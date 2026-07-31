@@ -1,0 +1,26 @@
+services:
+  recall-server:
+    build: ../server
+    container_name: recall-server
+    restart: unless-stopped
+    environment:
+      RECALL_TOKEN: ${RECALL_TOKEN:?set RECALL_TOKEN in deploy/.env}
+      RECALL_PORT: "8787"
+      RECALL_DB_PATH: /data/recall.db
+    volumes:
+      - recall-data:/data
+    expose:
+      - "8787"
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: recall-cloudflared
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?set CLOUDFLARE_TUNNEL_TOKEN in deploy/.env}
+    depends_on:
+      - recall-server
+
+volumes:
+  recall-data:

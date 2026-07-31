@@ -1,0 +1,94 @@
+# Deploying Recall's server via OrbStack + Cloudflare Tunnel
+
+For running the server on a Mac with [OrbStack](https://orbstack.dev)
+instead of renting a VPS. OrbStack ships Docker + Compose, so this is
+plain `docker compose`. Cloudflare Tunnel gives the server a stable public
+HTTPS URL without opening any port on your router, and without requiring
+anything special installed on the client side (laptops, cloud sessions) —
+they just `curl` a normal URL, keeping Recall's "zero prior setup on a
+fresh environment" property intact.
+
+Trade-off to know going in: the server only runs while your Mac + OrbStack
++ the tunnel are up. Fine for proving Phase 1 works and for regular use if
+your Mac is usually on; if you want it reachable while your Mac is asleep
+or off, that's what a small always-on VPS is for later — nothing here
+would need to change except where it's deployed.
+
+## Prerequisites
+
+- OrbStack installed and running.
+- A domain added to your Cloudflare account (free plan is enough). You
+  need this for a **stable** hostname — Cloudflare's zero-config "Quick
+  Tunnels" give you a random `*.trycloudflare.com` URL that changes every
+  time you start it, which means updating `RECALL_URL` everywhere each
+  restart. Not worth it beyond a five-minute smoke test.
+
+## 1. Create the tunnel in Cloudflare
+
+1. Open the [Zero Trust dashboard](https://one.dash.cloudflare.com/) →
+   **Networks → Tunnels → Create a tunnel**.
+2. Choose the **Cloudflared** connector type, name it (e.g. `recall`).
+3. On the install-command step, copy just the **token** value (the long
+   string after `--token`) — you don't need to run anything on this Mac
+   directly, `docker compose` will run the connector in a container.
+4. Still in the wizard, add a **Public Hostname**: pick a subdomain (e.g.
+   `recall.yourdomain.com`), type **HTTP**, and service URL
+   `recall-server:8787` — that's the other container's name and port on
+   the Compose network, not `localhost`.
+5. Save.
+
+## 2. Configure secrets
+
+```sh
+cd deploy
+cp .env.example .env
+```
+
+Fill in `.env`:
+- `RECALL_TOKEN` — generate with `openssl rand -hex 32`.
+- `CLOUDFLARE_TUNNEL_TOKEN` — the token copied in step 1.3.
+
+`.env` is gitignored — never commit it.
+
+## 3. Run it
+
+```sh
+cd deploy
+docker compose up -d
+docker compose logs -f   # confirm both containers report healthy/connected
+```
+
+## 4. Verify from outside
+
+```sh
+curl -H "Authorization: Bearer <your RECALL_TOKEN>" \
+  "https://recall.yourdomain.com/sync?project_key=smoke-test"
+# expect: {"project_key":"smoke-test","files":[]}
+```
+
+If that works from your own machine, it'll work from a fresh cloud
+session too — it's just an HTTPS request either way.
+
+## 5. Point real environments at it
+
+Per `hooks/README.md`, set on every environment that should push/pull:
+
+| Variable | Value |
+|---|---|
+| `RECALL_URL` | `https://recall.yourdomain.com` |
+| `RECALL_TOKEN` | the same token from `.env` |
+| `CLAUDE_CODE_REMOTE_MEMORY_DIR` | (remote/cloud environments only) that environment's `~/.claude` |
+
+Then wire `hooks/settings.snippet.json` into the target project's
+`.claude/settings.json` — see `hooks/README.md`.
+
+## Updating
+
+```sh
+cd deploy
+docker compose up -d --build   # rebuilds recall-server after code changes
+```
+
+The SQLite file lives in the named `recall-data` volume, so it survives
+rebuilds/restarts. `docker compose down -v` would delete it — don't run
+that unless you mean to wipe stored memory.

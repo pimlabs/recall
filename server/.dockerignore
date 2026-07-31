@@ -1,5 +1,4 @@
+data/
 node_modules/
-server/data/
 *.db
 *.db-journal
-deploy/.env
