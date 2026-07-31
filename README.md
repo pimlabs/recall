@@ -25,7 +25,7 @@ Both hooks live in the **project's own `.claude/settings.json`**, checked into g
 
 ## Status
 
-Pre-implementation. This repo currently holds the build brief and architecture docs — see below before writing code.
+Phase 0 done: server + hooks exist and the push/pull round-trip is proven (see `docs/phase-0-findings.md`). No merge logic yet — Phase 1.
 
 ## Project docs
 
@@ -36,6 +36,9 @@ Pre-implementation. This repo currently holds the build brief and architecture d
 | `ROADMAP.md` | Phased build plan. |
 | `CONTRIBUTING.md` | Dev workflow. |
 | `CLAUDE.md` | How Claude Code sessions should work in this repo (worktrees, task list, PR policy). |
+| `docs/phase-0-findings.md` | Empirical findings from Phase 0 — what the docs above assumed vs. what the installed Claude Code CLI actually does. |
+| `server/` | The sync backend. |
+| `hooks/` | `recall-push`/`recall-pull` scripts + the settings.json snippet to opt a project in. |
 
 ## License
 
