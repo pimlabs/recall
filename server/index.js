@@ -12,6 +12,9 @@ const PORT = process.env.RECALL_PORT || 8787;
 const TOKEN = process.env.RECALL_TOKEN;
 const DB_PATH = process.env.RECALL_DB_PATH || path.join(__dirname, "data", "recall.db");
 const GIT_COMMIT = process.env.RECALL_GIT_COMMIT || "unknown";
+const BACKUP_DIR = process.env.RECALL_BACKUP_DIR || "";
+const BACKUP_INTERVAL_HOURS = Number(process.env.RECALL_BACKUP_INTERVAL_HOURS || 24);
+const BACKUP_KEEP = Number(process.env.RECALL_BACKUP_KEEP || 7);
 
 if (!TOKEN) {
   console.error("RECALL_TOKEN is not set. Refusing to start with no auth.");
@@ -50,6 +53,48 @@ const selectStmt = db.prepare(`
 const lastSyncStmt = db.prepare(`SELECT MAX(updated_at) AS last_sync_at FROM memory_files`);
 
 const startedAt = new Date().toISOString();
+let lastBackupAt = null;
+
+function runBackup() {
+  if (!BACKUP_DIR) return;
+  fs.mkdirSync(BACKUP_DIR, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const dest = path.join(BACKUP_DIR, `recall-${stamp}.db`);
+  // VACUUM INTO takes a consistent snapshot even while the server keeps
+  // writing — safe to run on a live database, unlike copying the file.
+  db.prepare("VACUUM INTO ?").run(dest);
+  lastBackupAt = new Date().toISOString();
+  console.log(`backup written: ${dest}`);
+
+  const files = fs
+    .readdirSync(BACKUP_DIR)
+    .filter((f) => f.startsWith("recall-") && f.endsWith(".db"))
+    .sort();
+  const excess = files.length - BACKUP_KEEP;
+  for (let i = 0; i < excess; i++) {
+    fs.unlinkSync(path.join(BACKUP_DIR, files[i]));
+    console.log(`backup pruned: ${files[i]}`);
+  }
+}
+
+function runBackupSafely() {
+  try {
+    runBackup();
+  } catch (err) {
+    // A backup failure must never take the sync server down with it.
+    console.error(`backup failed: ${err.message}`);
+  }
+}
+
+if (BACKUP_DIR) {
+  runBackupSafely();
+  // setInterval's delay is a 32-bit signed int (~24.8 days max) — past
+  // that it silently becomes ~1ms instead of erroring, which turns one
+  // misconfigured env var into a backup-storm. Clamp well under the limit.
+  const MAX_INTERVAL_HOURS = 24 * 20; // 20 days
+  const intervalHours = Math.min(BACKUP_INTERVAL_HOURS, MAX_INTERVAL_HOURS);
+  setInterval(runBackupSafely, intervalHours * 60 * 60 * 1000).unref();
+}
 
 function isAuthorized(req) {
   const header = req.headers["authorization"] || "";
@@ -132,6 +177,7 @@ function handleHealth(req, res) {
     git_commit: GIT_COMMIT,
     started_at: startedAt,
     last_sync_at: last_sync_at || null,
+    last_backup_at: lastBackupAt,
   });
 }
 
