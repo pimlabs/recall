@@ -39,6 +39,17 @@ environment, pointing at that environment's own `~/.claude`
 normally don't need it at all — `CLAUDE_CODE_REMOTE` isn't set there, so
 auto memory already works without it.
 
+### claude.ai cloud environments also need a network allowlist entry
+
+Confirmed live 2026-08-12: a claude.ai cloud environment's outbound network
+access defaults to something short of unrestricted, so a self-hosted
+`RECALL_URL` domain gets rejected with `403`/`CONNECT tunnel failed` until
+explicitly allowed. Fix in that environment's settings (the same
+"Add/Edit cloud environment" dialog where the variables above get set):
+set **Network access** to **Custom** and add the server's domain (e.g.
+`recall.pimlabs.id`) under **Allowed domains**. This is per-environment,
+not account-wide — a new environment needs it set again.
+
 ## Server-side environment variables
 
 | Variable | Purpose |
