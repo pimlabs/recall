@@ -11,34 +11,34 @@ Recall exists for that specific gap: **a central service any environment can tal
 ## What it is not
 
 - Not a replacement for git-based `CLAUDE.md` sync — that's already solved, don't touch it.
-- Not a multi-user product. Personal tool, single owner, no Anthropic API key, no auth system beyond a personal token. See `PROMPT.md`.
+- Not a multi-user product. Personal tool, single owner, no Anthropic API key, no auth system beyond a personal token. See `CLAUDE.md`'s Ground rules.
 - Not append-only. Merge is closer to what `claude-brain` does (semantic merge via the local `claude` CLI) than to naive line-dedup.
 
 ## How it plugs into Claude Code
 
 No custom client daemon. Claude Code's own hook system does the work:
 
-- **Push**: a `FileChanged`/`PostToolUse` hook (type `http`) fires straight to Recall's API when a memory file changes.
-- **Pull**: a `SessionStart` hook runs a small script that fetches the latest merged state before Claude loads context.
+- **Push**: a `PostToolUse` hook matching `Edit|Write` runs a script (`hooks/recall-push`) that checks whether the edited file is a memory file and, if so, `curl`s it to Recall's API. (An earlier design assumed a `FileChanged` event and a declarative `http` hook type — neither exists in the installed CLI; see `docs/phase-0-findings.md`.)
+- **Pull**: a `SessionStart` hook runs a small script (`hooks/recall-pull`) that fetches the latest synced state before Claude loads context.
 
 Both hooks live in the **project's own `.claude/settings.json`**, checked into git — so any environment that clones the repo (laptop or fresh cloud session) picks up sync automatically. See `ARCHITECTURE.md`.
 
 ## Status
 
-Phase 0 done: server + hooks exist and the push/pull round-trip is proven (see `docs/phase-0-findings.md`). No merge logic yet — Phase 1.
+Phase 0 and Phase 1 both done: server + hooks exist, deployed for real (OrbStack + Cloudflare Tunnel, `deploy/`), and the push/pull round-trip is proven both locally and from a genuine claude.ai cloud session — not just simulated (see `docs/phase-0-findings.md` and `ROADMAP.md`). No merge logic yet — Phase 2.
 
 ## Project docs
 
 | File | What it's for |
 |---|---|
-| `PROMPT.md` | Build brief — read this first. |
 | `ARCHITECTURE.md` | Hook wiring, backend shape, merge strategy, project-key derivation. |
-| `ROADMAP.md` | Phased build plan. |
+| `ROADMAP.md` | Phased build plan, current status, and what's explicitly deferred. |
 | `CONTRIBUTING.md` | Dev workflow. |
-| `CLAUDE.md` | How Claude Code sessions should work in this repo (worktrees, task list, PR policy). |
+| `CLAUDE.md` | How Claude Code sessions should work in this repo (worktrees, task list, PR policy, ground rules). |
 | `docs/phase-0-findings.md` | Empirical findings from Phase 0 — what the docs above assumed vs. what the installed Claude Code CLI actually does. |
 | `server/` | The sync backend. |
 | `hooks/` | `recall-push`/`recall-pull` scripts + the settings.json snippet to opt a project in. |
+| `deploy/` | OrbStack + Cloudflare Tunnel deployment (docker-compose based). |
 
 ## License
 

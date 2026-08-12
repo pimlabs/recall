@@ -2,23 +2,13 @@
 
 Solo/personal project; light process to keep the history useful.
 
-## Layout (once code exists)
+## Layout
 
-```
-server/         the sync backend (POST/GET /sync, SQLite storage, merge logic)
-hooks/          recall-pull script + the .claude/settings.json snippet to opt a project in
-PROMPT.md       build brief — read before structural changes
-ARCHITECTURE.md hook wiring, backend shape, merge strategy, project-key derivation
-ROADMAP.md      phased build order
-```
+See `README.md`'s "Project docs" table for what each file/directory is for — kept in one place so it doesn't drift out of sync with a second copy here.
 
-## Ground rules (from PROMPT.md)
+## Ground rules
 
-- No Anthropic API key anywhere in this codebase. LLM-assisted merge goes through the local `claude` CLI, never a raw API call with a key.
-- No multi-user auth/billing — single owner, one bearer token, self-hosted.
-- Hook config for a synced project lives in *that project's* `.claude/settings.json`, not user-level config — this is the whole reason Recall works in fresh cloud sessions.
-
-Touching any of the above? Stop and confirm with the user first — see `PROMPT.md` → "Why it exists."
+See `CLAUDE.md`'s "Ground rules" section — same reason, one source of truth. Touching any of them? Stop and confirm with the user first.
 
 ## Commit messages
 

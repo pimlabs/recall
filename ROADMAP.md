@@ -44,8 +44,16 @@ No new features. The server and hooks from Phase 0 already do everything needed 
 ## Phase 4 — Operational polish (open-ended)
 
 - [x] Basic observability: `GET /health` (unauthenticated) reports server status, start time, and the most recent sync across all projects. Global rather than per-project — good enough to answer "is this thing alive" from outside without a token; per-project last-synced-at can wait until it's actually needed.
-- Decide whether `recall-pull` should be a single static binary vs. a script needing a runtime — revisit once Phase 1's real-world deployment is known to work.
+- [x] Decide whether `recall-pull` should be a single static binary (e.g. Go) vs. a script needing a runtime — revisited 2026-08-12 now that Phase 1's real-world deployment is known to work: staying with bash + curl + jq. Both dependencies have now been proven present and working on every real environment tested (this laptop, and a genuine claude.ai cloud sandbox), the one real bug they caused (trailing-newline fidelity) is fixed, and a compiled-binary rewrite would trade "clone and it just works" for per-platform binary distribution to fix a problem that hasn't actually recurred. Revisit again only if curl/jq turn out missing on some future environment, or if the hooks' logic grows past what a shell script should reasonably hold.
 
 ## Explicitly deferred
 
-- Anything in `PROMPT.md`'s non-goals list. Multi-user/hosted-for-others is a different project — don't fold it in incrementally.
+- **Multi-user / a hosted "Recall as a service for others" product.** Raised and discussed 2026-08-12, shelved: use Recall personally for a while first to get real signal before committing to this. The technical shape is already mapped out if it comes back — it needs deciding on demand, not feasibility:
+  - The VPS-hosting requirement is real friction, but a SaaS trades it for a different one (trusting a third party with potentially sensitive memory content), not eliminating friction outright.
+  - Current auth (one shared bearer token, readable across every `project_key`) would need a full rewrite for real per-user isolation, not an extension.
+  - Phase 2's planned merge shells out to a locally-logged-in `claude` CLI, which doesn't scale to many users' merges and directly conflicts with the no-API-key rule in `CLAUDE.md` — a SaaS needs a different answer to this specifically, independent of the auth question.
+  - Cross-device project-path differences (raised as a concern, turned out already solved) are *not* a blocker: `project_key` derives from the git remote, not the local checkout path, proven live during the Phase 1 cloud test. The one real gap is a project with no git remote at all, which falls back to a path-based key that won't agree across machines — a known Phase 0 limitation, not new.
+- Syncing anything other than auto memory (`CLAUDE.md`, skills, settings, sessions — leave those to git, or to not existing as a problem in the first place).
+- Real-time collaborative editing between two humans.
+- A GUI. This is a backend + a couple of hook scripts.
+- Supporting Windows without WSL, unless it turns out to be trivial.
