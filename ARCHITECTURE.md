@@ -79,10 +79,26 @@ Known limitation: git hosts with nested groups (e.g. GitLab subgroups) collapse 
 
 Deliberately boring. Two endpoints:
 
-- `POST /sync` — body: `{ project_key, file_path, content, source_env, timestamp }`. Runs merge (see below) against the stored version, persists the result.
-- `GET /sync?project_key=...` — returns the current merged set of memory files for that project.
+- `POST /sync` — body: `{ project_key, file_path, content, source_env, timestamp }`. Runs merge (see below) against the stored version, persists the result. `content` can be omitted if `deleted: true` is set instead — see "Deletes are tombstones, not row removal" below.
+- `GET /sync?project_key=...` — returns the current merged set of memory files for that project, each with a `deleted` flag.
 
 Storage: whatever's simplest to self-host and keep running — a single SQLite file behind a small server process is enough for one user's data; don't reach for a distributed database for this. Auth: one bearer token, generated once, stored as an env var on every environment (never committed to the repo).
+
+### Deletes are tombstones, not row removal
+
+A pushed delete (`{ project_key, file_path, deleted: true, source_env }`)
+sets a `deleted` flag on the existing row rather than removing it —
+`content` is left untouched by that update, so the last known content is
+still sitting in the database even though nothing in the app exposes an
+"undo" for it yet. `GET /sync` reports `deleted: true` for that row and
+withholds `content` (`null`) so a pull can't accidentally resurrect it.
+
+This existed as a real gap before it was built: `recall-push` used to
+silently no-op when the file it was called about no longer existed,
+which meant the server never learned about a delete at all, and a
+deleted file would come back on the next pull. See `hooks/README.md` for
+how the client side actually detects a local delete — there's no hook
+event for it, so it's closer to "eventual" than "instant."
 
 ## Merge strategy
 

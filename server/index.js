@@ -30,21 +30,46 @@ db.exec(`
     content     TEXT NOT NULL,
     source_env  TEXT,
     updated_at  TEXT NOT NULL,
+    deleted     INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (project_key, file_path)
   );
 `);
 
+// Migration for databases created before the `deleted` column existed —
+// ALTER TABLE ADD COLUMN is safe to run against an already-migrated
+// database too, guarded so it only runs once.
+const hasDeletedColumn = db
+  .prepare("PRAGMA table_info(memory_files)")
+  .all()
+  .some((c) => c.name === "deleted");
+if (!hasDeletedColumn) {
+  db.exec("ALTER TABLE memory_files ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0");
+}
+
+// Tombstone, not delete: content is preserved (ON CONFLICT leaves it
+// untouched) so a mistaken delete is recoverable at the database level,
+// even though nothing in the app surfaces an "undo" yet.
 const upsertStmt = db.prepare(`
-  INSERT INTO memory_files (project_key, file_path, content, source_env, updated_at)
-  VALUES (?, ?, ?, ?, ?)
+  INSERT INTO memory_files (project_key, file_path, content, source_env, updated_at, deleted)
+  VALUES (?, ?, ?, ?, ?, 0)
   ON CONFLICT(project_key, file_path) DO UPDATE SET
     content = excluded.content,
     source_env = excluded.source_env,
-    updated_at = excluded.updated_at
+    updated_at = excluded.updated_at,
+    deleted = 0
+`);
+
+const tombstoneStmt = db.prepare(`
+  INSERT INTO memory_files (project_key, file_path, content, source_env, updated_at, deleted)
+  VALUES (?, ?, '', ?, ?, 1)
+  ON CONFLICT(project_key, file_path) DO UPDATE SET
+    source_env = excluded.source_env,
+    updated_at = excluded.updated_at,
+    deleted = 1
 `);
 
 const selectStmt = db.prepare(`
-  SELECT file_path, content, source_env, updated_at
+  SELECT file_path, content, source_env, updated_at, deleted
   FROM memory_files
   WHERE project_key = ?
   ORDER BY file_path
@@ -137,10 +162,11 @@ async function handleSyncPost(req, res) {
     return sendJson(res, 400, { error: "invalid json body" });
   }
 
-  const { project_key, file_path, content, source_env } = parsed;
-  if (!project_key || !file_path || typeof content !== "string") {
+  const { project_key, file_path, content, source_env, deleted } = parsed;
+  const isDelete = deleted === true;
+  if (!project_key || !file_path || (!isDelete && typeof content !== "string")) {
     return sendJson(res, 400, {
-      error: "project_key, file_path, and content (string) are required",
+      error: "project_key, file_path, and content (string) are required, unless deleted is true",
     });
   }
   if (file_path.includes("..") || path.isAbsolute(file_path)) {
@@ -148,9 +174,13 @@ async function handleSyncPost(req, res) {
   }
 
   const updatedAt = new Date().toISOString();
-  upsertStmt.run(project_key, file_path, content, source_env || null, updatedAt);
+  if (isDelete) {
+    tombstoneStmt.run(project_key, file_path, source_env || null, updatedAt);
+  } else {
+    upsertStmt.run(project_key, file_path, content, source_env || null, updatedAt);
+  }
 
-  sendJson(res, 200, { ok: true, project_key, file_path, updated_at: updatedAt });
+  sendJson(res, 200, { ok: true, project_key, file_path, deleted: isDelete, updated_at: updatedAt });
 }
 
 function handleSyncGet(req, res, url) {
@@ -163,9 +193,13 @@ function handleSyncGet(req, res, url) {
     project_key: projectKey,
     files: rows.map((r) => ({
       file_path: r.file_path,
-      content: r.content,
+      // Tombstoned rows keep their content in the database (for a
+      // possible future undo) but don't hand it back over the wire —
+      // a pull shouldn't be able to resurrect a deleted file's content.
+      content: r.deleted ? null : r.content,
       source_env: r.source_env,
       updated_at: r.updated_at,
+      deleted: !!r.deleted,
     })),
   });
 }

@@ -35,6 +35,14 @@ recall_memory_dir() {
   printf '%s/projects/%s/memory' "$(recall_memory_root)" "$(recall_slug "$(recall_project_root)")"
 }
 
+# Sibling of the memory dir, not inside it — so it's never mistaken for a
+# memory file itself. Tracks the last known set of local file paths, so
+# recall-push can tell a real local delete (path was known, now missing)
+# apart from a file that was simply never synced.
+recall_state_file() {
+  printf '%s/projects/%s/.recall-state.json' "$(recall_memory_root)" "$(recall_slug "$(recall_project_root)")"
+}
+
 recall_project_key() {
   local url segment
   url="$(git remote get-url origin 2>/dev/null || true)"
