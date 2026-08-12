@@ -15,6 +15,8 @@ const GIT_COMMIT = process.env.RECALL_GIT_COMMIT || "unknown";
 const BACKUP_DIR = process.env.RECALL_BACKUP_DIR || "";
 const BACKUP_INTERVAL_HOURS = Number(process.env.RECALL_BACKUP_INTERVAL_HOURS || 24);
 const BACKUP_KEEP = Number(process.env.RECALL_BACKUP_KEEP || 7);
+const RATE_LIMIT_WINDOW_MS = Number(process.env.RECALL_RATE_LIMIT_WINDOW_MS || 60_000);
+const RATE_LIMIT_MAX = Number(process.env.RECALL_RATE_LIMIT_MAX || 60);
 
 if (!TOKEN) {
   console.error("RECALL_TOKEN is not set. Refusing to start with no auth.");
@@ -121,6 +123,47 @@ if (BACKUP_DIR) {
   setInterval(runBackupSafely, intervalHours * 60 * 60 * 1000).unref();
 }
 
+// In-memory, per-IP fixed-window limiter — no external store needed for a
+// single-process personal server. Applies to /sync only (both valid and
+// invalid-token requests count, so a flood of bad tokens can't dodge it by
+// never reaching isAuthorized); /health stays unlimited since it's meant
+// to be pollable by uptime tools and is cheap regardless.
+const rateLimitBuckets = new Map();
+
+function getClientIp(req) {
+  // Every request that reaches this process already came through the
+  // Cloudflare Tunnel — the origin port isn't published anywhere else
+  // (deploy/docker-compose.yml uses `expose`, not `ports`) — so this
+  // header can't be spoofed by hitting the origin directly.
+  const cfIp = req.headers["cf-connecting-ip"];
+  if (cfIp) return cfIp;
+  const xff = req.headers["x-forwarded-for"];
+  if (xff) return xff.split(",")[0].trim();
+  return req.socket.remoteAddress || "unknown";
+}
+
+function isRateLimited(ip) {
+  const now = Date.now();
+  let bucket = rateLimitBuckets.get(ip);
+  if (!bucket || now - bucket.windowStart >= RATE_LIMIT_WINDOW_MS) {
+    bucket = { count: 0, windowStart: now };
+    rateLimitBuckets.set(ip, bucket);
+  }
+  bucket.count += 1;
+  return bucket.count > RATE_LIMIT_MAX;
+}
+
+// Otherwise every distinct IP that ever hits the server stays in memory
+// forever. Sweep buckets that are well past their window.
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, bucket] of rateLimitBuckets) {
+    if (now - bucket.windowStart >= RATE_LIMIT_WINDOW_MS * 2) {
+      rateLimitBuckets.delete(ip);
+    }
+  }
+}, RATE_LIMIT_WINDOW_MS).unref();
+
 function isAuthorized(req) {
   const header = req.headers["authorization"] || "";
   const [scheme, value] = header.split(" ");
@@ -220,6 +263,11 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === "/health" && req.method === "GET") {
     return handleHealth(req, res);
+  }
+
+  if (isRateLimited(getClientIp(req))) {
+    res.setHeader("Retry-After", Math.ceil(RATE_LIMIT_WINDOW_MS / 1000));
+    return sendJson(res, 429, { error: "rate limit exceeded, try again later" });
   }
 
   if (!isAuthorized(req)) {
