@@ -43,7 +43,7 @@ No new features. The server and hooks from Phase 0 already do everything needed 
 
 ## Phase 4 — Operational polish (open-ended)
 
-- Basic observability: last-synced-at per project, simple health check.
+- [x] Basic observability: `GET /health` (unauthenticated) reports server status, start time, and the most recent sync across all projects. Global rather than per-project — good enough to answer "is this thing alive" from outside without a token; per-project last-synced-at can wait until it's actually needed.
 - Decide whether `recall-pull` should be a single static binary vs. a script needing a runtime — revisit once Phase 1's real-world deployment is known to work.
 
 ## Explicitly deferred

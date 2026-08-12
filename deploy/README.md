@@ -66,6 +66,14 @@ curl -H "Authorization: Bearer <your RECALL_TOKEN>" \
 # expect: {"project_key":"smoke-test","files":[]}
 ```
 
+`GET /health` needs no token, useful for uptime checks or a quick "is it
+alive" from anywhere:
+
+```sh
+curl "https://recall.yourdomain.com/health"
+# expect: {"status":"ok","started_at":"...","last_sync_at":null or ISO timestamp}
+```
+
 If that works from your own machine, it'll work from a fresh cloud
 session too — it's just an HTTPS request either way.
 

@@ -46,6 +46,10 @@ const selectStmt = db.prepare(`
   ORDER BY file_path
 `);
 
+const lastSyncStmt = db.prepare(`SELECT MAX(updated_at) AS last_sync_at FROM memory_files`);
+
+const startedAt = new Date().toISOString();
+
 function isAuthorized(req) {
   const header = req.headers["authorization"] || "";
   const [scheme, value] = header.split(" ");
@@ -120,8 +124,17 @@ function handleSyncGet(req, res, url) {
   });
 }
 
+function handleHealth(req, res) {
+  const { last_sync_at } = lastSyncStmt.get();
+  sendJson(res, 200, { status: "ok", started_at: startedAt, last_sync_at: last_sync_at || null });
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+
+  if (url.pathname === "/health" && req.method === "GET") {
+    return handleHealth(req, res);
+  }
 
   if (!isAuthorized(req)) {
     return sendJson(res, 401, { error: "unauthorized" });
