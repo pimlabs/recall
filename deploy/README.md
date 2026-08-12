@@ -94,8 +94,15 @@ Then wire `hooks/settings.snippet.json` into the target project's
 
 ```sh
 cd deploy
-docker compose up -d --build   # rebuilds recall-server after code changes
+GIT_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --build
 ```
+
+`GIT_COMMIT` gets baked into the image and shows up in `GET /health` —
+useful for confirming what's actually running matches what's on `main`,
+since `main` having a fix and the running container having it are two
+different things until this is run. Plain `docker compose up -d --build`
+without it still works, `/health` just reports `"unknown"` for
+`git_commit`.
 
 The SQLite file lives in the named `recall-data` volume, so it survives
 rebuilds/restarts. `docker compose down -v` would delete it — don't run

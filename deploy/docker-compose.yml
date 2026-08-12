@@ -1,6 +1,9 @@
 services:
   recall-server:
-    build: ../server
+    build:
+      context: ../server
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     container_name: recall-server
     restart: unless-stopped
     environment:
