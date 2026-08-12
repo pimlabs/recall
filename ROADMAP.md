@@ -20,12 +20,12 @@ No new features. The server and hooks from Phase 0 already do everything needed 
 
 - [x] **Deploy the server somewhere it stays running.** Done via OrbStack + Cloudflare Tunnel (`deploy/`) — `recall-server` and `cloudflared` containers running on the owner's Mac, public hostname `recall.pimlabs.id`. Verified from outside: `GET /sync?project_key=smoke-test` returns `{"project_key":"smoke-test","files":[]}` with a valid bearer token, `401` without one.
 - [x] **Generate the real `RECALL_TOKEN`** — generated, stored in `deploy/.env` (gitignored, not committed).
-- [ ] **Set `CLAUDE_CODE_REMOTE_MEMORY_DIR` as a real environment secret** on the actual cloud environment(s) used — this was the load-bearing gap Phase 0 found; without it, auto memory silently never activates there.
+- [x] **Set `CLAUDE_CODE_REMOTE_MEMORY_DIR` as a real environment secret** on a real claude.ai cloud environment for `pimlabs/recall` (`/home/user/.claude` — that sandbox's `$HOME` is actually `/root`, but `hooks/lib.sh` prioritizes the explicit override so the memory path still resolves correctly).
 - [x] **Wire `hooks/settings.snippet.json` into one real project's `.claude/settings.json`** — wired into `pimlabs/recall` itself, dogfooding.
-- [ ] **Run the real test**: edit a memory file on one real machine, start an actual second fresh session (ideally a genuine ephemeral cloud session, not this same one) on the same project, confirm the content shows up with zero manual setup beyond the env vars above already being configured.
-- **Fix whatever breaks under real conditions** that a local simulation can't catch — network reachability from a cloud sandbox to wherever the server lives, `curl`/`jq` actually present in the target image, TLS, hook execution latency, token handling. Expect at least one surprise here; that's the point of doing this before adding more moving parts.
+- [x] **Run the real test**: verified 2026-08-12 in a genuine claude.ai cloud session — SessionStart's `recall-pull` synced all 3 existing memory files with zero manual intervention, then editing one of them triggered `recall-push` automatically and the change showed up server-side seconds later.
+- [x] **Fix whatever breaks under real conditions**: two surprises, both fixed. (1) A trailing-newline round-trip bug in `recall-push`/`recall-pull` (fixed, see the newline-fidelity fix commit). (2) claude.ai cloud environments block egress to custom domains by default — `recall.pimlabs.id` needed adding under that environment's **Network access → Custom → Allowed domains**, not something a local simulation could have caught.
 
-**Done when:** the exact "done when" from Phase 0 is true for real — a genuine second environment, zero simulation.
+**Done when:** the exact "done when" from Phase 0 is true for real — a genuine second environment, zero simulation. **Done, 2026-08-12.**
 
 ## Phase 2 — Real merge
 
