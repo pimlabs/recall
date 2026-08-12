@@ -41,7 +41,11 @@ jq -r '.files[] | .file_path' <<<"$RESPONSE" | while IFS= read -r rel_path; do
   esac
   dest="$MEM_DIR/$rel_path"
   mkdir -p "$(dirname "$dest")"
-  jq -r --arg fp "$rel_path" '.files[] | select(.file_path == $fp) | .content' <<<"$RESPONSE" > "$dest"
+  # -j (not -r): raw output mode appends a trailing newline after every
+  # value regardless of what the string itself ends with, which silently
+  # padded files pushed with 0 trailing newlines. -j joins with nothing,
+  # writing the content's own bytes exactly.
+  jq -j --arg fp "$rel_path" '.files[] | select(.file_path == $fp) | .content' <<<"$RESPONSE" > "$dest"
 done
 
 echo "recall-pull: synced $FILE_COUNT memory file(s) for $PROJECT_KEY" >&2
