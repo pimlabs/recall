@@ -18,11 +18,11 @@
 
 No new features. The server and hooks from Phase 0 already do everything needed — this phase is entirely about closing the gap between "proven in a simulated sandbox" and "a real person's memory actually syncs."
 
-- **Deploy the server somewhere it stays running.** Needs a decision: cheapest/simplest persistent host the owner already has (small VPS, home server, existing box) — not serverless, since Phase 2 will need a long-lived `claude` CLI login on it anyway, no reason to migrate hosting later. `server/` has zero dependencies beyond Node ≥22.5, so this should be close to `git clone && npm start` behind a process manager.
-- **Generate the real `RECALL_TOKEN`** once, store it as a secret on every real environment that'll push/pull (laptop shell profile, cloud session secrets) — never commit it.
-- **Set `CLAUDE_CODE_REMOTE_MEMORY_DIR` as a real environment secret** on the actual cloud environment(s) used — this was the load-bearing gap Phase 0 found; without it, auto memory silently never activates there.
-- **Wire `hooks/settings.snippet.json` into one real project's `.claude/settings.json`** and commit it (start with `pimlabs/recall` itself, dogfooding, or whichever project is actually worked in day to day).
-- **Run the real test**: edit a memory file on one real machine, start an actual second fresh session (ideally a genuine ephemeral cloud session, not this same one) on the same project, confirm the content shows up with zero manual setup beyond the env vars above already being configured.
+- [x] **Deploy the server somewhere it stays running.** Done via OrbStack + Cloudflare Tunnel (`deploy/`) — `recall-server` and `cloudflared` containers running on the owner's Mac, public hostname `recall.pimlabs.id`. Verified from outside: `GET /sync?project_key=smoke-test` returns `{"project_key":"smoke-test","files":[]}` with a valid bearer token, `401` without one.
+- [x] **Generate the real `RECALL_TOKEN`** — generated, stored in `deploy/.env` (gitignored, not committed).
+- [ ] **Set `CLAUDE_CODE_REMOTE_MEMORY_DIR` as a real environment secret** on the actual cloud environment(s) used — this was the load-bearing gap Phase 0 found; without it, auto memory silently never activates there.
+- [x] **Wire `hooks/settings.snippet.json` into one real project's `.claude/settings.json`** — wired into `pimlabs/recall` itself, dogfooding.
+- [ ] **Run the real test**: edit a memory file on one real machine, start an actual second fresh session (ideally a genuine ephemeral cloud session, not this same one) on the same project, confirm the content shows up with zero manual setup beyond the env vars above already being configured.
 - **Fix whatever breaks under real conditions** that a local simulation can't catch — network reachability from a cloud sandbox to wherever the server lives, `curl`/`jq` actually present in the target image, TLS, hook execution latency, token handling. Expect at least one surprise here; that's the point of doing this before adding more moving parts.
 
 **Done when:** the exact "done when" from Phase 0 is true for real — a genuine second environment, zero simulation.
