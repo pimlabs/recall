@@ -73,7 +73,29 @@ not account-wide — a new environment needs it set again.
 - **`recall-pull`** — a `SessionStart` hook that fetches the latest synced
   snapshot and writes it straight into the same directory Claude Code
   reads auto-memory from, before context loads. No `additionalContext`
-  injection needed.
+  injection needed. Also removes any local file the server has tombstoned
+  (see below) — deleted content doesn't come back on a fresh pull.
+
+### Deletes: no dedicated hook, so `recall-push` reconciles instead
+
+There's no `FileDeleted`-style event, and a delete via the `Bash` tool
+(`rm ...`) wouldn't match `recall-push`'s `Edit|Write` matcher even if
+there were one. So `recall-push` doesn't rely on being told about a
+delete directly — every time it runs (triggered by *any* Edit/Write to a
+memory file), it compares the current directory listing against the last
+known one (`hooks/lib.sh:recall_state_file`, a small JSON file kept
+*next to* the memory directory, not inside it) and reports anything
+that's gone missing as a delete to the server. The server keeps a
+tombstone row (content preserved, flagged `deleted`) rather than removing
+the row outright, so a mistaken delete is recoverable at the database
+level even though nothing in the app surfaces an "undo" yet.
+
+Practical consequence: a delete propagates the next time *any* memory
+file in that project is edited, not the instant it happens — there's no
+hook to catch the instant, so this is the closest available
+approximation. `recall-pull` also refreshes the state file after every
+pull, so the baseline stays accurate even on a machine that only ever
+pulls.
 
 Both scripts derive the local memory directory the same way Claude Code's
 own CLI does (`hooks/lib.sh:recall_memory_dir`), and derive the

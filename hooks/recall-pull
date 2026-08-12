@@ -21,6 +21,7 @@ source "$SCRIPT_DIR/lib.sh"
 
 MEM_DIR="$(recall_memory_dir)"
 PROJECT_KEY="$(recall_project_key)"
+STATE_FILE="$(recall_state_file)"
 
 RESPONSE="$(curl -sS --fail-with-body \
   -H "Authorization: Bearer $RECALL_TOKEN" \
@@ -34,18 +35,39 @@ FILE_COUNT="$(jq -r '.files | length' <<<"$RESPONSE")"
 
 mkdir -p "$MEM_DIR"
 
-jq -r '.files[] | .file_path' <<<"$RESPONSE" | while IFS= read -r rel_path; do
+DELETED_COUNT=0
+WRITTEN_COUNT=0
+while IFS= read -r file_obj; do
+  rel_path="$(jq -r '.file_path' <<<"$file_obj")"
+  is_deleted="$(jq -r '.deleted' <<<"$file_obj")"
   # No traversal outside MEM_DIR, matching the server-side check on push.
   case "$rel_path" in
     ""|*..*|/*) continue ;;
   esac
   dest="$MEM_DIR/$rel_path"
+  if [[ "$is_deleted" == "true" ]]; then
+    if [[ -f "$dest" ]]; then
+      rm -f "$dest"
+      DELETED_COUNT=$((DELETED_COUNT + 1))
+    fi
+    continue
+  fi
   mkdir -p "$(dirname "$dest")"
   # -j (not -r): raw output mode appends a trailing newline after every
   # value regardless of what the string itself ends with, which silently
   # padded files pushed with 0 trailing newlines. -j joins with nothing,
   # writing the content's own bytes exactly.
-  jq -j --arg fp "$rel_path" '.files[] | select(.file_path == $fp) | .content' <<<"$RESPONSE" > "$dest"
-done
+  jq -j '.content' <<<"$file_obj" > "$dest"
+  WRITTEN_COUNT=$((WRITTEN_COUNT + 1))
+done < <(jq -c '.files[]' <<<"$RESPONSE")
 
-echo "recall-pull: synced $FILE_COUNT memory file(s) for $PROJECT_KEY" >&2
+# Baseline for recall-push's own delete-reconciliation: what's actually on
+# disk right after a pull is "known good" until the next local edit.
+mkdir -p "$(dirname "$STATE_FILE")"
+find "$MEM_DIR" -type f 2>/dev/null |
+  sed "s|^$MEM_DIR/||" |
+  sort |
+  jq -R -s 'split("\n") | map(select(length > 0)) | {files: .}' \
+  > "$STATE_FILE"
+
+echo "recall-pull: synced $WRITTEN_COUNT memory file(s), removed $DELETED_COUNT deleted file(s) for $PROJECT_KEY" >&2
