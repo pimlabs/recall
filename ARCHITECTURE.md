@@ -20,7 +20,7 @@ No peer-to-peer link between environments — every environment only ever talks 
 
 ## Client side: pure Claude Code hooks, no daemon
 
-Both directions are implemented as hooks in the **project's own `.claude/settings.json`** (see `PROMPT.md` for why it can't be user-level config).
+Both directions are implemented as hooks in the **project's own `.claude/settings.json`**, not user-level config — a fresh cloud session only has whatever's in the repo it cloned, so user-level hooks would silently never fire there (see `CLAUDE.md`'s Ground rules).
 
 ### Push — `PostToolUse` matching `Edit|Write`, `type: "command"`
 
@@ -88,11 +88,11 @@ Storage: whatever's simplest to self-host and keep running — a single SQLite f
 
 **Not append-only, not naive last-write-wins.** For memory content specifically, follow `claude-brain`'s approach: shell out to the local `claude` CLI (`claude -p`) to semantically merge two versions of a memory file — dedupe restated facts, reconcile contradictions, keep both if they're genuinely different information. This keeps the "no API key" constraint intact (`claude -p` rides whatever auth is already on the machine running the merge — almost certainly the server, so the server itself needs a logged-in `claude` CLI available to it, which is a real operational requirement to design around, not an afterthought).
 
-Structured/settings-like data, if Recall ever expands beyond auto memory (it currently shouldn't — see Non-goals in `PROMPT.md`) would use plain deterministic merge; this doesn't apply to the current scope.
+Structured/settings-like data, if Recall ever expands beyond auto memory (it currently shouldn't — see "Explicitly deferred" in `ROADMAP.md`) would use plain deterministic merge; this doesn't apply to the current scope.
 
 ## What's deliberately not here
 
 - No client daemon or background watcher — hooks are the entire client.
 - No multi-user auth, no OAuth, no billing.
 - No Anthropic API key anywhere in the request path.
-- No attempt to sync `CLAUDE.md`, skills, or settings — git already does `CLAUDE.md`, and the rest is out of scope (see `PROMPT.md`).
+- No attempt to sync `CLAUDE.md`, skills, or settings — git already does `CLAUDE.md`, and the rest is out of scope (see "Explicitly deferred" in `ROADMAP.md`).
