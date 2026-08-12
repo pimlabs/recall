@@ -34,14 +34,18 @@ esac
 [[ -f "$FILE_PATH" ]] || exit 0  # e.g. a delete; nothing to read
 
 REL_PATH="${FILE_PATH#"$MEM_DIR"/}"
-CONTENT="$(cat "$FILE_PATH")"
 PROJECT_KEY="$(recall_project_key)"
 SOURCE_ENV="${RECALL_SOURCE_ENV:-$(hostname 2>/dev/null || echo unknown)}"
 
+# --rawfile (not --arg "$(cat ...)") because command substitution strips
+# every trailing newline regardless of how many the file actually has —
+# confirmed live: a file with 0 or 2+ trailing newlines came back from a
+# push/pull round-trip with exactly 1, silently changed. --rawfile reads
+# the file's exact bytes into the jq string, trailing newlines included.
 jq -n \
   --arg pk "$PROJECT_KEY" \
   --arg fp "$REL_PATH" \
-  --arg c "$CONTENT" \
+  --rawfile c "$FILE_PATH" \
   --arg env "$SOURCE_ENV" \
   '{project_key: $pk, file_path: $fp, content: $c, source_env: $env}' |
   curl -sS --fail-with-body -o /dev/null \
