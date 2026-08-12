@@ -107,3 +107,30 @@ without it still works, `/health` just reports `"unknown"` for
 The SQLite file lives in the named `recall-data` volume, so it survives
 rebuilds/restarts. `docker compose down -v` would delete it — don't run
 that unless you mean to wipe stored memory.
+
+## Backups
+
+The server takes its own consistent snapshots automatically (every 24h
+by default, keeping the last 7) via SQLite's `VACUUM INTO` — safe to run
+against a live database. They land in `deploy/backups/` on the host,
+outside Docker entirely, so you can point any off-box backup (Time
+Machine, an external drive, cloud storage) straight at that folder.
+`GET /health`'s `last_backup_at` confirms it's actually running.
+
+Tune with env vars in `.env` if the defaults don't fit:
+`RECALL_BACKUP_INTERVAL_HOURS`, `RECALL_BACKUP_KEEP`. This matters more
+than it might seem: cloud Claude Code sessions are ephemeral by design,
+so for memory content that only ever existed on one of those, this
+server is the only copy left once the session ends — losing the
+database here isn't just downtime, it's permanent data loss for that
+content.
+
+**To restore:** stop the server, copy a `deploy/backups/recall-*.db`
+file over the live one in the `recall-data` volume, restart.
+
+```sh
+docker compose stop recall-server
+docker run --rm -v deploy_recall-data:/data -v "$(pwd)/backups":/backups:ro \
+  alpine cp /backups/recall-<timestamp>.db /data/recall.db
+docker compose start recall-server
+```
