@@ -11,6 +11,7 @@ const crypto = require("node:crypto");
 const PORT = process.env.RECALL_PORT || 8787;
 const TOKEN = process.env.RECALL_TOKEN;
 const DB_PATH = process.env.RECALL_DB_PATH || path.join(__dirname, "data", "recall.db");
+const GIT_COMMIT = process.env.RECALL_GIT_COMMIT || "unknown";
 
 if (!TOKEN) {
   console.error("RECALL_TOKEN is not set. Refusing to start with no auth.");
@@ -126,7 +127,12 @@ function handleSyncGet(req, res, url) {
 
 function handleHealth(req, res) {
   const { last_sync_at } = lastSyncStmt.get();
-  sendJson(res, 200, { status: "ok", started_at: startedAt, last_sync_at: last_sync_at || null });
+  sendJson(res, 200, {
+    status: "ok",
+    git_commit: GIT_COMMIT,
+    started_at: startedAt,
+    last_sync_at: last_sync_at || null,
+  });
 }
 
 const server = http.createServer(async (req, res) => {
