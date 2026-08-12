@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# SessionStart "command" hook. Fetches the latest synced memory snapshot and
+# writes it into the same directory Claude Code itself reads auto-memory
+# from, before Claude loads context — no additionalContext injection
+# needed, Claude Code reads MEMORY.md + topic files straight off disk.
+#
+# Important prerequisite this script does NOT itself fix: in a remote/cloud
+# session, Claude Code's auto-memory feature is OFF unless
+# CLAUDE_CODE_REMOTE_MEMORY_DIR is set (confirmed by reading the CLI source
+# — Sz() returns false when CLAUDE_CODE_REMOTE is set and
+# CLAUDE_CODE_REMOTE_MEMORY_DIR isn't). The settings.json snippet in this
+# repo sets that env var so this isn't a silent no-op on fresh cloud
+# sessions.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib.sh"
+
+: "${RECALL_URL:?RECALL_URL must be set (e.g. https://recall.example.com)}"
+: "${RECALL_TOKEN:?RECALL_TOKEN must be set}"
+
+MEM_DIR="$(recall_memory_dir)"
+PROJECT_KEY="$(recall_project_key)"
+
+RESPONSE="$(curl -sS --fail-with-body \
+  -H "Authorization: Bearer $RECALL_TOKEN" \
+  -G "$RECALL_URL/sync" --data-urlencode "project_key=$PROJECT_KEY")" || {
+  echo "recall-pull: fetch failed, leaving local memory untouched" >&2
+  exit 0
+}
+
+FILE_COUNT="$(jq -r '.files | length' <<<"$RESPONSE")"
+[[ "$FILE_COUNT" -eq 0 ]] && exit 0
+
+mkdir -p "$MEM_DIR"
+
+jq -r '.files[] | .file_path' <<<"$RESPONSE" | while IFS= read -r rel_path; do
+  # No traversal outside MEM_DIR, matching the server-side check on push.
+  case "$rel_path" in
+    ""|*..*|/*) continue ;;
+  esac
+  dest="$MEM_DIR/$rel_path"
+  mkdir -p "$(dirname "$dest")"
+  jq -r --arg fp "$rel_path" '.files[] | select(.file_path == $fp) | .content' <<<"$RESPONSE" > "$dest"
+done
+
+echo "recall-pull: synced $FILE_COUNT memory file(s) for $PROJECT_KEY" >&2

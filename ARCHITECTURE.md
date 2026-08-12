@@ -22,22 +22,18 @@ No peer-to-peer link between environments — every environment only ever talks 
 
 Both directions are implemented as hooks in the **project's own `.claude/settings.json`** (see `PROMPT.md` for why it can't be user-level config).
 
-### Push — `FileChanged` (or `PostToolUse` matching `Edit|Write`), `type: "http"`
+### Push — `PostToolUse` matching `Edit|Write`, `type: "command"`
 
-Claude Code's hook runner makes the HTTP call itself — no client script, no daemon:
+**Resolved in Phase 0 (see `docs/phase-0-findings.md`):** the installed Claude Code CLI (v2.1.42) has no `FileChanged` event and no `"http"` hook type at all. Memory files are written through the plain `Write`/`Edit` tools, so the push hook is a `PostToolUse` hook matching `Edit|Write`, `type: "command"`, running a script (`hooks/recall-push`) that does the HTTP call itself with `curl`:
 
 ```json
 {
   "hooks": {
-    "FileChanged": [
+    "PostToolUse": [
       {
-        "matcher": "MEMORY.md",
+        "matcher": "Edit|Write",
         "hooks": [
-          {
-            "type": "http",
-            "url": "https://<your-recall-host>/sync",
-            "headers": { "Authorization": "Bearer $RECALL_TOKEN" }
-          }
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/hooks/recall-push" }
         ]
       }
     ]
@@ -45,7 +41,7 @@ Claude Code's hook runner makes the HTTP call itself — no client script, no da
 }
 ```
 
-Open question to resolve in Phase 0 (flagged, not assumed): whether `FileChanged`'s matcher can pick up **dynamically-created topic files** under `memory/` (files like `debugging.md` that Claude names on the fly), or only literal pre-known filenames. If it can't glob-match new files, `PostToolUse` on `Edit|Write` with an `if` path-glob against `**/memory/**` is the fallback — confirm against the installed Claude Code version's actual hook-matching behavior before committing to one.
+The `matcher` field only matches on tool name, not path — there's no built-in path glob. `recall-push` itself checks `tool_input.file_path` from the JSON payload on stdin against the project's memory directory and exits silently if it's not a memory file. **Confirmed live** (not just by reading the source): this catches **dynamically-created topic files** — a real run with this exact hook fired identically for a pre-known `MEMORY.md` write and a `debugging.md` file Claude named on the fly in the same turn, because the check happens per-call against the actual path rather than via a filename registered in advance.
 
 ### Pull — `SessionStart`, `type: "command"`
 
@@ -53,20 +49,31 @@ Open question to resolve in Phase 0 (flagged, not assumed): whether `FileChanged
 {
   "hooks": {
     "SessionStart": [
-      { "type": "command", "command": "recall-pull" }
+      {
+        "hooks": [
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/hooks/recall-pull" }
+        ]
+      }
     ]
   }
 }
 ```
 
-`recall-pull` is a small script (bundled with this project, installed however's simplest — a single self-contained binary/script is preferable to a language runtime dependency, decide in Phase 0) that:
+`recall-pull` (`hooks/recall-pull`, plain bash + curl + jq — no language runtime dependency, per Phase 0's decision) that:
 1. Derives the project key (see below).
 2. `GET`s the latest merged snapshot from the server.
-3. Writes it into `~/.claude/projects/<project>/memory/` before Claude Code loads context.
+3. Writes it into `$CLAUDE_CODE_REMOTE_MEMORY_DIR/projects/<slug>/memory/` (or `~/.claude/projects/<slug>/memory/` when that env var isn't set) before Claude Code loads context.
+
+**Load-bearing prerequisite found in Phase 0, not in the original design:** in a remote/cloud session, Claude Code's auto-memory feature is *disabled by default* unless `CLAUDE_CODE_REMOTE_MEMORY_DIR` is set (see `docs/phase-0-findings.md` §5). `recall-pull` writing files is necessary but not sufficient — that env var has to be set on the remote environment (as a secret, alongside `RECALL_TOKEN`; it can't be baked into committed `settings.json`, whose `env` values don't support `$HOME` expansion) or Claude Code never looks at the memory directory at all.
 
 ## Project identity
 
-Derive the same way Claude Code derives its own per-project memory scoping: from the project's git remote URL. Don't invent a separate ID scheme — if Recall's key derivation drifts from Claude Code's own, a laptop and a cloud session could disagree about which memory belongs to which project. Confirm the exact derivation (likely a normalized form of the `origin` remote URL) empirically in Phase 0 rather than guessing the hash/format.
+**Resolved in Phase 0 (see `docs/phase-0-findings.md` §6):** Claude Code does *not* scope its own memory storage by git remote — it uses the local filesystem path (git root, or cwd if none) with non-alphanumeric characters replaced by `-`. That's machine-local by construction (a laptop clone and a cloud clone of the same repo get different slugs), which is exactly the gap Recall exists to bridge — so Recall deliberately uses a *different* derivation than Claude Code's own:
+
+- **`project_key`** (server-side, must agree across machines): the git remote's `owner/repo`, taking just the last two path segments so it normalizes identically across SSH (`git@host:owner/repo.git`), HTTPS (`https://host/owner/repo.git`), and locally-proxied remotes that cloud sandboxes rewrite `origin` to. Implemented in `hooks/lib.sh:recall_project_key`.
+- **local memory directory** (client-side, per-machine): replicates Claude Code's own local-path-slug algorithm exactly, so hooks read/write the same directory Claude Code itself uses on that machine. Implemented in `hooks/lib.sh:recall_memory_dir`.
+
+Known limitation: git hosts with nested groups (e.g. GitLab subgroups) collapse to their last two path segments too, which can collide across different subgroups with the same repo name. Acceptable for Phase 0; revisit in Phase 2 if it matters in practice.
 
 ## Server
 

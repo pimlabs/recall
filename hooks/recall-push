@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# PostToolUse "command" hook. Matcher should be "Edit|Write" (see settings
+# snippet). Claude Code has no FileChanged event and no "http" hook type in
+# the installed CLI version (confirmed by reading the CLI source, v2.1.42) —
+# so this is a "command" hook that filters by path itself and does the HTTP
+# call with curl.
+#
+# Claude Code feeds the hook a JSON payload on stdin:
+#   { "hook_event_name": "PostToolUse", "tool_name": "Write"|"Edit",
+#     "tool_input": { "file_path": "...", ... }, ... }
+# The matcher only matches on tool_name, not path — every Edit/Write call
+# reaches this script, including ones that create brand-new topic files
+# Claude names on the fly (e.g. debugging.md). That's what makes this catch
+# dynamically-created memory files where a literal-filename matcher
+# wouldn't.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib.sh"
+
+: "${RECALL_URL:?RECALL_URL must be set (e.g. https://recall.example.com)}"
+: "${RECALL_TOKEN:?RECALL_TOKEN must be set}"
+
+INPUT="$(cat)"
+FILE_PATH="$(jq -r '.tool_input.file_path // empty' <<<"$INPUT")"
+[[ -z "$FILE_PATH" ]] && exit 0
+
+MEM_DIR="$(recall_memory_dir)"
+case "$FILE_PATH" in
+  "$MEM_DIR"/*) ;;
+  *) exit 0 ;;  # not a memory file — nothing to push
+esac
+
+[[ -f "$FILE_PATH" ]] || exit 0  # e.g. a delete; nothing to read
+
+REL_PATH="${FILE_PATH#"$MEM_DIR"/}"
+CONTENT="$(cat "$FILE_PATH")"
+PROJECT_KEY="$(recall_project_key)"
+SOURCE_ENV="${RECALL_SOURCE_ENV:-$(hostname 2>/dev/null || echo unknown)}"
+
+jq -n \
+  --arg pk "$PROJECT_KEY" \
+  --arg fp "$REL_PATH" \
+  --arg c "$CONTENT" \
+  --arg env "$SOURCE_ENV" \
+  '{project_key: $pk, file_path: $fp, content: $c, source_env: $env}' |
+  curl -sS --fail-with-body -o /dev/null \
+    -X POST "$RECALL_URL/sync" \
+    -H "Authorization: Bearer $RECALL_TOKEN" \
+    -H "Content-Type: application/json" \
+    --data-binary @-
