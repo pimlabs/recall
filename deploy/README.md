@@ -130,7 +130,7 @@ file over the live one in the `recall-data` volume, restart.
 
 ```sh
 docker compose stop recall-server
-docker run --rm -v deploy_recall-data:/data -v "$(pwd)/backups":/backups:ro \
+docker run --rm -v recall_recall-data:/data -v "$(pwd)/backups":/backups:ro \
   alpine cp /backups/recall-<timestamp>.db /data/recall.db
 docker compose start recall-server
 ```
