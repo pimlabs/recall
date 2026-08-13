@@ -18,6 +18,26 @@ services:
       - ./backups:/backups
     expose:
       - "8787"
+    networks:
+      - tunnel
+
+  # Read-only DB browser for the owner's own use. Kept off the `tunnel`
+  # network on purpose — it has no bearer-token auth of its own, so
+  # cloudflared (and therefore the public internet) must have no container
+  # path to it. The 127.0.0.1 port binding below is the second, independent
+  # layer: even on the `db-tools` network alone, it's still unreachable
+  # from anywhere but this machine.
+  sqlite-web:
+    image: coleifer/sqlite-web
+    container_name: recall-sqlite-web
+    restart: unless-stopped
+    command: sqlite_web -H 0.0.0.0 -p 8080 -x -r /data/recall.db
+    volumes:
+      - recall-data:/data:ro
+    ports:
+      - "127.0.0.1:8081:8080"
+    networks:
+      - db-tools
 
   cloudflared:
     image: cloudflare/cloudflared:latest
@@ -28,6 +48,12 @@ services:
       TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?set CLOUDFLARE_TUNNEL_TOKEN in deploy/.env}
     depends_on:
       - recall-server
+    networks:
+      - tunnel
 
 volumes:
   recall-data:
+
+networks:
+  tunnel:
+  db-tools:

@@ -134,3 +134,19 @@ docker run --rm -v deploy_recall-data:/data -v "$(pwd)/backups":/backups:ro \
   alpine cp /backups/recall-<timestamp>.db /data/recall.db
 docker compose start recall-server
 ```
+
+## Monitoring / inspecting the database
+
+Two read-oriented views come up with `docker compose up -d` alongside the
+server, both for the owner's own use:
+
+- **sqlite-web** (`coleifer/sqlite-web`) mounts the `recall-data` volume
+  read-only and browses the live `recall.db` at
+  `http://localhost:8081` — but **only on the machine running Docker**,
+  since its port is bound to `127.0.0.1` on purpose, never exposed
+  through the Cloudflare tunnel. From another machine, tunnel over SSH
+  first: `ssh -L 8081:localhost:8081 <user>@<host>`, then open
+  `http://localhost:8081` locally.
+- **`GET /admin`**, built into `recall-server` itself, is reachable at
+  the regular public URL (`https://recall.yourdomain.com/admin`) and
+  needs the same `RECALL_TOKEN` as the hooks to load data.
