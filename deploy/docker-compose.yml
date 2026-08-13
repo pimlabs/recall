@@ -1,3 +1,5 @@
+name: recall
+
 services:
   recall-server:
     build:
