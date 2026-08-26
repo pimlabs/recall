@@ -37,6 +37,7 @@ Phases 0 through 3 done: server + hooks exist, deployed for real (OrbStack + Clo
 | `CLAUDE.md` | How Claude Code sessions should work in this repo (worktrees, task list, PR policy, ground rules). |
 | `docs/phase-0-findings.md` | Empirical findings from Phase 0 — what the docs above assumed vs. what the installed Claude Code CLI actually does. |
 | `docs/token-setup.md` | Generating and installing `RECALL_TOKEN` on every environment (laptop, cloud). |
+| `docs/github-actions-deploy.md` | Optional: CI checks on every PR, plus auto-deploy to a VPS over SSH on push to `main`. |
 | `server/` | The sync backend. |
 | `hooks/` | `recall-push`/`recall-pull` scripts + the settings.json snippet to opt a project in. |
 | `deploy/` | OrbStack + Cloudflare Tunnel deployment (docker-compose based), including enabling merge. |

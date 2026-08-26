@@ -1,0 +1,74 @@
+name: CI & Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Check server syntax
+        run: node --check server/index.js
+
+      - name: Check hook scripts syntax
+        run: |
+          bash -n hooks/lib.sh
+          bash -n hooks/recall-push
+          bash -n hooks/recall-pull
+
+      - name: Validate settings snippet is well-formed JSON
+        run: node -e "JSON.parse(require('fs').readFileSync('hooks/settings.snippet.json', 'utf8'))"
+
+      - name: Build server image (build check only, not pushed anywhere)
+        run: docker build -t recall-server-ci server/
+
+  # Only runs for a push that's actually landed on main (never for PRs) and
+  # only after `ci` passes. Needs three repo secrets set once under
+  # Settings > Secrets and variables > Actions — see
+  # docs/github-actions-deploy.md for exactly how, including generating a
+  # dedicated deploy key rather than reusing a personal one:
+  #   DEPLOY_HOST        the VPS's hostname or IP
+  #   DEPLOY_USER        the SSH user to connect as
+  #   DEPLOY_SSH_KEY     that user's private key (PEM), scoped to this repo only
+  # Two more are optional (sane defaults below):
+  #   DEPLOY_PORT        SSH port, defaults to 22
+  #   DEPLOY_PATH        where the repo is cloned on the VPS, defaults to
+  #                      the deploy user's home dir + /recall
+  deploy:
+    needs: ci
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script: |
+            set -e
+            cd "${DEPLOY_PATH:-$HOME/recall}"
+            git fetch origin main
+            git checkout main
+            # --ff-only, not --hard: this is meant to be a clean clone that
+            # only ever moves forward via this workflow. A fast-forward
+            # failure here means something unexpected changed on the VPS
+            # directly — that's a signal to go look, not something this
+            # workflow should silently overwrite.
+            git pull --ff-only origin main
+            cd deploy
+            GIT_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --build
+            sleep 5
+            curl -sf http://localhost:8787/health
+          envs: DEPLOY_PATH
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
