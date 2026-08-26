@@ -104,6 +104,10 @@ different things until this is run. Plain `docker compose up -d --build`
 without it still works, `/health` just reports `"unknown"` for
 `git_commit`.
 
+This can also run automatically on every push to `main` instead of by
+hand — see `docs/github-actions-deploy.md` for wiring up
+`.github/workflows/ci-deploy.yml` against this VPS.
+
 The SQLite file lives in the named `recall-data` volume, so it survives
 rebuilds/restarts. `docker compose down -v` would delete it — don't run
 that unless you mean to wipe stored memory.
