@@ -27,19 +27,20 @@ No new features. The server and hooks from Phase 0 already do everything needed 
 
 **Done when:** the exact "done when" from Phase 0 is true for real — a genuine second environment, zero simulation. **Done, 2026-08-12.**
 
-## Phase 2 — Real merge
+## Phase 2 — Real merge — done
 
-- Replace last-write-wins with the `claude -p` semantic merge described in `ARCHITECTURE.md` for memory file content.
-- Handle the server needing its own logged-in `claude` CLI to do this — figure out what that operationally requires. (Phase 1's hosting choice should already make this straightforward — see above.)
+- [x] **Replaced last-write-wins with `claude -p` semantic merge** for genuine conflicts. `POST /sync` only attempts a merge when there's something to reconcile — an existing, non-tombstoned row whose content differs byte-for-byte from the incoming push. A brand-new file, a revived tombstone, or a re-push of unchanged content all skip straight to a plain write (cheaper, and avoids a merge call ever second-guessing content that didn't actually conflict).
+- [x] **Handled the server needing its own logged-in `claude` CLI**: installed in the image (`npm install -g @anthropic-ai/claude-code`), one-time interactive `claude setup-token` documented in `deploy/README.md`, credentials stored under `/data/claude-config` — inside the same persistent volume the database already uses, so it survives rebuilds without a separate volume. Every failure mode (CLI missing, not logged in, timeout, malformed output) degrades to last-write-wins rather than rejecting the sync — visible via `GET /health`'s new `merge` object instead of failing silently or loudly.
+- [x] **Found and fixed a real cost problem while proving this live**: running `claude -p` with its default agentic system prompt from inside a real project directory ballooned a trivial merge call to ~$0.19 in wasted cache-creation tokens (project CLAUDE.md, tool definitions, etc. — none of which a text-merge task needs). Fixed with a minimal custom `--system-prompt`, `--exclude-dynamic-system-prompt-sections`, and `--strict-mcp-config`, run from a neutral cwd — same call, ~$0.01.
 
-**Done when:** two environments editing the same topic file with genuinely different information both end up represented after a sync, not just the more-recent one.
+**Done when:** two environments editing the same topic file with genuinely different information both end up represented after a sync, not just the more-recent one. **Done, verified live**: pushed version A (`--force` flag note + a Redis fact) then version B (a reworded `--force` note + an unrelated Nginx fact) for the same file — the stored result kept the clearer wording from B, the Redis fact only A had, and the Nginx fact only B had. A separate live check with a genuine contradiction (two different numbers for the same rate limit) confirmed both are kept with an inline `[CONFLICT: ...]` marker rather than one silently overwriting the other.
 
-## Phase 3 — Multiple projects, token/auth hardening
+## Phase 3 — Multiple projects, token/auth hardening — done
 
-- Confirm the server correctly separates memory by `project_key` for more than one repo.
-- Bearer token setup made boring: a short doc on generating and installing `RECALL_TOKEN` per environment (laptop shell profile, cloud session secrets).
+- [x] **Confirmed the server separates memory by `project_key`** for more than one repo. Verified live: pushed different content under the same `file_path` (`MEMORY.md`) to two different `project_key`s, read each back — no cross-contamination. Also confirmed for deletes: tombstoning the file in one project left the other's row completely untouched, and `GET /admin/stats` bucketed both projects separately with correct per-project counts. This was already structurally guaranteed (`project_key` is half of every row's primary key, every query filters by it) — this step was confirming that empirically rather than trusting the schema by inspection alone, per this project's stated preference throughout.
+- [x] **Bearer token setup made boring**: `docs/token-setup.md` — generate once, install on a laptop shell profile and on a claude.ai cloud environment's secrets (plus the network-allowlist step that's easy to forget), verify with a couple of `curl`s, and what rotation actually involves for a single shared token.
 
-**Done when:** two different projects synced through the same Recall server never cross-contaminate memory.
+**Done when:** two different projects synced through the same Recall server never cross-contaminate memory. **Done, verified live** (see above).
 
 ## Phase 4 — Operational polish (open-ended)
 

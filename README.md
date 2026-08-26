@@ -12,7 +12,7 @@ Recall exists for that specific gap: **a central service any environment can tal
 
 - Not a replacement for git-based `CLAUDE.md` sync — that's already solved, don't touch it.
 - Not a multi-user product. Personal tool, single owner, no Anthropic API key, no auth system beyond a personal token. See `CLAUDE.md`'s Ground rules.
-- Not append-only. Merge is closer to what `claude-brain` does (semantic merge via the local `claude` CLI) than to naive line-dedup.
+- Not append-only. Merge works like `claude-brain`'s does: a semantic merge via the local `claude` CLI, not naive line-dedup — implemented and verified live, see `ROADMAP.md` Phase 2.
 
 ## How it plugs into Claude Code
 
@@ -25,7 +25,7 @@ Both hooks live in the **project's own `.claude/settings.json`**, checked into g
 
 ## Status
 
-Phase 0 and Phase 1 both done: server + hooks exist, deployed for real (OrbStack + Cloudflare Tunnel, `deploy/`), and the push/pull round-trip is proven both locally and from a genuine claude.ai cloud session — not just simulated (see `docs/phase-0-findings.md` and `ROADMAP.md`). No merge logic yet — Phase 2.
+Phases 0 through 3 done: server + hooks exist, deployed for real (OrbStack + Cloudflare Tunnel, `deploy/`), the push/pull round-trip is proven from a genuine claude.ai cloud session, conflicting edits now get a real semantic merge instead of last-write-wins, and multi-project isolation plus token setup are documented and verified live. See `ROADMAP.md` for the evidence behind each. Phase 4 (operational polish) is open-ended and mostly already underway.
 
 ## Project docs
 
@@ -36,9 +36,10 @@ Phase 0 and Phase 1 both done: server + hooks exist, deployed for real (OrbStack
 | `CONTRIBUTING.md` | Dev workflow. |
 | `CLAUDE.md` | How Claude Code sessions should work in this repo (worktrees, task list, PR policy, ground rules). |
 | `docs/phase-0-findings.md` | Empirical findings from Phase 0 — what the docs above assumed vs. what the installed Claude Code CLI actually does. |
+| `docs/token-setup.md` | Generating and installing `RECALL_TOKEN` on every environment (laptop, cloud). |
 | `server/` | The sync backend. |
 | `hooks/` | `recall-push`/`recall-pull` scripts + the settings.json snippet to opt a project in. |
-| `deploy/` | OrbStack + Cloudflare Tunnel deployment (docker-compose based). |
+| `deploy/` | OrbStack + Cloudflare Tunnel deployment (docker-compose based), including enabling merge. |
 
 ## License
 

@@ -57,6 +57,8 @@ not account-wide — a new environment needs it set again.
 | `RECALL_TOKEN` | The same bearer token clients send |
 | `RECALL_PORT` | Defaults to `8787` |
 | `RECALL_DB_PATH` | Defaults to `server/data/recall.db` |
+| `RECALL_MERGE_ENABLED` | Set `false` to skip semantic merge entirely (always last-write-wins). Defaults to enabled — see `deploy/README.md` for the one-time `claude setup-token` step this actually needs to do anything. |
+| `RECALL_MERGE_TIMEOUT_MS` | Per-merge-call timeout before falling back to last-write-wins. Defaults to `45000`. |
 
 ## How the two hooks work
 
