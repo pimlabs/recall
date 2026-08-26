@@ -1,11 +1,18 @@
 #!/usr/bin/env node
-// Recall sync server — Phase 0: SQLite storage, last-write-wins, no merge logic.
-// No external dependencies: node:http + node:sqlite (Node >= 22.5).
+// Recall sync server — Phase 2: SQLite storage, semantic merge via a local
+// `claude` CLI for conflicting writes, last-write-wins as the fallback when
+// merge isn't available or fails.
+// No external dependencies: node:http + node:sqlite (Node >= 22.5). The
+// `claude` CLI is an external process, not a package dependency (see
+// "no Anthropic API key" rule in CLAUDE.md — this rides the CLI's own
+// logged-in subscription session, never a raw API key in this codebase).
 
 const http = require("node:http");
 const { DatabaseSync } = require("node:sqlite");
+const { spawn } = require("node:child_process");
 const path = require("node:path");
 const fs = require("node:fs");
+const os = require("node:os");
 const crypto = require("node:crypto");
 
 const PORT = process.env.RECALL_PORT || 8787;
@@ -17,6 +24,10 @@ const BACKUP_INTERVAL_HOURS = Number(process.env.RECALL_BACKUP_INTERVAL_HOURS ||
 const BACKUP_KEEP = Number(process.env.RECALL_BACKUP_KEEP || 7);
 const RATE_LIMIT_WINDOW_MS = Number(process.env.RECALL_RATE_LIMIT_WINDOW_MS || 60_000);
 const RATE_LIMIT_MAX = Number(process.env.RECALL_RATE_LIMIT_MAX || 60);
+const MERGE_ENABLED = process.env.RECALL_MERGE_ENABLED !== "false";
+const MERGE_TIMEOUT_MS = Number(process.env.RECALL_MERGE_TIMEOUT_MS || 45_000);
+const CLAUDE_BIN = process.env.RECALL_CLAUDE_BIN || "claude";
+const CLAUDE_STATUS_INTERVAL_MS = Number(process.env.RECALL_CLAUDE_STATUS_INTERVAL_MS || 30 * 60_000);
 
 if (!TOKEN) {
   console.error("RECALL_TOKEN is not set. Refusing to start with no auth.");
@@ -336,6 +347,12 @@ const selectStmt = db.prepare(`
   ORDER BY file_path
 `);
 
+const selectOneStmt = db.prepare(`
+  SELECT content, deleted
+  FROM memory_files
+  WHERE project_key = ? AND file_path = ?
+`);
+
 const lastSyncStmt = db.prepare(`SELECT MAX(updated_at) AS last_sync_at FROM memory_files`);
 
 const adminProjectsStmt = db.prepare(`
@@ -445,6 +462,140 @@ setInterval(() => {
   }
 }, RATE_LIMIT_WINDOW_MS).unref();
 
+// Semantic merge, per ARCHITECTURE.md's "Merge strategy" — shells out to
+// the *local* `claude` CLI rather than calling the Anthropic API directly,
+// per CLAUDE.md's no-API-key rule. This means the merge rides whatever
+// account is logged into that CLI on this host (`claude setup-token`,
+// documented in deploy/README.md) — a real operational dependency, not an
+// afterthought, which is why every failure mode below degrades to
+// last-write-wins instead of rejecting the sync outright: a broken or
+// not-yet-configured merge step must never be able to take basic sync down
+// with it.
+const MERGE_SYSTEM_PROMPT = [
+  "You are a precise text-merging assistant for a personal notes-sync tool.",
+  "You merge two versions of a Claude Code auto-memory file that were edited independently on different machines and then synced through a central server.",
+  "Rules: preserve every distinct fact from both versions; if both state the same fact in different words, keep it once, worded clearly (prefer the more complete wording); if they directly contradict each other, keep both and mark the conflict inline so a human can resolve it later; never invent information that isn't present in either version.",
+  "Output ONLY the merged file content — no preamble, no explanation, no code fences, nothing else.",
+].join(" ");
+
+function buildMergePrompt(oldContent, newContent) {
+  return `--- VERSION A (currently stored) ---\n${oldContent}\n\n--- VERSION B (incoming) ---\n${newContent}`;
+}
+
+// Runs in a neutral cwd with no MCP servers and a minimal, non-dynamic
+// system prompt — confirmed live that skipping this (i.e. running `claude
+// -p` with its default agentic system prompt from inside a real project
+// directory) balloons a trivial call from ~$0.01 to ~$0.19 in cache-
+// creation tokens for no benefit, since this task needs no tools and no
+// project context, just a text-in/text-out transform.
+function mergeMemoryContent(oldContent, newContent) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      CLAUDE_BIN,
+      [
+        "-p",
+        "--output-format", "json",
+        "--input-format", "text",
+        "--system-prompt", MERGE_SYSTEM_PROMPT,
+        "--exclude-dynamic-system-prompt-sections",
+        "--strict-mcp-config",
+      ],
+      { cwd: os.tmpdir(), stdio: ["pipe", "pipe", "pipe"] }
+    );
+
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGKILL");
+      reject(new Error(`claude merge timed out after ${MERGE_TIMEOUT_MS}ms`));
+    }, MERGE_TIMEOUT_MS);
+
+    child.stdout.on("data", (d) => (stdout += d));
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code !== 0) {
+        return reject(new Error(`claude exited ${code}: ${stderr.slice(0, 500) || "(no stderr)"}`));
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(stdout);
+      } catch {
+        return reject(new Error(`claude returned non-JSON output: ${stdout.slice(0, 500)}`));
+      }
+      if (parsed.is_error || typeof parsed.result !== "string") {
+        return reject(new Error(`claude merge failed: ${String(parsed.result || stderr).slice(0, 500)}`));
+      }
+      resolve(parsed.result);
+    });
+
+    child.stdin.write(buildMergePrompt(oldContent, newContent));
+    child.stdin.end();
+  });
+}
+
+// Cheap, local, no model cost — just confirms the CLI is installed and its
+// login session is live, so /health can answer "will merge actually work"
+// without waiting to find out on a real conflicting push.
+let claudeCliStatus = { checked_at: null, available: null, logged_in: null, error: null };
+
+function checkClaudeCliStatus() {
+  return new Promise((resolve) => {
+    const child = spawn(CLAUDE_BIN, ["auth", "status"], { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    child.on("error", (err) => {
+      resolve({
+        checked_at: new Date().toISOString(),
+        available: false,
+        logged_in: false,
+        error: err.code === "ENOENT" ? "claude CLI not found on PATH" : err.message,
+      });
+    });
+    child.stdout.on("data", (d) => (stdout += d));
+    child.on("close", () => {
+      try {
+        const parsed = JSON.parse(stdout);
+        resolve({
+          checked_at: new Date().toISOString(),
+          available: true,
+          logged_in: !!parsed.loggedIn,
+          error: null,
+        });
+      } catch {
+        resolve({
+          checked_at: new Date().toISOString(),
+          available: true,
+          logged_in: false,
+          error: "could not parse `claude auth status` output",
+        });
+      }
+    });
+  });
+}
+
+async function refreshClaudeCliStatus() {
+  claudeCliStatus = await checkClaudeCliStatus();
+}
+
+let lastMergeAt = null;
+let lastMergeError = null;
+
+if (MERGE_ENABLED) {
+  refreshClaudeCliStatus();
+  setInterval(refreshClaudeCliStatus, CLAUDE_STATUS_INTERVAL_MS).unref();
+}
+
 function isAuthorized(req) {
   const header = req.headers["authorization"] || "";
   const [scheme, value] = header.split(" ");
@@ -500,11 +651,35 @@ async function handleSyncPost(req, res) {
   const updatedAt = new Date().toISOString();
   if (isDelete) {
     tombstoneStmt.run(project_key, file_path, source_env || null, updatedAt);
-  } else {
-    upsertStmt.run(project_key, file_path, content, source_env || null, updatedAt);
+    return sendJson(res, 200, { ok: true, project_key, file_path, deleted: true, merged: false, updated_at: updatedAt });
   }
 
-  sendJson(res, 200, { ok: true, project_key, file_path, deleted: isDelete, updated_at: updatedAt });
+  // Merge only when there's actually something to reconcile: a brand-new
+  // file, a revived tombstone (the delete already expressed intent to
+  // discard the old content, so it shouldn't come back via a merge), or
+  // byte-identical content all skip straight to a plain upsert — cheaper,
+  // and it means a client re-pushing its own unchanged file never triggers
+  // a merge call.
+  const existing = selectOneStmt.get(project_key, file_path);
+  let finalContent = content;
+  let merged = false;
+  const shouldAttemptMerge =
+    MERGE_ENABLED && claudeCliStatus.logged_in && existing && !existing.deleted && existing.content !== content;
+  if (shouldAttemptMerge) {
+    try {
+      finalContent = await mergeMemoryContent(existing.content, content);
+      merged = true;
+      lastMergeAt = new Date().toISOString();
+      lastMergeError = null;
+    } catch (err) {
+      console.error(`merge failed for ${project_key}/${file_path}, falling back to last-write-wins: ${err.message}`);
+      lastMergeError = { message: err.message, at: new Date().toISOString() };
+      // finalContent is still the incoming content — last-write-wins.
+    }
+  }
+
+  upsertStmt.run(project_key, file_path, finalContent, source_env || null, updatedAt);
+  sendJson(res, 200, { ok: true, project_key, file_path, deleted: false, merged, updated_at: updatedAt });
 }
 
 function handleSyncGet(req, res, url) {
@@ -536,6 +711,12 @@ function handleHealth(req, res) {
     started_at: startedAt,
     last_sync_at: last_sync_at || null,
     last_backup_at: lastBackupAt,
+    merge: {
+      enabled: MERGE_ENABLED,
+      claude_cli: claudeCliStatus,
+      last_merge_at: lastMergeAt,
+      last_merge_error: lastMergeError,
+    },
   });
 }
 

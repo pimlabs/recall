@@ -135,6 +135,38 @@ docker run --rm -v recall_recall-data:/data -v "$(pwd)/backups":/backups:ro \
 docker compose start recall-server
 ```
 
+## Enabling real merge (Phase 2)
+
+Without this step, Recall still works exactly as before — conflicting
+writes just fall back to last-write-wins. Semantic merge (`server/index.js`
+shelling out to `claude -p` per `ARCHITECTURE.md`) needs the CLI, already
+installed in the image, to actually be logged in **inside the container**.
+That's a one-time interactive step only the owner can do (it's your
+Claude subscription):
+
+```sh
+docker compose exec -it -u node recall-server claude setup-token
+```
+
+Follow the prompt (open a URL, paste back what it gives you). The token
+lands under `/data/claude-config` — the same persistent volume as the
+database, so this survives rebuilds and restarts; you don't need to redo
+it after `docker compose up -d --build`, only if you tear down the
+`recall-data` volume itself.
+
+Verify it worked:
+
+```sh
+curl "https://recall.yourdomain.com/health" | jq .merge
+# expect: "claude_cli": {"available": true, "logged_in": true, "error": null}
+```
+
+If `logged_in` is `false`, merge silently degrades to last-write-wins —
+sync keeps working either way, this section is the only thing gating
+merge quality specifically. Tune with env vars in `.env` if needed:
+`RECALL_MERGE_ENABLED` (set `false` to skip even attempting it),
+`RECALL_MERGE_TIMEOUT_MS` (default 45s per merge call).
+
 ## Monitoring / inspecting the database
 
 Two read-oriented views come up with `docker compose up -d` alongside the
