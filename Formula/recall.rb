@@ -1,33 +1,41 @@
-# Homebrew formula for the Recall CLI.
+# Homebrew formula for Recall.
 #
 # This repo isn't named homebrew-recall, so the tap needs its URL given
 # explicitly (Homebrew only infers the homebrew-* naming convention):
 #
 #   brew tap pimlabs/recall https://github.com/pimlabs/recall
-#   brew install --HEAD pimlabs/recall/recall
+#   brew install pimlabs/recall/recall          # latest tagged release
+#   brew install --HEAD pimlabs/recall/recall   # straight from main
 #
-# HEAD-only on purpose: this project deploys straight from main and
-# deliberately has no tagged-release process (see ROADMAP.md Phase 4 on
-# why formal semver wasn't worth it for a single-owner tool). Adding a
-# stable `url`/`sha256` here would mean maintaining tagged releases just
-# to satisfy the formula.
+# Built from source rather than pulling a release binary: Homebrew already
+# has a Go toolchain available as a build dependency, and building here
+# means the formula works against main before any tag exists.
 class Recall < Formula
   desc "Sync Claude Code's auto memory across machines and cloud sessions"
   homepage "https://github.com/pimlabs/recall"
-  head "https://github.com/pimlabs/recall.git", branch: "main"
+  url "https://github.com/pimlabs/recall/archive/refs/tags/v0.1.0.tar.gz"
+  # Filled in when v0.1.0 is actually tagged; until then use --HEAD.
+  sha256 ""
   license "MIT"
+  head "https://github.com/pimlabs/recall.git", branch: "main"
 
-  depends_on "curl"
-  depends_on "jq"
+  depends_on "go" => :build
 
   def install
-    # bin/recall resolves hooks/ relative to its own real path, so the two
-    # have to stay siblings — hence libexec rather than a bare bin.install.
-    libexec.install "bin", "hooks"
-    bin.install_symlink libexec/"bin/recall"
+    ldflags = %W[
+      -s -w
+      -X main.version=#{version}
+      -X main.commit=#{tap&.installed? ? Utils.git_short_head : "unknown"}
+    ]
+    system "go", "build", *std_go_args(ldflags: ldflags), "./cmd/recall"
   end
 
   test do
     assert_match "recall", shell_output("#{bin}/recall version")
+
+    # `recall init` must refuse to touch anything outside a git repository —
+    # it edits a file the user is expected to commit.
+    output = shell_output("#{bin}/recall init 2>&1", 1)
+    assert_match "git repository", output
   end
 end

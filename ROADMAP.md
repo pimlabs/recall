@@ -51,6 +51,44 @@ No new features. The server and hooks from Phase 0 already do everything needed 
 - [x] **Rate limiting on `/sync`.** Simple in-memory per-IP fixed-window limiter (default 60 req/min, tunable via `RECALL_RATE_LIMIT_MAX`/`RECALL_RATE_LIMIT_WINDOW_MS`) — no external store needed for a single-process personal server. Counts both valid and invalid-token requests so a flood of bad tokens can't dodge it by failing auth first. `/health` stays unlimited since it's meant to be pollable. This closes out every finding from the architecture/security pass.
 - [x] Decide whether `recall-pull` should be a single static binary (e.g. Go) vs. a script needing a runtime — revisited 2026-08-12 now that Phase 1's real-world deployment is known to work: staying with bash + curl + jq. Both dependencies have now been proven present and working on every real environment tested (this laptop, and a genuine claude.ai cloud sandbox), the one real bug they caused (trailing-newline fidelity) is fixed, and a compiled-binary rewrite would trade "clone and it just works" for per-platform binary distribution to fix a problem that hasn't actually recurred. Revisit again only if curl/jq turn out missing on some future environment, or if the hooks' logic grows past what a shell script should reasonably hold.
 
+## Phase 5 — One Go binary — done
+
+Designed in `docs/go-rewrite-design.md` and decided there: everything, one
+binary, `recall serve` included.
+
+- [x] **Client and server rewritten in Go**, sharing `internal/wire` — the
+      validation rules and the tombstone/empty-file distinction that
+      previously existed twice, in JavaScript and in bash, with nothing
+      keeping them in agreement.
+- [x] **The test suite that justified the move.** Everything previously
+      verified by hand is now table-driven: `project_key` across every real
+      remote form, the memory-dir slug, settings merging, delete
+      reconciliation, newline fidelity, tombstone withholding, project
+      isolation, rate limiting, merge fallback.
+- [x] **Three defects found by writing those tests**, all of which the
+      shell version had and none of which anything would have caught:
+      the `sed` breaking on paths containing `|`; the slug being
+      byte-wise and **locale-dependent**, so a project path with an accent
+      or emoji resolved to a directory Claude Code never writes to and sync
+      silently did nothing; and a sibling directory sharing a name prefix
+      (`memory-notes` vs `memory`) being treated as inside the memory dir.
+- [x] **Verified against the implementations being replaced**, not just in
+      isolation: the Go server opens a database written by the Node server
+      and serves it correctly, tombstones included, with no migration; the
+      old shell hooks push to and pull from the Go server; the Go client
+      pushes to and pulls from the Node server; and a real semantic merge
+      through the Go server kept both distinct facts and the better
+      wording.
+- [x] **Distribution**: prebuilt binaries for darwin/linux × amd64/arm64
+      via a tag-triggered release workflow, delivered through npm (checksum
+      verified), Homebrew, and `install.sh`. Tagged releases adopted, for
+      the reason recorded in the design doc.
+
+**Done when:** one installable binary does everything, with the old
+implementations still present as a rollback path. **Done** — remaining is
+Phase C of the design: retire `server/index.js` and `hooks/*.sh` once the
+binary has run in production for a while.
+
 ## Explicitly deferred
 
 - **Multi-user / a hosted "Recall as a service for others" product.** Raised and discussed 2026-08-12, shelved: use Recall personally for a while first to get real signal before committing to this. The technical shape is already mapped out if it comes back — it needs deciding on demand, not feasibility:

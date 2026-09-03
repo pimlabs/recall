@@ -1,0 +1,11 @@
+.git
+.github
+deploy/backups
+deploy/.env
+docs
+hooks
+npm
+server/data
+Formula
+*.md
+*.db

@@ -3,13 +3,15 @@
   "version": "0.1.0",
   "description": "Sync Claude Code's auto memory across machines and ephemeral cloud sessions",
   "bin": {
-    "recall": "./bin/recall"
+    "recall": "bin/recall"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
   },
   "files": [
-    "bin",
-    "hooks",
-    "README.md",
-    "LICENSE"
+    "bin/recall",
+    "install.js",
+    "README.md"
   ],
   "keywords": [
     "claude",
@@ -20,10 +22,16 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/pimlabs/recall.git"
+    "url": "git+https://github.com/pimlabs/recall.git",
+    "directory": "npm"
   },
+  "homepage": "https://github.com/pimlabs/recall",
   "os": [
     "darwin",
     "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
   ]
 }

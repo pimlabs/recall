@@ -6,13 +6,18 @@ own `.claude/settings.json` (see `settings.snippet.json` — merge its
 that project, laptop or fresh cloud session, gets sync automatically once
 the environment variables below are set.
 
-> **Most projects should use the CLI instead:** `recall init` does this
-> merge for you, idempotently, and points the hooks at `recall push` /
-> `recall pull` on `PATH` — so the project doesn't need its own copy of
-> these scripts at all. See `../docs/install.md`. This directory is both
-> the implementation behind those subcommands and the manual, no-CLI path,
-> which stays supported (a project already wired to
-> `$CLAUDE_PROJECT_DIR/hooks/recall-push` keeps working unchanged).
+> **Superseded by the `recall` binary.** These shell scripts were the
+> original implementation; `recall push` / `recall pull` do the same work
+> now, with tests, exact-byte handling, atomic writes, and none of the
+> `jq`/`curl`/locale fragility documented in `../docs/go-rewrite-design.md`.
+> New projects should run `recall init` (see `../docs/install.md`).
+>
+> They stay in the tree deliberately: any project already wired to
+> `$CLAUDE_PROJECT_DIR/hooks/recall-push` keeps working unchanged — the
+> wire format is identical — and they are the rollback path for a machine
+> not yet on the binary. Two known defects are *not* fixed here, because
+> fixing them is what the rewrite was for: the `sed` breaks on paths
+> containing `|`, and the slug is locale-dependent for non-ASCII paths.
 
 ## Client-side environment variables
 

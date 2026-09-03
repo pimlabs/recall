@@ -1,53 +1,62 @@
 #!/usr/bin/env bash
-# Recall CLI installer, for machines without npm or Homebrew:
+# Recall installer, for machines without npm or Homebrew:
 #
 #   curl -fsSL https://raw.githubusercontent.com/pimlabs/recall/main/install.sh | bash
 #
-# Installs into ~/.local/share/recall and symlinks ~/.local/bin/recall.
-# Override with RECALL_INSTALL_DIR / RECALL_BIN_DIR.
+# Downloads the prebuilt binary for this platform from the latest GitHub
+# release. Installs to ~/.local/bin/recall; override with RECALL_BIN_DIR,
+# or pin a version with RECALL_VERSION=v0.1.0.
 set -euo pipefail
 
-REPO_TARBALL="https://github.com/pimlabs/recall/archive/refs/heads/main.tar.gz"
-INSTALL_DIR="${RECALL_INSTALL_DIR:-$HOME/.local/share/recall}"
+REPO="pimlabs/recall"
 BIN_DIR="${RECALL_BIN_DIR:-$HOME/.local/bin}"
+VERSION="${RECALL_VERSION:-latest}"
 
 die() {
   echo "install: $*" >&2
   exit 1
 }
 
-for dep in curl tar; do
+for dep in curl tar uname; do
   command -v "$dep" >/dev/null || die "$dep is required but not installed"
 done
 
-# Not fatal — the CLI itself checks for these and explains. But telling
-# someone now beats a confusing failure on their first `recall init`.
-missing_runtime=()
-command -v jq >/dev/null || missing_runtime+=("jq")
-command -v bash >/dev/null || missing_runtime+=("bash")
+os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+case "$os" in
+  darwin | linux) ;;
+  *) die "unsupported OS: $os (macOS and Linux only; Windows needs WSL)" ;;
+esac
+
+arch="$(uname -m)"
+case "$arch" in
+  x86_64 | amd64) arch="amd64" ;;
+  arm64 | aarch64) arch="arm64" ;;
+  *) die "unsupported architecture: $arch" ;;
+esac
+
+asset="recall_${os}_${arch}.tar.gz"
+if [[ "$VERSION" == "latest" ]]; then
+  url="https://github.com/$REPO/releases/latest/download/$asset"
+else
+  url="https://github.com/$REPO/releases/download/$VERSION/$asset"
+fi
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-echo "install: downloading recall..."
-curl -fsSL "$REPO_TARBALL" | tar -xz -C "$tmp" --strip-components=1
-
-# Replace rather than merge, so a reinstall can't leave a stale hook
-# script behind next to a newer bin/recall.
-rm -rf "$INSTALL_DIR"
-mkdir -p "$INSTALL_DIR" "$BIN_DIR"
-cp -R "$tmp/bin" "$tmp/hooks" "$INSTALL_DIR/"
-chmod +x "$INSTALL_DIR/bin/recall" "$INSTALL_DIR/hooks/recall-push" "$INSTALL_DIR/hooks/recall-pull"
-ln -sf "$INSTALL_DIR/bin/recall" "$BIN_DIR/recall"
-
-echo "install: installed to $INSTALL_DIR"
-echo "install: linked $BIN_DIR/recall"
-
-if [[ ${#missing_runtime[@]} -gt 0 ]]; then
-  echo
-  echo "  ! recall also needs: ${missing_runtime[*]}"
-  echo "    install those before running 'recall init' (e.g. brew install jq)"
+echo "install: downloading $asset ($VERSION)..."
+if ! curl -fsSL "$url" -o "$tmp/$asset"; then
+  die "could not download $url
+    If no release exists yet, build from source instead:
+      git clone https://github.com/$REPO && cd recall && go build -o recall ./cmd/recall"
 fi
+
+tar -xzf "$tmp/$asset" -C "$tmp"
+mkdir -p "$BIN_DIR"
+install -m 0755 "$tmp/recall_${os}_${arch}" "$BIN_DIR/recall"
+
+echo "install: installed $BIN_DIR/recall"
+"$BIN_DIR/recall" version
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
@@ -58,6 +67,8 @@ case ":$PATH:" in
     ;;
 esac
 
-echo
-echo "Next: set RECALL_URL and RECALL_TOKEN (see docs/token-setup.md), then"
-echo "run 'recall init' inside a project you want synced."
+cat <<'EOF'
+
+Next: set RECALL_URL and RECALL_TOKEN (see docs/token-setup.md), then run
+'recall init' inside a project you want synced.
+EOF

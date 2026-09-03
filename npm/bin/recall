@@ -1,0 +1,28 @@
+#!/bin/sh
+# Shim: npm creates a bin link at install time, but the real binary is
+# fetched by postinstall (install.js) and lands next to this file. Exec'ing
+# through a tiny sh script — rather than pointing npm's bin link straight at
+# the downloaded file — avoids depending on npm's ordering of bin-linking
+# versus lifecycle scripts, which has varied between versions.
+#
+# The symlink resolution below is not optional: `npm install -g` puts a
+# symlink on PATH pointing here, so "$0" is that symlink, and looking for
+# the binary next to it would search the wrong directory entirely.
+# readlink -f isn't portable to older macOS, hence the loop.
+src=$0
+while [ -L "$src" ]; do
+  dir=$(CDPATH= cd -- "$(dirname -- "$src")" && pwd -P)
+  src=$(readlink "$src")
+  case $src in
+    /*) ;;
+    *) src=$dir/$src ;;
+  esac
+done
+dir=$(CDPATH= cd -- "$(dirname -- "$src")" && pwd -P)
+
+real="$dir/recall-bin"
+if [ ! -x "$real" ]; then
+  echo "recall: binary missing at $real — try reinstalling (npm install -g @pimlabs/recall)" >&2
+  exit 1
+fi
+exec "$real" "$@"
