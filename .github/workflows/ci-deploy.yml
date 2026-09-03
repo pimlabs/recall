@@ -11,57 +11,46 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-go@v5
         with:
-          node-version: "22"
+          go-version: "1.24"
 
-      - name: Check server syntax
-        run: node --check server/index.js
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"; echo "$unformatted"; exit 1
+          fi
 
-      - name: Check shell scripts syntax
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -race ./...
+
+      - name: Build every release platform
+        run: |
+          set -euo pipefail
+          for platform in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
+            os="${platform%/*}"; arch="${platform#*/}"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -o /dev/null ./cmd/recall
+          done
+
+      # The shell hooks stay in the tree as the rollback path for machines
+      # not yet on the binary, so they still get syntax-checked.
+      - name: Legacy shell hooks still parse
         run: |
           bash -n hooks/lib.sh
           bash -n hooks/recall-push
           bash -n hooks/recall-pull
-          bash -n bin/recall
           bash -n install.sh
 
-      - name: Check recall init is idempotent and non-destructive
-        run: |
-          set -euo pipefail
-          mkdir -p /tmp/init-check/.claude && cd /tmp/init-check
-          git init -q && git remote add origin git@github.com:acme/ci-check.git
-          # Pre-existing unrelated settings + another tool's hook on the
-          # same matcher — init must append, never replace.
-          cat > .claude/settings.json <<'JSON'
-          {"permissions":{"allow":["Bash(npm test)"]},
-           "hooks":{"PostToolUse":[{"matcher":"Edit|Write","hooks":[{"type":"command","command":"prettier --write"}]}]}}
-          JSON
-          "$GITHUB_WORKSPACE/bin/recall" init >/dev/null
-          "$GITHUB_WORKSPACE/bin/recall" init >/dev/null   # twice: must not duplicate
-          jq -e '.permissions.allow[0] == "Bash(npm test)"' .claude/settings.json >/dev/null
-          jq -e '[.. | objects | select(.command? == "prettier --write")] | length == 1' .claude/settings.json >/dev/null
-          jq -e '[.. | objects | select(.command? == "recall push")] | length == 1' .claude/settings.json >/dev/null
-          jq -e '[.. | objects | select(.command? == "recall pull")] | length == 1' .claude/settings.json >/dev/null
+      - name: Server image builds
+        run: docker build -f server/Dockerfile -t recall-server-ci .
 
-      - name: Validate settings snippet is well-formed JSON
-        run: node -e "JSON.parse(require('fs').readFileSync('hooks/settings.snippet.json', 'utf8'))"
-
-      - name: Build server image (build check only, not pushed anywhere)
-        run: docker build -t recall-server-ci server/
-
-  # Only runs for a push that's actually landed on main (never for PRs) and
-  # only after `ci` passes. Needs three repo secrets set once under
-  # Settings > Secrets and variables > Actions — see
-  # docs/github-actions-deploy.md for exactly how, including generating a
-  # dedicated deploy key rather than reusing a personal one:
-  #   DEPLOY_HOST        the VPS's hostname or IP
-  #   DEPLOY_USER        the SSH user to connect as
-  #   DEPLOY_SSH_KEY     that user's private key (PEM), scoped to this repo only
-  # Two more are optional (sane defaults below):
-  #   DEPLOY_PORT        SSH port, defaults to 22
-  #   DEPLOY_PATH        where the repo is cloned on the VPS, defaults to
-  #                      the deploy user's home dir + /recall
+  # Only runs after CI passes, and only for a push that landed on main.
+  # Needs DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY as repo secrets —
+  # see docs/github-actions-deploy.md.
   deploy:
     needs: ci
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -79,11 +68,9 @@ jobs:
             cd "${DEPLOY_PATH:-$HOME/recall}"
             git fetch origin main
             git checkout main
-            # --ff-only, not --hard: this is meant to be a clean clone that
-            # only ever moves forward via this workflow. A fast-forward
-            # failure here means something unexpected changed on the VPS
-            # directly — that's a signal to go look, not something this
-            # workflow should silently overwrite.
+            # --ff-only, not --hard: a fast-forward failure means something
+            # changed on the VPS directly, which is a signal to go look, not
+            # something this workflow should silently overwrite.
             git pull --ff-only origin main
             cd deploy
             GIT_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --build

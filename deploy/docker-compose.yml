@@ -3,7 +3,10 @@ name: recall
 services:
   recall-server:
     build:
-      context: ../server
+      # Context is the repo root, not server/: the image builds the Go
+      # binary from cmd/ and internal/, then copies the server's entrypoint.
+      context: ..
+      dockerfile: server/Dockerfile
       args:
         GIT_COMMIT: ${GIT_COMMIT:-unknown}
     container_name: recall-server

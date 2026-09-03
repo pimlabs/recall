@@ -18,6 +18,15 @@
 
 No peer-to-peer link between environments — every environment only ever talks to the server. This is what makes the "ephemeral session with zero prior setup" requirement work: there's nothing to pair, just one URL + one token.
 
+## One binary
+
+Client and server are the same Go binary (`docs/go-rewrite-design.md`):
+`recall serve` runs the server, `recall init` / `status` / `push` / `pull`
+run on a developer machine. That is not packaging convenience — the
+validation rules and the tombstone/empty-file distinction previously
+existed twice, in JavaScript and in bash, with nothing keeping them in
+agreement. `internal/wire` is now the single definition both halves use.
+
 ## Client side: pure Claude Code hooks, no daemon
 
 Both directions are implemented as hooks in the **project's own `.claude/settings.json`**, not user-level config — a fresh cloud session only has whatever's in the repo it cloned, so user-level hooks would silently never fire there (see `CLAUDE.md`'s Ground rules).
@@ -33,7 +42,7 @@ Both directions are implemented as hooks in the **project's own `.claude/setting
       {
         "matcher": "Edit|Write",
         "hooks": [
-          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/hooks/recall-push" }
+          { "type": "command", "command": "recall push" }
         ]
       }
     ]
@@ -51,7 +60,7 @@ The `matcher` field only matches on tool name, not path — there's no built-in 
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/hooks/recall-pull" }
+          { "type": "command", "command": "recall pull" }
         ]
       }
     ]
