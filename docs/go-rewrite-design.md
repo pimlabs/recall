@@ -27,11 +27,30 @@ table-driven tests. Today that knowledge lives in prose in
 `docs/phase-0-findings.md` and in the maintainer's head. In Go it becomes
 `go test`, run by CI on every PR.
 
-## Scope
+## Scope — decided
 
-**In:** everything — client and server — as **one binary**, per the
-owner's call. `recall serve` runs the server; the same artifact on a
-laptop runs `recall init` / `push` / `pull`.
+**In:** everything — client and server — as **one binary**. `recall serve`
+runs the server; the same artifact on a laptop runs `recall init` /
+`push` / `pull`.
+
+The owner's reasoning, and it holds up under inspection: maintaining one
+tool beats two, and fixes stay aligned. Concretely, rules are currently
+**duplicated across languages** — the server validates `file_path`
+(rejects `..`, requires relative) in JavaScript while the client
+constructs those same paths in bash; tombstone semantics are understood
+independently on both sides. Nothing enforces that the two stay in
+agreement, and a drift between them only shows up in production. One
+module means one definition and one set of tests covering both halves.
+
+Two consequences follow, both accepted:
+
+- **~10-15MB binary** (pure-Go SQLite, shipped even to machines that only
+  ever run `recall push`). Accepted as the cost of one artifact.
+- **Phase B is committed, not optional.** The staged migration below stays
+  — but as risk management on the *path*, not a hedge about the
+  destination. Client first, then server, so that freshly-rewritten code
+  is never writing to the production database in the same step that the
+  client also changed.
 
 **Out (unchanged):** the ground rules in `CLAUDE.md`. No Anthropic API key
 (merge still shells out to the local `claude` CLI). Single owner, one
@@ -230,15 +249,17 @@ the old container against the same untouched file.
 once both phases are stable. Git history keeps them; the tagged release
 before cutover is the rollback point.
 
-## Open questions for the owner
+## Decisions taken
 
-1. **Tagged releases** — adopt `v*` tags for binary distribution (see
-   above)? This is the one process change the rewrite forces.
-2. **Phase B appetite** — is rewriting a working production server worth
-   it for one-language consistency? My honest read: Phase A carries most
-   of the quality win (that's where the bugs and the untested logic are),
-   while Phase B is mostly consistency. Phase A alone is a legitimate
-   stopping point if the appetite runs out.
-3. **Binary size** — ~10-15MB with pure-Go SQLite, vs ~2MB if the client
-   were split from the server. Single binary is the stated preference;
-   confirming that's still true knowing the number.
+1. **Scope: both halves, one binary.** Decided — see "Scope" above.
+2. **Binary size: accepted.** ~10-15MB, on every machine, including ones
+   that only push.
+3. **Tagged releases: adopt them.** Previously argued against in
+   `ROADMAP.md` Phase 4, and that reasoning was sound *for a server
+   deployed straight from `main`*. It doesn't survive the move to
+   distributed binaries: npm's per-platform packages and a Homebrew
+   formula both need a fixed artifact to point at, and once one binary
+   serves both halves, the version is the only thing that says which
+   server a given client was built against. Lightweight `v*` tags plus a
+   release workflow doing the build matrix; the server stays independently
+   deployable from `main` for hotfixes.
