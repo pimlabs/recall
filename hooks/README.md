@@ -6,6 +6,14 @@ own `.claude/settings.json` (see `settings.snippet.json` — merge its
 that project, laptop or fresh cloud session, gets sync automatically once
 the environment variables below are set.
 
+> **Most projects should use the CLI instead:** `recall init` does this
+> merge for you, idempotently, and points the hooks at `recall push` /
+> `recall pull` on `PATH` — so the project doesn't need its own copy of
+> these scripts at all. See `../docs/install.md`. This directory is both
+> the implementation behind those subcommands and the manual, no-CLI path,
+> which stays supported (a project already wired to
+> `$CLAUDE_PROJECT_DIR/hooks/recall-push` keeps working unchanged).
+
 ## Client-side environment variables
 
 Set these on every environment that should push/pull (laptop shell
