@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+# Recall CLI — one binary, installed once per machine (npm / Homebrew /
+# install.sh), instead of copying hook scripts into every project.
+#
+# `recall init` writes the hook wiring into a project's own
+# .claude/settings.json pointing at `recall push` / `recall pull`, which
+# resolve through PATH — so the only thing a synced project commits is a
+# small settings.json diff, not a vendored copy of these scripts.
+#
+# The hooks themselves still live in hooks/ and are still the
+# implementation; this is a dispatcher in front of them, not a rewrite.
+set -euo pipefail
+
+RECALL_VERSION="0.1.0"
+
+# Resolve this script's real location through however it was installed —
+# npm and Homebrew both put a symlink on PATH pointing back into their own
+# store, so $0's directory isn't where hooks/ actually is.
+resolve_self_dir() {
+  local src="${BASH_SOURCE[0]}" dir
+  while [[ -L "$src" ]]; do
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    [[ "$src" != /* ]] && src="$dir/$src"
+  done
+  cd -P "$(dirname "$src")" && pwd
+}
+
+BIN_DIR="$(resolve_self_dir)"
+PKG_ROOT="$(cd -P "$BIN_DIR/.." && pwd)"
+HOOKS_DIR="$PKG_ROOT/hooks"
+
+PUSH_HOOK_COMMAND="recall push"
+PULL_HOOK_COMMAND="recall pull"
+PUSH_MATCHER="Edit|Write"
+
+die() {
+  echo "recall: $*" >&2
+  exit 1
+}
+
+require_deps() {
+  command -v jq >/dev/null || die "jq is required but not installed (brew install jq / apt install jq)"
+  command -v curl >/dev/null || die "curl is required but not installed"
+}
+
+usage() {
+  cat <<'EOF'
+recall — sync Claude Code's auto memory across machines and cloud sessions
+
+Usage:
+  recall init      Wire the current project's .claude/settings.json for sync
+  recall status    Show whether sync is configured and reachable, here
+  recall push      (hook) Push a changed memory file — called by PostToolUse
+  recall pull      (hook) Pull the latest memory — called by SessionStart
+  recall version   Print the version
+  recall help      Show this help
+
+Environment (set on every machine that syncs — see docs/token-setup.md):
+  RECALL_URL       Base URL of your Recall server
+  RECALL_TOKEN     Your bearer token
+EOF
+}
+
+cmd_push() {
+  exec "$HOOKS_DIR/recall-push" "$@"
+}
+
+cmd_pull() {
+  exec "$HOOKS_DIR/recall-pull" "$@"
+}
+
+cmd_init() {
+  require_deps
+
+  local project_root settings_dir settings_file
+  project_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  if [[ -z "$project_root" ]]; then
+    die "not inside a git repository — run this from the project you want to sync"
+  fi
+
+  settings_dir="$project_root/.claude"
+  settings_file="$settings_dir/settings.json"
+
+  mkdir -p "$settings_dir"
+  if [[ ! -f "$settings_file" ]]; then
+    echo '{}' > "$settings_file"
+    echo "recall: created $settings_file"
+  elif ! jq empty "$settings_file" 2>/dev/null; then
+    die "$settings_file exists but isn't valid JSON — fix or move it first, refusing to overwrite"
+  fi
+
+  # Idempotent by construction: re-running never duplicates an entry, and
+  # an existing Edit|Write matcher (someone else's hook) gets this hook
+  # appended to it rather than being replaced.
+  local tmp
+  tmp="$(mktemp)"
+  jq \
+    --arg matcher "$PUSH_MATCHER" \
+    --arg push "$PUSH_HOOK_COMMAND" \
+    --arg pull "$PULL_HOOK_COMMAND" \
+    '
+    .hooks //= {}
+    | .hooks.PostToolUse //= []
+    | .hooks.PostToolUse |= (
+        if any(.[]; .matcher == $matcher) then
+          map(
+            if .matcher == $matcher then
+              .hooks = ((.hooks // [])
+                | if any(.[]; .command == $push) then .
+                  else . + [{type: "command", command: $push}] end)
+            else . end
+          )
+        else
+          . + [{matcher: $matcher, hooks: [{type: "command", command: $push}]}]
+        end
+      )
+    | .hooks.SessionStart //= []
+    | .hooks.SessionStart |= (
+        if any(.[]; (.hooks // []) | any(.[]; .command == $pull)) then .
+        else . + [{hooks: [{type: "command", command: $pull}]}]
+        end
+      )
+    ' "$settings_file" > "$tmp"
+  mv "$tmp" "$settings_file"
+
+  echo "recall: wired hooks into $settings_file"
+  echo
+
+  local missing=0
+  [[ -n "${RECALL_URL:-}" ]] || { echo "  ! RECALL_URL is not set in this shell"; missing=1; }
+  [[ -n "${RECALL_TOKEN:-}" ]] || { echo "  ! RECALL_TOKEN is not set in this shell"; missing=1; }
+  if [[ "$missing" -eq 1 ]]; then
+    cat <<'EOF'
+
+  Add these to your shell profile (~/.zshrc, ~/.bashrc) before sync works:
+
+    export RECALL_URL="https://your-recall-host"
+    export RECALL_TOKEN="<your token>"
+
+  See docs/token-setup.md for generating the token, and for the extra
+  variables a claude.ai cloud environment needs.
+EOF
+  fi
+
+  cat <<EOF
+
+  Next: review and commit the change, so fresh clones and cloud sessions
+  pick it up too — that's what makes this work without per-machine setup.
+
+    git -C "$project_root" diff .claude/settings.json
+    git -C "$project_root" add .claude/settings.json && git -C "$project_root" commit -m "Enable Recall memory sync"
+EOF
+}
+
+cmd_status() {
+  require_deps
+
+  local project_root project_key memory_dir settings_file
+  project_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+  settings_file="$project_root/.claude/settings.json"
+
+  # shellcheck source=/dev/null
+  source "$HOOKS_DIR/lib.sh"
+  project_key="$(recall_project_key)"
+  memory_dir="$(recall_memory_dir)"
+
+  echo "project      : $project_root"
+  echo "project_key  : $project_key"
+  echo "memory dir   : $memory_dir"
+
+  if [[ -d "$memory_dir" ]]; then
+    echo "memory files : $(find "$memory_dir" -type f 2>/dev/null | wc -l | tr -d ' ') on disk"
+  else
+    echo "memory files : (none — directory doesn't exist yet)"
+  fi
+
+  if [[ -f "$settings_file" ]] && jq -e --arg push "$PUSH_HOOK_COMMAND" \
+      '[.. | objects | select(.command? == $push)] | length > 0' "$settings_file" >/dev/null 2>&1; then
+    echo "hooks wired  : yes ($settings_file)"
+  else
+    echo "hooks wired  : NO — run 'recall init' in this project"
+  fi
+
+  echo "RECALL_URL   : ${RECALL_URL:-(unset)}"
+  echo "RECALL_TOKEN : $([[ -n "${RECALL_TOKEN:-}" ]] && echo "set" || echo "(unset)")"
+
+  if [[ -n "${RECALL_URL:-}" ]]; then
+    local health
+    if health="$(curl -sS --max-time 10 "$RECALL_URL/health" 2>&1)"; then
+      echo "server       : reachable"
+      echo "$health" | jq '{git_commit, last_sync_at, merge: .merge.claude_cli.logged_in}' 2>/dev/null || true
+    else
+      echo "server       : UNREACHABLE ($health)"
+    fi
+  fi
+
+  if [[ -n "${RECALL_URL:-}" && -n "${RECALL_TOKEN:-}" ]]; then
+    local synced
+    if synced="$(curl -sS --max-time 10 -H "Authorization: Bearer $RECALL_TOKEN" \
+        -G "$RECALL_URL/sync" --data-urlencode "project_key=$project_key" 2>&1)"; then
+      echo "synced files : $(echo "$synced" | jq '[.files[] | select(.deleted | not)] | length' 2>/dev/null || echo "?") on server"
+    fi
+  fi
+}
+
+case "${1:-help}" in
+  init)    shift; cmd_init "$@" ;;
+  push)    shift; cmd_push "$@" ;;
+  pull)    shift; cmd_pull "$@" ;;
+  status)  shift; cmd_status "$@" ;;
+  version|--version|-v) echo "recall $RECALL_VERSION" ;;
+  help|--help|-h) usage ;;
+  *) usage >&2; exit 1 ;;
+esac

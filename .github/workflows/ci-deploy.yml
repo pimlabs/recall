@@ -18,11 +18,31 @@ jobs:
       - name: Check server syntax
         run: node --check server/index.js
 
-      - name: Check hook scripts syntax
+      - name: Check shell scripts syntax
         run: |
           bash -n hooks/lib.sh
           bash -n hooks/recall-push
           bash -n hooks/recall-pull
+          bash -n bin/recall
+          bash -n install.sh
+
+      - name: Check recall init is idempotent and non-destructive
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/init-check/.claude && cd /tmp/init-check
+          git init -q && git remote add origin git@github.com:acme/ci-check.git
+          # Pre-existing unrelated settings + another tool's hook on the
+          # same matcher — init must append, never replace.
+          cat > .claude/settings.json <<'JSON'
+          {"permissions":{"allow":["Bash(npm test)"]},
+           "hooks":{"PostToolUse":[{"matcher":"Edit|Write","hooks":[{"type":"command","command":"prettier --write"}]}]}}
+          JSON
+          "$GITHUB_WORKSPACE/bin/recall" init >/dev/null
+          "$GITHUB_WORKSPACE/bin/recall" init >/dev/null   # twice: must not duplicate
+          jq -e '.permissions.allow[0] == "Bash(npm test)"' .claude/settings.json >/dev/null
+          jq -e '[.. | objects | select(.command? == "prettier --write")] | length == 1' .claude/settings.json >/dev/null
+          jq -e '[.. | objects | select(.command? == "recall push")] | length == 1' .claude/settings.json >/dev/null
+          jq -e '[.. | objects | select(.command? == "recall pull")] | length == 1' .claude/settings.json >/dev/null
 
       - name: Validate settings snippet is well-formed JSON
         run: node -e "JSON.parse(require('fs').readFileSync('hooks/settings.snippet.json', 'utf8'))"

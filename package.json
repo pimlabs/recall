@@ -1,0 +1,29 @@
+{
+  "name": "@pimlabs/recall",
+  "version": "0.1.0",
+  "description": "Sync Claude Code's auto memory across machines and ephemeral cloud sessions",
+  "bin": {
+    "recall": "./bin/recall"
+  },
+  "files": [
+    "bin",
+    "hooks",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "memory",
+    "sync"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pimlabs/recall.git"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ]
+}
