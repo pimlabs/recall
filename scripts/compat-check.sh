@@ -40,7 +40,7 @@ check() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1"; printf '        got: 
 # precisely the property most of this script exists to verify.
 check_bytes() { if [ "$(printf '%s' "$2" | base64 -w0)" = "$(printf '%s' "$3" | base64 -w0)" ]; then ok "$1"; else bad "$1"; printf '        got:  %s\n        want: %s\n' "$(printf '%s' "$2" | od -c | head -2)" "$(printf '%s' "$3" | od -c | head -2)"; fi; }
 
-[ -x "$BIN" ] || { echo "no binary at $BIN — build it first (cargo build -p recall-cli)"; exit 1; }
+[ -x "$BIN" ] || { echo "no binary at $BIN — build it first (cargo build -p recall-sync)"; exit 1; }
 BIN="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
 
 start_node() {

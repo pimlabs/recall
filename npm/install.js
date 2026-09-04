@@ -95,7 +95,7 @@ async function main() {
     fail(
       `could not install the binary: ${err.message}\n` +
         `  If no release exists for v${version} yet, install another way:\n` +
-        `    cargo install --git https://github.com/${REPO} recall-cli\n` +
+        `    cargo install --git https://github.com/${REPO} recall-sync\n` +
         `    brew tap pimlabs/recall https://github.com/${REPO} && brew install --HEAD pimlabs/recall/recall`
     );
   }

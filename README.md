@@ -33,7 +33,7 @@ Recall is a single Rust binary — the same artifact runs the server and the cli
 npm install -g @pimlabs/recall                    # or bun, or pnpm
 brew tap pimlabs/recall https://github.com/pimlabs/recall && brew install pimlabs/recall/recall
 curl -fsSL https://raw.githubusercontent.com/pimlabs/recall/main/install.sh | bash
-cargo install recall-cli
+cargo install recall-sync
 ```
 
 Details, and what each one actually does, in [`docs/install.md`](docs/install.md).

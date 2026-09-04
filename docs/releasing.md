@@ -105,12 +105,32 @@ the alternative is a half-installed package.
 Five crates, published **bottom-up**. Each one has to be on the index before
 anything that depends on it can be packaged, so the order is not optional:
 
+On a **first** publish, check the names are still free before you start —
+crate names are global and first-come, and a half-published set is awkward to
+back out of:
+
+```sh
+for n in recall-wire recall-paths recall-hooks recall-server recall-sync; do
+  a=$(echo "$n" | cut -c1-2); b=$(echo "$n" | cut -c3-4)
+  printf '%-16s %s\n' "$n" \
+    "$(curl -s -o /dev/null -w '%{http_code}' "https://index.crates.io/$a/$b/$n")"
+done
+# 404 = available, 200 = taken
+```
+
+This is not hypothetical: the binary crate was called `recall-cli` until that
+check found the name already belonged to an unrelated project — a TUI session
+browser for AI coding assistants, in almost exactly this space. `recall` is
+taken too. Hence `recall-sync`, publishing a binary still called `recall`.
+
+Then, bottom-up:
+
 ```sh
 cargo publish -p recall-wire
 cargo publish -p recall-paths
 cargo publish -p recall-hooks
 cargo publish -p recall-server
-cargo publish -p recall-cli
+cargo publish -p recall-sync
 ```
 
 Wait for each to land before the next — the index takes a few seconds, and
@@ -118,7 +138,7 @@ Wait for each to land before the next — the index takes a few seconds, and
 of it. Then:
 
 ```sh
-cargo install recall-cli
+cargo install recall-sync
 ```
 
 **crates.io is permanent.** A published version can be yanked but never

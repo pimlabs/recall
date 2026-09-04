@@ -15,7 +15,7 @@ cargo test --workspace                 # what CI runs
 cargo test -p recall-hooks             # just one crate, much faster
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
-cargo build --release -p recall-cli    # binary at target/release/recall
+cargo build --release -p recall-sync    # binary at target/release/recall
 ```
 
 The first build is slow — `rusqlite` compiles SQLite from C. After that it's cached.
@@ -34,7 +34,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps   # what CI runs
 `docs/api.md` is checked the same way — not by review, but by assertion:
 
 ```sh
-cargo build --release -p recall-cli
+cargo build --release -p recall-sync
 ./scripts/api-doc-check.sh target/release/recall
 ```
 
