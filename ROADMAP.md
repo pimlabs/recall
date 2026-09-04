@@ -136,6 +136,25 @@ CGO-free build).
       on every unrelated edit. Both fixed; details in
       `docs/rust-rewrite.md`.
 
+- [x] **A pass over the public API and the docs.** Names first: two
+      unrelated types called `Env` (the CLI had already worked around it with
+      `use recall_paths::Env as ClaudeEnv`), a `Client` that held
+      configuration next to a `Client` that made requests, and
+      `Result<PushResult, Error>`. Now `claude::Env` and `Context`,
+      `ClientConfig` and `client::Client`, `PushOutcome`/`PullOutcome`. Then
+      boundaries: `hooks.rs` was 1169 lines holding push, pull, path
+      containment and 63 tests behind a `tests_support` shim, and `main.rs`
+      held all five commands; both are split, one file per thing.
+      `missing_docs` is denied in every library crate and CI runs rustdoc
+      with `-D warnings`, so an undocumented public item or a stale doc link
+      now fails the build. The HTTP API — the actual public surface, and the
+      one part with no reference at all — is documented in `docs/api.md`, and
+      that document is *asserted* rather than trusted:
+      `scripts/api-doc-check.sh` drives 27 checks against a real server on a
+      real socket, covering every status code, error string, field order and
+      `null`-versus-`""` claim it makes. Change a handler without changing the
+      doc and CI fails.
+
 **Done when:** one installable Rust binary does everything the Go one did,
 against the same verification matrix. **Done.**
 
