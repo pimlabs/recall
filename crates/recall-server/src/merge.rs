@@ -395,7 +395,50 @@ mod tests {
         writeln!(f, "printf '%s' '{out}'").unwrap();
         drop(f);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        settle(&path);
         let bin = path.to_str().unwrap().to_string();
         (dir, bin)
+    }
+
+    /// Waits out `ETXTBSY` on a script this process just wrote.
+    ///
+    /// Writing an executable and then running it is racy in a multi-threaded
+    /// program: another thread's `fork` inherits the still-open write handle
+    /// to this file, and until that child reaches its own `exec` the kernel
+    /// refuses to run the image — `Text file busy`. The window is
+    /// microseconds and only exists between a `File::create` here and some
+    /// other test's spawn, but with a dozen tests spawning processes in
+    /// parallel it does hit, and did: `cargo test --workspace` failed roughly
+    /// one run in four.
+    ///
+    /// The retry belongs here rather than in [`Merger`] because nothing in
+    /// production writes a binary and then runs it. This is an artifact of
+    /// building the stand-in inside the test binary.
+    fn settle(path: &std::path::Path) {
+        use std::process::Stdio;
+
+        for _ in 0..100 {
+            match std::process::Command::new(path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+            {
+                // Once it execs cleanly, no writer holds the inode and it
+                // will keep exec'ing — nothing reopens it for writing.
+                Ok(_) => return,
+                Err(e) if e.raw_os_error() == Some(libc_etxtbsy()) => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                // Anything else is a real problem the assertions should see.
+                Err(_) => return,
+            }
+        }
+        panic!("{} stayed ETXTBSY for half a second", path.display());
+    }
+
+    /// `ETXTBSY`. Spelled out rather than pulling in `libc` for one integer.
+    fn libc_etxtbsy() -> i32 {
+        26
     }
 }
