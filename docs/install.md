@@ -6,43 +6,78 @@ machine, then run `recall init` once per project.
 
 ## Install
 
-**npm** (or bun/pnpm):
+Four channels, all delivering the same binary. Pick whichever your machine
+already has.
+
+| Channel | Command |
+|---|---|
+| **npm** / bun / pnpm | `npm install -g @pimlabs/recall` |
+| **Homebrew** | `brew tap pimlabs/recall https://github.com/pimlabs/recall`<br>`brew install pimlabs/recall/recall` |
+| **curl** | `curl -fsSL https://raw.githubusercontent.com/pimlabs/recall/main/install.sh \| bash` |
+| **cargo** | `cargo install recall-cli` |
+
+Supported: macOS and Linux, x64 and arm64. Windows needs WSL. There are no
+runtime dependencies — no `jq`, no `curl`, no Node — except on the server,
+where the semantic merge shells out to the `claude` CLI.
+
+### npm (or bun, or pnpm)
 
 ```sh
 npm install -g @pimlabs/recall
+bun install -g @pimlabs/recall     # works the same way
 ```
 
-Downloads the prebuilt binary for your platform and verifies it against the
-release's checksums. Nothing about the runtime is Node — that's just the
+A `postinstall` script downloads the prebuilt binary for your platform and
+**verifies its SHA-256 against the release's `checksums.txt`** before making
+anything executable. Nothing about the runtime is Node — that is only the
 delivery mechanism.
 
-**Homebrew** — the tap needs its URL given explicitly, since this repo isn't
-named `homebrew-recall`:
+### Homebrew
+
+The tap needs its URL given explicitly, since this repo isn't named
+`homebrew-recall` and Homebrew only infers that convention:
 
 ```sh
 brew tap pimlabs/recall https://github.com/pimlabs/recall
-brew install pimlabs/recall/recall
+brew install pimlabs/recall/recall          # latest tagged release
+brew install --HEAD pimlabs/recall/recall   # straight from main
 ```
 
-**Plain curl**, for machines with neither:
+Built from source rather than pulling a release binary — Homebrew already has
+a Rust toolchain available as a build dependency, and it means `--HEAD` works
+against `main` between releases.
+
+### curl
+
+For a machine with neither npm nor Homebrew:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/pimlabs/recall/main/install.sh | bash
 ```
 
 Installs to `~/.local/bin/recall`. Override with `RECALL_BIN_DIR`, or pin a
-version with `RECALL_VERSION=v0.1.0`.
+version with `RECALL_VERSION=v0.1.0`. It will tell you if that directory
+isn't on your `PATH`.
 
-**From source**, if you have Rust:
+### cargo
 
 ```sh
+cargo install recall-cli                                   # from crates.io
+cargo install --git https://github.com/pimlabs/recall recall-cli   # from main
+```
+
+The crate is `recall-cli`; the binary it installs is `recall`. The `--git`
+form needs no release, so it is also the answer for anything unreleased.
+
+### From a clone
+
+```sh
+git clone https://github.com/pimlabs/recall && cd recall
 cargo build --release -p recall-cli
 # binary at target/release/recall
 ```
 
-Supported: macOS and Linux, x64 and arm64. Windows needs WSL. There are no
-runtime dependencies — no `jq`, no `curl`, no Node — except on the server,
-where the semantic merge shells out to the `claude` CLI.
+The first build is slow — `rusqlite` compiles SQLite from C.
 
 ## Set the environment variables
 
