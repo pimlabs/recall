@@ -14,7 +14,7 @@ already has.
 | **npm** / bun / pnpm | `npm install -g @pimlabs/recall` |
 | **Homebrew** | `brew tap pimlabs/recall https://github.com/pimlabs/recall`<br>`brew install pimlabs/recall/recall` |
 | **curl** | `curl -fsSL https://raw.githubusercontent.com/pimlabs/recall/main/install.sh \| bash` |
-| **cargo** | `cargo install recall-cli` |
+| **cargo** | `cargo install recall-sync` |
 
 Supported: macOS and Linux, x64 and arm64. Windows needs WSL. There are no
 runtime dependencies — no `jq`, no `curl`, no Node — except on the server,
@@ -62,18 +62,24 @@ isn't on your `PATH`.
 ### cargo
 
 ```sh
-cargo install recall-cli                                   # from crates.io
-cargo install --git https://github.com/pimlabs/recall recall-cli   # from main
+cargo install recall-sync                                   # from crates.io
+cargo install --git https://github.com/pimlabs/recall recall-sync   # from main
 ```
 
-The crate is `recall-cli`; the binary it installs is `recall`. The `--git`
-form needs no release, so it is also the answer for anything unreleased.
+The crate is `recall-sync`; the binary it installs is **`recall`**. They
+differ because both `recall` and `recall-cli` were already taken on crates.io
+by unrelated projects — a crate name is global and first-come, while a binary
+name is only yours to collide with. `fd-find` installing `fd` is the same
+situation.
+
+The `--git` form needs no release, so it is also the answer for anything
+unreleased.
 
 ### From a clone
 
 ```sh
 git clone https://github.com/pimlabs/recall && cd recall
-cargo build --release -p recall-cli
+cargo build --release -p recall-sync
 # binary at target/release/recall
 ```
 

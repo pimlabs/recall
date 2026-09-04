@@ -132,7 +132,7 @@ crates/recall-wire     the request/response contract + validation, shared
 crates/recall-paths    Claude Code path derivation, project_key, config
 crates/recall-hooks    hook payloads, state file, settings merge, client, push/pull
 crates/recall-server   SQLite store, claude -p merge, axum HTTP
-crates/recall-cli      the binary that wires them together
+crates/recall-sync     the binary that wires them together
 ```
 
 `recall-wire` is the load-bearing one. It exists because the rules it holds

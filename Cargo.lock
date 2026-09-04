@@ -872,22 +872,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "recall-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "recall-hooks",
- "recall-paths",
- "recall-server",
- "recall-wire",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "recall-hooks"
 version = "0.1.0"
 dependencies = [
@@ -923,6 +907,22 @@ dependencies = [
  "time",
  "tokio",
  "tower",
+]
+
+[[package]]
+name = "recall-sync"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "recall-hooks",
+ "recall-paths",
+ "recall-server",
+ "recall-wire",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

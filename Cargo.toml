@@ -5,7 +5,7 @@ members = [
     "crates/recall-paths",
     "crates/recall-hooks",
     "crates/recall-server",
-    "crates/recall-cli",
+    "crates/recall-sync",
 ]
 
 # Shared across every crate so versions can't drift between the halves.

@@ -51,7 +51,7 @@ jobs:
       # so a cross build would need a C toolchain per target — native runners
       # (including the arm64 Linux one) avoid that entirely.
       - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }} -p recall-cli
+        run: cargo build --release --locked --target ${{ matrix.target }} -p recall-sync
 
       - name: Package
         shell: bash

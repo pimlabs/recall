@@ -35,7 +35,7 @@ Each crate is a boundary, not a folder. They compile and test independently,
 and the dependency arrows only ever point downward.
 
 ```
-recall-cli        the binary: one module per command
+recall-sync       the binary: one module per command
    │              init · status · hook (push/pull) · serve · project
    ├──────────────┬──────────────┐
    ▼              ▼              │
@@ -54,7 +54,7 @@ recall-hooks   recall-server     │   the two halves
 | `recall-paths` | Claude Code's memory paths, `project_key` derivation, client config | Tracks *someone else's* implementation. When the CLI changes there is one place to fix, with its own tests. |
 | `recall-hooks` | `push`, `pull`, the baseline, the HTTP client, the settings merge | Everything that runs inside a user's editing session, where being quiet matters more than being thorough. |
 | `recall-server` | SQLite store, `claude -p` merge, the axum API | Everything that runs on the host. Never depends on `recall-hooks`. |
-| `recall-cli` | Argument parsing and one module per command | Thin. Each command's *failure policy* is documented beside the command it governs. |
+| `recall-sync` | Argument parsing and one module per command | Thin. Each command's *failure policy* is documented beside the command it governs. |
 
 The generated API docs (`cargo doc --workspace --open`) are the reference;
 `missing_docs` is denied in every library crate and CI runs rustdoc with
