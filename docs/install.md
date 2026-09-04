@@ -145,6 +145,13 @@ git add .claude/settings.json
 git commit -m "Enable Recall memory sync"
 ```
 
+**Every machine still needs the binary.** The hook command is guarded — a
+machine without Recall installed silently does nothing rather than erroring
+on every edit — so a clone is never *broken* by the missing binary, but it
+does not sync either. On a claude.ai cloud environment that means installing
+Recall as part of that environment's setup, alongside setting the variables
+in [`token-setup.md`](token-setup.md).
+
 **The commit is the point, not a formality.** The hook config has to be in
 the project's repo for a fresh clone — especially an ephemeral cloud
 session that has never seen your machine — to pick sync up with no setup of
