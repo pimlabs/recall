@@ -27,11 +27,16 @@ Both hooks live in the **project's own `.claude/settings.json`**, checked into g
 
 ## Quick start
 
-Recall is a single Rust binary — the same artifact runs the server and the client. Install once per machine (npm, Homebrew, or curl — see [`docs/install.md`](docs/install.md)):
+Recall is a single Rust binary — the same artifact runs the server and the client. Install once per machine, whichever way suits it:
 
 ```sh
-npm install -g @pimlabs/recall
+npm install -g @pimlabs/recall                    # or bun, or pnpm
+brew tap pimlabs/recall https://github.com/pimlabs/recall && brew install pimlabs/recall/recall
+curl -fsSL https://raw.githubusercontent.com/pimlabs/recall/main/install.sh | bash
+cargo install recall-cli
 ```
+
+Details, and what each one actually does, in [`docs/install.md`](docs/install.md).
 
 Set `RECALL_URL` and `RECALL_TOKEN` in your shell profile ([`docs/token-setup.md`](docs/token-setup.md)), then, in each project you want synced:
 
@@ -54,6 +59,7 @@ Phases 0 through 4 done, and Recall is now a single Rust binary (`docs/rust-rewr
 | Start here | For |
 |---|---|
 | [`docs/install.md`](docs/install.md) | Installing the CLI and opting a project in |
+| [`docs/releasing.md`](docs/releasing.md) | Cutting a release across all four channels |
 | [`docs/token-setup.md`](docs/token-setup.md) | Getting a token onto every machine, laptop and cloud |
 | [`docs/api.md`](docs/api.md) | The HTTP API: endpoints, schemas, status codes, examples |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | How it works, and the code map |

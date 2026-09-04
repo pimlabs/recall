@@ -17,10 +17,10 @@ license = "MIT"
 repository = "https://github.com/pimlabs/recall"
 
 [workspace.dependencies]
-recall-wire = { path = "crates/recall-wire" }
-recall-paths = { path = "crates/recall-paths" }
-recall-hooks = { path = "crates/recall-hooks" }
-recall-server = { path = "crates/recall-server" }
+recall-wire = { path = "crates/recall-wire", version = "0.1.0" }
+recall-paths = { path = "crates/recall-paths", version = "0.1.0" }
+recall-hooks = { path = "crates/recall-hooks", version = "0.1.0" }
+recall-server = { path = "crates/recall-server", version = "0.1.0" }
 
 anyhow = "1"
 thiserror = "2"

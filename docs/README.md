@@ -7,7 +7,7 @@ Everything else is here, grouped by what you're trying to do.
 
 | Document | Read it when |
 |---|---|
-| [`install.md`](install.md) | Installing the `recall` CLI (npm, Homebrew, curl) and opting a project in with `recall init`. |
+| [`install.md`](install.md) | Installing the `recall` CLI (npm, Homebrew, curl, cargo) and opting a project in with `recall init`. |
 | [`token-setup.md`](token-setup.md) | Generating `RECALL_TOKEN` and installing it on every environment — including the extra variable a claude.ai cloud session needs. |
 | [`api.md`](api.md) | Talking to the server directly: endpoints, schemas, status codes, `curl` examples. |
 
@@ -17,6 +17,7 @@ Everything else is here, grouped by what you're trying to do.
 |---|---|
 | [`../deploy/README.md`](../deploy/README.md) | Standing the server up (OrbStack + Cloudflare Tunnel), including enabling merge. |
 | [`github-actions-deploy.md`](github-actions-deploy.md) | Wiring CI checks on every PR and auto-deploy to a VPS on push to `main`. |
+| [`releasing.md`](releasing.md) | Cutting a release across all four install channels — what the tag automates, and what only the owner can push. |
 
 ## Understanding it
 
