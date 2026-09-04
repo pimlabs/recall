@@ -70,6 +70,43 @@ nicer than hand-rolling JSON key-order preservation, which in Go needed a
 third-party surgical-edit library), and `Result`/`Option` being stronger
 than Go's error returns.
 
+### Two more, from an adversarial test pass
+
+Written after the port, when the suite was extended from 113 tests to 159
+specifically to hunt for edge cases. Both were live in the Rust
+implementation; neither was reachable by any test that existed.
+
+**Eighth: an empty merge result silently wiped memory.** When two versions
+of a file conflict, the server asks the local `claude` CLI to merge them
+and stores what comes back. If the CLI answered `{"is_error": false,
+"result": ""}` — a well-formed success envelope with nothing in it — the
+server believed it: it stored `""`, reported `merged: true`, and the
+original content was gone from every machine on the next pull. Verified by
+putting a stub `claude` on `PATH`. The failure needs a model to return
+empty on a valid request, which is rare and entirely possible, and the blast
+radius is the one thing the whole service exists to protect.
+
+The fix is `merge::Error::EmptyResult`: an empty result is a merge
+*failure*, so the existing conflict path runs and both versions survive.
+The one legitimate empty merge — both inputs were already empty — is
+allowed through explicitly.
+
+**Ninth: `push` demanded configuration before deciding it had nothing to
+do.** `recall push` runs as a `PostToolUse` hook on *every* `Edit` and
+`Write`, and the vast majority of those are ordinary source files it should
+ignore. It read `RECALL_URL`/`RECALL_TOKEN` first and only then checked
+whether the edited path was a memory file — so on a machine where a project
+had hooks wired but the environment was not yet set (a fresh clone, a new
+laptop, a cloud session), every single edit printed a configuration error.
+Reordering the two checks makes the not-my-business case a silent exit
+before configuration is ever consulted.
+
+Both were found the same way the seventh was: by testing the real thing
+rather than a stand-in — one with a fake `claude` binary, one by running
+the actual compiled `recall` under `env_clear()` and asserting on the exit
+code and stderr, which the library tests can't see because they call
+functions directly.
+
 ## What it costs, concretely
 
 **Cross-compilation.** The Go build was `CGO_ENABLED=0` plus a
