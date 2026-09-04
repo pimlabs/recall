@@ -7,6 +7,7 @@
 use std::env;
 use std::time::Duration;
 
+/// Why the server cannot start.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ConfigError {
     /// Mirrors the Node server's refusal to start without auth — a server
@@ -17,23 +18,71 @@ pub enum ConfigError {
 }
 
 /// What `recall serve` needs.
+///
+/// Every field has a default that is safe to run with, except [`token`],
+/// which has none — see [`ConfigError::MissingToken`].
+///
+/// | Field | Variable | Default |
+/// |---|---|---|
+/// | [`addr`] | `RECALL_HOST`, `RECALL_PORT` | `0.0.0.0:8787` |
+/// | [`token`] | `RECALL_TOKEN` | *required* |
+/// | [`db_path`] | `RECALL_DB_PATH` | `data/recall.db` |
+/// | [`git_commit`] | `RECALL_GIT_COMMIT` | `unknown` |
+/// | [`backup_dir`] | `RECALL_BACKUP_DIR` | off |
+/// | [`backup_interval`] | `RECALL_BACKUP_INTERVAL_MS` | 24h |
+/// | [`backup_keep`] | `RECALL_BACKUP_KEEP` | 7 |
+/// | [`rate_limit_window`] | `RECALL_RATE_LIMIT_WINDOW_MS` | 60s |
+/// | [`rate_limit_max`] | `RECALL_RATE_LIMIT_MAX` | 60 |
+/// | [`merge_enabled`] | `RECALL_MERGE_ENABLED` | on |
+/// | [`merge_timeout`] | `RECALL_MERGE_TIMEOUT_MS` | 45s |
+/// | [`claude_bin`] | `RECALL_CLAUDE_BIN` | `claude` |
+/// | [`claude_status_interval`] | `RECALL_CLAUDE_STATUS_INTERVAL_MS` | 30m |
+///
+/// [`addr`]: Config::addr
+/// [`token`]: Config::token
+/// [`db_path`]: Config::db_path
+/// [`git_commit`]: Config::git_commit
+/// [`backup_dir`]: Config::backup_dir
+/// [`backup_interval`]: Config::backup_interval
+/// [`backup_keep`]: Config::backup_keep
+/// [`rate_limit_window`]: Config::rate_limit_window
+/// [`rate_limit_max`]: Config::rate_limit_max
+/// [`merge_enabled`]: Config::merge_enabled
+/// [`merge_timeout`]: Config::merge_timeout
+/// [`claude_bin`]: Config::claude_bin
+/// [`claude_status_interval`]: Config::claude_status_interval
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// The socket to bind, assembled from host and port.
     pub addr: String,
+    /// The single bearer token. There is no second one, by design.
     pub token: String,
+    /// The SQLite file. Opened, never created from a schema migration — it
+    /// is the same file the Node server wrote.
     pub db_path: String,
+    /// Reported by `GET /health` so a deploy can be confirmed from outside.
     pub git_commit: String,
 
+    /// Where periodic database snapshots go. Empty disables backups.
     pub backup_dir: String,
+    /// How often to take one.
     pub backup_interval: Duration,
+    /// How many to keep before deleting the oldest.
     pub backup_keep: usize,
 
+    /// The window rate limiting counts requests over.
     pub rate_limit_window: Duration,
+    /// How many requests one client may make in that window.
     pub rate_limit_max: u32,
 
+    /// Whether to attempt semantic merge at all. Off means last-write-wins.
     pub merge_enabled: bool,
+    /// How long a merge may take before it is abandoned — and, like every
+    /// other merge failure, degraded to last-write-wins.
     pub merge_timeout: Duration,
+    /// The `claude` binary to shell out to. Never the Anthropic API.
     pub claude_bin: String,
+    /// How often to re-check that the binary is present and logged in.
     pub claude_status_interval: Duration,
 }
 

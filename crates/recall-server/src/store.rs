@@ -33,10 +33,14 @@ const SCHEMA: &str = "
 /// merging.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Existing {
+    /// The stored bytes. Present even for a tombstone — the server keeps the
+    /// last known content, it just refuses to hand it back over the wire.
     pub content: String,
+    /// Whether the row is a tombstone.
     pub deleted: bool,
 }
 
+/// The SQLite database, and every query the server makes against it.
 pub struct Store {
     // A single connection behind a mutex. This is a single-owner server
     // against a local file; a pool would buy nothing and SQLite would

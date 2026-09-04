@@ -10,16 +10,25 @@ use serde::de::DeserializeOwned;
 /// calls happen inside a user's session, so they cannot hang forever.
 const TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Why a call to the server did not succeed.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// The server answered, and said no. Carries enough to tell the user
     /// *why* — a 401 from a stale token reads very differently from a 500.
     #[error("server returned {code}: {body}")]
-    Status { code: u16, body: String },
+    Status {
+        /// The HTTP status.
+        code: u16,
+        /// The response body, trimmed.
+        body: String,
+    },
+    /// Caught before sending, by the same rules the server would apply.
     #[error("refusing to send an invalid request: {0}")]
     Invalid(#[from] ValidationError),
+    /// The server could not be reached, or timed out.
     #[error("could not reach the server: {0}")]
     Transport(#[from] reqwest::Error),
+    /// The server answered with something this client cannot parse.
     #[error("server sent a response this client can't parse: {0}")]
     Decode(#[from] serde_json::Error),
 }
@@ -33,6 +42,8 @@ pub struct Client {
 }
 
 impl Client {
+    /// Builds a client for one server. Trailing slashes on `base_url` are
+    /// trimmed, so a URL pasted with one does not produce `//sync`.
     pub fn new(base_url: &str, token: &str) -> Result<Self, Error> {
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -41,6 +52,7 @@ impl Client {
         })
     }
 
+    /// The normalized server URL this client will call.
     pub fn base_url(&self) -> &str {
         &self.base_url
     }

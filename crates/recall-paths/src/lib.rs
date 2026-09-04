@@ -14,11 +14,23 @@
 //! this", and are meant to disagree: one answers "where does this machine
 //! keep the files", the other "whose history is this". Conflating them was
 //! the bug that made the shell version sync into the void.
+//!
+//! # On the missing re-exports
+//!
+//! [`claude::Env`] and [`project::key`] are reached through their modules on
+//! purpose. Flattened to the crate root they became `Env` and `key`, which
+//! say nothing at a call site and collided with other crates' types — the
+//! CLI had already resorted to `use recall_paths::Env as ClaudeEnv`, which
+//! is the codebase telling you the name was wrong. `claude::Env` and
+//! `project::key` read correctly wherever they appear.
+//!
+//! [`ClientConfig`] is re-exported, because there is nothing ambiguous about
+//! it.
+
+#![deny(missing_docs)]
 
 pub mod claude;
 pub mod config;
 pub mod project;
 
-pub use claude::{slug, Env};
-pub use config::{Client, ConfigError};
-pub use project::{key, key_from_remote, local_key};
+pub use config::{ClientConfig, ConfigError};

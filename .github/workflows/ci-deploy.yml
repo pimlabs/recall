@@ -26,6 +26,14 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --locked
 
+      # `missing_docs` is denied in each library crate, so an undocumented
+      # public item already fails the build above. This catches the other
+      # half: a doc comment that links to something that no longer exists.
+      - name: cargo doc
+        run: cargo doc --workspace --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+
       # The shell hooks stay in the tree as the rollback path for machines
       # not yet on the binary, so they still get syntax-checked.
       - name: Legacy shell hooks still parse

@@ -6,6 +6,8 @@
 //! migration a machine still on the old client and one already on this
 //! binary talk to the same deployment.
 
+#![deny(missing_docs)]
+
 pub mod config;
 pub mod merge;
 pub mod server;

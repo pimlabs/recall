@@ -19,29 +19,35 @@ use crate::claude::Env;
 /// Node implementations printed, so existing runbooks still apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigError {
+    /// No server to talk to.
     #[error("RECALL_URL must be set (e.g. https://recall.example.com)")]
     MissingUrl,
+    /// A server, but no way to authenticate against it.
     #[error("RECALL_TOKEN must be set")]
     MissingToken,
-    /// Mirrors the Node server's refusal to start without auth — a server
-    /// reachable from the internet with no token is not a degraded mode
-    /// worth supporting.
-    #[error("RECALL_TOKEN is not set; refusing to start with no auth")]
-    MissingServerToken,
 }
 
 /// What `recall push`, `pull`, `status` and `init` need.
+///
+/// Named for what it is — configuration — to keep it distinct from
+/// `recall_hooks::client::Client`, which is the thing that actually makes
+/// requests.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Client {
+pub struct ClientConfig {
+    /// `RECALL_URL`: where the server lives. Empty when unset.
     pub url: String,
+    /// `RECALL_TOKEN`: the single bearer token. Empty when unset.
     pub token: String,
+    /// `RECALL_SOURCE_ENV`: the label synced files are stamped with,
+    /// falling back to the hostname and then to `"unknown"`.
     pub source_env: String,
+    /// Where Claude Code keeps its memory on this machine.
     pub claude: Env,
 }
 
-impl Client {
+impl ClientConfig {
     /// Reads client configuration. It does not error on missing values —
-    /// callers that need them say so via [`Client::require`], because
+    /// callers that need them say so via [`ClientConfig::require`], because
     /// `recall status` and `recall init` are specifically useful when
     /// configuration is incomplete and should report that rather than refuse
     /// to run.
@@ -49,7 +55,7 @@ impl Client {
     where
         F: Fn(&str) -> Option<String>,
     {
-        Client {
+        ClientConfig {
             url: var(&lookup, "RECALL_URL").unwrap_or_default(),
             token: var(&lookup, "RECALL_TOKEN").unwrap_or_default(),
             source_env: resolve_source_env(var(&lookup, "RECALL_SOURCE_ENV"), hostname),
@@ -57,6 +63,7 @@ impl Client {
         }
     }
 
+    /// Reads client configuration from the real process environment.
     pub fn from_process_env() -> Self {
         Self::from_lookup(env_var)
     }
@@ -135,7 +142,7 @@ mod tests {
 
     #[test]
     fn client_reads_its_variables_and_the_claude_ones() {
-        let client = Client::from_lookup(env(&[
+        let client = ClientConfig::from_lookup(env(&[
             ("RECALL_URL", "https://recall.example.com"),
             ("RECALL_TOKEN", "s3cret"),
             ("RECALL_SOURCE_ENV", "laptop"),
@@ -154,13 +161,14 @@ mod tests {
     /// exactly when they are useful.
     #[test]
     fn client_load_never_fails_but_require_reports_what_is_missing() {
-        let empty = Client::from_lookup(env(&[]));
+        let empty = ClientConfig::from_lookup(env(&[]));
         assert_eq!(empty.require(), Err(ConfigError::MissingUrl));
 
-        let no_token = Client::from_lookup(env(&[("RECALL_URL", "https://recall.example.com")]));
+        let no_token =
+            ClientConfig::from_lookup(env(&[("RECALL_URL", "https://recall.example.com")]));
         assert_eq!(no_token.require(), Err(ConfigError::MissingToken));
 
-        let complete = Client::from_lookup(env(&[
+        let complete = ClientConfig::from_lookup(env(&[
             ("RECALL_URL", "https://recall.example.com"),
             ("RECALL_TOKEN", "s3cret"),
         ]));
@@ -202,10 +210,6 @@ mod tests {
         assert_eq!(
             ConfigError::MissingToken.to_string(),
             "RECALL_TOKEN must be set"
-        );
-        assert_eq!(
-            ConfigError::MissingServerToken.to_string(),
-            "RECALL_TOKEN is not set; refusing to start with no auth"
         );
     }
 }

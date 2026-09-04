@@ -34,10 +34,15 @@ pub const PULL_COMMAND: &str = "recall pull";
 const POST_TOOL_USE: &str = "PostToolUse";
 const SESSION_START: &str = "SessionStart";
 
+/// Why the settings file could not be wired.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// The file exists but isn't JSON. Refusing is the point: this is a file
+    /// the user hand-edits and commits, and rewriting it from scratch would
+    /// throw away whatever they meant to keep.
     #[error("settings file exists but is not valid JSON")]
     InvalidJson,
+    /// Reading or writing the settings file failed.
     #[error(transparent)]
     Io(#[from] io::Error),
 }
