@@ -122,6 +122,12 @@ mod tests {
     /// implementation got wrong (byte-wise, and differently depending on
     /// `LC_ALL`), which meant a wrong memory directory and silently dead
     /// sync.
+    ///
+    /// These rows are illustrative, not the whole proof: equivalence was also
+    /// checked differentially against real `node` over 300 random paths mixing
+    /// ASCII, accents, CJK, emoji and symbols — identical output on every one.
+    /// Worth redoing that if this function is ever touched, since a table of
+    /// hand-picked cases is exactly what a subtly wrong rewrite still passes.
     #[test]
     fn slugs_paths_the_way_claude_code_does() {
         for (input, want, why) in [
