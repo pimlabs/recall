@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/recall-wire",
+    "crates/recall-paths",
+    "crates/recall-hooks",
+    "crates/recall-server",
+    "crates/recall-cli",
+]
+
+# Shared across every crate so versions can't drift between the halves.
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+repository = "https://github.com/pimlabs/recall"
+
+[workspace.dependencies]
+recall-wire = { path = "crates/recall-wire" }
+recall-paths = { path = "crates/recall-paths" }
+recall-hooks = { path = "crates/recall-hooks" }
+recall-server = { path = "crates/recall-server" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+# preserve_order keeps a user's .claude/settings.json key order intact when
+# `recall init` edits it — that file is committed and reviewed, so silently
+# re-sorting it would turn a two-line change into a whole-file diff.
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "signal", "fs"] }
+axum = "0.8"
+# rustls rather than native-tls: no OpenSSL to find or cross-compile against.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+clap = { version = "4", features = ["derive"] }
+time = { version = "0.3", features = ["formatting", "macros"] }
+tempfile = "3"
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
