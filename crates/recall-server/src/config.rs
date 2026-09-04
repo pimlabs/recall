@@ -71,7 +71,10 @@ impl Config {
                 env_u64("RECALL_BACKUP_INTERVAL_HOURS", 24).saturating_mul(3600),
             ),
             backup_keep: env_u64("RECALL_BACKUP_KEEP", 7) as usize,
-            rate_limit_window: Duration::from_millis(env_u64("RECALL_RATE_LIMIT_WINDOW_MS", 60_000)),
+            rate_limit_window: Duration::from_millis(env_u64(
+                "RECALL_RATE_LIMIT_WINDOW_MS",
+                60_000,
+            )),
             rate_limit_max: env_u64("RECALL_RATE_LIMIT_MAX", 60) as u32,
             // Opt-out, not opt-in: only the literal "false" disables it.
             merge_enabled: env::var("RECALL_MERGE_ENABLED").as_deref() != Ok("false"),

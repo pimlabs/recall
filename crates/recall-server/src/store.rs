@@ -50,12 +50,10 @@ impl Store {
         let path = path.as_ref();
         if let Some(dir) = path.parent() {
             if !dir.as_os_str().is_empty() {
-                fs::create_dir_all(dir)
-                    .with_context(|| format!("creating {}", dir.display()))?;
+                fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
             }
         }
-        let conn = Connection::open(path)
-            .with_context(|| format!("opening {}", path.display()))?;
+        let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         let store = Self {
             conn: Mutex::new(conn),
         };
@@ -201,9 +199,8 @@ impl Store {
     /// nothing has ever been synced.
     pub fn last_sync_at(&self) -> Result<String> {
         let conn = self.lock();
-        let v: Option<String> = conn.query_row("SELECT MAX(updated_at) FROM memory_files", [], |r| {
-            r.get(0)
-        })?;
+        let v: Option<String> =
+            conn.query_row("SELECT MAX(updated_at) FROM memory_files", [], |r| r.get(0))?;
         Ok(v.unwrap_or_default())
     }
 
@@ -247,7 +244,8 @@ impl Store {
             let mut stmt = conn.prepare(
                 "SELECT DISTINCT project_key, source_env FROM memory_files WHERE source_env IS NOT NULL",
             )?;
-            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
             for row in rows {
                 let (key, src) = row?;
                 if src.is_empty() {
@@ -300,10 +298,7 @@ impl Store {
             })
             .collect();
         snapshots.sort();
-        for stale in snapshots
-            .iter()
-            .take(snapshots.len().saturating_sub(keep))
-        {
+        for stale in snapshots.iter().take(snapshots.len().saturating_sub(keep)) {
             let _ = fs::remove_file(stale);
         }
         Ok(dest)
@@ -331,8 +326,14 @@ mod tests {
     #[test]
     fn upsert_get_and_list_round_trip() {
         let st = store();
-        st.upsert("acme/app", "MEMORY.md", "hello", "laptop", "2026-01-01T00:00:00.000Z")
-            .unwrap();
+        st.upsert(
+            "acme/app",
+            "MEMORY.md",
+            "hello",
+            "laptop",
+            "2026-01-01T00:00:00.000Z",
+        )
+        .unwrap();
 
         let got = st.get("acme/app", "MEMORY.md").unwrap().unwrap();
         assert_eq!(got.content, "hello");
@@ -350,8 +351,14 @@ mod tests {
     #[test]
     fn tombstone_preserves_content_but_list_withholds_it() {
         let st = store();
-        st.upsert("acme/app", "gone.md", "secret", "laptop", "2026-01-01T00:00:00.000Z")
-            .unwrap();
+        st.upsert(
+            "acme/app",
+            "gone.md",
+            "secret",
+            "laptop",
+            "2026-01-01T00:00:00.000Z",
+        )
+        .unwrap();
         st.tombstone("acme/app", "gone.md", "laptop", "2026-01-01T00:00:01.000Z")
             .unwrap();
 
@@ -360,7 +367,11 @@ mod tests {
         assert!(row.deleted);
 
         let files = st.list("acme/app").unwrap();
-        assert_eq!(files.len(), 1, "tombstones are listed so clients can delete locally");
+        assert_eq!(
+            files.len(),
+            1,
+            "tombstones are listed so clients can delete locally"
+        );
         assert!(files[0].deleted);
         assert_eq!(files[0].content, None, "a pull must not resurrect it");
     }
@@ -371,8 +382,14 @@ mod tests {
         let st = store();
         st.tombstone("acme/app", "f.md", "laptop", "2026-01-01T00:00:00.000Z")
             .unwrap();
-        st.upsert("acme/app", "f.md", "back", "laptop", "2026-01-01T00:00:01.000Z")
-            .unwrap();
+        st.upsert(
+            "acme/app",
+            "f.md",
+            "back",
+            "laptop",
+            "2026-01-01T00:00:01.000Z",
+        )
+        .unwrap();
         let row = st.get("acme/app", "f.md").unwrap().unwrap();
         assert!(!row.deleted);
         assert_eq!(row.content, "back");
@@ -388,8 +405,14 @@ mod tests {
     #[test]
     fn admin_stats_keeps_commas_inside_a_source_env() {
         let st = store();
-        st.upsert("acme/app", "a.md", "x", "laptop,evil", "2026-01-01T00:00:00.000Z")
-            .unwrap();
+        st.upsert(
+            "acme/app",
+            "a.md",
+            "x",
+            "laptop,evil",
+            "2026-01-01T00:00:00.000Z",
+        )
+        .unwrap();
         let (projects, _) = st.admin_stats().unwrap();
         assert_eq!(projects[0].sources, vec!["laptop,evil".to_string()]);
     }
@@ -429,7 +452,10 @@ mod tests {
         let dest = st.backup(dir.path(), 7).unwrap();
         let name = dest.file_name().unwrap().to_str().unwrap();
         // recall-2026-09-03T21-49-55-191Z.db
-        assert!(name.starts_with("recall-") && name.ends_with("Z.db"), "got {name}");
+        assert!(
+            name.starts_with("recall-") && name.ends_with("Z.db"),
+            "got {name}"
+        );
         let stamp = &name["recall-".len()..name.len() - ".db".len()];
         assert_eq!(stamp.len(), 24, "got {stamp}");
         // The three characters before the Z are the milliseconds, which

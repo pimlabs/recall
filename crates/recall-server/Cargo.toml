@@ -17,7 +17,8 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true
-tokio.workspace = true
+# io-util is needed to stream the merge prompt into the CLI's stdin.
+tokio = { workspace = true, features = ["io-util"] }
 
 [dev-dependencies]
 tempfile.workspace = true

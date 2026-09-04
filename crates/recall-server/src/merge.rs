@@ -186,7 +186,9 @@ impl Merger {
             };
             return Err(Error::Failed(format!(
                 "exit {}: {}",
-                status.code().map_or_else(|| "signal".into(), |c| c.to_string()),
+                status
+                    .code()
+                    .map_or_else(|| "signal".into(), |c| c.to_string()),
                 truncate(&detail, DETAIL_LIMIT)
             )));
         }
@@ -314,23 +316,32 @@ mod tests {
     async fn parses_the_json_envelope_and_honors_is_error() {
         let (_ok_dir, bin) = fake_claude(r#"{"is_error":false,"result":"merged!"}"#);
         assert_eq!(
-            Merger::new(bin, Duration::from_secs(10)).merge("a", "b").await.unwrap(),
+            Merger::new(bin, Duration::from_secs(10))
+                .merge("a", "b")
+                .await
+                .unwrap(),
             "merged!"
         );
 
         let (_bad_dir, bin) = fake_claude(r#"{"is_error":true,"result":"nope"}"#);
-        let err = Merger::new(bin, Duration::from_secs(10)).merge("a", "b").await;
+        let err = Merger::new(bin, Duration::from_secs(10))
+            .merge("a", "b")
+            .await;
         assert!(matches!(err, Err(Error::Rejected(_))), "got {err:?}");
 
         let (_junk_dir, bin) = fake_claude("not json");
-        let err = Merger::new(bin, Duration::from_secs(10)).merge("a", "b").await;
+        let err = Merger::new(bin, Duration::from_secs(10))
+            .merge("a", "b")
+            .await;
         assert!(matches!(err, Err(Error::NonJson(_))), "got {err:?}");
     }
 
     #[tokio::test]
     async fn reads_logged_in_from_auth_status() {
         let (_dir, bin) = fake_claude(r#"{"loggedIn":true}"#);
-        let st = Merger::new(bin, Duration::from_secs(10)).check_status().await;
+        let st = Merger::new(bin, Duration::from_secs(10))
+            .check_status()
+            .await;
         assert!(st.available && st.logged_in, "got {st:?}");
     }
 
