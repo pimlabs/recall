@@ -18,20 +18,22 @@ Recall exists for that specific gap: **a central service any environment can tal
 
 No custom client daemon. Claude Code's own hook system does the work:
 
-- **Push**: a `PostToolUse` hook matching `Edit|Write` runs `recall push`, which checks whether the edited file is a memory file and, if so, sends it to Recall's API. (An earlier design assumed a `FileChanged` event and a declarative `http` hook type — neither exists in the installed CLI; see `docs/phase-0-findings.md`.)
+- **Push**: a `PostToolUse` hook matching `Edit|Write` runs `recall push`, which checks whether the edited file is a memory file and, if so, sends it to Recall's API. (An earlier design assumed a `FileChanged` event and a declarative `http` hook type — neither exists in the installed CLI; see [`docs/phase-0-findings.md`](docs/phase-0-findings.md).)
 - **Pull**: a `SessionStart` hook runs `recall pull`, which fetches the latest synced state before Claude loads context.
+
+Neither can break a session: an unreachable server or an unconfigured machine warns on stderr and exits 0.
 
 Both hooks live in the **project's own `.claude/settings.json`**, checked into git — so any environment that clones the repo (laptop or fresh cloud session) picks up sync automatically. See `ARCHITECTURE.md`.
 
 ## Quick start
 
-Recall is a single Rust binary — the same artifact runs the server and the client. Install once per machine (npm, Homebrew, or curl — see `docs/install.md`):
+Recall is a single Rust binary — the same artifact runs the server and the client. Install once per machine (npm, Homebrew, or curl — see [`docs/install.md`](docs/install.md)):
 
 ```sh
 npm install -g @pimlabs/recall
 ```
 
-Set `RECALL_URL` and `RECALL_TOKEN` in your shell profile (`docs/token-setup.md`), then, in each project you want synced:
+Set `RECALL_URL` and `RECALL_TOKEN` in your shell profile ([`docs/token-setup.md`](docs/token-setup.md)), then, in each project you want synced:
 
 ```sh
 recall init                                  # wires .claude/settings.json
@@ -39,7 +41,7 @@ git add .claude/settings.json && git commit  # so fresh clones get it too
 recall status                                # confirm it's actually working
 ```
 
-Standing up the server itself is `recall serve`, in practice via `deploy/`.
+Standing up the server itself is `recall serve`, in practice via [`deploy/`](deploy/README.md). To talk to it directly, see the [HTTP API reference](docs/api.md).
 
 ## Status
 
@@ -47,23 +49,27 @@ Phases 0 through 4 done, and Recall is now a single Rust binary (`docs/rust-rewr
 
 ## Project docs
 
-| File | What it's for |
+**[`docs/`](docs/README.md) is the index.** The short version:
+
+| Start here | For |
 |---|---|
-| `ARCHITECTURE.md` | Hook wiring, backend shape, merge strategy, project-key derivation. |
-| `ROADMAP.md` | Phased build plan, current status, and what's explicitly deferred. |
-| `CONTRIBUTING.md` | Dev workflow. |
-| `CLAUDE.md` | How Claude Code sessions should work in this repo (worktrees, task list, PR policy, ground rules). |
-| `docs/install.md` | Installing the `recall` CLI (npm / Homebrew / curl) and opting a project in with `recall init`. |
-| `docs/phase-0-findings.md` | Empirical findings from Phase 0 — what the docs above assumed vs. what the installed Claude Code CLI actually does. |
-| `docs/token-setup.md` | Generating and installing `RECALL_TOKEN` on every environment (laptop, cloud). |
-| `docs/github-actions-deploy.md` | Optional: CI checks on every PR, plus auto-deploy to a VPS over SSH on push to `main`. |
-| `docs/rust-rewrite.md` | The current implementation: why Rust, what it costs, and what's frozen. |
-| `docs/go-rewrite-design.md` | Historical: the Go port that preceded it, and the staged-migration reasoning still in use. |
-| `crates/` | The binary: `wire` (shared contract), `paths`, `hooks`, `server`, `cli`. |
+| [`docs/install.md`](docs/install.md) | Installing the CLI and opting a project in |
+| [`docs/token-setup.md`](docs/token-setup.md) | Getting a token onto every machine, laptop and cloud |
+| [`docs/api.md`](docs/api.md) | The HTTP API: endpoints, schemas, status codes, examples |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | How it works, and the code map |
+| [`docs/rust-rewrite.md`](docs/rust-rewrite.md) | Why Rust, honestly — including every bug this project has shipped |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Building, testing, and what not to "clean up" |
+
+And the tree:
+
+| Path | What's in it |
+|---|---|
+| `crates/` | The binary. `wire` (frozen contract) · `paths` · `hooks` (client) · `server` · `cli`. See ARCHITECTURE's code map. |
+| `deploy/` | OrbStack + Cloudflare Tunnel deployment, docker-compose based. |
+| `scripts/` | `compat-check.sh` — the mixed-fleet compatibility matrix. |
 | `npm/`, `Formula/`, `install.sh` | The three install channels. |
-| `server/` | Dockerfile and entrypoint for the deployed server. `index.js` is the superseded Node implementation, kept as the rollback path. |
+| `server/` | Dockerfile and entrypoint. `index.js` is the superseded Node implementation, kept as the rollback path. |
 | `hooks/` | The superseded shell hooks, kept working for projects already wired to them. |
-| `deploy/` | OrbStack + Cloudflare Tunnel deployment (docker-compose based), including enabling merge. |
 
 ## License
 

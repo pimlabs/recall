@@ -1,10 +1,7 @@
-//! What Claude Code feeds a hook on stdin, and how a hook is allowed to
-//! fail.
+//! What Claude Code feeds a hook on stdin.
 //!
-//! The failure policy matters as much as the parsing. These run inside
-//! someone's session: a push hook that errors noisily on every unrelated
-//! edit, or a pull hook that stops a session from starting because the
-//! server is down, is worse than one that does nothing.
+//! Parsing here is deliberately forgiving; the matching failure policy — and
+//! the reasoning behind it — lives in [`crate::exit`].
 
 use std::io::Read;
 
@@ -17,10 +14,13 @@ use serde::Deserialize;
 /// grow, so unknown keys are ignored rather than rejected.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct PostToolUse {
+    /// Always `"PostToolUse"` in practice; carried for completeness.
     #[serde(default)]
     pub hook_event_name: String,
+    /// The tool that just ran — `Edit` or `Write`, given the matcher.
     #[serde(default)]
     pub tool_name: String,
+    /// The arguments that tool was called with.
     #[serde(default)]
     pub tool_input: ToolInput,
 }
@@ -29,6 +29,8 @@ pub struct PostToolUse {
 /// that decides anything.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct ToolInput {
+    /// The absolute path the tool wrote to. Empty for tools that don't write
+    /// files at all, which callers read as "nothing to do".
     #[serde(default)]
     pub file_path: String,
 }
@@ -50,15 +52,6 @@ pub fn parse_post_tool_use<R: Read>(reader: R) -> PostToolUse {
     }
     serde_json::from_slice(&buf).unwrap_or_default()
 }
-
-/// Success, or a deliberate no-op — an edit to a file that isn't a memory
-/// file, or a pull that couldn't reach the server.
-pub const EXIT_OK: i32 = 0;
-/// A misconfiguration only the user can fix: no token, not a git
-/// repository. Worth surfacing.
-pub const EXIT_CONFIG: i32 = 1;
-/// The server rejected the request.
-pub const EXIT_SERVER: i32 = 2;
 
 #[cfg(test)]
 mod tests {

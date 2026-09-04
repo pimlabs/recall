@@ -29,13 +29,45 @@ agreement. The `recall-wire` crate is now the single definition both
 halves use, which is also why the workspace is split by boundary rather
 than being one crate.
 
+### Code map
+
+Each crate is a boundary, not a folder. They compile and test independently,
+and the dependency arrows only ever point downward.
+
+```
+recall-cli        the binary: one module per command
+   │              init · status · hook (push/pull) · serve · project
+   ├──────────────┬──────────────┐
+   ▼              ▼              │
+recall-hooks   recall-server     │   the two halves
+   │              │              │
+   └──────┬───────┘              │
+          ▼                      ▼
+     recall-wire            recall-paths
+     the frozen             where things live,
+     HTTP contract          what a project is called
+```
+
+| Crate | Holds | Why it's separate |
+|---|---|---|
+| `recall-wire` | Request/response shapes and the validation both sides apply | These rules were once written twice — JavaScript and bash — and drifted. One definition is the whole point. |
+| `recall-paths` | Claude Code's memory paths, `project_key` derivation, client config | Tracks *someone else's* implementation. When the CLI changes there is one place to fix, with its own tests. |
+| `recall-hooks` | `push`, `pull`, the baseline, the HTTP client, the settings merge | Everything that runs inside a user's editing session, where being quiet matters more than being thorough. |
+| `recall-server` | SQLite store, `claude -p` merge, the axum API | Everything that runs on the host. Never depends on `recall-hooks`. |
+| `recall-cli` | Argument parsing and one module per command | Thin. Each command's *failure policy* is documented beside the command it governs. |
+
+The generated API docs (`cargo doc --workspace --open`) are the reference;
+`missing_docs` is denied in every library crate and CI runs rustdoc with
+`-D warnings`, so an undocumented public item or a stale doc link fails the
+build.
+
 ## Client side: pure Claude Code hooks, no daemon
 
 Both directions are implemented as hooks in the **project's own `.claude/settings.json`**, not user-level config — a fresh cloud session only has whatever's in the repo it cloned, so user-level hooks would silently never fire there (see `CLAUDE.md`'s Ground rules).
 
 ### Push — `PostToolUse` matching `Edit|Write`, `type: "command"`
 
-**Resolved in Phase 0 (see `docs/phase-0-findings.md`):** the installed Claude Code CLI (v2.1.42) has no `FileChanged` event and no `"http"` hook type at all. Memory files are written through the plain `Write`/`Edit` tools, so the push hook is a `PostToolUse` hook matching `Edit|Write`, `type: "command"`, running a script (`hooks/recall-push`) that does the HTTP call itself with `curl`:
+**Resolved in Phase 0 (see `docs/phase-0-findings.md`):** the installed Claude Code CLI (v2.1.42) has no `FileChanged` event and no `"http"` hook type at all. Memory files are written through the plain `Write`/`Edit` tools, so the push hook is a `PostToolUse` hook matching `Edit|Write`, `type: "command"`, running `recall push`, which makes the HTTP call itself:
 
 ```json
 {
@@ -52,7 +84,7 @@ Both directions are implemented as hooks in the **project's own `.claude/setting
 }
 ```
 
-The `matcher` field only matches on tool name, not path — there's no built-in path glob. `recall-push` itself checks `tool_input.file_path` from the JSON payload on stdin against the project's memory directory and exits silently if it's not a memory file. **Confirmed live** (not just by reading the source): this catches **dynamically-created topic files** — a real run with this exact hook fired identically for a pre-known `MEMORY.md` write and a `debugging.md` file Claude named on the fly in the same turn, because the check happens per-call against the actual path rather than via a filename registered in advance.
+The `matcher` field only matches on tool name, not path — there's no built-in path glob. `recall push` itself checks `tool_input.file_path` from the JSON payload on stdin against the project's memory directory and exits silently if it's not a memory file — *before* it reads any configuration, so a machine that has cloned a wired project but isn't set up yet doesn't error on every unrelated edit. **Confirmed live** (not just by reading the source): this catches **dynamically-created topic files** — a real run with this exact hook fired identically for a pre-known `MEMORY.md` write and a `debugging.md` file Claude named on the fly in the same turn, because the check happens per-call against the actual path rather than via a filename registered in advance.
 
 ### Pull — `SessionStart`, `type: "command"`
 
@@ -70,28 +102,32 @@ The `matcher` field only matches on tool name, not path — there's no built-in 
 }
 ```
 
-`recall-pull` (`hooks/recall-pull`, plain bash + curl + jq — no language runtime dependency, per Phase 0's decision) that:
+`recall pull`:
 1. Derives the project key (see below).
 2. `GET`s the latest merged snapshot from the server.
-3. Writes it into `$CLAUDE_CODE_REMOTE_MEMORY_DIR/projects/<slug>/memory/` (or `~/.claude/projects/<slug>/memory/` when that env var isn't set) before Claude Code loads context.
+3. Writes it into `$CLAUDE_CODE_REMOTE_MEMORY_DIR/projects/<slug>/memory/` (or `~/.claude/projects/<slug>/memory/` when that env var isn't set) before Claude Code loads context — atomically, so a session starting mid-write can never read half a memory file.
 
-**Load-bearing prerequisite found in Phase 0, not in the original design:** in a remote/cloud session, Claude Code's auto-memory feature is *disabled by default* unless `CLAUDE_CODE_REMOTE_MEMORY_DIR` is set (see `docs/phase-0-findings.md` §5). `recall-pull` writing files is necessary but not sufficient — that env var has to be set on the remote environment (as a secret, alongside `RECALL_TOKEN`; it can't be baked into committed `settings.json`, whose `env` values don't support `$HOME` expansion) or Claude Code never looks at the memory directory at all.
+A pull that can't reach the server, or a machine with nothing configured, warns on stderr and exits **0**. A hook must not be the reason a session fails to start.
+
+**Load-bearing prerequisite found in Phase 0, not in the original design:** in a remote/cloud session, Claude Code's auto-memory feature is *disabled by default* unless `CLAUDE_CODE_REMOTE_MEMORY_DIR` is set (see `docs/phase-0-findings.md` §5). `recall pull` writing files is necessary but not sufficient — that env var has to be set on the remote environment (as a secret, alongside `RECALL_TOKEN`; it can't be baked into committed `settings.json`, whose `env` values don't support `$HOME` expansion) or Claude Code never looks at the memory directory at all.
 
 ## Project identity
 
 **Resolved in Phase 0 (see `docs/phase-0-findings.md` §6):** Claude Code does *not* scope its own memory storage by git remote — it uses the local filesystem path (git root, or cwd if none) with non-alphanumeric characters replaced by `-`. That's machine-local by construction (a laptop clone and a cloud clone of the same repo get different slugs), which is exactly the gap Recall exists to bridge — so Recall deliberately uses a *different* derivation than Claude Code's own:
 
-- **`project_key`** (server-side, must agree across machines): the git remote's `owner/repo`, taking just the last two path segments so it normalizes identically across SSH (`git@host:owner/repo.git`), HTTPS (`https://host/owner/repo.git`), and locally-proxied remotes that cloud sandboxes rewrite `origin` to. Implemented in `hooks/lib.sh:recall_project_key`.
-- **local memory directory** (client-side, per-machine): replicates Claude Code's own local-path-slug algorithm exactly, so hooks read/write the same directory Claude Code itself uses on that machine. Implemented in `hooks/lib.sh:recall_memory_dir`.
+- **`project_key`** (server-side, must agree across machines): the git remote's `owner/repo`, taking just the last two path segments so it normalizes identically across SSH (`git@host:owner/repo.git`), HTTPS (`https://host/owner/repo.git`), and locally-proxied remotes that cloud sandboxes rewrite `origin` to. Implemented in `recall_paths::project::key`.
+- **local memory directory** (client-side, per-machine): replicates Claude Code's own local-path-slug algorithm exactly, so the hooks read and write the same directory Claude Code itself uses on that machine. Implemented in `recall_paths::claude`. The subtlety: Claude Code's slug is a JavaScript regex replace, which operates on **UTF-16 code units**, so `é` becomes one dash and `🚀` becomes two. Iterating bytes or `chars()` both diverge for any non-ASCII path — and the shell version did exactly that, computing a directory Claude Code never writes to.
 
 Known limitation: git hosts with nested groups (e.g. GitLab subgroups) collapse to their last two path segments too, which can collide across different subgroups with the same repo name. Acceptable for Phase 0; revisit in Phase 2 if it matters in practice.
 
 ## Server
 
-Deliberately boring. Two endpoints:
+Deliberately boring. Two endpoints do the work and three exist to look at it. The full reference — schemas, status codes, worked `curl` examples — is **[`docs/api.md`](docs/api.md)**.
 
-- `POST /sync` — body: `{ project_key, file_path, content, source_env, timestamp }`. Runs merge (see below) against the stored version, persists the result. `content` can be omitted if `deleted: true` is set instead — see "Deletes are tombstones, not row removal" below.
-- `GET /sync?project_key=...` — returns the current merged set of memory files for that project, each with a `deleted` flag.
+- `POST /sync` — one memory file, or one delete. Runs merge (see below) against the stored version and persists the result. `content` is omitted only when `deleted: true` — see "Deletes are tombstones, not row removal" below.
+- `GET /sync?project_key=...` — the current merged set for that project, tombstones included, so a puller can remove local copies.
+- `GET /health` — unauthenticated, and the only way a silently-degraded merge becomes visible from outside.
+- `GET /admin/stats` and `GET /admin` — read-only. There is deliberately no admin *write* surface, so a leaked token cannot quietly destroy history through it.
 
 Storage: whatever's simplest to self-host and keep running — a single SQLite file behind a small server process is enough for one user's data; don't reach for a distributed database for this. Auth: one bearer token, generated once, stored as an env var on every environment (never committed to the repo).
 
@@ -104,12 +140,20 @@ still sitting in the database even though nothing in the app exposes an
 "undo" for it yet. `GET /sync` reports `deleted: true` for that row and
 withholds `content` (`null`) so a pull can't accidentally resurrect it.
 
-This existed as a real gap before it was built: `recall-push` used to
+This existed as a real gap before it was built: the push hook used to
 silently no-op when the file it was called about no longer existed,
 which meant the server never learned about a delete at all, and a
-deleted file would come back on the next pull. See `hooks/README.md` for
-how the client side actually detects a local delete — there's no hook
-event for it, so it's closer to "eventual" than "instant."
+deleted file would come back on the next pull.
+
+How the client detects a local delete: there is no delete event, so
+`recall push` reconciles the memory directory against a baseline
+(`.recall-state.json`, kept *beside* the memory directory so it can never be
+mistaken for a memory file) on every run that does touch a memory file.
+Anything in the baseline that is no longer on disk is pushed as a tombstone.
+That makes deletes "eventual" rather than instant — they propagate on the next
+memory edit — and it is why a **missing** baseline is treated differently from
+an **empty** one: with no baseline at all, an empty memory directory would
+read as "everything was deleted" and tombstone the project's whole history.
 
 ## Merge strategy
 

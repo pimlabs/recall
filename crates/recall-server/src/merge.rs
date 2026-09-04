@@ -44,16 +44,27 @@ const DETAIL_LIMIT: usize = 500;
 /// way at the call site: fall back to last-write-wins and keep the sync.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// The binary is missing, unspawnable, or not logged in.
     #[error("claude CLI unavailable: {0}")]
     Unavailable(String),
+    /// It ran, but not within `RECALL_MERGE_TIMEOUT_MS`.
     #[error("claude merge timed out after {0:?}")]
     TimedOut(Duration),
+    /// It exited non-zero.
     #[error("claude failed: {0}")]
     Failed(String),
+    /// Its output was not the JSON envelope this asked for.
     #[error("claude returned non-JSON output: {0}")]
     NonJson(String),
+    /// The envelope reported an error of its own.
     #[error("claude merge failed: {0}")]
     Rejected(String),
+    /// A well-formed success envelope carrying nothing, from two versions
+    /// that both had content.
+    ///
+    /// Treated as a failure precisely because it does not look like one:
+    /// stored as a result it would replace both machines' notes with `""`
+    /// and report `merged: true`.
     #[error("claude returned an empty merge of two non-empty versions")]
     EmptyResult,
 }
@@ -61,7 +72,9 @@ pub enum Error {
 /// Runs merges through a `claude` binary.
 #[derive(Debug, Clone)]
 pub struct Merger {
+    /// The binary to run. Resolved through `PATH` like any other command.
     pub bin: String,
+    /// How long it may take before the merge is abandoned.
     pub timeout: Duration,
 }
 
@@ -79,9 +92,13 @@ impl Default for Merger {
 /// deployment is visible without waiting for a real conflict.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Status {
+    /// When this check ran.
     pub checked_at: String,
+    /// Whether the binary was found and runnable.
     pub available: bool,
+    /// Whether it has a usable login.
     pub logged_in: bool,
+    /// Why the check failed, when it did.
     pub error: String,
 }
 
@@ -107,6 +124,7 @@ pub fn prompt(old_content: &str, new_content: &str) -> String {
 }
 
 impl Merger {
+    /// Builds a merger around one binary and one timeout.
     pub fn new(bin: impl Into<String>, timeout: Duration) -> Self {
         Self {
             bin: bin.into(),

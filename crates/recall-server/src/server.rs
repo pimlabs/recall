@@ -75,6 +75,7 @@ impl AppState {
     }
 }
 
+/// The HTTP API, its background jobs, and the state they share.
 pub struct Server {
     state: Arc<AppState>,
 }

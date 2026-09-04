@@ -18,6 +18,8 @@ use crate::atomic;
 /// pull.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {
+    /// The paths that were present, sorted, so two runs on the same
+    /// directory produce byte-identical files.
     #[serde(default)]
     pub files: Vec<String>,
 }

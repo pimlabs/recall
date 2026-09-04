@@ -26,6 +26,23 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --locked
 
+      # `missing_docs` is denied in each library crate, so an undocumented
+      # public item already fails the build above. This catches the other
+      # half: a doc comment that links to something that no longer exists.
+      - name: cargo doc
+        run: cargo doc --workspace --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      # docs/api.md describes a frozen compatibility surface, so it is
+      # asserted rather than trusted: status codes, error wording, field
+      # order, and the null-versus-empty-string distinction, against a real
+      # server on a real socket.
+      - name: API reference still matches the server
+        run: |
+          cargo build --release -p recall-cli --locked
+          ./scripts/api-doc-check.sh target/release/recall
+
       # The shell hooks stay in the tree as the rollback path for machines
       # not yet on the binary, so they still get syntax-checked.
       - name: Legacy shell hooks still parse
