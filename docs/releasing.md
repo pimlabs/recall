@@ -6,6 +6,23 @@ a credentialed push that only the owner can make.
 
 Order matters, because three of the four depend on the release existing.
 
+## The short version
+
+```sh
+./scripts/release.sh v0.1.0 --dry-run    # every check, nothing published
+./scripts/release.sh v0.1.0
+```
+
+That script is this document, executable. It runs the preflight, checks the
+three version fields agree, runs the full suite plus both real-server
+checkers, checks the crate names are still free, then walks the three
+irreversible steps — tag, `npm publish`, `cargo publish` — **asking before
+each one**. Answering anything but `y` skips that step; nothing is published
+by accident.
+
+The rest of this page is what it does and why, for when a step fails and you
+need to finish by hand.
+
 ---
 
 ## 0. Before the tag

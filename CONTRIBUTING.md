@@ -58,6 +58,16 @@ Two more that aren't in `CLAUDE.md` because they're about this code rather than 
 - **The SQLite schema, the HTTP JSON, the timestamp format, and the env var names are frozen.** The deployed Node server wrote the rows currently in production and speaks that JSON. See `docs/rust-rewrite.md`.
 - **`recall-paths`'s `slug()` must stay UTF-16-based.** It reproduces a JavaScript regex replace inside Claude Code, which operates on UTF-16 code units. Iterating bytes or `chars()` instead is wrong for any non-ASCII path, and wrong here means silently reading and writing a directory Claude Code never touches.
 
+## Releasing
+
+```sh
+./scripts/release.sh v0.1.0 --dry-run
+```
+
+Runs everything above plus both real-server checkers, verifies the three
+version fields agree, and then asks before each irreversible step. See
+`docs/releasing.md` for what only the owner can push, and why.
+
 ## Commit messages
 
 State the why, not just the what.
