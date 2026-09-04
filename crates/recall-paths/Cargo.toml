@@ -5,5 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Claude Code path derivation, project keys, and environment configuration"
 
 [dependencies]
+thiserror.workspace = true
