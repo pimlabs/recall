@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use recall_hooks::{client::Client, Context};
-use recall_paths::{claude, project, ClientConfig};
+use recall_paths::{claude, project, scope, ClientConfig};
 
 /// The project root, resolved the way Claude Code resolves it: the git root,
 /// falling back to the working directory.
@@ -53,7 +53,7 @@ pub fn hook_context() -> anyhow::Result<Context> {
     Ok(Context {
         memory_dir: claude.memory_dir(&root_str),
         state_file: claude.state_file(&root_str),
-        project_key: project::key(&remote(), &root_str),
+        scopes: scope::scopes(project::key(&remote(), &root_str), cfg.global_key.clone()),
         source_env: cfg.source_env.clone(),
         client: Client::new(&cfg.url, &cfg.token)?,
     })

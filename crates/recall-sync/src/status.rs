@@ -6,7 +6,7 @@
 //! the output, not errors.
 
 use recall_hooks::{client::Client, exit, settings, state};
-use recall_paths::{project, ClientConfig};
+use recall_paths::{project, scope, ClientConfig};
 
 use crate::project as proj;
 
@@ -24,6 +24,15 @@ pub struct Report {
     pub memory_files: usize,
     /// Whether `.claude/settings.json` carries Recall's hooks.
     pub hooks_wired: bool,
+    /// The key global memories sync under, when global sync is on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub global_key: Option<String>,
+    /// How many global memory files are on disk here.
+    pub global_files: usize,
+    /// Whether `MEMORY.md` links the global index. Without that link Claude
+    /// Code never reads any of it, so it is worth reporting separately from
+    /// "the files are here".
+    pub global_linked: bool,
     /// Whether `RECALL_URL` is set.
     pub url_set: bool,
     /// Whether `RECALL_TOKEN` is set.
@@ -74,6 +83,13 @@ async fn collect(cfg: &ClientConfig) -> Report {
         hooks_wired: std::fs::read(root.join(".claude").join("settings.json"))
             .map(|b| settings::is_wired(&b))
             .unwrap_or(false),
+        global_key: cfg.global_key.clone(),
+        global_files: state::list_memory_files(&memory_dir.join(scope::GLOBAL_DIR))
+            .map(|f| f.len())
+            .unwrap_or(0),
+        global_linked: std::fs::read(memory_dir.join("MEMORY.md"))
+            .map(|b| recall_hooks::global_index_is_linked(&b))
+            .unwrap_or(false),
         url_set: !cfg.url.is_empty(),
         token_set: !cfg.token.is_empty(),
         server_ok: false,
@@ -123,6 +139,20 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
             "yes"
         } else {
             "NO — run 'recall init' in this project"
+        }
+    );
+    println!(
+        "global       : {}",
+        match &rep.global_key {
+            None => "off (set RECALL_GLOBAL_KEY to share memories across projects)".to_string(),
+            Some(key) if rep.global_linked => format!(
+                "{key} — {} file(s), linked from MEMORY.md",
+                rep.global_files
+            ),
+            Some(key) => format!(
+                "{key} — {} file(s), NOT linked from MEMORY.md yet (run 'recall pull')",
+                rep.global_files
+            ),
         }
     );
     println!(

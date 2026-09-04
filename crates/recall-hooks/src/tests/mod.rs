@@ -8,6 +8,7 @@
 
 mod behaviour;
 mod edge_cases;
+mod global_scope;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,12 +28,21 @@ pub(crate) struct Fixture {
 
 impl Fixture {
     pub(crate) async fn new() -> Self {
+        Self::with_global(None).await
+    }
+
+    /// A fixture whose memory directory also carries a global scope.
+    pub(crate) async fn with_global_scope() -> Self {
+        Self::with_global(Some("global:eko".to_string())).await
+    }
+
+    async fn with_global(global: Option<String>) -> Self {
         let server = FakeServer::start().await;
         let dir = tempfile::tempdir().unwrap();
         let ctx = Context {
             memory_dir: dir.path().join("memory"),
             state_file: dir.path().join(".recall-state.json"),
-            project_key: "acme/app".into(),
+            scopes: recall_paths::scope::scopes("acme/app".into(), global),
             source_env: "test".into(),
             client: Client::new(&server.url, "token").unwrap(),
         };

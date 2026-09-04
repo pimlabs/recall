@@ -6,6 +6,7 @@
 //! indistinguishable from a delete. A mock agreeing with the code under test
 //! would have found neither.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
@@ -21,7 +22,11 @@ use tokio::task::JoinHandle;
 #[derive(Default)]
 struct Inner {
     pushes: Vec<PushRequest>,
-    files: Vec<File>,
+    /// What `GET /sync` serves for a given `project_key`. The empty key is
+    /// the fallback, so a test that does not care about scopes can keep
+    /// calling `set_files`.
+    files: HashMap<String, Vec<File>>,
+    pulled_keys: Vec<String>,
     fail_with: Option<(u16, String)>,
     last_authorization: Option<String>,
 }
@@ -61,9 +66,31 @@ impl FakeServer {
         self.inner.lock().expect("test lock").pushes.clone()
     }
 
-    /// What `GET /sync` will serve.
+    /// What `GET /sync` will serve for any key that has nothing of its own.
     pub fn set_files(&self, files: Vec<File>) {
-        self.inner.lock().expect("test lock").files = files;
+        self.inner
+            .lock()
+            .expect("test lock")
+            .files
+            .insert(String::new(), files);
+    }
+
+    /// What `GET /sync` will serve for one specific key.
+    ///
+    /// Scopes are only visible from outside as different keys, so a test that
+    /// wants to prove routing has to be able to serve them differently.
+    pub fn set_files_for(&self, project_key: &str, files: Vec<File>) {
+        self.inner
+            .lock()
+            .expect("test lock")
+            .files
+            .insert(project_key.to_string(), files);
+    }
+
+    /// Every key that has been fetched, in order — so a test can assert that
+    /// a scope was *not* consulted.
+    pub fn pulled_keys(&self) -> Vec<String> {
+        self.inner.lock().expect("test lock").pulled_keys.clone()
     }
 
     /// Make every subsequent request fail with this status and body.
@@ -119,7 +146,16 @@ async fn pull(
     if let Some(failure) = intercept(&state, &headers) {
         return failure;
     }
-    let files = state.lock().expect("test lock").files.clone();
+    let files = {
+        let mut inner = state.lock().expect("test lock");
+        inner.pulled_keys.push(q.project_key.clone());
+        inner
+            .files
+            .get(&q.project_key)
+            .or_else(|| inner.files.get(""))
+            .cloned()
+            .unwrap_or_default()
+    };
     Json(SyncResponse {
         project_key: q.project_key,
         files,

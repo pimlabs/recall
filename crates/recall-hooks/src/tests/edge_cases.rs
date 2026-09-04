@@ -178,7 +178,7 @@ async fn concurrent_pushes_never_leave_a_corrupt_baseline() {
         let ctx = Context {
             memory_dir: memory_dir.clone(),
             state_file: state_file.clone(),
-            project_key: "acme/app".into(),
+            scopes: recall_paths::scope::scopes("acme/app".into(), None),
             source_env: "test".into(),
             client: Client::new(&server.url, "token").unwrap(),
         };

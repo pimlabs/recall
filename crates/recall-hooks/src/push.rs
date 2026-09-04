@@ -3,9 +3,11 @@
 use std::fs;
 use std::path::Path;
 
+use recall_paths::scope::route;
 use recall_wire::PushRequest;
 
 use crate::context::{Context, Error};
+use crate::index;
 use crate::path::{is_under, relative_slash};
 use crate::state;
 
@@ -13,6 +15,8 @@ use crate::state;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PushOutcome {
     /// The memory-file path that was sent, if the triggering file was one.
+    /// Relative to the memory directory, so a global file reads as
+    /// `global/editor.md`.
     pub pushed: Option<String>,
     /// Paths reported as deleted by reconciliation.
     pub deleted: Vec<String>,
@@ -30,6 +34,9 @@ pub struct PushOutcome {
 /// mechanism that catches deletes at all: Claude Code has no delete event,
 /// and an `rm` through the Bash tool wouldn't match an `Edit|Write` matcher
 /// even if it did.
+///
+/// Each file goes to the scope that owns it, so an edit under `global/` is
+/// stored against the global key rather than this repository's.
 pub async fn push(ctx: &Context, triggered_path: &Path) -> Result<PushOutcome, Error> {
     let mut res = PushOutcome::default();
 
@@ -55,9 +62,14 @@ pub async fn push(ctx: &Context, triggered_path: &Path) -> Result<PushOutcome, E
             if state::join_relative(&ctx.memory_dir, rel).exists() {
                 continue;
             }
+            // A vanished file goes to the scope that owned it, which is not
+            // necessarily this project's.
+            let Some((scope, path)) = route(&ctx.scopes, rel) else {
+                continue;
+            };
             let req = PushRequest {
-                project_key: ctx.project_key.clone(),
-                file_path: rel.clone(),
+                project_key: scope.key.clone(),
+                file_path: path,
                 deleted: true,
                 source_env: ctx.source_env.clone(),
                 ..Default::default()
@@ -77,32 +89,39 @@ pub async fn push(ctx: &Context, triggered_path: &Path) -> Result<PushOutcome, E
         let rel =
             relative_slash(&ctx.memory_dir, triggered_path).expect("containment was just checked");
 
-        // Exact bytes. The shell version used command substitution, which
-        // strips every trailing newline, so a file with none or with two came
-        // back from a round trip with exactly one — content silently altered.
-        // Reading raw and handing the bytes straight to the serializer is
-        // what prevents that.
-        let content = fs::read(triggered_path)?;
-        let content =
-            String::from_utf8(content).map_err(|_| Error::NotUtf8 { path: rel.clone() })?;
+        // A file in no scope — the global directory while global sync is
+        // off — is left alone rather than swept into this project.
+        if let Some((scope, path)) = route(&ctx.scopes, &rel) {
+            // Exact bytes. The shell version used command substitution,
+            // which strips every trailing newline, so a file with none or
+            // with two came back from a round trip with exactly one —
+            // content silently altered. Reading raw and handing the bytes
+            // straight to the serializer is what prevents that.
+            let content = fs::read(triggered_path)?;
+            let content =
+                String::from_utf8(content).map_err(|_| Error::NotUtf8 { path: rel.clone() })?;
 
-        let req = PushRequest {
-            project_key: ctx.project_key.clone(),
-            file_path: rel.clone(),
-            // Some, even when the file is empty: None means "this is a
-            // delete", and the server rejects a non-delete push with no
-            // content field at all.
-            content: Some(content),
-            source_env: ctx.source_env.clone(),
-            deleted: false,
-        };
-        ctx.client.push(&req).await.map_err(|source| Error::Push {
-            path: rel.clone(),
-            source,
-        })?;
-        res.pushed = Some(rel);
+            let req = PushRequest {
+                project_key: scope.key.clone(),
+                file_path: path,
+                // Some, even when the file is empty: None means "this is
+                // a delete", and the server rejects a non-delete push
+                // with no content field at all.
+                content: Some(content),
+                source_env: ctx.source_env.clone(),
+                deleted: false,
+            };
+            ctx.client.push(&req).await.map_err(|source| Error::Push {
+                path: rel.clone(),
+                source,
+            })?;
+            res.pushed = Some(rel);
+        }
     }
 
+    if ctx.global().is_some() {
+        index::refresh(&ctx.memory_dir)?;
+    }
     ctx.refresh_state()?;
     Ok(res)
 }

@@ -97,6 +97,36 @@ export RECALL_TOKEN="<your token>"
 See `token-setup.md` for generating the token and for what a claude.ai
 cloud environment additionally needs.
 
+## Memories that follow you into every project
+
+By default Recall syncs each project's memory under its own key, and a note
+about *you* — your preferred editor, how you like commits worded — is stuck
+in whichever repository you happened to be in when Claude wrote it down.
+
+Set one more variable, on every machine, to fix that:
+
+```sh
+export RECALL_GLOBAL_KEY="your-name"      # any stable string; the same one everywhere
+```
+
+Anything in `<memory dir>/global/` is then synced under that key instead of
+the project's, and pulled into **every** project you have wired. `recall
+status` shows the key, the file count, and whether `MEMORY.md` links them.
+
+A few things worth knowing:
+
+- **`global/` is reserved.** A project topic file must not live there; with
+  global sync on it would be shared with every project, and with it off it is
+  ignored rather than swept into the current project.
+- **Turn it on everywhere or nowhere.** `recall pull` maintains links in
+  `MEMORY.md`, and `MEMORY.md` is itself synced per project, so a machine
+  with global off will carry links to files it never fetches.
+- **Writing the file is not enough for Claude to read it** — it has to be
+  linked from `MEMORY.md`, which Recall does for you. Why, and how that was
+  established, is in [`memory-loading-findings.md`](memory-loading-findings.md).
+
+Nothing changes if you leave `RECALL_GLOBAL_KEY` unset.
+
 ## Enable sync for a project
 
 From inside the project:

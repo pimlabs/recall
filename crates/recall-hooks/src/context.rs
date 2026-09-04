@@ -3,6 +3,8 @@
 use std::io;
 use std::path::PathBuf;
 
+use recall_paths::Scope;
+
 use crate::client::Client;
 use crate::state;
 
@@ -19,8 +21,11 @@ pub struct Context {
     /// Recall's own baseline of what was last synced, used to notice
     /// deletes. Deliberately beside the memory directory, never inside it.
     pub state_file: PathBuf,
-    /// The key this project syncs under, which must agree across machines.
-    pub project_key: String,
+    /// What this machine syncs, and under which keys.
+    ///
+    /// Always at least the project scope. A global scope, when configured,
+    /// comes first — see [`recall_paths::scope`].
+    pub scopes: Vec<Scope>,
     /// The label writes from this machine are stamped with.
     pub source_env: String,
     /// The configured server connection.
@@ -28,6 +33,22 @@ pub struct Context {
 }
 
 impl Context {
+    /// The key of the scope that owns the memory directory itself — the
+    /// repository. Used for messages, where "which project is this" is the
+    /// question a person is actually asking.
+    pub fn project_key(&self) -> &str {
+        self.scopes
+            .iter()
+            .find(|s| s.prefix.is_none())
+            .map(|s| s.key.as_str())
+            .unwrap_or_default()
+    }
+
+    /// The global scope, when one is configured.
+    pub fn global(&self) -> Option<&Scope> {
+        self.scopes.iter().find(|s| s.is_global())
+    }
+
     /// Rewrites the baseline to match what is on disk right now.
     ///
     /// Called at the end of both a push and a pull. A machine that only ever

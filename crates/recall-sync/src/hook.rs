@@ -39,7 +39,7 @@ pub async fn push() -> anyhow::Result<i32> {
                     "recall-push: pushed {}, deleted {} for {}",
                     usize::from(res.pushed.is_some()),
                     res.deleted.len(),
-                    ctx.project_key
+                    ctx.project_key()
                 );
             }
             Ok(exit::OK)
@@ -64,7 +64,7 @@ pub async fn pull() -> anyhow::Result<i32> {
     };
     match recall_hooks::pull(&ctx).await {
         Ok(res) => {
-            eprintln!("{}", res.describe(&ctx.project_key));
+            eprintln!("{}", res.describe(ctx.project_key()));
             Ok(exit::OK)
         }
         Err(err) => {

@@ -25,6 +25,7 @@ Everything else is here, grouped by what you're trying to do.
 |---|---|
 | [`../ARCHITECTURE.md`](../ARCHITECTURE.md) | Hook wiring, the code map, project-key derivation, merge strategy, and what is deliberately absent. |
 | [`rust-rewrite.md`](rust-rewrite.md) | Why Rust, honestly — what it cost, what it caught, and the nine bugs this project has actually shipped and fixed. |
+| [`memory-loading-findings.md`](memory-loading-findings.md) | What Claude Code actually does with memory files — the entry point, subdirectories, and why a single failed probe means nothing. |
 | [`phase-0-findings.md`](phase-0-findings.md) | What the Claude Code CLI *actually* does, verified by running it, versus what the original design assumed. Still the source of several load-bearing constraints. |
 | [`../ROADMAP.md`](../ROADMAP.md) | The phased build plan, the evidence behind each phase, and what is explicitly deferred. |
 

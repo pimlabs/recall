@@ -9,6 +9,7 @@ description = "What `recall push` and `recall pull` actually do, plus the settin
 
 [dependencies]
 recall-wire.workspace = true
+recall-paths.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

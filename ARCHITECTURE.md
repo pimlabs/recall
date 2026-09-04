@@ -40,12 +40,14 @@ recall-sync       the binary: one module per command
    ├──────────────┬──────────────┐
    ▼              ▼              │
 recall-hooks   recall-server     │   the two halves
-   │              │              │
-   └──────┬───────┘              │
-          ▼                      ▼
+   │  │           │              │
+   │  └───────────┼──────────────┼────┐
+   └──────┬───────┘              │    │
+          ▼                      ▼    ▼
      recall-wire            recall-paths
-     the frozen             where things live,
-     HTTP contract          what a project is called
+     the frozen             where things live, what a
+     HTTP contract          project is called, what is
+                            synced under which key
 ```
 
 | Crate | Holds | Why it's separate |
@@ -119,6 +121,37 @@ A pull that can't reach the server, or a machine with nothing configured, warns 
 - **local memory directory** (client-side, per-machine): replicates Claude Code's own local-path-slug algorithm exactly, so the hooks read and write the same directory Claude Code itself uses on that machine. Implemented in `recall_paths::claude`. The subtlety: Claude Code's slug is a JavaScript regex replace, which operates on **UTF-16 code units**, so `é` becomes one dash and `🚀` becomes two. Iterating bytes or `chars()` both diverge for any non-ASCII path — and the shell version did exactly that, computing a directory Claude Code never writes to.
 
 Known limitation: git hosts with nested groups (e.g. GitLab subgroups) collapse to their last two path segments too, which can collide across different subgroups with the same repo name. Acceptable for Phase 0; revisit in Phase 2 if it matters in practice.
+
+## Scopes: what is synced, under which key
+
+A **scope** pairs a `project_key` on the wire with a subtree of the local
+memory directory. There are two:
+
+| Scope | Key | Local subtree |
+|---|---|---|
+| project | `owner/repo` from the git remote | the memory directory itself |
+| global | `global:<RECALL_GLOBAL_KEY>` | `<memory dir>/global/` |
+
+The global scope exists because Claude Code stores facts about *the user*
+inside whichever project it happened to learn them in — it even labels them
+`type: user` in the file's own front matter — and those should follow the
+person, not the repository.
+
+The server learns nothing new from this. A scope key is just another opaque
+`project_key`, so the frozen HTTP surface and the SQLite schema are
+untouched; `global:eko` is a project as far as storage is concerned. All the
+routing is client-side, in `recall_paths::scope`.
+
+Two rules earn their place:
+
+- **A path under `global/` never falls through to the project scope.** With
+  global sync off it is ignored, not absorbed. Pushing someone's personal
+  notes into one repository's history is a one-way door.
+- **Files are only useful if Claude reads them**, and it reads what
+  `MEMORY.md` links. `recall pull` maintains a link per global file, carrying
+  each file's own front-matter description as the gloss, because that gloss
+  is what the model sees when deciding what to open. See
+  [`docs/memory-loading-findings.md`](docs/memory-loading-findings.md).
 
 ## Server
 

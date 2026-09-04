@@ -9,6 +9,8 @@
 //! - [`project`] — the key Recall syncs a project under. Derived from the
 //!   git remote so two machines that have never met agree on it.
 //! - [`config`] — the environment both halves of the binary read.
+//! - [`scope`] — what Recall syncs and under which key: one repository, and
+//!   optionally a global scope that follows the user into every project.
 //!
 //! The first two are deliberately different derivations of "which project is
 //! this", and are meant to disagree: one answers "where does this machine
@@ -32,5 +34,7 @@
 pub mod claude;
 pub mod config;
 pub mod project;
+pub mod scope;
 
 pub use config::{ClientConfig, ConfigError};
+pub use scope::Scope;
