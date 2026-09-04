@@ -48,7 +48,11 @@ echo "install: downloading $asset ($VERSION)..."
 if ! curl -fsSL "$url" -o "$tmp/$asset"; then
   die "could not download $url
     If no release exists yet, build from source instead:
-      git clone https://github.com/$REPO && cd recall && go build -o recall ./cmd/recall"
+      git clone https://github.com/$REPO && cd recall
+      cargo build --release -p recall-cli   # binary at target/release/recall
+    Or, without a Rust toolchain of your own:
+      brew tap pimlabs/recall https://github.com/$REPO
+      brew install --HEAD pimlabs/recall/recall"
 fi
 
 tar -xzf "$tmp/$asset" -C "$tmp"
