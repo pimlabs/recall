@@ -6,3 +6,8 @@ deploy/.env
 
 # Rust
 /target
+
+# Worktrees. CLAUDE.md asks for feature work to happen in one of these, and
+# a worktree is a nested checkout — it must never be committed into the repo
+# it is a checkout of.
+.claude/worktrees/
