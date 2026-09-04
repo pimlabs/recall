@@ -43,6 +43,28 @@ a silent data-corruption bug in exactly the property the whole round-trip
 test suite exists to protect. That is a better argument for the move than
 anything in the original reasoning.
 
+### And one the type system did not catch
+
+A seventh, for symmetry, because it cuts the other way. `PushRequest`
+omitted `content` when it was empty — the natural-looking
+`skip_serializing_if = "String::is_empty"` in Rust, `json:",omitempty"` in
+Go. So pushing an **empty memory file** sent no `content` field at all, and
+the Node server answers 400 for that (`typeof undefined !== "string"`). A
+project containing one empty note could never sync.
+
+Both implementations had it. Both test suites missed it, and missed it the
+same way: every test that covered an empty file used a stand-in server that
+accepted anything, so the hole sat precisely where the tests were looking
+away. What found it was `scripts/compat-check.sh` pushing a real empty file
+at a real Node server.
+
+The fix is to make the distinction explicit in the type —
+`content: Option<String>`, where `Some("")` is an empty file and `None` is
+a delete. Rust can express that better than Go can, but it did not *force*
+it; the first Rust cut made the same mistake. The lesson is the older one:
+tests against a stand-in agree with whatever the stand-in was built to
+believe.
+
 What Rust does genuinely buy here: a smaller binary, `serde` (notably
 nicer than hand-rolling JSON key-order preservation, which in Go needed a
 third-party surgical-edit library), and `Result`/`Option` being stronger

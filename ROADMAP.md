@@ -110,6 +110,19 @@ CGO-free build).
       keeping it would have meant carrying two dead implementations instead
       of one. Node and the shell hooks stay — Node is what actually serves
       the owner's memory today, so it is the real rollback path.
+- [x] **Two more bugs found, both of which predated the port.** Go's
+      `json.Marshal` silently replaced invalid UTF-8 with U+FFFD, so a
+      non-UTF-8 memory file was pushed corrupted; Rust's types force that
+      into the open. And an empty memory file was unsyncable in *both*
+      implementations, because `content` was omitted when empty and the
+      Node server rejects a push without it — caught not by either test
+      suite but by `scripts/compat-check.sh` running a real push at the
+      real server. Details in `docs/rust-rewrite.md`.
+- [x] **`scripts/compat-check.sh`** — the mixed-fleet matrix, automated:
+      the new server opening a Node-written database, the old shell hooks
+      against the new server, the new client against the Node server, and
+      byte-exact round trips. 11 checks, all green. Run it before cutting
+      production over, and again after.
 
 **Done when:** one installable Rust binary does everything the Go one did,
 against the same verification matrix. **Done.**
