@@ -25,7 +25,7 @@ export RECALL_URL="https://recall.yourdomain.com"
 ```
 
 Open a new terminal (or `source` the file) so the hooks pick it up —
-`hooks/recall-push`/`hooks/recall-pull` read these from the environment,
+`recall push` / `recall pull` read these from the environment,
 not from a config file.
 
 ## 3. Install it on a claude.ai cloud environment
@@ -37,9 +37,9 @@ dialog):
 
 - **Environment variables**: add `RECALL_TOKEN` and `RECALL_URL` with the
   same values as step 2, plus `CLAUDE_CODE_REMOTE_MEMORY_DIR` (see
-  `hooks/README.md` for why that one's required, not optional, here).
+  `../ARCHITECTURE.md` for why that one's required, not optional, here).
 - **Network access**: set to **Custom** and add the server's domain under
-  **Allowed domains** — confirmed live (`hooks/README.md`) that the
+  **Allowed domains** — confirmed live (see `ROADMAP.md` Phase 1) that the
   default network policy blocks a self-hosted domain otherwise.
 
 This is per-environment, not account-wide. A new cloud environment for a

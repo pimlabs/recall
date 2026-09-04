@@ -42,8 +42,3 @@ cargo doc --workspace --no-deps --open
 | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | Dev workflow: building, testing, the compatibility matrix. |
 | [`../CLAUDE.md`](../CLAUDE.md) | How Claude Code sessions should work in this repo — worktrees, the task list, PR policy, and the ground rules that are not up for negotiation. |
 
-## Historical
-
-| Document | What it is |
-|---|---|
-| [`go-rewrite-design.md`](go-rewrite-design.md) | The Go port that preceded the Rust one. Removed from the tree; the staged-migration reasoning in it is still what's in use. |

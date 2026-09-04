@@ -2,10 +2,12 @@
 
 `.github/workflows/ci-deploy.yml` has two jobs:
 
-- **`ci`** — runs on every push and PR: syntax-checks `server/index.js` and
-  the hook scripts, validates `hooks/settings.snippet.json` is valid JSON,
-  and does a `docker build` of `server/` (build check only, nothing is
-  pushed anywhere). No secrets needed for this job.
+- **`ci`** — runs on every push and PR: `cargo fmt`, `clippy -D warnings`,
+  the test suite, `cargo doc` with `-D warnings`, the API-reference checker
+  (`scripts/api-doc-check.sh`, which asserts `docs/api.md` against a running
+  server), a syntax check of the shipped shell scripts, and a `docker build`
+  of `deploy/Dockerfile` (build check only, nothing is pushed anywhere). No
+  secrets needed for this job.
 - **`deploy`** — runs only after `ci` passes, and only for a push that's
   actually landed on `main` (never for PRs, never for other branches). SSHes
   into the VPS and runs the same three commands from `deploy/README.md`'s

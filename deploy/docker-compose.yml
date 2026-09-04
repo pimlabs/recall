@@ -3,10 +3,10 @@ name: recall
 services:
   recall-server:
     build:
-      # Context is the repo root, not server/: the image builds the Go
-      # binary from cmd/ and internal/, then copies the server's entrypoint.
+      # Context is the repo root, not deploy/: the image builds the Rust
+      # binary from crates/, then copies the entrypoint next to this file.
       context: ..
-      dockerfile: server/Dockerfile
+      dockerfile: deploy/Dockerfile
       args:
         GIT_COMMIT: ${GIT_COMMIT:-unknown}
     container_name: recall-server

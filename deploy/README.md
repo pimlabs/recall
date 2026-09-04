@@ -79,7 +79,7 @@ session too — it's just an HTTPS request either way.
 
 ## 5. Point real environments at it
 
-Per `hooks/README.md`, set on every environment that should push/pull:
+Set on every environment that should push and pull — see [`../docs/token-setup.md`](../docs/token-setup.md):
 
 | Variable | Value |
 |---|---|
@@ -87,8 +87,8 @@ Per `hooks/README.md`, set on every environment that should push/pull:
 | `RECALL_TOKEN` | the same token from `.env` |
 | `CLAUDE_CODE_REMOTE_MEMORY_DIR` | (remote/cloud environments only) that environment's `~/.claude` |
 
-Then wire `hooks/settings.snippet.json` into the target project's
-`.claude/settings.json` — see `hooks/README.md`.
+Then, in each project you want synced, run `recall init` — it wires that
+project's own `.claude/settings.json`. See [`../docs/install.md`](../docs/install.md).
 
 ## Updating
 
@@ -142,7 +142,7 @@ docker compose start recall-server
 ## Enabling real merge (Phase 2)
 
 Without this step, Recall still works exactly as before — conflicting
-writes just fall back to last-write-wins. Semantic merge (`server/index.js`
+writes just fall back to last-write-wins. Semantic merge (the server
 shelling out to `claude -p` per `ARCHITECTURE.md`) needs the CLI, already
 installed in the image, to actually be logged in **inside the container**.
 That's a one-time interactive step only the owner can do (it's your

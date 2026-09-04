@@ -163,7 +163,19 @@ Unchanged, and not open to tidying:
 production, so keeping it would have meant carrying two dead
 implementations rather than one.
 
-`server/index.js` and `hooks/*.sh` stay. Node is what actually serves the
-owner's memory today, so it is the real rollback path until the Rust
-binary has run in production for a while, and projects already wired to
-`$CLAUDE_PROJECT_DIR/hooks/recall-push` keep working unchanged.
+`server/index.js` and `hooks/*.sh` — the Node server and the bash hooks —
+are gone too, along with the `server/` directory itself. They were kept for
+a while as the rollback path; what replaced them is narrower and more
+useful: `tests/fixtures/node-written.db`, a database the Node server
+actually wrote, captured before it was deleted.
+
+That fixture is the part that mattered. Production's database was written by
+Node, so `scripts/compat-check.sh` opens it with this server and checks every
+row survives — byte-exact content, trailing newlines, an empty file, unicode,
+a nested path, a tombstone with its content still withheld, project isolation
+— and then that this server can keep writing to it. 19 checks. The 26 KB of
+JavaScript was carrying that one property, and a 12 KB fixture carries it
+better: it cannot drift from the schema, and it needs no Node on the
+machine running the checks.
+
+Everything deleted is still in git history if it is ever wanted.

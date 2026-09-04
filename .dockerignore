@@ -1,13 +1,16 @@
-.git
-.github
-target
-deploy/backups
-deploy/.env
-docs
-hooks
-npm
-server/data
-server/index.js
-Formula
-*.md
+# Docker reads this from the build context root, which for this image is the
+# repository root — see deploy/docker-compose.yml. It lived in server/ for a
+# while, where it was never read at all, so `target/` was being uploaded to
+# the daemon on every build.
+target/
+.git/
+.claude/worktrees/
+
+data/
 *.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+node_modules/
+deploy/.env

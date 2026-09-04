@@ -164,6 +164,22 @@ Deliberately boring. Two endpoints do the work and three exist to look at it. Th
 
 Storage: whatever's simplest to self-host and keep running — a single SQLite file behind a small server process is enough for one user's data; don't reach for a distributed database for this. Auth: one bearer token, generated once, stored as an env var on every environment (never committed to the repo).
 
+### Configuration
+
+Every setting is an environment variable, and the authoritative list — name,
+default, and what it does — is the table on `recall_server::Config` in the
+generated docs:
+
+```sh
+cargo doc --workspace --no-deps --open
+```
+
+Client-side variables (`RECALL_URL`, `RECALL_TOKEN`, `RECALL_SOURCE_ENV`,
+`RECALL_GLOBAL_KEY`, and Claude Code's own `CLAUDE_CODE_REMOTE_MEMORY_DIR`)
+are in [`docs/token-setup.md`](docs/token-setup.md), which also covers the
+per-environment network allowlist a claude.ai cloud environment needs before
+it can reach a self-hosted server at all.
+
 ### Deletes are tombstones, not row removal
 
 A pushed delete (`{ project_key, file_path, deleted: true, source_env }`)

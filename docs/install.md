@@ -197,11 +197,20 @@ pushed. Until the first tag exists, install via Homebrew `--HEAD` or build
 from source; npm and `install.sh` both need a published release to download
 from, and both say so plainly rather than failing obscurely.
 
-## The shell implementation this replaces
+## If a project is still wired to the old shell hooks
 
-`hooks/recall-push` and `hooks/recall-pull` are still in the repository.
-They remain the rollback path for a machine not yet on the binary, and any
-project already wired to `$CLAUDE_PROJECT_DIR/hooks/recall-push` keeps
-working unchanged — the wire format is identical in both directions. New
-projects should use `recall init`, which wires `recall push` / `recall pull`
-instead so nothing needs copying into the project at all.
+The bash implementation that preceded this one has been removed from the
+repository. A project whose `.claude/settings.json` still calls
+`$CLAUDE_PROJECT_DIR/hooks/recall-push` will stop working once that project
+no longer carries those scripts.
+
+The fix is one command in the project:
+
+```sh
+recall init
+```
+
+That rewrites the hooks to `recall push` / `recall pull`, which need nothing
+copied into the project at all. The wire format is identical in both
+directions, so there is nothing to migrate server-side. The old scripts are
+still in git history if you need them (`git log -- hooks/`).

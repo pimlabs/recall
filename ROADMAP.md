@@ -3,7 +3,7 @@
 ## Phase 0 — Prove the round-trip, no merge logic yet — done
 
 - [x] Stood up the server with `POST /sync` / `GET /sync` against SQLite (`server/`), no merge — last write simply overwrites. Zero external dependencies (`node:http` + `node:sqlite`).
-- [x] Built the `PostToolUse`/`SessionStart` hooks (`hooks/recall-push`, `hooks/recall-pull`, `hooks/settings.snippet.json`) — see below for why `PostToolUse` instead of `FileChanged`.
+- [x] Built the `PostToolUse`/`SessionStart` hooks, as bash scripts at the time — see below for why `PostToolUse` instead of `FileChanged`. (Retired in Phase 7; `recall init` now wires `recall push` / `recall pull`.)
 - [x] Confirmed empirically: **`FileChanged` doesn't exist** in the installed Claude Code CLI (v2.1.42), and neither does hook type `"http"`. Used `PostToolUse` matching `Edit|Write` (`type: "command"`) instead. Confirmed live — not just by reading the source — that this **does** catch dynamically-named topic files (e.g. `debugging.md`), because the matcher only filters on tool name and the script itself checks the actual file path per call. Full writeup: `docs/phase-0-findings.md`.
 - [x] Confirmed the project-key derivation does **not** match Claude Code's own scoping (which is local-filesystem-path-based, not git-remote-based) — and that this divergence is intentional/necessary. `project_key` derives from the git remote's `owner/repo`; the local memory directory is computed separately by replicating Claude Code's own path-slug algorithm. Details and edge cases (proxied remotes, GitLab subgroups) in `docs/phase-0-findings.md` §6.
 - Also surfaced, not originally in scope but load-bearing: auto memory is **off by default in remote/cloud sessions** unless `CLAUDE_CODE_REMOTE_MEMORY_DIR` is set (`docs/phase-0-findings.md` §5) — this has to be configured as an environment secret alongside `RECALL_TOKEN`.
@@ -20,8 +20,8 @@ No new features. The server and hooks from Phase 0 already do everything needed 
 
 - [x] **Deploy the server somewhere it stays running.** Done via OrbStack + Cloudflare Tunnel (`deploy/`) — `recall-server` and `cloudflared` containers running on the owner's Mac, public hostname `recall.pimlabs.id`. Verified from outside: `GET /sync?project_key=smoke-test` returns `{"project_key":"smoke-test","files":[]}` with a valid bearer token, `401` without one.
 - [x] **Generate the real `RECALL_TOKEN`** — generated, stored in `deploy/.env` (gitignored, not committed).
-- [x] **Set `CLAUDE_CODE_REMOTE_MEMORY_DIR` as a real environment secret** on a real claude.ai cloud environment for `pimlabs/recall` (`/home/user/.claude` — that sandbox's `$HOME` is actually `/root`, but `hooks/lib.sh` prioritizes the explicit override so the memory path still resolves correctly).
-- [x] **Wire `hooks/settings.snippet.json` into one real project's `.claude/settings.json`** — wired into `pimlabs/recall` itself, dogfooding.
+- [x] **Set `CLAUDE_CODE_REMOTE_MEMORY_DIR` as a real environment secret** on a real claude.ai cloud environment for `pimlabs/recall` (`/home/user/.claude` — that sandbox's `$HOME` is actually `/root`, but the memory-path derivation prioritizes the explicit override, so it still resolves correctly).
+- [x] **Wire the hooks into one real project's `.claude/settings.json`** — wired into `pimlabs/recall` itself, dogfooding.
 - [x] **Run the real test**: verified 2026-08-12 in a genuine claude.ai cloud session — SessionStart's `recall-pull` synced all 3 existing memory files with zero manual intervention, then editing one of them triggered `recall-push` automatically and the change showed up server-side seconds later.
 - [x] **Fix whatever breaks under real conditions**: two surprises, both fixed. (1) A trailing-newline round-trip bug in `recall-push`/`recall-pull` (fixed, see the newline-fidelity fix commit). (2) claude.ai cloud environments block egress to custom domains by default — `recall.pimlabs.id` needed adding under that environment's **Network access → Custom → Allowed domains**, not something a local simulation could have caught.
 
@@ -46,14 +46,14 @@ No new features. The server and hooks from Phase 0 already do everything needed 
 
 - [x] Basic observability: `GET /health` (unauthenticated) reports server status, start time, and the most recent sync across all projects. Global rather than per-project — good enough to answer "is this thing alive" from outside without a token; per-project last-synced-at can wait until it's actually needed. Also reports the deployed `git_commit` (baked in via a Docker build arg), added after deciding formal semver/CHANGELOG wasn't worth it for a single-owner tool deployed straight from `main` — the real risk was deployment drift (`main` has a fix, the running container doesn't yet), not version compatibility between independent consumers.
 - [x] **Automatic backups.** Found during an architecture/security pass (2026-08-12) that there was no backup story at all — a real gap given cloud sessions are ephemeral by design, so the server can be the *only* surviving copy of content that originated there. Server now runs `VACUUM INTO` on an interval (default 24h, keeps last 7), writing to a host-mounted `deploy/backups/` folder so external backup tooling can reach it without going through Docker. See `deploy/README.md`.
-- [x] **Delete/tombstone support.** Same pass found `recall-push` silently no-ops on a local delete — the server never learned a file was removed, so it came back on the next pull. Fixed with a tombstone design (content preserved in the row, `deleted` flag set, `GET /sync` withholds content for tombstoned rows so a pull can't resurrect them). The harder half: there's no hook event for a delete at all (a `Bash rm` doesn't match the `Edit|Write` matcher even if there were one), so `recall-push` reconciles instead — every run compares the current directory listing against a small state file (`hooks/lib.sh:recall_state_file`, next to the memory dir, not inside it) and reports anything missing as a delete. Propagation is "next edit to any memory file in the project," not instant, since there's nothing to make it instant. Verified end to end: local delete + editing an unrelated file correctly produced a tombstone; a fresh pull skipped the tombstoned file; a stale local copy got actively removed on pull.
-- [x] **Non-root container user.** `server/Dockerfile` now runs the Node process as the built-in `node` user. Not just a `USER node` line — the production volume already existed with root-owned content from before this fix, so a small `docker-entrypoint.sh` runs as root only long enough to `chown` `/data`, then drops to `node` via `su-exec` for the actual process. Verified against a hand-built volume with pre-existing root-owned files: server started clean, process confirmed running as `node` (not root), old files' ownership fixed automatically.
+- [x] **Delete/tombstone support.** Same pass found `recall-push` silently no-ops on a local delete — the server never learned a file was removed, so it came back on the next pull. Fixed with a tombstone design (content preserved in the row, `deleted` flag set, `GET /sync` withholds content for tombstoned rows so a pull can't resurrect them). The harder half: there's no hook event for a delete at all (a `Bash rm` doesn't match the `Edit|Write` matcher even if there were one), so `recall-push` reconciles instead — every run compares the current directory listing against a small state file (`.recall-state.json`, next to the memory dir, not inside it) and reports anything missing as a delete. Propagation is "next edit to any memory file in the project," not instant, since there's nothing to make it instant. Verified end to end: local delete + editing an unrelated file correctly produced a tombstone; a fresh pull skipped the tombstoned file; a stale local copy got actively removed on pull.
+- [x] **Non-root container user.** The image now runs the server as the built-in `node` user. Not just a `USER node` line — the production volume already existed with root-owned content from before this fix, so a small `docker-entrypoint.sh` runs as root only long enough to `chown` `/data`, then drops to `node` via `su-exec` for the actual process. Verified against a hand-built volume with pre-existing root-owned files: server started clean, process confirmed running as `node` (not root), old files' ownership fixed automatically.
 - [x] **Rate limiting on `/sync`.** Simple in-memory per-IP fixed-window limiter (default 60 req/min, tunable via `RECALL_RATE_LIMIT_MAX`/`RECALL_RATE_LIMIT_WINDOW_MS`) — no external store needed for a single-process personal server. Counts both valid and invalid-token requests so a flood of bad tokens can't dodge it by failing auth first. `/health` stays unlimited since it's meant to be pollable. This closes out every finding from the architecture/security pass.
 - [x] Decide whether `recall-pull` should be a single static binary (e.g. Go) vs. a script needing a runtime — revisited 2026-08-12 now that Phase 1's real-world deployment is known to work: staying with bash + curl + jq. Both dependencies have now been proven present and working on every real environment tested (this laptop, and a genuine claude.ai cloud sandbox), the one real bug they caused (trailing-newline fidelity) is fixed, and a compiled-binary rewrite would trade "clone and it just works" for per-platform binary distribution to fix a problem that hasn't actually recurred. Revisit again only if curl/jq turn out missing on some future environment, or if the hooks' logic grows past what a shell script should reasonably hold.
 
 ## Phase 5 — One Go binary — done
 
-Designed in `docs/go-rewrite-design.md` and decided there: everything, one
+Designed in the Go rewrite design doc (retired in Phase 7; see git history) and decided there: everything, one
 binary, `recall serve` included.
 
 - [x] **Client and server rewritten in Go**, sharing `internal/wire` — the
@@ -85,9 +85,8 @@ binary, `recall serve` included.
       the reason recorded in the design doc.
 
 **Done when:** one installable binary does everything, with the old
-implementations still present as a rollback path. **Done** — remaining is
-Phase C of the design: retire `server/index.js` and `hooks/*.sh` once the
-binary has run in production for a while.
+implementations still present as a rollback path. **Done.** (The retirement
+itself happened in Phase 7.)
 
 ## Phase 6 — Rust — done
 
@@ -157,6 +156,42 @@ CGO-free build).
 
 **Done when:** one installable Rust binary does everything the Go one did,
 against the same verification matrix. **Done.**
+
+## Phase 7 — Retire the implementations that were replaced — done
+
+The tree still carried a full Node server and a full bash client, months
+after both were superseded, plus the design doc for a Go port that no longer
+exists. All three were kept "as the rollback path", which git already is.
+
+- [x] **Deleted `server/index.js`, `server/package.json`, `hooks/*.sh`,
+      `hooks/settings.snippet.json`, `hooks/README.md`, and
+      `docs/go-rewrite-design.md`.** Nothing is lost — `git log -- hooks/`
+      still has all of it.
+- [x] **Kept the one thing that mattered, in a better form.** The Node
+      server's real value here was as a source of Node-written database rows
+      for `scripts/compat-check.sh`, because production's database was
+      written by Node and this server has to open it. That is now
+      `tests/fixtures/node-written.db`, a database the Node server actually
+      wrote, captured before it was deleted. The matrix went from 11 checks
+      to **19** and covers more: byte-exact content, no/one/two trailing
+      newlines, an empty file, unicode, a nested path, a tombstone with its
+      content still withheld, project isolation, and that this server can
+      keep *writing* to a Node-written file. It also no longer needs Node
+      installed to run.
+- [x] **`server/` is gone as a directory.** What was left in it — the
+      Dockerfile and the entrypoint — is the deployment image, so it lives in
+      `deploy/` next to the compose file that builds it.
+- [x] **Fixed two things the move surfaced.** `.dockerignore` was in
+      `server/`, but the build context is the repository root, so Docker was
+      never reading it and `target/` was being uploaded to the daemon on
+      every build. And CI had been **red on every run since the `recall-cli`
+      → `recall-sync` rename**: the Dockerfile still asked for the old
+      package, and being extensionless it was missed by the search that
+      updated everything else. Both fixed, and CI now also syntax-checks the
+      scripts that actually ship.
+
+**Done when:** nothing in the tree is a copy of something already replaced,
+and the checks that protected the migration still run. **Done.**
 
 ## Explicitly deferred
 
