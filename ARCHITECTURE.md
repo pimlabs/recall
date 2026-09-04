@@ -20,12 +20,14 @@ No peer-to-peer link between environments — every environment only ever talks 
 
 ## One binary
 
-Client and server are the same Go binary (`docs/go-rewrite-design.md`):
+Client and server are the same Rust binary (`docs/rust-rewrite.md`):
 `recall serve` runs the server, `recall init` / `status` / `push` / `pull`
 run on a developer machine. That is not packaging convenience — the
 validation rules and the tombstone/empty-file distinction previously
 existed twice, in JavaScript and in bash, with nothing keeping them in
-agreement. `internal/wire` is now the single definition both halves use.
+agreement. The `recall-wire` crate is now the single definition both
+halves use, which is also why the workspace is split by boundary rather
+than being one crate.
 
 ## Client side: pure Claude Code hooks, no daemon
 

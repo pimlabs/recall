@@ -10,7 +10,7 @@ npm install -g @pimlabs/recall
 
 This package downloads the prebuilt `recall` binary for your platform
 (macOS and Linux, x64 and arm64) and verifies it against the release's
-checksums. There's no Node dependency at runtime — the binary is Go.
+checksums. There's no Node dependency at runtime — the binary is Rust.
 
 Then, once per machine:
 
