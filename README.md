@@ -71,11 +71,10 @@ And the tree:
 | Path | What's in it |
 |---|---|
 | `crates/` | The binary. `wire` (frozen contract) · `paths` · `hooks` (client) · `server` · `cli`. See ARCHITECTURE's code map. |
-| `deploy/` | OrbStack + Cloudflare Tunnel deployment, docker-compose based. |
-| `scripts/` | `compat-check.sh` — the mixed-fleet compatibility matrix. |
+| `deploy/` | The image and the OrbStack + Cloudflare Tunnel deployment. |
+| `scripts/` | `compat-check.sh` (the cutover matrix), `api-doc-check.sh`, `release.sh`, and `probes/`. |
 | `npm/`, `Formula/`, `install.sh` | The three install channels. |
-| `server/` | Dockerfile and entrypoint. `index.js` is the superseded Node implementation, kept as the rollback path. |
-| `hooks/` | The superseded shell hooks, kept working for projects already wired to them. |
+| `tests/fixtures/` | A database the retired Node server actually wrote, so the cutover stays testable without it. |
 
 ## License
 

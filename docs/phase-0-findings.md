@@ -72,7 +72,7 @@ all. Auto memory was never turned on.
 Practical consequence: `recall-pull` writing files to disk is necessary
 but not sufficient. Without `CLAUDE_CODE_REMOTE_MEMORY_DIR` set on the
 remote environment, Claude Code won't be looking at that directory (or any
-memory directory) in the first place. See `hooks/README.md` for why this
+memory directory) in the first place. See `../ARCHITECTURE.md` for why this
 has to be an environment secret, not something baked into the committed
 `settings.json` (short version: settings `env` values are literal strings,
 no `$HOME` expansion — confirmed by live-testing `"$HOME/x"` and
@@ -98,7 +98,7 @@ This matters because it means Claude Code's own scoping is
 **machine-local** — a laptop clone at `~/code/recall` and a cloud clone at
 `/home/user/recall` get *different* slugs for the same repo. That's
 exactly the gap Recall exists to bridge, so it's intentional that Recall's
-own `project_key` (git remote `owner/repo`, see `hooks/lib.sh`) uses a
+own `project_key` (git remote `owner/repo`, see `recall_paths::project`) uses a
 *different* derivation than Claude Code's local slug — they solve two
 different problems:
 
@@ -113,7 +113,7 @@ different problems:
 In this sandboxed cloud environment, `git remote get-url origin` returns
 `http://local_proxy@127.0.0.1:<random-port>/git/pimlabs/recall` — a
 locally proxied URL, not the real `git@github.com:pimlabs/recall.git`.
-`recall_project_key()` in `hooks/lib.sh` handles this by keying on just the
+`recall_paths::project::key` handles this by keying on just the
 last two path segments (`owner/repo`), which normalizes identically across
 SSH, HTTPS, and this proxied form. Verified directly:
 

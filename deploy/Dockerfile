@@ -9,7 +9,7 @@ RUN apk add --no-cache musl-dev
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-RUN cargo build --release --locked -p recall-cli
+RUN cargo build --release --locked -p recall-sync
 
 # ...then assemble a runtime that still has Node in it.
 #
@@ -29,7 +29,7 @@ RUN apk add --no-cache su-exec
 RUN npm install -g @anthropic-ai/claude-code
 
 COPY --from=build /src/target/release/recall /usr/local/bin/recall
-COPY server/docker-entrypoint.sh /usr/local/bin/
+COPY deploy/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 ARG GIT_COMMIT=unknown

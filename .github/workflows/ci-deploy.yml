@@ -43,17 +43,18 @@ jobs:
           cargo build --release -p recall-sync --locked
           ./scripts/api-doc-check.sh target/release/recall
 
-      # The shell hooks stay in the tree as the rollback path for machines
-      # not yet on the binary, so they still get syntax-checked.
-      - name: Legacy shell hooks still parse
+      - name: Shipped shell scripts still parse
         run: |
-          bash -n hooks/lib.sh
-          bash -n hooks/recall-push
-          bash -n hooks/recall-pull
           bash -n install.sh
+          bash -n scripts/compat-check.sh
+          bash -n scripts/api-doc-check.sh
+          bash -n scripts/release.sh
 
+      # The image the deployment actually builds. This is where a crate
+      # rename slipped through once: the Dockerfile has no file extension and
+      # was missed by the search that updated everything else.
       - name: Server image builds
-        run: docker build -f server/Dockerfile -t recall-server-ci .
+        run: docker build -f deploy/Dockerfile -t recall-server-ci .
 
   # Only runs after CI passes, and only for a push that landed on main.
   # Needs DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY as repo secrets —
