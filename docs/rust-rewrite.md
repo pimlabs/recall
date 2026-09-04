@@ -24,6 +24,25 @@ safety and data races, which this program does not have and cannot get
 much value from: it reads small text files, makes HTTP calls, talks to
 SQLite, and spawns one subprocess.
 
+### One correction to the above, found during the port
+
+The port surfaced a **sixth** bug, and this one Rust's types did force into
+the open. Go's `json.Marshal` silently replaces invalid UTF-8 with U+FFFD
+and returns no error, so a memory file that wasn't valid UTF-8 was pushed
+*corrupted* — verified: `caf\xe9\n` marshals to `"caf�\n"`, round-trips
+back as `63 61 66 ef bf bd 0a`, and the next pull writes that corruption to
+disk. The byte-exactness tests missed it because every case they used was
+already valid UTF-8.
+
+Rust cannot do this by accident, because `content` is a `String` and the
+bytes have to be converted deliberately. The port makes it an explicit
+refusal (`hooks::Error::NotUtf8`) rather than sending anything.
+
+So the honest scorecard is five-to-one, not six-to-nothing — and the one is
+a silent data-corruption bug in exactly the property the whole round-trip
+test suite exists to protect. That is a better argument for the move than
+anything in the original reasoning.
+
 What Rust does genuinely buy here: a smaller binary, `serde` (notably
 nicer than hand-rolling JSON key-order preservation, which in Go needed a
 third-party surgical-edit library), and `Result`/`Option` being stronger

@@ -9,9 +9,9 @@
 //! workspace pins `serde_json` with `preserve_order`, so a
 //! [`serde_json::Value`] map keeps insertion order through a decode/encode
 //! round-trip; without it, re-encoding would silently re-sort every key in
-//! the user's file and turn a two-line change into a whole-file diff.
-//! [`preserves_key_order`](tests::preserves_key_order) is there to fail loudly
-//! if that feature ever gets dropped.
+//! the user's file and turn a two-line change into a whole-file diff. The
+//! `preserves_key_order` test is there to fail loudly if that feature ever
+//! gets dropped.
 
 use std::fs;
 use std::io;

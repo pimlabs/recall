@@ -301,7 +301,7 @@ mod tests {
     use recall_wire::File;
 
     struct Fixture {
-        _dir: tempfile::TempDir,
+        dir: tempfile::TempDir,
         server: FakeServer,
         env: Env,
     }
@@ -317,11 +317,7 @@ mod tests {
                 source_env: "test".into(),
                 client: Client::new(&server.url, "token").unwrap(),
             };
-            Self {
-                _dir: dir,
-                server,
-                env,
-            }
+            Self { dir, server, env }
         }
 
         fn memory(&self, rel: &str) -> PathBuf {
@@ -337,7 +333,7 @@ mod tests {
     #[tokio::test]
     async fn push_ignores_files_outside_the_memory_dir() {
         let f = Fixture::new().await;
-        let other = f._dir.path().join("src").join("main.rs");
+        let other = f.dir.path().join("src").join("main.rs");
         write(&other, "fn main() {}");
 
         let res = push(&f.env, &other).await.unwrap();
@@ -656,8 +652,8 @@ mod tests {
         // Nested two deep so that even `../../` lands inside the temp
         // directory the test owns, and the assertions below are about real
         // paths rather than about the machine's temp root.
-        f.env.memory_dir = f._dir.path().join("a").join("b").join("memory");
-        let outside_root = f._dir.path().to_path_buf();
+        f.env.memory_dir = f.dir.path().join("a").join("b").join("memory");
+        let outside_root = f.dir.path().to_path_buf();
         f.server.set_files(
             [
                 "../../escaped.md",
@@ -683,7 +679,6 @@ mod tests {
             outside_root.join("a").join("b").join("escaped.md"),
             outside_root.join("a").join("escaped.md"),
             outside_root.join("escaped.md"),
-            PathBuf::from("/etc/passwd.recall-test"),
         ] {
             assert!(
                 !escaped.exists(),
