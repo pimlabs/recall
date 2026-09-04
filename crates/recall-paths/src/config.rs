@@ -41,6 +41,15 @@ pub struct ClientConfig {
     /// `RECALL_SOURCE_ENV`: the label synced files are stamped with,
     /// falling back to the hostname and then to `"unknown"`.
     pub source_env: String,
+    /// `RECALL_GLOBAL_KEY`: the key for memories that follow the user into
+    /// every project, normalised by
+    /// [`scope::global_key`](crate::scope::global_key).
+    ///
+    /// [`None`] — the default — means global sync is off and Recall behaves
+    /// exactly as it did before the scope existed. It has to be opt-in:
+    /// turning it on makes files appear in every synced project's memory
+    /// directory, which is not something to do to someone by surprise.
+    pub global_key: Option<String>,
     /// Where Claude Code keeps its memory on this machine.
     pub claude: Env,
 }
@@ -59,6 +68,9 @@ impl ClientConfig {
             url: var(&lookup, "RECALL_URL").unwrap_or_default(),
             token: var(&lookup, "RECALL_TOKEN").unwrap_or_default(),
             source_env: resolve_source_env(var(&lookup, "RECALL_SOURCE_ENV"), hostname),
+            global_key: var(&lookup, "RECALL_GLOBAL_KEY")
+                .as_deref()
+                .and_then(crate::scope::global_key),
             claude: Env::from_lookup(&lookup),
         }
     }

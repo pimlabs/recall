@@ -20,14 +20,14 @@
 //! let ctx = Context {
 //!     memory_dir: PathBuf::from("/home/me/.claude/projects/-home-me-app/memory"),
 //!     state_file: PathBuf::from("/home/me/.claude/projects/-home-me-app/.recall-state.json"),
-//!     project_key: "acme/app".to_string(),
+//!     scopes: recall_paths::scope::scopes("acme/app".into(), None),
 //!     source_env: "laptop".to_string(),
 //!     client: Client::new("https://recall.example.com", "token")?,
 //! };
 //!
 //! // At session start: make local memory match the server.
 //! let pulled = pull(&ctx).await?;
-//! eprintln!("{}", pulled.describe(&ctx.project_key));
+//! eprintln!("{}", pulled.describe(ctx.project_key()));
 //!
 //! // After an edit: send that file, and reconcile any deletes.
 //! let pushed = push(&ctx, &ctx.memory_dir.join("MEMORY.md")).await?;
@@ -57,6 +57,7 @@
 
 mod atomic;
 mod context;
+mod index;
 mod pull;
 mod push;
 
@@ -68,6 +69,7 @@ pub mod settings;
 pub mod state;
 
 pub use context::{Context, Error};
+pub use index::is_linked as global_index_is_linked;
 pub use path::is_memory_file;
 pub use pull::{pull, PullOutcome};
 pub use push::{push, PushOutcome};

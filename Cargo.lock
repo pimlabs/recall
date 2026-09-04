@@ -876,6 +876,7 @@ name = "recall-hooks"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "recall-paths",
  "recall-wire",
  "reqwest",
  "serde",
