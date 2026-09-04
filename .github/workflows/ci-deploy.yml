@@ -64,7 +64,29 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
+      # Not having the deploy secrets is a normal state, not a failure: a
+      # fork, a clone, or this repository before the VPS was wired up. This
+      # job used to fail on every push to main with "missing server host",
+      # which meant main was permanently red — and a workflow that is always
+      # red is a workflow nobody reads. It cost five PRs merged over a broken
+      # build before anyone looked.
+      #
+      # The secrets context is not available in a job-level `if`, so the
+      # check has to be a step.
+      - name: Are the deploy secrets configured?
+        id: secrets
+        run: |
+          if [ -n "${{ secrets.DEPLOY_HOST }}" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::DEPLOY_HOST is not set, so there is nothing to \
+            deploy to. This is not a failure — see docs/github-actions-deploy.md \
+            to wire up a VPS."
+          fi
+
       - name: Deploy over SSH
+        if: steps.secrets.outputs.configured == 'true'
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.DEPLOY_HOST }}

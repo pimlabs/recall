@@ -13,6 +13,12 @@
   into the VPS and runs the same three commands from `deploy/README.md`'s
   "Updating" section.
 
+  **Without the secrets it skips, and says so, rather than failing.** That is
+  deliberate: a repository with no VPS wired up is a normal state, and a
+  workflow that fails on every push to `main` is one nobody reads. This job
+  did exactly that for a while — `error: missing server host` — and five PRs
+  were merged over a red build before anyone looked.
+
 The `deploy` job needs secrets it doesn't have by default — set these once
 under the repo's **Settings → Secrets and variables → Actions → New
 repository secret**:
