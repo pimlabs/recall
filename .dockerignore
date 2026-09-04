@@ -1,11 +1,13 @@
 .git
 .github
+target
 deploy/backups
 deploy/.env
 docs
 hooks
 npm
 server/data
+server/index.js
 Formula
 *.md
 *.db

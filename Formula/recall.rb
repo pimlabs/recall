@@ -8,7 +8,7 @@
 #   brew install --HEAD pimlabs/recall/recall   # straight from main
 #
 # Built from source rather than pulling a release binary: Homebrew already
-# has a Go toolchain available as a build dependency, and building here
+# has a Rust toolchain available as a build dependency, and building here
 # means the formula works against main before any tag exists.
 class Recall < Formula
   desc "Sync Claude Code's auto memory across machines and cloud sessions"
@@ -19,15 +19,10 @@ class Recall < Formula
   license "MIT"
   head "https://github.com/pimlabs/recall.git", branch: "main"
 
-  depends_on "go" => :build
+  depends_on "rust" => :build
 
   def install
-    ldflags = %W[
-      -s -w
-      -X main.version=#{version}
-      -X main.commit=#{tap&.installed? ? Utils.git_short_head : "unknown"}
-    ]
-    system "go", "build", *std_go_args(ldflags: ldflags), "./cmd/recall"
+    system "cargo", "install", *std_cargo_args(path: "crates/recall-cli")
   end
 
   test do
