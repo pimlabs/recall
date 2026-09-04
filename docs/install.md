@@ -1,6 +1,6 @@
 # Installing and using Recall
 
-Recall is a single Go binary. The same artifact runs the server
+Recall is a single Rust binary. The same artifact runs the server
 (`recall serve`) and everything on a developer machine — install once per
 machine, then run `recall init` once per project.
 
@@ -33,10 +33,11 @@ curl -fsSL https://raw.githubusercontent.com/pimlabs/recall/main/install.sh | ba
 Installs to `~/.local/bin/recall`. Override with `RECALL_BIN_DIR`, or pin a
 version with `RECALL_VERSION=v0.1.0`.
 
-**From source**, if you have Go:
+**From source**, if you have Rust:
 
 ```sh
-go build -o recall ./cmd/recall
+cargo build --release -p recall-cli
+# binary at target/release/recall
 ```
 
 Supported: macOS and Linux, x64 and arm64. Windows needs WSL. There are no

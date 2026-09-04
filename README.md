@@ -25,7 +25,7 @@ Both hooks live in the **project's own `.claude/settings.json`**, checked into g
 
 ## Quick start
 
-Recall is a single Go binary — the same artifact runs the server and the client. Install once per machine (npm, Homebrew, or curl — see `docs/install.md`):
+Recall is a single Rust binary — the same artifact runs the server and the client. Install once per machine (npm, Homebrew, or curl — see `docs/install.md`):
 
 ```sh
 npm install -g @pimlabs/recall
@@ -43,7 +43,7 @@ Standing up the server itself is `recall serve`, in practice via `deploy/`.
 
 ## Status
 
-Phases 0 through 4 done, and Recall is now a single Go binary (`docs/go-rewrite-design.md`): deployed for real behind a Cloudflare tunnel, the push/pull round-trip proven from a genuine claude.ai cloud session, conflicting edits semantically merged rather than last-write-wins, multi-project isolation verified, and the whole client and server sharing one tested implementation. The Node server and shell hooks remain in the tree as the rollback path until the Go binary has run in production for a while. See `ROADMAP.md` for the evidence behind each phase.
+Phases 0 through 4 done, and Recall is now a single Rust binary (`docs/rust-rewrite.md`): deployed for real behind a Cloudflare tunnel, the push/pull round-trip proven from a genuine claude.ai cloud session, conflicting edits semantically merged rather than last-write-wins, multi-project isolation verified, and the whole client and server sharing one tested implementation. The Node server and shell hooks remain in the tree as the rollback path until the Rust binary has run in production for a while. See `ROADMAP.md` for the evidence behind each phase.
 
 ## Project docs
 
@@ -57,8 +57,9 @@ Phases 0 through 4 done, and Recall is now a single Go binary (`docs/go-rewrite-
 | `docs/phase-0-findings.md` | Empirical findings from Phase 0 — what the docs above assumed vs. what the installed Claude Code CLI actually does. |
 | `docs/token-setup.md` | Generating and installing `RECALL_TOKEN` on every environment (laptop, cloud). |
 | `docs/github-actions-deploy.md` | Optional: CI checks on every PR, plus auto-deploy to a VPS over SSH on push to `main`. |
-| `docs/go-rewrite-design.md` | Why and how Recall became one Go binary, and the staged migration off Node + bash. |
-| `cmd/`, `internal/` | The binary: client, server, and the wire contract they share. |
+| `docs/rust-rewrite.md` | The current implementation: why Rust, what it costs, and what's frozen. |
+| `docs/go-rewrite-design.md` | Historical: the Go port that preceded it, and the staged-migration reasoning still in use. |
+| `crates/` | The binary: `wire` (shared contract), `paths`, `hooks`, `server`, `cli`. |
 | `npm/`, `Formula/`, `install.sh` | The three install channels. |
 | `server/` | Dockerfile and entrypoint for the deployed server. `index.js` is the superseded Node implementation, kept as the rollback path. |
 | `hooks/` | The superseded shell hooks, kept working for projects already wired to them. |

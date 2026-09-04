@@ -1,8 +1,10 @@
 # Design: Recall as a single Go binary
 
-**Status: proposal, awaiting the owner's decision.** Nothing here is built
-yet. This exists so the architecture and the public surface can be agreed
-before any code moves.
+> **Historical.** This design was built, then superseded by the Rust
+> implementation — see `rust-rewrite.md`. It is kept because most of it
+> still holds: the frozen surfaces, the staged-migration reasoning, and the
+> evidence for why one binary beats two programs are all unchanged, only
+> the language differs. The Go code itself has been removed.
 
 ## Why move at all
 

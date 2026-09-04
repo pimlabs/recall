@@ -3,3 +3,6 @@ server/data/
 *.db
 *.db-journal
 deploy/.env
+
+# Rust
+/target

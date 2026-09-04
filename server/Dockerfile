@@ -1,26 +1,22 @@
 # Build the binary...
-FROM golang:1.24-alpine AS build
+FROM rust:1-alpine AS build
+
+# rusqlite's `bundled` feature compiles the SQLite amalgamation from C, so
+# the build stage needs a C toolchain even though nothing here is C. musl
+# specifically, so the result runs on the Alpine-based runtime below.
+RUN apk add --no-cache musl-dev
 
 WORKDIR /src
-COPY go.mod go.sum ./
-RUN go mod download
-COPY cmd ./cmd
-COPY internal ./internal
-
-ARG GIT_COMMIT=unknown
-# CGO off: the SQLite driver is pure Go, so this needs no C toolchain and
-# the result runs on a bare image.
-RUN CGO_ENABLED=0 go build -trimpath \
-    -ldflags "-s -w -X main.version=docker -X main.commit=${GIT_COMMIT}" \
-    -o /out/recall ./cmd/recall
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN cargo build --release --locked -p recall-cli
 
 # ...then assemble a runtime that still has Node in it.
 #
-# Worth being explicit about: moving the server to Go did NOT make this
-# image small. The semantic merge shells out to the `claude` CLI, which is
-# a Node package, so the runtime needs Node regardless of what language the
-# server itself is written in. What Go bought here is the build, the tests,
-# and one implementation shared with the client — not image size.
+# Worth being explicit about: rewriting the server did NOT make this image
+# small. The semantic merge shells out to the `claude` CLI, which is a Node
+# package, so the runtime needs Node regardless of what language the server
+# is written in.
 FROM node:22-alpine
 
 RUN apk add --no-cache su-exec
@@ -32,7 +28,7 @@ RUN apk add --no-cache su-exec
 # degrades to last-write-wins, visible at GET /health.
 RUN npm install -g @anthropic-ai/claude-code
 
-COPY --from=build /out/recall /usr/local/bin/recall
+COPY --from=build /src/target/release/recall /usr/local/bin/recall
 COPY server/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 

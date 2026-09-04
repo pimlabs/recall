@@ -89,6 +89,44 @@ implementations still present as a rollback path. **Done** — remaining is
 Phase C of the design: retire `server/index.js` and `hooks/*.sh` once the
 binary has run in production for a while.
 
+## Phase 6 — Rust — done
+
+The owner chose Rust as a first project in the language. `docs/rust-rewrite.md`
+records that as the actual reason, along with an honest accounting: none of
+the five bugs the Go port surfaced would have been prevented by Rust, and
+the one concrete cost is cross-compilation (rusqlite's bundled SQLite is C,
+so the release matrix now builds on native runners rather than a single
+CGO-free build).
+
+- [x] **Cargo workspace, one crate per boundary** — `wire`, `paths`,
+      `hooks`, `server`, `cli`. Not ceremony: it is what let the port run
+      in parallel, since each crate compiles and tests on its own.
+- [x] **Every frozen surface preserved** — SQLite schema (the server opens
+      the existing production database with no migration), HTTP API and
+      JSON down to field order and the `null`-vs-`""` tombstone
+      distinction, timestamp format, env var names, and the CLI surface
+      that projects already have committed in their `.claude/settings.json`.
+- [x] **The Go implementation removed.** It never ran in production, so
+      keeping it would have meant carrying two dead implementations instead
+      of one. Node and the shell hooks stay — Node is what actually serves
+      the owner's memory today, so it is the real rollback path.
+- [x] **Two more bugs found, both of which predated the port.** Go's
+      `json.Marshal` silently replaced invalid UTF-8 with U+FFFD, so a
+      non-UTF-8 memory file was pushed corrupted; Rust's types force that
+      into the open. And an empty memory file was unsyncable in *both*
+      implementations, because `content` was omitted when empty and the
+      Node server rejects a push without it — caught not by either test
+      suite but by `scripts/compat-check.sh` running a real push at the
+      real server. Details in `docs/rust-rewrite.md`.
+- [x] **`scripts/compat-check.sh`** — the mixed-fleet matrix, automated:
+      the new server opening a Node-written database, the old shell hooks
+      against the new server, the new client against the Node server, and
+      byte-exact round trips. 11 checks, all green. Run it before cutting
+      production over, and again after.
+
+**Done when:** one installable Rust binary does everything the Go one did,
+against the same verification matrix. **Done.**
+
 ## Explicitly deferred
 
 - **Multi-user / a hosted "Recall as a service for others" product.** Raised and discussed 2026-08-12, shelved: use Recall personally for a while first to get real signal before committing to this. The technical shape is already mapped out if it comes back — it needs deciding on demand, not feasibility:

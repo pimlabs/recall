@@ -1,9 +1,7 @@
 name: Release
 
 # Tagged releases exist for one reason: npm, Homebrew and install.sh all
-# need a fixed artifact to point at. See docs/go-rewrite-design.md —
-# ROADMAP Phase 4's argument against versioning held for a server deployed
-# straight from main, and stopped holding once binaries get distributed.
+# need a fixed artifact to point at.
 on:
   push:
     tags: ["v*"]
@@ -18,43 +16,70 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            os: macos-13
+            asset: recall_darwin_amd64
+          - target: aarch64-apple-darwin
+            os: macos-14
+            asset: recall_darwin_arm64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            asset: recall_linux_amd64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            asset: recall_linux_arm64
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - uses: actions/setup-go@v5
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          go-version: "1.24"
+          targets: ${{ matrix.target }}
 
-      - name: Test before releasing anything
-        run: go test ./...
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
-      - name: Build every platform
-        env:
-          VERSION: ${{ github.event.inputs.tag || github.ref_name }}
+      # Every target builds on a native runner rather than cross-compiling.
+      # rusqlite's `bundled` feature compiles the SQLite amalgamation from C,
+      # so a cross build would need a C toolchain per target — native runners
+      # (including the arm64 Linux one) avoid that entirely.
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p recall-cli
+
+      - name: Package
+        shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
-          commit="$(git rev-parse --short HEAD)"
-          # CGO stays off: the SQLite driver is pure Go, which is what keeps
-          # this a plain GOOS/GOARCH matrix with no C toolchain per target.
-          for platform in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
-            os="${platform%/*}"; arch="${platform#*/}"
-            out="dist/recall_${os}_${arch}"
-            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build \
-              -trimpath \
-              -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${commit}" \
-              -o "$out" ./cmd/recall
-            tar -czf "${out}.tar.gz" -C dist "$(basename "$out")"
-            rm "$out"
-          done
-          cd dist && sha256sum *.tar.gz > checksums.txt
-          cat checksums.txt
+          cp "target/${{ matrix.target }}/release/recall" "dist/${{ matrix.asset }}"
+          tar -czf "dist/${{ matrix.asset }}.tar.gz" -C dist "${{ matrix.asset }}"
+          rm "dist/${{ matrix.asset }}"
 
-      - name: Publish the release
-        uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/*.tar.gz
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: cd dist && sha256sum *.tar.gz > checksums.txt && cat checksums.txt
+
+      - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: dist/*

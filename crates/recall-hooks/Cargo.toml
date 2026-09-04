@@ -1,0 +1,26 @@
+[package]
+name = "recall-hooks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "What `recall push` and `recall pull` actually do, plus the settings wiring behind `recall init`"
+
+[dependencies]
+recall-wire.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Used for the temp half of every atomic write: an O_EXCL-unique name in the
+# destination directory, removed on drop if the rename never happens.
+tempfile.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+# "net" for TcpListener: the HTTP tests run a real server on port 0 rather
+# than mocking the client, which is how the Go tests caught serialization
+# bugs that a mocked client would have hidden.
+tokio = { workspace = true, features = ["net"] }
+tempfile.workspace = true
