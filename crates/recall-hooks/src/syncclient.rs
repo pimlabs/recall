@@ -112,7 +112,7 @@ mod tests {
         let req = PushRequest {
             project_key: "acme/app".into(),
             file_path: "MEMORY.md".into(),
-            content: "hello".into(),
+            content: Some("hello".into()),
             source_env: "test".into(),
             deleted: false,
         };

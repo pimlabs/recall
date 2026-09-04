@@ -51,7 +51,7 @@ enum Cmd {
     Version,
 }
 
-fn main() -> std::process::ExitCode {
+fn main() {
     let cli = Cli::parse();
 
     // Only `serve` is long-running and genuinely concurrent. The hook
@@ -72,26 +72,26 @@ fn main() -> std::process::ExitCode {
     };
 
     match result {
-        Ok(code) => std::process::ExitCode::from(code),
+        Ok(code) => std::process::exit(code),
         Err(err) => {
             eprintln!("recall: {err:#}");
-            std::process::ExitCode::from(EXIT_CONFIG)
+            std::process::exit(EXIT_CONFIG)
         }
     }
 }
 
-fn block_on_current<F: std::future::Future<Output = anyhow::Result<u8>>>(
+fn block_on_current<F: std::future::Future<Output = anyhow::Result<i32>>>(
     fut: F,
-) -> anyhow::Result<u8> {
+) -> anyhow::Result<i32> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
         .block_on(fut)
 }
 
-fn block_on_multi<F: std::future::Future<Output = anyhow::Result<u8>>>(
+fn block_on_multi<F: std::future::Future<Output = anyhow::Result<i32>>>(
     fut: F,
-) -> anyhow::Result<u8> {
+) -> anyhow::Result<i32> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
@@ -138,7 +138,7 @@ fn hook_env() -> anyhow::Result<hooks::Env> {
     })
 }
 
-fn cmd_init(path: Option<&Path>) -> anyhow::Result<u8> {
+fn cmd_init(path: Option<&Path>) -> anyhow::Result<i32> {
     let root = match path {
         Some(p) => p.to_path_buf(),
         None => match git(&["rev-parse", "--show-toplevel"]) {
@@ -211,7 +211,7 @@ struct StatusReport {
     last_synced_at: Option<String>,
 }
 
-async fn cmd_status(as_json: bool) -> anyhow::Result<u8> {
+async fn cmd_status(as_json: bool) -> anyhow::Result<i32> {
     let cfg = config::Client::from_process_env();
     let root = project_root();
     let root_str = root.to_string_lossy().to_string();
@@ -281,11 +281,19 @@ async fn cmd_status(as_json: bool) -> anyhow::Result<u8> {
     );
     println!(
         "RECALL_URL   : {}",
-        if cfg.url.is_empty() { "(unset)" } else { &cfg.url }
+        if cfg.url.is_empty() {
+            "(unset)"
+        } else {
+            &cfg.url
+        }
     );
     println!(
         "RECALL_TOKEN : {}",
-        if cfg.token.is_empty() { "(unset)" } else { "set" }
+        if cfg.token.is_empty() {
+            "(unset)"
+        } else {
+            "set"
+        }
     );
     if rep.url_set {
         if rep.server_ok {
@@ -312,7 +320,7 @@ async fn cmd_status(as_json: bool) -> anyhow::Result<u8> {
     Ok(EXIT_OK)
 }
 
-async fn cmd_push() -> anyhow::Result<u8> {
+async fn cmd_push() -> anyhow::Result<i32> {
     let payload = hookio::parse_post_tool_use(io::stdin().lock());
     if payload.tool_input.file_path.is_empty() {
         return Ok(EXIT_OK);
@@ -337,7 +345,7 @@ async fn cmd_push() -> anyhow::Result<u8> {
     }
 }
 
-async fn cmd_pull() -> anyhow::Result<u8> {
+async fn cmd_pull() -> anyhow::Result<i32> {
     // A pull must never be the reason a session can't start: an unconfigured
     // or unreachable server warns on stderr and exits 0, leaving whatever is
     // already on disk alone.
@@ -360,8 +368,12 @@ async fn cmd_pull() -> anyhow::Result<u8> {
     }
 }
 
-async fn cmd_serve() -> anyhow::Result<u8> {
-    let cfg = config::Server::from_process_env()?;
-    recall_server::serve(cfg).await?;
+async fn cmd_serve() -> anyhow::Result<i32> {
+    let cfg = recall_server::Config::from_env()?;
+    // Opening the store before constructing the server means a bad database
+    // path fails immediately with a clear error, rather than after the port
+    // is already bound.
+    let store = std::sync::Arc::new(recall_server::Store::open(&cfg.db_path)?);
+    recall_server::Server::new(cfg, store).serve().await?;
     Ok(EXIT_OK)
 }

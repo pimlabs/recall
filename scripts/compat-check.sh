@@ -35,6 +35,11 @@ ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass + 1)); }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail + 1)); }
 check() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1"; printf '        got:  %q\n        want: %q\n' "$2" "$3"; fi; }
 
+# Compares raw bytes. Command substitution strips trailing newlines, so a
+# plain check() cannot tell "ends with a newline" from "doesn't" — which is
+# precisely the property most of this script exists to verify.
+check_bytes() { if [ "$(printf '%s' "$2" | base64 -w0)" = "$(printf '%s' "$3" | base64 -w0)" ]; then ok "$1"; else bad "$1"; printf '        got:  %s\n        want: %s\n' "$(printf '%s' "$2" | od -c | head -2)" "$(printf '%s' "$3" | od -c | head -2)"; fi; }
+
 [ -x "$BIN" ] || { echo "no binary at $BIN — build it first (cargo build -p recall-cli)"; exit 1; }
 BIN="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
 
@@ -80,8 +85,11 @@ kill -9 ${PIDS# } 2>/dev/null || true; PIDS=""; sleep 1
 
 start_rust "$SHARED"
 body="$(pull_from "$RUST_PORT" "acme/app")"
-check "content survives the handover" "$(jq -r '.files[]|select(.file_path=="MEMORY.md")|.content' <<<"$body")" "written by NODE
-"
+# jq -j, not -r: raw mode appends a newline of its own, which would mask a
+# missing one in the value being checked.
+check_bytes "content survives the handover byte for byte" \
+  "$(jq -j '.files[]|select(.file_path=="MEMORY.md")|.content' <<<"$body" | base64 -w0)" \
+  "$(printf 'written by NODE\n' | base64 -w0)"
 check "source_env survives" "$(jq -r '.files[]|select(.file_path=="MEMORY.md")|.source_env' <<<"$body")" "node-era"
 check "tombstone survives" "$(jq -r '.files[]|select(.file_path=="gone.md")|.deleted' <<<"$body")" "true"
 check "tombstoned content still withheld" "$(jq -r '.files[]|select(.file_path=="gone.md")|.content' <<<"$body")" "null"

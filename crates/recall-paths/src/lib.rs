@@ -20,5 +20,5 @@ pub mod config;
 pub mod project;
 
 pub use claude::{slug, Env};
-pub use config::{Client, ConfigError, Server};
+pub use config::{Client, ConfigError};
 pub use project::{key, key_from_remote, local_key};

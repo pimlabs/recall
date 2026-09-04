@@ -402,7 +402,14 @@ async fn handle_push(State(state): State<Arc<AppState>>, body: Bytes) -> Respons
         Err(e) => return internal(e),
     };
 
-    let mut content = req.content.clone();
+    // A non-delete push with no content field at all is malformed — the
+    // Node server answers 400 for it, and the wording below matches so a
+    // client sees the same message from either implementation.
+    let Some(incoming) = req.content.clone() else {
+        return error(StatusCode::BAD_REQUEST, REQUIRED_FIELDS_MSG);
+    };
+
+    let mut content = incoming.clone();
     let mut merged = false;
 
     // Merge only when there is genuinely something to reconcile. A
@@ -410,8 +417,8 @@ async fn handle_push(State(state): State<Arc<AppState>>, body: Bytes) -> Respons
     // intent to discard the old content), or an unchanged re-push all skip
     // straight to a write — cheaper, and it keeps a merge from ever
     // second-guessing content that didn't actually conflict.
-    if let Some(stored) = should_merge(&state, existing.as_ref(), &req.content) {
-        match state.merger.merge(stored, &req.content).await {
+    if let Some(stored) = should_merge(&state, existing.as_ref(), &incoming) {
+        match state.merger.merge(stored, &incoming).await {
             Ok(out) => {
                 content = out;
                 merged = true;

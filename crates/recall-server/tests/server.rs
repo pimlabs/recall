@@ -76,7 +76,7 @@ impl Harness {
                 &PushRequest {
                     project_key: project_key.into(),
                     file_path: file_path.into(),
-                    content: content.into(),
+                    content: Some(content.into()),
                     source_env: source_env.into(),
                     deleted: false,
                 },
@@ -165,7 +165,7 @@ async fn rejects_traversal_and_absolute_paths() {
                 &PushRequest {
                     project_key: "acme/app".into(),
                     file_path: bad.into(),
-                    content: "x".into(),
+                    content: Some("x".into()),
                     ..Default::default()
                 },
             )
@@ -241,7 +241,7 @@ async fn merge_failure_falls_back_to_last_write_wins() {
             &PushRequest {
                 project_key: "acme/app".into(),
                 file_path: "MEMORY.md".into(),
-                content: "version B".into(),
+                content: Some("version B".into()),
                 ..Default::default()
             },
         )
@@ -319,7 +319,7 @@ async fn a_real_conflict_is_merged_end_to_end() {
             &PushRequest {
                 project_key: "acme/app".into(),
                 file_path: "MEMORY.md".into(),
-                content: "B".into(),
+                content: Some("B".into()),
                 ..Default::default()
             },
         )
@@ -339,7 +339,7 @@ async fn a_real_conflict_is_merged_end_to_end() {
             &PushRequest {
                 project_key: "acme/app".into(),
                 file_path: "MEMORY.md".into(),
-                content: "A and B".into(),
+                content: Some("A and B".into()),
                 ..Default::default()
             },
         )

@@ -18,15 +18,25 @@ use serde::{Deserialize, Serialize};
 
 /// Body of `POST /sync`.
 ///
-/// `content` is skipped when empty so a delete serializes without it, while
-/// `deleted` carries that intent explicitly — an empty file is a legitimate
-/// push and must never be mistaken for a tombstone.
+/// `content` is an `Option`, not a `String`, and that is load-bearing: it
+/// has to distinguish "this file is empty" (`Some("")`, serialized as
+/// `"content":""`) from "this is a delete, there is no content"
+/// (`None`, omitted entirely).
+///
+/// Skipping on emptiness instead — the obvious-looking
+/// `skip_serializing_if = "String::is_empty"` — omits the field for an
+/// empty *file* too, and the deployed Node server rejects that push with a
+/// 400, since `typeof undefined !== "string"`. Both the Go and the first
+/// Rust implementation had exactly that bug, and neither test suite caught
+/// it: every test that exercised an empty file used a stand-in server that
+/// accepted anything. It surfaced only when the compatibility script ran a
+/// real empty-file push against the real Node server.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PushRequest {
     pub project_key: String,
     pub file_path: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source_env: String,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -185,10 +195,7 @@ pub fn validate_file_path(path: &str) -> Result<(), ValidationError> {
     if path.len() >= 2 && path.as_bytes()[1] == b':' {
         return Err(ValidationError::FilePathAbsolute);
     }
-    if path
-        .split(['/', '\\'])
-        .any(|segment| segment == "..")
-    {
+    if path.split(['/', '\\']).any(|segment| segment == "..") {
         return Err(ValidationError::FilePathTraversal);
     }
     Ok(())
@@ -234,8 +241,14 @@ mod tests {
             ("C:/Windows/system32", ValidationError::FilePathAbsolute),
             (r"\etc\passwd", ValidationError::FilePathAbsolute),
             ("../outside.md", ValidationError::FilePathTraversal),
-            ("topics/../../outside.md", ValidationError::FilePathTraversal),
-            (r"topics\..\..\outside.md", ValidationError::FilePathTraversal),
+            (
+                "topics/../../outside.md",
+                ValidationError::FilePathTraversal,
+            ),
+            (
+                r"topics\..\..\outside.md",
+                ValidationError::FilePathTraversal,
+            ),
             ("..", ValidationError::FilePathTraversal),
         ] {
             assert_eq!(validate_file_path(path), Err(want), "for {path:?}");
@@ -247,7 +260,7 @@ mod tests {
         let valid = PushRequest {
             project_key: "acme/app".into(),
             file_path: "MEMORY.md".into(),
-            content: "hi".into(),
+            content: Some("hi".into()),
             ..Default::default()
         };
         assert!(valid.validate().is_ok());
@@ -275,7 +288,7 @@ mod tests {
         let push = PushRequest {
             project_key: "acme/app".into(),
             file_path: "MEMORY.md".into(),
-            content: "hello".into(),
+            content: Some("hello".into()),
             source_env: "laptop".into(),
             deleted: false,
         };
@@ -295,6 +308,34 @@ mod tests {
             serde_json::to_string(&delete).unwrap(),
             r#"{"project_key":"acme/app","file_path":"gone.md","source_env":"laptop","deleted":true}"#
         );
+    }
+
+    /// The bug the compatibility script caught: an empty memory file must
+    /// still send `"content":""`. Omitting it makes the Node server answer
+    /// 400, so a project containing one empty note could never sync.
+    #[test]
+    fn an_empty_file_still_sends_its_content_field() {
+        let push = PushRequest {
+            project_key: "acme/app".into(),
+            file_path: "empty.md".into(),
+            content: Some(String::new()),
+            source_env: "laptop".into(),
+            deleted: false,
+        };
+        let json = serde_json::to_string(&push).unwrap();
+        assert!(
+            json.contains(r#""content":"""#),
+            "empty file must serialize its content field, got {json}"
+        );
+
+        // A delete still omits it, which is what keeps the two apart.
+        let delete = PushRequest {
+            project_key: "acme/app".into(),
+            file_path: "gone.md".into(),
+            deleted: true,
+            ..Default::default()
+        };
+        assert!(!serde_json::to_string(&delete).unwrap().contains("content"));
     }
 
     #[test]
@@ -332,7 +373,9 @@ mod tests {
             content: None,
             ..Default::default()
         };
-        assert!(serde_json::to_string(&tombstone).unwrap().contains(r#""content":null"#));
+        assert!(serde_json::to_string(&tombstone)
+            .unwrap()
+            .contains(r#""content":null"#));
     }
 
     /// Responses from the deployed Node server must deserialize as-is.
@@ -344,7 +387,10 @@ mod tests {
         ]}"#;
         let parsed: SyncResponse = serde_json::from_str(body).unwrap();
         assert_eq!(parsed.files.len(), 2);
-        assert_eq!(parsed.files[0].content.as_deref(), Some("written by the NODE server\n"));
+        assert_eq!(
+            parsed.files[0].content.as_deref(),
+            Some("written by the NODE server\n")
+        );
         assert!(parsed.files[1].deleted);
         assert_eq!(parsed.files[1].content, None);
     }

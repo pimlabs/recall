@@ -135,7 +135,10 @@ pub async fn push(env: &Env, triggered_path: &Path) -> Result<PushResult, Error>
         let req = PushRequest {
             project_key: env.project_key.clone(),
             file_path: rel.clone(),
-            content,
+            // Some, even when the file is empty: None means "this is a
+            // delete", and the server rejects a non-delete push with no
+            // content field at all.
+            content: Some(content),
             source_env: env.source_env.clone(),
             deleted: false,
         };
@@ -414,7 +417,8 @@ mod tests {
             let pushes = f.server.pushes();
             assert_eq!(pushes.len(), 1, "{name}: expected exactly one push");
             assert_eq!(
-                pushes[0].content, content,
+                pushes[0].content.as_deref(),
+                Some(content),
                 "{name}: content round trip altered the bytes"
             );
             assert!(!pushes[0].deleted, "{name}: a content push is not a delete");
@@ -432,7 +436,7 @@ mod tests {
         let pushes = f.server.pushes();
         assert_eq!(pushes.len(), 1);
         assert!(!pushes[0].deleted);
-        assert_eq!(pushes[0].content, "");
+        assert_eq!(pushes[0].content.as_deref(), Some(""));
     }
 
     /// A file Claude names on the fly is pushed exactly like `MEMORY.md` —
