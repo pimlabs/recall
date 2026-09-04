@@ -89,6 +89,31 @@ implementations still present as a rollback path. **Done** — remaining is
 Phase C of the design: retire `server/index.js` and `hooks/*.sh` once the
 binary has run in production for a while.
 
+## Phase 6 — Rust — done
+
+The owner chose Rust as a first project in the language. `docs/rust-rewrite.md`
+records that as the actual reason, along with an honest accounting: none of
+the five bugs the Go port surfaced would have been prevented by Rust, and
+the one concrete cost is cross-compilation (rusqlite's bundled SQLite is C,
+so the release matrix now builds on native runners rather than a single
+CGO-free build).
+
+- [x] **Cargo workspace, one crate per boundary** — `wire`, `paths`,
+      `hooks`, `server`, `cli`. Not ceremony: it is what let the port run
+      in parallel, since each crate compiles and tests on its own.
+- [x] **Every frozen surface preserved** — SQLite schema (the server opens
+      the existing production database with no migration), HTTP API and
+      JSON down to field order and the `null`-vs-`""` tombstone
+      distinction, timestamp format, env var names, and the CLI surface
+      that projects already have committed in their `.claude/settings.json`.
+- [x] **The Go implementation removed.** It never ran in production, so
+      keeping it would have meant carrying two dead implementations instead
+      of one. Node and the shell hooks stay — Node is what actually serves
+      the owner's memory today, so it is the real rollback path.
+
+**Done when:** one installable Rust binary does everything the Go one did,
+against the same verification matrix. **Done.**
+
 ## Explicitly deferred
 
 - **Multi-user / a hosted "Recall as a service for others" product.** Raised and discussed 2026-08-12, shelved: use Recall personally for a while first to get real signal before committing to this. The technical shape is already mapped out if it comes back — it needs deciding on demand, not feasibility:
