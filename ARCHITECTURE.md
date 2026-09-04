@@ -78,7 +78,8 @@ Both directions are implemented as hooks in the **project's own `.claude/setting
       {
         "matcher": "Edit|Write",
         "hooks": [
-          { "type": "command", "command": "recall push" }
+          { "type": "command",
+            "command": "if command -v recall >/dev/null 2>&1; then recall push; fi" }
         ]
       }
     ]
@@ -88,6 +89,15 @@ Both directions are implemented as hooks in the **project's own `.claude/setting
 
 The `matcher` field only matches on tool name, not path — there's no built-in path glob. `recall push` itself checks `tool_input.file_path` from the JSON payload on stdin against the project's memory directory and exits silently if it's not a memory file — *before* it reads any configuration, so a machine that has cloned a wired project but isn't set up yet doesn't error on every unrelated edit. **Confirmed live** (not just by reading the source): this catches **dynamically-created topic files** — a real run with this exact hook fired identically for a pre-known `MEMORY.md` write and a `debugging.md` file Claude named on the fly in the same turn, because the check happens per-call against the actual path rather than via a filename registered in advance.
 
+**Why the command is guarded rather than a bare `recall push`:** this file is
+committed, so it travels to every machine that clones the project —
+including the ephemeral cloud session that is the whole reason it is
+committed rather than wired user-side. On a machine that has not installed
+Recall, a bare command exits 127 on every Edit and Write in the session. The
+bash implementation this replaced was self-contained in the repository and so
+worked in a fresh clone with nothing installed; a binary cannot be, so it
+earns the property back with the guard. Not installed is a silent no-op.
+
 ### Pull — `SessionStart`, `type: "command"`
 
 ```json
@@ -96,7 +106,8 @@ The `matcher` field only matches on tool name, not path — there's no built-in 
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "recall pull" }
+          { "type": "command",
+            "command": "if command -v recall >/dev/null 2>&1; then recall pull; fi" }
         ]
       }
     ]

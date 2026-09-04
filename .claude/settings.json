@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/hooks/recall-push"
+            "command": "if command -v recall >/dev/null 2>&1; then recall push; fi"
           }
         ]
       }
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/hooks/recall-pull"
+            "command": "if command -v recall >/dev/null 2>&1; then recall pull; fi"
           }
         ]
       }

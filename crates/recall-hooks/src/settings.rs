@@ -25,11 +25,31 @@ use crate::atomic;
 /// no path matching, which is precisely why this catches topic files Claude
 /// names on the fly. See `docs/phase-0-findings.md` §4.
 pub const PUSH_MATCHER: &str = "Edit|Write";
-/// Resolved through `PATH`, so a project commits only this reference and
-/// never a copy of the implementation.
-pub const PUSH_COMMAND: &str = "recall push";
+/// The command `recall init` writes for the push hook.
+///
+/// Guarded rather than a bare `recall push`, and the guard is load-bearing.
+/// This string is *committed*, and it travels to every machine that clones
+/// the project — including the ephemeral cloud session that is the whole
+/// reason the project commits it rather than wiring hooks user-side. On a
+/// machine without Recall installed, a bare command exits 127 on every Edit
+/// and Write in the session.
+///
+/// The bash implementation this replaced was self-contained in the
+/// repository, so a fresh clone worked with nothing installed. A binary
+/// cannot be, so it earns the same property back here: not installed is a
+/// silent no-op, and only a Recall that *is* present gets to report
+/// anything.
+pub const PUSH_COMMAND: &str = "if command -v recall >/dev/null 2>&1; then recall push; fi";
 /// Likewise for the session-start pull.
-pub const PULL_COMMAND: &str = "recall pull";
+pub const PULL_COMMAND: &str = "if command -v recall >/dev/null 2>&1; then recall pull; fi";
+
+/// What makes a hook command Recall's, for detection.
+///
+/// Matched as a substring rather than comparing whole commands, so a project
+/// wired before the guard was added still reads as wired — and does not get
+/// a second, duplicate hook appended the next time `recall init` runs.
+const PUSH_MARKER: &str = "recall push";
+const PULL_MARKER: &str = "recall pull";
 
 const POST_TOOL_USE: &str = "PostToolUse";
 const SESSION_START: &str = "SessionStart";
@@ -68,8 +88,14 @@ pub fn wire(src: &[u8]) -> Result<(Vec<u8>, bool), Error> {
         return Err(Error::InvalidJson);
     }
 
-    let push_added = add_matcher_hook(&mut doc, POST_TOOL_USE, PUSH_MATCHER, PUSH_COMMAND);
-    let pull_added = add_session_start_hook(&mut doc, PULL_COMMAND);
+    let push_added = add_matcher_hook(
+        &mut doc,
+        POST_TOOL_USE,
+        PUSH_MATCHER,
+        PUSH_COMMAND,
+        PUSH_MARKER,
+    );
+    let pull_added = add_session_start_hook(&mut doc, PULL_COMMAND, PULL_MARKER);
 
     if !push_added && !pull_added {
         // Byte-identical, not merely equivalent: a no-op run must not
@@ -91,7 +117,7 @@ pub fn is_wired(src: &[u8]) -> bool {
     event_entries(&doc, POST_TOOL_USE).is_some_and(|entries| {
         entries
             .iter()
-            .any(|entry| entry_has_command(entry, PUSH_COMMAND))
+            .any(|entry| entry_has_command(entry, PUSH_MARKER))
     })
 }
 
@@ -117,7 +143,13 @@ pub fn wire_file(path: &Path) -> Result<bool, Error> {
 
 /// Handles the `PostToolUse` shape, where entries are keyed by a matcher and
 /// each holds its own list of hooks.
-fn add_matcher_hook(doc: &mut Value, event: &str, matcher: &str, command: &str) -> bool {
+fn add_matcher_hook(
+    doc: &mut Value,
+    event: &str,
+    matcher: &str,
+    command: &str,
+    marker: &str,
+) -> bool {
     let entries = event_entries_mut(doc, event);
 
     for entry in entries.iter_mut() {
@@ -136,7 +168,7 @@ fn add_matcher_hook(doc: &mut Value, event: &str, matcher: &str, command: &str) 
             *list = Value::Array(Vec::new());
         }
         let list = list.as_array_mut().expect("just ensured it is an array");
-        if list.iter().any(|h| has_command(h, command)) {
+        if list.iter().any(|h| has_command(h, marker)) {
             return false;
         }
         list.push(hook_entry(command));
@@ -149,9 +181,9 @@ fn add_matcher_hook(doc: &mut Value, event: &str, matcher: &str, command: &str) 
 
 /// Handles the `SessionStart` shape, which has no matcher — entries are just
 /// groups of hooks.
-fn add_session_start_hook(doc: &mut Value, command: &str) -> bool {
+fn add_session_start_hook(doc: &mut Value, command: &str, marker: &str) -> bool {
     let entries = event_entries_mut(doc, SESSION_START);
-    if entries.iter().any(|e| entry_has_command(e, command)) {
+    if entries.iter().any(|e| entry_has_command(e, marker)) {
         return false;
     }
     entries.push(json!({ "hooks": [hook_entry(command)] }));
@@ -162,8 +194,10 @@ fn hook_entry(command: &str) -> Value {
     json!({ "type": "command", "command": command })
 }
 
-fn has_command(hook: &Value, command: &str) -> bool {
-    hook.get("command").and_then(Value::as_str) == Some(command)
+fn has_command(hook: &Value, marker: &str) -> bool {
+    hook.get("command")
+        .and_then(Value::as_str)
+        .is_some_and(|cmd| cmd.contains(marker))
 }
 
 fn entry_has_command(entry: &Value, command: &str) -> bool {
@@ -202,6 +236,49 @@ fn event_entries_mut<'a>(doc: &'a mut Value, event: &str) -> &'a mut Vec<Value> 
 
 #[cfg(test)]
 mod tests {
+    /// The committed command runs on machines that have never heard of
+    /// Recall. A bare `recall push` there is 127 on every Edit and Write.
+    #[test]
+    fn the_wired_command_is_a_no_op_where_recall_is_not_installed() {
+        use std::process::Command;
+
+        for command in [PUSH_COMMAND, PULL_COMMAND] {
+            // /bin/sh by absolute path, because the whole point is to run
+            // it with a PATH on which nothing — including `recall` — can be
+            // found.
+            let status = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(command)
+                .env("PATH", "/nonexistent")
+                .status()
+                .expect("the hook command should at least run");
+            assert!(
+                status.success(),
+                "{command:?} exited {status:?} with recall absent — that is a \
+                 hook error on every edit in the session"
+            );
+        }
+    }
+
+    /// A project wired before the guard existed must still read as wired, or
+    /// `recall status` lies and `recall init` appends a duplicate.
+    #[test]
+    fn a_project_wired_with_the_old_bare_command_is_still_recognised() {
+        let old = br#"{"hooks":{
+            "PostToolUse":[{"matcher":"Edit|Write",
+                "hooks":[{"type":"command","command":"recall push"}]}],
+            "SessionStart":[
+                {"hooks":[{"type":"command","command":"recall pull"}]}]}}"#;
+        assert!(is_wired(old));
+
+        let (out, changed) = wire(old).unwrap();
+        assert!(!changed, "an already-wired project was rewritten");
+
+        let text = String::from_utf8_lossy(&out);
+        assert_eq!(text.matches("recall push").count(), 1, "push duplicated");
+        assert_eq!(text.matches("recall pull").count(), 1, "pull duplicated");
+    }
+
     use super::*;
 
     /// Counts every `"command": <cmd>` anywhere in the document, so a
