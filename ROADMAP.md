@@ -124,6 +124,18 @@ CGO-free build).
       byte-exact round trips. 11 checks, all green. Run it before cutting
       production over, and again after.
 
+- [x] **Edge-case hardening: 113 tests → 159, and two more bugs.** A
+      deliberate adversarial pass over merge failure, content fidelity
+      (unicode, NUL bytes, oversized bodies), awkward project keys and file
+      paths, tombstones, auth header variants, concurrency, symlinks,
+      permissions, and the CLI's exit-code contract. It found that an
+      **empty merge result silently wiped memory** — the server stored `""`
+      and reported `merged: true` — and that **`recall push` demanded
+      configuration before checking whether the edited file was even a
+      memory file**, so an unconfigured machine with a wired project errored
+      on every unrelated edit. Both fixed; details in
+      `docs/rust-rewrite.md`.
+
 **Done when:** one installable Rust binary does everything the Go one did,
 against the same verification matrix. **Done.**
 

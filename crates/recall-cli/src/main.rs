@@ -325,8 +325,21 @@ async fn cmd_push() -> anyhow::Result<i32> {
     if payload.tool_input.file_path.is_empty() {
         return Ok(EXIT_OK);
     }
+    let triggered = PathBuf::from(&payload.tool_input.file_path);
+
+    // Decide whether this is even our business before asking for
+    // configuration. This hook fires on every Edit and Write in the session,
+    // and a machine that has cloned a wired project without being configured
+    // yet — the exact case Recall exists for — would otherwise report a
+    // missing token on every unrelated file the user touches.
+    let root = project_root();
+    let memory_dir = ClaudeEnv::from_process_env().memory_dir(&root.to_string_lossy());
+    if !hooks::is_memory_file(&memory_dir, &triggered) {
+        return Ok(EXIT_OK);
+    }
+
     let env = hook_env()?;
-    match hooks::push(&env, Path::new(&payload.tool_input.file_path)).await {
+    match hooks::push(&env, &triggered).await {
         Ok(res) => {
             if res.pushed.is_some() || !res.deleted.is_empty() {
                 eprintln!(

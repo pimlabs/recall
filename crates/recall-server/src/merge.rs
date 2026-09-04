@@ -54,6 +54,8 @@ pub enum Error {
     NonJson(String),
     #[error("claude merge failed: {0}")]
     Rejected(String),
+    #[error("claude returned an empty merge of two non-empty versions")]
+    EmptyResult,
 }
 
 /// Runs merges through a `claude` binary.
@@ -200,6 +202,21 @@ impl Merger {
             return Err(Error::Rejected(
                 truncate(&parsed.result, DETAIL_LIMIT).to_string(),
             ));
+        }
+
+        // A merge that comes back empty while both inputs had content is a
+        // malfunction, not a result — the model refused, or emitted nothing,
+        // or the envelope carried `is_error: false` over an empty body.
+        //
+        // Storing it would be the worst outcome this server can produce:
+        // both machines' notes replaced by "", reported as `merged: true`,
+        // and then written out as an empty file everywhere on the next pull.
+        // Every other failure here degrades to last-write-wins, and so does
+        // this one.
+        if parsed.result.trim().is_empty()
+            && !(old_content.trim().is_empty() && new_content.trim().is_empty())
+        {
+            return Err(Error::EmptyResult);
         }
         Ok(parsed.result)
     }
