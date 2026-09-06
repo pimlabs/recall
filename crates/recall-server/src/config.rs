@@ -33,6 +33,7 @@ pub enum ConfigError {
 /// | [`backup_keep`] | `RECALL_BACKUP_KEEP` | 7 |
 /// | [`rate_limit_window`] | `RECALL_RATE_LIMIT_WINDOW_MS` | 60s |
 /// | [`rate_limit_max`] | `RECALL_RATE_LIMIT_MAX` | 60 |
+/// | [`trusted_ip_header`] | `RECALL_TRUSTED_IP_HEADER` | `cf-connecting-ip` |
 /// | [`merge_enabled`] | `RECALL_MERGE_ENABLED` | on |
 /// | [`merge_timeout`] | `RECALL_MERGE_TIMEOUT_MS` | 45s |
 /// | [`claude_bin`] | `RECALL_CLAUDE_BIN` | `claude` |
@@ -47,6 +48,7 @@ pub enum ConfigError {
 /// [`backup_keep`]: Config::backup_keep
 /// [`rate_limit_window`]: Config::rate_limit_window
 /// [`rate_limit_max`]: Config::rate_limit_max
+/// [`trusted_ip_header`]: Config::trusted_ip_header
 /// [`merge_enabled`]: Config::merge_enabled
 /// [`merge_timeout`]: Config::merge_timeout
 /// [`claude_bin`]: Config::claude_bin
@@ -74,6 +76,30 @@ pub struct Config {
     pub rate_limit_window: Duration,
     /// How many requests one client may make in that window.
     pub rate_limit_max: u32,
+    /// The one request header whose value is taken as the client's address,
+    /// or empty to trust none and use the socket's peer address.
+    ///
+    /// Rate limiting keys off this, and rate limiting runs *before* auth
+    /// precisely so a flood of invalid tokens is limited too — so a client
+    /// that can choose its own value here can rotate it and get unlimited
+    /// attempts at guessing the token.
+    ///
+    /// That makes this a statement about the deployment, not a preference:
+    /// it names the header the *ingress* sets, and it is only safe when
+    /// nothing can reach this server except through that ingress. Exactly
+    /// one header is read, so a value the client supplies under any other
+    /// name is ignored.
+    ///
+    /// | Ingress | Set this to |
+    /// |---|---|
+    /// | Cloudflare Tunnel | `cf-connecting-ip` (the default) |
+    /// | Traefik, nginx, Caddy | `x-real-ip` |
+    /// | None — reached directly | empty |
+    ///
+    /// Deliberately *not* `x-forwarded-for`: a proxy appends to it, so the
+    /// first entry is whatever the client sent. Reading it as one value is
+    /// the classic way to make this setting useless.
+    pub trusted_ip_header: String,
 
     /// Whether to attempt semantic merge at all. Off means last-write-wins.
     pub merge_enabled: bool,
@@ -98,6 +124,7 @@ impl Default for Config {
             backup_keep: 7,
             rate_limit_window: Duration::from_secs(60),
             rate_limit_max: 60,
+            trusted_ip_header: "cf-connecting-ip".to_string(),
             merge_enabled: true,
             merge_timeout: Duration::from_secs(45),
             claude_bin: "claude".to_string(),
@@ -144,6 +171,11 @@ impl Config {
             backup_keep: num("RECALL_BACKUP_KEEP", 7) as usize,
             rate_limit_window: Duration::from_millis(num("RECALL_RATE_LIMIT_WINDOW_MS", 60_000)),
             rate_limit_max: num("RECALL_RATE_LIMIT_MAX", 60) as u32,
+            // Lowercased because HeaderMap lookups are case-insensitive but
+            // this is compared as a plain string.
+            trusted_ip_header: lookup("RECALL_TRUSTED_IP_HEADER")
+                .map(|v| v.trim().to_ascii_lowercase())
+                .unwrap_or_else(|| "cf-connecting-ip".to_string()),
             // Opt-out, not opt-in: only the literal "false" disables it, so a
             // typo leaves merge on rather than silently off.
             merge_enabled: lookup("RECALL_MERGE_ENABLED").as_deref() != Some("false"),

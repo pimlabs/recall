@@ -40,6 +40,19 @@ cargo build --release -p recall-sync
 
 27 checks against a real server on a real socket: every status code, error string, field order and `null`-versus-`""` claim the document makes. Change a handler without changing the doc and this fails, which is the point.
 
+### The rate-limit bucket is a security boundary
+
+```sh
+./scripts/trusted-ip-check.sh target/release/recall
+```
+
+Nine checks on a real socket. Rate limiting runs *before* auth so a flood of
+invalid tokens is limited too — which means a client that can choose its own
+bucket has unlimited attempts at guessing the token. `RECALL_TRUSTED_IP_HEADER`
+names the one header the ingress sets; everything else a client might send is
+ignored, and the compose files keep the origin unreachable except through that
+ingress. Change any of those three and this fails.
+
 ### Before touching anything frozen
 
 ```sh

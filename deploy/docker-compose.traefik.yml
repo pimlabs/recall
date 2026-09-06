@@ -1,0 +1,96 @@
+# Recall behind an existing Traefik, on a VPS that already routes other
+# services the same way.
+#
+#   cd deploy
+#   cp .env.example .env          # fill in RECALL_TOKEN
+#   docker compose -f docker-compose.traefik.yml up -d --build
+#
+# The alternative is docker-compose.yml, which brings its own ingress
+# (Cloudflare Tunnel) and needs nothing on the host. Use that one if this
+# machine is not already running Traefik. Use this one if it is — a single
+# ingress you already understand beats a second one you have to remember.
+#
+# ---------------------------------------------------------------------------
+# THREE THINGS TO CHECK BEFORE THE FIRST RUN
+#
+#   1. `traefik` below must be the network your Traefik actually attaches to.
+#      Find it with:  docker inspect traefik -f '{{json .NetworkSettings.Networks}}'
+#   2. `websecure` must be one of your Traefik entrypoints, and `letsencrypt`
+#      one of its certificate resolvers. Both are conventional defaults and
+#      both are frequently something else.
+#   3. RECALL_URL on every client must match the Host rule below.
+# ---------------------------------------------------------------------------
+
+name: recall
+
+services:
+  recall-server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+    container_name: recall-server
+    restart: unless-stopped
+    environment:
+      RECALL_TOKEN: ${RECALL_TOKEN:?set RECALL_TOKEN in deploy/.env}
+      RECALL_PORT: "8787"
+      RECALL_DB_PATH: /data/recall.db
+      RECALL_BACKUP_DIR: /backups
+      RECALL_BACKUP_INTERVAL_HOURS: "24"
+      RECALL_BACKUP_KEEP: "7"
+      # Not cosmetic. Rate limiting keys off this header, and rate limiting
+      # runs before auth so a flood of invalid tokens is limited too. Traefik
+      # sets x-real-ip to the real client address; leave this as the tunnel's
+      # cf-connecting-ip and a client can send that header itself, rotate it,
+      # and get unlimited attempts at guessing the token.
+      #
+      # Exactly one header is read, so every other one a client might send is
+      # ignored. This holds only while nothing can reach the container except
+      # through Traefik — which is what the missing `ports:` below is for.
+      RECALL_TRUSTED_IP_HEADER: x-real-ip
+    volumes:
+      - recall-data:/data
+      - ./backups:/backups
+    # `expose`, never `ports`. Publishing 8787 to the host would let anyone
+    # who can reach the VPS bypass Traefik, send their own x-real-ip, and
+    # make the setting above meaningless.
+    expose:
+      - "8787"
+    networks:
+      - traefik
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: traefik
+      # Adjust the host to yours.
+      traefik.http.routers.recall.rule: Host(`recall.example.com`)
+      traefik.http.routers.recall.entrypoints: websecure
+      traefik.http.routers.recall.tls: "true"
+      traefik.http.routers.recall.tls.certresolver: letsencrypt
+      traefik.http.services.recall.loadbalancer.server.port: "8787"
+
+  # Read-only database browser, for the owner's own use. It has no auth of
+  # its own, so it is deliberately *not* on the Traefik network and is bound
+  # to loopback: reachable only over an SSH tunnel to this machine.
+  #
+  #   ssh -L 8081:127.0.0.1:8081 user@vps   # then http://localhost:8081
+  sqlite-web:
+    image: coleifer/sqlite-web
+    container_name: recall-sqlite-web
+    restart: unless-stopped
+    command: sqlite_web -H 0.0.0.0 -p 8080 -x -r /data/recall.db
+    volumes:
+      - recall-data:/data:ro
+    ports:
+      - "127.0.0.1:8081:8080"
+    networks:
+      - db-tools
+
+volumes:
+  recall-data:
+
+networks:
+  # Created and owned by Traefik, not by this file.
+  traefik:
+    external: true
+  db-tools:
