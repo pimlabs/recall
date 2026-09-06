@@ -43,11 +43,21 @@ jobs:
           cargo build --release -p recall-sync --locked
           ./scripts/api-doc-check.sh target/release/recall
 
+      # Rate limiting runs before auth, so the bucket key is a security
+      # boundary: a client that can pick its own gets unlimited attempts at
+      # the token. Driven on a real socket, because the unit tests only cover
+      # client_ip in isolation.
+      - name: Rate-limit bucket cannot be chosen by the client
+        run: |
+          cargo build --release -p recall-sync --locked
+          ./scripts/trusted-ip-check.sh target/release/recall
+
       - name: Shipped shell scripts still parse
         run: |
           bash -n install.sh
           bash -n scripts/compat-check.sh
           bash -n scripts/api-doc-check.sh
+          bash -n scripts/trusted-ip-check.sh
           bash -n scripts/release.sh
 
       # The image the deployment actually builds. This is where a crate

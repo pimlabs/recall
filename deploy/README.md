@@ -14,6 +14,38 @@ your Mac is usually on; if you want it reachable while your Mac is asleep
 or off, that's what a small always-on VPS is for later — nothing here
 would need to change except where it's deployed.
 
+## Which ingress
+
+Two compose files, same server, same image, same volume:
+
+| File | Ingress | Use it when |
+|---|---|---|
+| `docker-compose.yml` | Cloudflare Tunnel | The machine runs nothing else public. Brings its own ingress and needs no open ports. |
+| `docker-compose.traefik.yml` | An existing Traefik | The machine already routes other services through Traefik. One ingress you understand beats a second one you have to remember. |
+
+Whichever you pick, two properties have to hold together, and neither is
+optional:
+
+1. **The container has no published port.** Both files use `expose`, never
+   `ports`. The origin must be unreachable except through the ingress.
+2. **`RECALL_TRUSTED_IP_HEADER` names the header that ingress sets** —
+   `cf-connecting-ip` for the tunnel, `x-real-ip` for Traefik.
+
+They are one property, really. Rate limiting keys off that header and runs
+*before* auth, so that a flood of invalid tokens is limited too. If a client
+can reach the origin directly, or can supply the trusted header itself, it
+can rotate the value, get a fresh bucket per request, and have unlimited
+attempts at guessing the token. Exactly one header is read, so anything sent
+under another name is ignored — but only the missing `ports:` keeps the
+ingress in the path at all.
+
+Running Recall directly on the host instead of in a container is a worse
+trade than it looks: the semantic merge shells out to the `claude` CLI, which
+is a Node package, so "just one Rust binary" is not what gets installed. The
+container also already solves the CLI's login living on the data volume,
+running as non-root over a pre-existing root-owned volume, and rollback.
+
+
 ## Prerequisites
 
 - OrbStack installed and running.

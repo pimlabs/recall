@@ -18,6 +18,13 @@ services:
       RECALL_BACKUP_DIR: /backups
       RECALL_BACKUP_INTERVAL_HOURS: "24"
       RECALL_BACKUP_KEEP: "7"
+      # Stated rather than left to the default, because it is a claim about
+      # this file: cloudflared is the only thing that can reach the container
+      # (`expose`, not `ports`, and its own network), so its header is the
+      # only one that cannot be chosen by a client. Rate limiting keys off
+      # it, and runs before auth. See docker-compose.traefik.yml for the
+      # other ingress.
+      RECALL_TRUSTED_IP_HEADER: cf-connecting-ip
     volumes:
       - recall-data:/data
       - ./backups:/backups

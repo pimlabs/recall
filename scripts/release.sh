@@ -120,6 +120,7 @@ run "cargo build --release"            cargo build --release --locked
 # bugs every unit test in the repo missed.
 run "compat-check.sh (11 checks)"      ./scripts/compat-check.sh target/release/recall
 run "api-doc-check.sh (27 checks)"     ./scripts/api-doc-check.sh target/release/recall
+run "trusted-ip-check.sh (9 checks)"   ./scripts/trusted-ip-check.sh target/release/recall
 
 built=$(./target/release/recall version)
 printf '    built: %s\n' "$built"

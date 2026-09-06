@@ -52,9 +52,15 @@ contents and no project keys.
 Rate limiting is per client IP, defaulting to **60 requests per 60 seconds**
 (`RECALL_RATE_LIMIT_MAX`, `RECALL_RATE_LIMIT_WINDOW_MS`), and runs *before*
 the auth check — so a flood of invalid tokens is limited too, rather than
-escaping the limiter by never reaching auth. Behind a Cloudflare tunnel the
-client IP comes from `CF-Connecting-IP`, which is trustworthy only because the
-container is not reachable except through the tunnel.
+escaping the limiter by never reaching auth.
+
+The client's address is read from exactly one request header, named by
+`RECALL_TRUSTED_IP_HEADER` — `cf-connecting-ip` behind a Cloudflare tunnel,
+`x-real-ip` behind Traefik or nginx. One header, not a list: anything the
+server is willing to read from an untrusted client is something that client
+can choose, and choosing your own bucket defeats the limit. It is trustworthy
+only because the container has no published port, so every request really
+does arrive through that ingress.
 
 ## Errors
 

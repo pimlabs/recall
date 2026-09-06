@@ -261,7 +261,10 @@ async fn shutdown_signal() {
 /// limited too rather than escaping the limiter by never reaching the auth
 /// check.
 async fn guard(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
-    if state.limiter.limited(&client_ip(&req)) {
+    if state
+        .limiter
+        .limited(&client_ip(&req, &state.cfg.trusted_ip_header))
+    {
         let mut resp = error(
             StatusCode::TOO_MANY_REQUESTS,
             "rate limit exceeded, try again later",
@@ -308,18 +311,23 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     std::hint::black_box(diff) == 0
 }
 
-/// Trusts Cloudflare's header because every request that reaches this
-/// process arrives through the tunnel — the origin port is never published
-/// (compose uses `expose`, not `ports`), so the header can't be spoofed by
-/// hitting the origin directly.
-fn client_ip(req: &Request) -> String {
-    if let Some(ip) = header_str(req.headers(), "cf-connecting-ip") {
-        return ip.to_string();
-    }
-    if let Some(xff) = header_str(req.headers(), "x-forwarded-for") {
-        let first = xff.split(',').next().unwrap_or("").trim();
-        if !first.is_empty() {
-            return first.to_string();
+/// The address rate limiting keys off.
+///
+/// Reads exactly one header — the one `RECALL_TRUSTED_IP_HEADER` names — and
+/// falls back to the socket's peer address. One header, not a list of
+/// candidates: anything this server is willing to read from an untrusted
+/// client is something that client can choose, and choosing your own rate
+/// limit bucket defeats the rate limit.
+///
+/// This is safe only while nothing can reach the process except through the
+/// ingress that sets that header. The compose files keep it that way by
+/// using `expose` rather than `ports`, so the origin has no published port
+/// to be addressed directly. If that ever changes, this setting is wrong and
+/// the limiter is decorative.
+fn client_ip(req: &Request, trusted_header: &str) -> String {
+    if !trusted_header.is_empty() {
+        if let Some(ip) = header_str(req.headers(), trusted_header) {
+            return ip.to_string();
         }
     }
     req.extensions()
@@ -705,29 +713,89 @@ mod tests {
         assert!(authorized("secret", &h));
     }
 
+    fn request_with(headers: Vec<(&str, &str)>) -> Request {
+        let mut req = Request::new(axum::body::Body::empty());
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 1234))));
+        for (k, v) in headers {
+            let name = axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap();
+            req.headers_mut().insert(name, v.parse().unwrap());
+        }
+        req
+    }
+
     #[test]
-    fn client_ip_prefers_cloudflare_then_forwarded_then_socket() {
-        let build = |headers: Vec<(&str, &str)>| {
-            let mut req = Request::new(axum::body::Body::empty());
-            req.extensions_mut()
-                .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 1234))));
-            for (k, v) in headers {
-                let name = axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap();
-                req.headers_mut().insert(name, v.parse().unwrap());
-            }
-            req
-        };
-        assert_eq!(client_ip(&build(vec![])), "127.0.0.1");
+    fn client_ip_reads_the_configured_header_then_the_socket() {
+        // Cloudflare Tunnel, the default.
         assert_eq!(
-            client_ip(&build(vec![("x-forwarded-for", "203.0.113.9, 10.0.0.1")])),
-            "203.0.113.9"
-        );
-        assert_eq!(
-            client_ip(&build(vec![
-                ("x-forwarded-for", "203.0.113.9"),
-                ("cf-connecting-ip", "198.51.100.4"),
-            ])),
+            client_ip(
+                &request_with(vec![("cf-connecting-ip", "198.51.100.4")]),
+                "cf-connecting-ip"
+            ),
             "198.51.100.4"
         );
+        // Traefik, nginx, Caddy.
+        assert_eq!(
+            client_ip(
+                &request_with(vec![("x-real-ip", "198.51.100.7")]),
+                "x-real-ip"
+            ),
+            "198.51.100.7"
+        );
+        // Header configured but absent: fall back rather than invent one.
+        assert_eq!(
+            client_ip(&request_with(vec![]), "cf-connecting-ip"),
+            "127.0.0.1"
+        );
+        // Empty means trust nothing.
+        assert_eq!(
+            client_ip(
+                &request_with(vec![("cf-connecting-ip", "198.51.100.4")]),
+                ""
+            ),
+            "127.0.0.1"
+        );
+    }
+
+    /// The reason this is configurable at all.
+    ///
+    /// Behind Traefik the ingress sets `x-real-ip`, but a client can still
+    /// send whatever it likes under any other name. If more than one header
+    /// were consulted, rotating the one the ingress does *not* set would
+    /// hand out a fresh rate-limit bucket per request — and the limiter runs
+    /// before auth, so that is unlimited attempts at guessing the token.
+    #[test]
+    fn a_header_the_ingress_does_not_set_is_ignored() {
+        let attacker = request_with(vec![
+            ("cf-connecting-ip", "1.1.1.1"),
+            ("x-forwarded-for", "2.2.2.2"),
+            ("true-client-ip", "3.3.3.3"),
+            ("x-real-ip", "198.51.100.7"),
+        ]);
+        assert_eq!(
+            client_ip(&attacker, "x-real-ip"),
+            "198.51.100.7",
+            "only the configured header may decide the bucket"
+        );
+
+        // And the same in the other direction: on Cloudflare, a spoofed
+        // x-real-ip must not displace the tunnel's own header.
+        assert_eq!(client_ip(&attacker, "cf-connecting-ip"), "1.1.1.1");
+    }
+
+    /// `x-forwarded-for` is deliberately not a sensible value for the
+    /// setting: a proxy *appends* to it, so its first entry is whatever the
+    /// client sent. This asserts the old first-entry behaviour is gone —
+    /// reading the whole value is wrong too, but it is at least not silently
+    /// attacker-chosen.
+    #[test]
+    fn forwarded_for_is_no_longer_split_and_trusted() {
+        let req = request_with(vec![("x-forwarded-for", "203.0.113.9, 10.0.0.1")]);
+        assert_ne!(
+            client_ip(&req, "cf-connecting-ip"),
+            "203.0.113.9",
+            "x-forwarded-for must not be consulted when it is not the configured header"
+        );
+        assert_eq!(client_ip(&req, "cf-connecting-ip"), "127.0.0.1");
     }
 }
