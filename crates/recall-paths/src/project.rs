@@ -22,7 +22,9 @@ use crate::claude::slug;
 /// The cost of taking only the last two segments is that nested groups
 /// collapse: `gitlab.com/some-group/sub-group/repo` keys as
 /// `sub-group/repo`. That is a known limitation, not an oversight — two
-/// sibling subgroups with same-named repos would collide.
+/// sibling subgroups with same-named repos would collide. A project that
+/// hits that collision can declare its key instead; see
+/// [`key_with_override`].
 ///
 /// These keys are load-bearing for data continuity: a project's synced
 /// history lives under its key on the server, so any change here orphans it.
@@ -49,17 +51,82 @@ pub fn key_from_remote(remote_url: &str) -> Option<String> {
 }
 
 /// The fallback for a project with no git remote at all. Two clones in
-/// different directories will disagree, which is a real and documented
-/// limitation rather than something this can solve: without a remote there
-/// is nothing stable to agree on.
+/// different directories will disagree, and no *derivation* can fix that:
+/// with no remote there is nothing about the checkout both machines can
+/// see. Declaring a key with `RECALL_PROJECT_KEY` is the way out — see
+/// [`key_with_override`] — but that is the user supplying the answer, not
+/// Recall working it out.
 pub fn local_key(project_root: &str) -> String {
     format!("local:{}", slug(project_root))
 }
 
-/// Prefers the remote-derived identity and falls back to the local one. An
-/// empty or unusable `remote_url` is the no-remote case.
+/// The derived key: the remote-derived identity, falling back to the local
+/// one. An empty or unusable `remote_url` is the no-remote case.
+///
+/// [`key_with_override`] is this plus a key the project declared for itself;
+/// this one stays for callers that want only the derivation.
 pub fn key(remote_url: &str, project_root: &str) -> String {
     key_from_remote(remote_url).unwrap_or_else(|| local_key(project_root))
+}
+
+/// Normalises a key a project declared for itself, or [`None`] when the
+/// value is unusable and the derivation should stand.
+///
+/// Trimming and lowercasing are exactly what [`key_from_remote`] does,
+/// because both kinds of key land in one namespace on the server: declaring
+/// `PimLabs/Recall` on one machine has to reach the same rows as the
+/// remote-derived `pimlabs/recall` on another, or the declaration splits the
+/// history it was meant to join.
+///
+/// Two values are refused rather than used:
+///
+/// - one containing whitespace or a control character. The server stores
+///   `project_key` opaquely and the client percent-encodes it, so such a key
+///   would in fact work — but it is a key nobody retypes identically on the
+///   second machine, and two machines failing to agree is the outcome this
+///   module exists to prevent.
+/// - one under `global:`, the namespace
+///   [`scope::global_key`](crate::scope::global_key) owns. A project keyed
+///   there would push its own files into the bucket it shares with every
+///   other project.
+///
+/// Refusing means falling back to the derived key: leaving an already-working
+/// project exactly as it was is a safer answer to a malformed declaration
+/// than a mangled key that quietly starts a second history.
+///
+/// ```
+/// # use recall_paths::project::explicit_key;
+/// assert_eq!(explicit_key(" PimLabs/Recall "), Some("pimlabs/recall".to_string()));
+/// assert_eq!(explicit_key("   "), None);
+/// assert_eq!(explicit_key("global:eko"), None);
+/// ```
+pub fn explicit_key(raw: &str) -> Option<String> {
+    let key = raw.trim().to_lowercase();
+    if key.is_empty() || key.starts_with("global:") {
+        return None;
+    }
+    if key.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return None;
+    }
+    Some(key)
+}
+
+/// The key a project syncs under: the one it declared, else the derived one.
+///
+/// `explicit` is the raw `RECALL_PROJECT_KEY` value; [`explicit_key`] decides
+/// whether it is usable. A usable declaration beats the remote, which is the
+/// whole point — it covers the four cases no derivation reaches: a repo with
+/// no remote at all, sub-projects in a monorepo that should (or should not)
+/// share one history, a fork that wants to keep reading the upstream's
+/// memory, and the nested-subgroup collision [`key_from_remote`] documents.
+///
+/// A declared key is as load-bearing as a derived one: the server files
+/// memory under the key it was pushed with and moves nothing, so changing
+/// the declaration strands the old history under the old key.
+pub fn key_with_override(explicit: Option<&str>, remote_url: &str, project_root: &str) -> String {
+    explicit
+        .and_then(explicit_key)
+        .unwrap_or_else(|| key(remote_url, project_root))
 }
 
 #[cfg(test)]
@@ -166,6 +233,113 @@ mod tests {
             local_key("/Users/eko/code/recall"),
             local_key("/home/user/recall"),
             "the local fallback is exactly what cannot agree across machines"
+        );
+    }
+
+    #[test]
+    fn a_declared_key_wins_over_both_derivations() {
+        assert_eq!(
+            key_with_override(
+                Some("acme/monorepo-api"),
+                "git@github.com:acme/monorepo.git",
+                "/src/monorepo/api"
+            ),
+            "acme/monorepo-api",
+            "a remote to derive from does not get the last word"
+        );
+        assert_eq!(
+            key_with_override(Some("acme/notes"), "", "/home/eko/notes"),
+            "acme/notes",
+            "and with no remote there is nothing to lose to"
+        );
+    }
+
+    /// The declaration only works if it survives the trip between two
+    /// machines that typed it slightly differently — and if it can name a key
+    /// a remote elsewhere derives, since joining an existing history is one
+    /// of the reasons to declare one.
+    #[test]
+    fn a_declared_key_is_normalised_like_a_derived_one() {
+        let derived = key("git@github.com:PimLabs/Recall.git", "/anywhere");
+        for declared in ["pimlabs/recall", "PimLabs/Recall", "  pimlabs/recall\n"] {
+            assert_eq!(
+                key_with_override(Some(declared), "", "/home/eko/fork"),
+                derived,
+                "for {declared:?}"
+            );
+        }
+    }
+
+    /// Every rejected form falls back to the derivation rather than keying
+    /// the project somewhere unusable — an unset variable and a malformed one
+    /// must land in the same place.
+    #[test]
+    fn an_unusable_declaration_leaves_the_derivation_standing() {
+        let derived = key("git@github.com:pimlabs/recall.git", "/anywhere");
+        for (declared, why) in [
+            (None, "unset is the default and always has been"),
+            (Some(""), "an empty variable is not a key"),
+            (Some("   \t"), "nor is whitespace"),
+            (
+                Some("global:eko"),
+                "the global namespace is not a project's to claim",
+            ),
+            (
+                Some("acme/my project"),
+                "a space is a key the other machine will not retype identically",
+            ),
+            (Some("acme/app\u{7}"), "control characters likewise"),
+        ] {
+            assert_eq!(
+                key_with_override(declared, "git@github.com:pimlabs/recall.git", "/anywhere"),
+                derived,
+                "{why}"
+            );
+        }
+    }
+
+    /// The four cases the derivation cannot serve, each stated as the
+    /// agreement (or disagreement) the project actually wants.
+    #[test]
+    fn declaring_a_key_covers_what_deriving_one_cannot() {
+        // Sub-projects of one monorepo: same remote, deliberately separate
+        // histories.
+        let remote = "git@github.com:acme/monorepo.git";
+        assert_ne!(
+            key_with_override(Some("acme/monorepo-api"), remote, "/src/monorepo/api"),
+            key_with_override(Some("acme/monorepo-web"), remote, "/src/monorepo/web"),
+        );
+
+        // A fork keeps reading the upstream's memory despite its own remote.
+        assert_eq!(
+            key_with_override(
+                Some("pimlabs/recall"),
+                "git@github.com:eko/recall-fork.git",
+                "/home/eko/recall-fork"
+            ),
+            key("git@github.com:pimlabs/recall.git", "/elsewhere"),
+        );
+
+        // Two GitLab subgroups whose repos share a name, which
+        // `key_from_remote` collapses onto each other.
+        assert_ne!(
+            key_with_override(
+                Some("group/alpha-app"),
+                "https://gitlab.com/group/alpha/app.git",
+                "/src/alpha/app"
+            ),
+            key_with_override(
+                Some("group/beta-app"),
+                "https://gitlab.com/group/beta/app.git",
+                "/src/beta/app"
+            ),
+        );
+
+        // No remote anywhere, and two machines still agree — the thing
+        // `local_key` cannot do.
+        assert_eq!(
+            key_with_override(Some("eko/notes"), "", "/Users/eko/notes"),
+            key_with_override(Some("eko/notes"), "", "/home/user/notes"),
         );
     }
 }

@@ -41,6 +41,21 @@ pub struct ClientConfig {
     /// `RECALL_SOURCE_ENV`: the label synced files are stamped with,
     /// falling back to the hostname and then to `"unknown"`.
     pub source_env: String,
+    /// `RECALL_PROJECT_KEY`: the key this project syncs under, declared
+    /// rather than derived from the git remote, and normalised by
+    /// [`project::explicit_key`](crate::project::explicit_key).
+    ///
+    /// [`None`] — the default — means the key is derived, which is what
+    /// every project did before this variable existed. Declare one for a
+    /// repo with no remote at all, for sub-projects of a monorepo that
+    /// should (or should not) share one history, or for a fork that wants to
+    /// keep reading the upstream's memory.
+    ///
+    /// Changing it on a project that has already synced orphans that
+    /// project's memory: the server files every file under the key it was
+    /// pushed with and moves nothing, so the old history stays where it is
+    /// and the new key starts empty.
+    pub project_key: Option<String>,
     /// `RECALL_GLOBAL_KEY`: the key for memories that follow the user into
     /// every project, normalised by
     /// [`scope::global_key`](crate::scope::global_key).
@@ -50,6 +65,15 @@ pub struct ClientConfig {
     /// turning it on makes files appear in every synced project's memory
     /// directory, which is not something to do to someone by surprise.
     pub global_key: Option<String>,
+    /// Names of variables that were set to a value the normaliser refused,
+    /// so the derived default stands instead.
+    ///
+    /// Refusing rather than failing is deliberate — a malformed
+    /// `RECALL_PROJECT_KEY` should not stop an already-working project from
+    /// syncing. But a setting that silently does nothing is the hardest kind
+    /// of misconfiguration to notice, so the names are kept here for
+    /// `recall status` to report. Empty is the ordinary case.
+    pub rejected_vars: Vec<&'static str>,
     /// Where Claude Code keeps its memory on this machine.
     pub claude: Env,
 }
@@ -64,13 +88,40 @@ impl ClientConfig {
     where
         F: Fn(&str) -> Option<String>,
     {
+        let declared_project = var(&lookup, "RECALL_PROJECT_KEY");
+        let project_key = declared_project
+            .as_deref()
+            .and_then(crate::project::explicit_key);
+        let declared_global = var(&lookup, "RECALL_GLOBAL_KEY");
+        let global_key = declared_global
+            .as_deref()
+            .and_then(crate::scope::global_key);
+
+        let mut rejected_vars = Vec::new();
+        for (declared, accepted, name) in [
+            (
+                declared_project.is_some(),
+                project_key.is_some(),
+                "RECALL_PROJECT_KEY",
+            ),
+            (
+                declared_global.is_some(),
+                global_key.is_some(),
+                "RECALL_GLOBAL_KEY",
+            ),
+        ] {
+            if declared && !accepted {
+                rejected_vars.push(name);
+            }
+        }
+
         ClientConfig {
             url: var(&lookup, "RECALL_URL").unwrap_or_default(),
             token: var(&lookup, "RECALL_TOKEN").unwrap_or_default(),
             source_env: resolve_source_env(var(&lookup, "RECALL_SOURCE_ENV"), hostname),
-            global_key: var(&lookup, "RECALL_GLOBAL_KEY")
-                .as_deref()
-                .and_then(crate::scope::global_key),
+            project_key,
+            global_key,
+            rejected_vars,
             claude: Env::from_lookup(&lookup),
         }
     }
@@ -209,6 +260,66 @@ mod tests {
             panic!("the hostname must not be looked up when RECALL_SOURCE_ENV is set")
         });
         assert_eq!(got, "laptop");
+    }
+
+    /// Normalising here rather than at the call site is what lets a machine
+    /// that exports `PimLabs/Recall` sync with one that exports
+    /// `pimlabs/recall`: the value goes to the server as a `project_key`, and
+    /// the two have to be the same string.
+    #[test]
+    fn a_declared_project_key_is_normalised_on_the_way_in() {
+        let client = ClientConfig::from_lookup(env(&[("RECALL_PROJECT_KEY", "  PimLabs/Recall ")]));
+        assert_eq!(client.project_key.as_deref(), Some("pimlabs/recall"));
+    }
+
+    /// Deriving the key stays the default, and a declaration that cannot be
+    /// used has to leave it that way rather than half-apply.
+    #[test]
+    fn an_absent_or_unusable_project_key_reads_as_unset() {
+        for (declared, why) in [
+            (None, "unset"),
+            (
+                Some(""),
+                "present but empty, which `var` already treats as unset",
+            ),
+            (Some("   "), "whitespace only"),
+            (
+                Some("global:eko"),
+                "the global namespace is not a project's",
+            ),
+            (
+                Some("acme/my project"),
+                "a space no one retypes identically",
+            ),
+        ] {
+            let pairs: Vec<(&str, &str)> = declared
+                .map(|value| vec![("RECALL_PROJECT_KEY", value)])
+                .unwrap_or_default();
+            assert_eq!(
+                ClientConfig::from_lookup(env(&pairs)).project_key,
+                None,
+                "{why}"
+            );
+        }
+    }
+
+    /// The distinction the field exists for: an unset variable and one set to
+    /// a value that was thrown away both leave the key derived, and only this
+    /// tells `recall status` which of the two happened.
+    #[test]
+    fn a_refused_value_is_recorded_but_an_unset_one_is_not() {
+        let refused = ClientConfig::from_lookup(env(&[
+            ("RECALL_PROJECT_KEY", "global:eko"),
+            ("RECALL_GLOBAL_KEY", "   "),
+        ]));
+        assert_eq!(
+            refused.rejected_vars,
+            ["RECALL_PROJECT_KEY", "RECALL_GLOBAL_KEY"]
+        );
+
+        let clean = ClientConfig::from_lookup(env(&[("RECALL_PROJECT_KEY", "acme/app")]));
+        assert!(clean.rejected_vars.is_empty());
+        assert!(ClientConfig::from_lookup(env(&[])).rejected_vars.is_empty());
     }
 
     /// The messages are the operator-facing half of these errors: each one

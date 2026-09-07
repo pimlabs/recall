@@ -265,6 +265,130 @@ fn status_works_outside_a_git_repository() {
     );
 }
 
+/// A declared key and a derived one are the same string on the wire, so the
+/// report has to say which is in force — otherwise the only way to tell that
+/// `RECALL_PROJECT_KEY` took effect is to go and look at the server.
+#[test]
+fn status_reports_a_declared_project_key_and_where_it_came_from() {
+    let repo = git_repo();
+    let r = run(
+        &["status", "--json"],
+        repo.path(),
+        &[("RECALL_PROJECT_KEY", "Acme/Monorepo-Api")],
+        None,
+    );
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(
+        parsed["project_key"], "acme/monorepo-api",
+        "a declaration beats the git remote, normalised: {parsed}"
+    );
+    assert_eq!(parsed["project_key_source"], "declared");
+    assert!(
+        parsed.get("rejected_vars").is_none(),
+        "nothing was refused, so nothing should be listed: {parsed}"
+    );
+}
+
+/// The silent failure the source field exists for: a declaration Recall
+/// cannot use is dropped and the key falls back, so without this the only
+/// symptom is memory syncing to a bucket nobody asked for.
+#[test]
+fn status_says_when_a_declared_project_key_was_refused() {
+    let repo = git_repo();
+    let r = run(
+        &["status"],
+        repo.path(),
+        &[("RECALL_PROJECT_KEY", "global:eko")],
+        None,
+    );
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(
+        r.stdout.contains("acme/app"),
+        "the derived key still stands: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("SET BUT UNUSABLE"),
+        "a refused declaration has to be visible: {}",
+        r.stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// promote
+// ---------------------------------------------------------------------------
+
+/// Every refusal below is decided before anything is sent or moved, so each
+/// one exits 1 — the code reserved for what only the user can fix — and none
+/// of them needs a server.
+#[test]
+fn promote_refuses_when_there_is_no_global_scope_to_promote_into() {
+    let repo = git_repo();
+    let r = run(
+        &["promote", "user.md"],
+        repo.path(),
+        &[("RECALL_URL", DEAD_SERVER), ("RECALL_TOKEN", "t")],
+        None,
+    );
+    assert_eq!(r.code, 1, "stdout: {} stderr: {}", r.stdout, r.stderr);
+    assert!(
+        r.stderr.contains("RECALL_GLOBAL_KEY"),
+        "the refusal should name the variable to set: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn promote_refuses_a_note_that_is_not_there() {
+    let repo = git_repo();
+    let r = run(
+        &["promote", "topics/nothing-here.md"],
+        repo.path(),
+        &[
+            ("RECALL_URL", DEAD_SERVER),
+            ("RECALL_TOKEN", "t"),
+            ("RECALL_GLOBAL_KEY", "eko"),
+        ],
+        None,
+    );
+    assert_eq!(r.code, 1, "stdout: {} stderr: {}", r.stdout, r.stderr);
+    assert!(r.stderr.contains("does not exist"), "stderr: {}", r.stderr);
+}
+
+/// The argument is joined onto the memory directory, so a traversing one has
+/// to be refused after the join rather than reaching outside it.
+#[test]
+fn promote_refuses_a_path_that_climbs_out_of_the_memory_directory() {
+    let repo = git_repo();
+    let r = run(
+        &["promote", "../../../../.ssh/id_rsa"],
+        repo.path(),
+        &[
+            ("RECALL_URL", DEAD_SERVER),
+            ("RECALL_TOKEN", "t"),
+            ("RECALL_GLOBAL_KEY", "eko"),
+        ],
+        None,
+    );
+    assert_eq!(r.code, 1, "stdout: {} stderr: {}", r.stdout, r.stderr);
+    assert!(
+        r.stderr.contains("not a memory file"),
+        "stderr: {}",
+        r.stderr
+    );
+}
+
+/// Unlike the hooks, `promote` is typed on purpose — so an unconfigured
+/// machine is told, rather than quietly doing nothing.
+#[test]
+fn promote_is_loud_about_missing_configuration() {
+    let repo = git_repo();
+    let r = run(&["promote", "user.md"], repo.path(), &[], None);
+    assert_eq!(r.code, 1, "stdout: {} stderr: {}", r.stdout, r.stderr);
+    assert!(r.stderr.contains("RECALL_URL"), "stderr: {}", r.stderr);
+}
+
 // ---------------------------------------------------------------------------
 // Surface
 // ---------------------------------------------------------------------------

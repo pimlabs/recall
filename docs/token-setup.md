@@ -38,14 +38,21 @@ dialog):
 - **Environment variables**: add `RECALL_TOKEN` and `RECALL_URL` with the
   same values as step 2, plus `CLAUDE_CODE_REMOTE_MEMORY_DIR` (see
   `../ARCHITECTURE.md` for why that one's required, not optional, here).
+  If you use the global scope, `RECALL_GLOBAL_KEY` belongs here too, with
+  the same value as everywhere else — it is on or off per environment, and
+  a mixture leaves `MEMORY.md` linking files that environment never fetches
+  (see [`install.md`](install.md)).
 - **Network access**: set to **Custom** and add the server's domain under
   **Allowed domains** — confirmed live (see `ROADMAP.md` Phase 1) that the
   default network policy blocks a self-hosted domain otherwise.
 
 This is per-environment, not account-wide. A new cloud environment for a
-different project needs this repeated (same values — the token and URL
-don't change per project, only `project_key` does, and that's derived
-automatically from the project's git remote, not something you set).
+different project needs this repeated. The values are the same either way:
+the token and URL don't change per project, and `project_key` — the one
+thing that does — is derived from the project's git remote rather than set
+here. A project that needs to declare its key instead does it in its own
+committed `.claude/settings.json`, which every environment already reads;
+see [`install.md`](install.md).
 
 ## 4. Verify
 
@@ -83,8 +90,8 @@ scope which `project_key` a request can touch (see `CLAUDE.md`: single
 owner, no multi-user auth, so there's no "which projects can this token
 see" question to answer). What's actually verified is that different
 projects never see each other's content: pushing conflicting content
-under two different `project_key`s (derived automatically from each
-project's own git remote — see `ARCHITECTURE.md`) and reading each back,
+under two different `project_key`s (from each project's own git remote, or
+whatever it declared — see `ARCHITECTURE.md`) and reading each back,
 including a delete in one, confirmed live to leave the other completely
 untouched. The isolation comes from `project_key` being part of the
 primary key on every row and every query being scoped by it — not from

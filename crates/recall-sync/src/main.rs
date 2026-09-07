@@ -8,6 +8,7 @@
 mod hook;
 mod init;
 mod project;
+mod promote;
 mod serve;
 mod status;
 
@@ -38,6 +39,11 @@ enum Cmd {
         /// Project to wire; defaults to the git root of the working directory
         #[arg(long)]
         path: Option<PathBuf>,
+    },
+    /// Move a note into the global scope, so it follows you into every project
+    Promote {
+        /// The note to promote, relative to the memory directory
+        file: PathBuf,
     },
     /// Show whether sync is configured and reachable, here
     Status {
@@ -70,6 +76,7 @@ fn main() {
         }
         Cmd::Init { path } => init::run(path.as_deref()),
         Cmd::Serve => block_on_multi(serve::run()),
+        Cmd::Promote { file } => block_on_current(promote::run(&file)),
         Cmd::Status { json } => block_on_current(status::run(json)),
         Cmd::Push => block_on_current(hook::push()),
         Cmd::Pull => block_on_current(hook::pull()),

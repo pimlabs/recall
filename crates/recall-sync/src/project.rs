@@ -53,7 +53,10 @@ pub fn hook_context() -> anyhow::Result<Context> {
     Ok(Context {
         memory_dir: claude.memory_dir(&root_str),
         state_file: claude.state_file(&root_str),
-        scopes: scope::scopes(project::key(&remote(), &root_str), cfg.global_key.clone()),
+        scopes: scope::scopes(
+            project::key_with_override(cfg.project_key.as_deref(), &remote(), &root_str),
+            cfg.global_key.clone(),
+        ),
         source_env: cfg.source_env.clone(),
         client: Client::new(&cfg.url, &cfg.token)?,
     })

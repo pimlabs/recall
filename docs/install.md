@@ -97,6 +97,56 @@ export RECALL_TOKEN="<your token>"
 See `token-setup.md` for generating the token and for what a claude.ai
 cloud environment additionally needs.
 
+## When the derived project key is wrong
+
+Recall files a project's memory under `owner/repo`, taken from the git
+remote. That is right nearly always. Four cases where it isn't:
+
+- **No remote at all** — a local-only repo, or a directory that is not one.
+  The key falls back to `local:<this checkout's path>`, so the same project
+  on a second machine is a second project with a second history.
+- **A monorepo** whose sub-projects should each keep their own memory — or,
+  the other way round, should share one.
+- **A fork** that wants to keep reading the upstream's memory.
+- **Nested groups** (GitLab subgroups), where two groups holding a repo of
+  the same name collapse onto one key.
+
+Declare the key instead of deriving it:
+
+```sh
+export RECALL_PROJECT_KEY="acme/app"
+```
+
+It is trimmed and lowercased, so `Acme/App` on one machine and `acme/app` on
+another are one key rather than two. A value that is empty, contains
+whitespace, or starts with `global:` is refused — the derived key stands and
+`recall status` says the declaration was ignored, rather than letting it pass
+silently.
+
+**This is per-project, not per-machine.** Exporting it from your shell
+profile would give *every* project the same key and pool their memory into
+one bucket. The right home is the project's own `.claude/settings.json` —
+the same file `recall init` writes, committed for the same reason:
+
+```json
+{
+  "env": {
+    "RECALL_PROJECT_KEY": "acme/app"
+  }
+}
+```
+
+Committed, it is the one form that reaches every machine and every fresh
+cloud session without per-machine setup. (`recall init` does not write it for
+you: which projects share a key is a decision only you can make.)
+
+**Changing it on a project that has already synced orphans that project's
+memory.** The server files every file under the key it was pushed with and
+moves nothing, so the old history stays where it is and the new key starts
+empty. Nothing is lost, and nothing follows either —
+[`../deploy/README.md`](../deploy/README.md) has the SQL for renaming or
+removing a key you no longer want.
+
 ## Memories that follow you into every project
 
 By default Recall syncs each project's memory under its own key, and a note
@@ -126,6 +176,47 @@ A few things worth knowing:
   established, is in [`memory-loading-findings.md`](memory-loading-findings.md).
 
 Nothing changes if you leave `RECALL_GLOBAL_KEY` unset.
+
+### Putting a note there: `recall promote`
+
+Claude writes a note about *you* while you happen to be working in one
+repository. Move it into the global scope:
+
+```sh
+recall promote topics/user.md
+```
+
+The path is relative to the memory directory (`recall status` prints where
+that is), or absolute. The note is stored under the global key, tombstoned
+under this project's key, moved into `global/` on disk, and linked from
+`MEMORY.md`. Every other wired project picks it up at its next session start.
+
+It is a move, not a copy. A note left in both scopes would be pulled twice
+into every future session of this project, and the two copies would drift
+apart the first time either was edited.
+
+It keeps only its file name — `topics/user.md` becomes `global/user.md`.
+A project's own folders (`topics/auth.md` is auth *in this repository*) mean
+nothing in a scope that has no project.
+
+The project's `MEMORY.md` loses its link to the old path, since that link is
+now dead and Recall is what killed it — and that one removal is pushed, so it
+does not come back on the next pull or linger on your other machines. Every
+other line in the file is left exactly as it was.
+
+Where it refuses rather than guesses:
+
+| It says | Because |
+|---|---|
+| global sync is not configured | `RECALL_GLOBAL_KEY` is unset, so there is nowhere to promote to. |
+| … is already a global memory | It is already under `global/`. |
+| `MEMORY.md` is this project's index | It is regenerated after every push and pull, so the move would quietly undo itself — while a copy of one repo's index sat in every other project. |
+| … already exists and holds a different note | A different note holds that name globally. Rename yours and run it again: overwriting is the only one of the options that cannot be undone. |
+
+Interrupted runs are safe to repeat. Nothing is sent or moved until the
+store succeeds, the new copy is written before the old one is removed, and a
+re-run that finds an identical copy already in `global/` finishes the move
+instead of refusing it.
 
 ## Enable sync for a project
 
@@ -163,12 +254,17 @@ its own. See `CLAUDE.md`'s ground rules.
 recall status
 ```
 
-Reports, for the project you're standing in: the derived `project_key`,
-where Claude Code's memory directory actually is on this machine, how many
-memory files exist locally, whether the hooks are wired, whether
+Reports, for the project you're standing in: the `project_key` and whether
+it was derived or declared, where Claude Code's memory directory actually is
+on this machine, how many memory files exist locally, whether the hooks are
+wired, the global scope and whether `MEMORY.md` links it, whether
 `RECALL_URL`/`RECALL_TOKEN` are set, whether the server answers, whether
 merge is actually configured server-side, and how many files the server
 holds for this project.
+
+Anything you set that Recall could not use is called out here too — a
+refused `RECALL_PROJECT_KEY` or `RECALL_GLOBAL_KEY` still leaves sync
+working, which is exactly why it would otherwise go unnoticed.
 
 `recall status --json` prints the same thing machine-readably.
 

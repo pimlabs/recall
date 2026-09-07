@@ -7,7 +7,7 @@ Everything else is here, grouped by what you're trying to do.
 
 | Document | Read it when |
 |---|---|
-| [`install.md`](install.md) | Installing the `recall` CLI (npm, Homebrew, curl, cargo) and opting a project in with `recall init`. |
+| [`install.md`](install.md) | Installing the `recall` CLI (npm, Homebrew, curl, cargo), opting a project in with `recall init`, declaring a `project_key` by hand, and promoting a note into the global scope. |
 | [`token-setup.md`](token-setup.md) | Generating `RECALL_TOKEN` and installing it on every environment — including the extra variable a claude.ai cloud session needs. |
 | [`api.md`](api.md) | Talking to the server directly: endpoints, schemas, status codes, `curl` examples. |
 
@@ -15,7 +15,7 @@ Everything else is here, grouped by what you're trying to do.
 
 | Document | Read it when |
 |---|---|
-| [`../deploy/README.md`](../deploy/README.md) | Standing the server up (OrbStack + Cloudflare Tunnel), including enabling merge. |
+| [`../deploy/README.md`](../deploy/README.md) | Standing the server up in Docker behind either ingress (Cloudflare Tunnel or an existing Traefik), enabling merge, backups, and cleaning up a project stored under the wrong key. |
 | [`github-actions-deploy.md`](github-actions-deploy.md) | Wiring CI checks on every PR and auto-deploy to a VPS on push to `main`. |
 | [`releasing.md`](releasing.md) | Cutting a release across all four install channels — what the tag automates, and what only the owner can push. |
 
