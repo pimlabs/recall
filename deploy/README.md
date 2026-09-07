@@ -1,18 +1,21 @@
-# Deploying Recall's server via OrbStack + Cloudflare Tunnel
+# Deploying Recall's server
 
-For running the server on a Mac with [OrbStack](https://orbstack.dev)
-instead of renting a VPS. OrbStack ships Docker + Compose, so this is
-plain `docker compose`. Cloudflare Tunnel gives the server a stable public
-HTTPS URL without opening any port on your router, and without requiring
-anything special installed on the client side (laptops, cloud sessions) —
-they just `curl` a normal URL, keeping Recall's "zero prior setup on a
-fresh environment" property intact.
+Docker Compose, on whatever runs Docker — a VPS, or a Mac with
+[OrbStack](https://orbstack.dev). The choice that actually matters is not the
+machine but the **ingress**, and there are two; see the next section.
 
-Trade-off to know going in: the server only runs while your Mac + OrbStack
-+ the tunnel are up. Fine for proving Phase 1 works and for regular use if
-your Mac is usually on; if you want it reachable while your Mac is asleep
-or off, that's what a small always-on VPS is for later — nothing here
-would need to change except where it's deployed.
+Either way the client side needs nothing special. Laptops and cloud sessions
+just `curl` a normal HTTPS URL, which is what keeps Recall's "zero prior setup
+on a fresh environment" property intact.
+
+The one thing to know before picking a machine: the server is only reachable
+while that machine is up. On a Mac that means memory stops syncing when the
+lid closes, which is fine for proving it works and merely annoying in daily
+use. An always-on VPS is the answer to that, and nothing in this directory
+changes except which compose file you run.
+
+Below, steps 1 and 2 are Cloudflare-specific. With Traefik you skip step 1
+entirely, and step 2 needs only `RECALL_TOKEN`.
 
 ## Which ingress
 
@@ -202,6 +205,69 @@ sync keeps working either way, this section is the only thing gating
 merge quality specifically. Tune with env vars in `.env` if needed:
 `RECALL_MERGE_ENABLED` (set `false` to skip even attempting it),
 `RECALL_MERGE_TIMEOUT_MS` (default 45s per merge call).
+
+## Removing a project that was stored under the wrong key
+
+Recall has **no admin write surface**, deliberately: `GET /admin/stats` is
+read-only, sqlite-web mounts the volume read-only, and nothing in the HTTP API
+can delete a project. A leaked token cannot be used to quietly destroy your
+history through any route the server exposes.
+
+The cost of that choice is that a project stored under a key you did not want
+stays there. It happens: a repository with no git remote syncs under a
+`local:<path>` key derived from its checkout path, so the same project on a
+second machine lands under a second key. Setting `RECALL_PROJECT_KEY` fixes it
+going forward, but the rows already written keep the old key.
+
+Nothing breaks if you leave them — they are a few kilobytes of prose that
+nothing reads. Clean up only if you want to.
+
+### Look before you delete
+
+```sh
+docker compose exec recall-server sh -c \
+  "sqlite3 /data/recall.db \
+   'SELECT project_key, count(*), sum(deleted) FROM memory_files GROUP BY 1 ORDER BY 1;'"
+```
+
+`sqlite3` is not in the image; if that fails, do it from the host against the
+volume, or read it through sqlite-web, which is exactly what it is for.
+
+### Then delete, from a backup you just took
+
+```sh
+# 1. A backup you can actually restore from. Do not skip this.
+docker compose exec recall-server sh -c \
+  "cp /data/recall.db /backups/before-cleanup-$(date +%Y%m%d-%H%M%S).db"
+
+# 2. Stop the server. SQLite tolerates concurrent writers; you should not
+#    rely on that while hand-editing the only copy of your memory.
+docker compose stop recall-server
+
+# 3. Delete, naming the key exactly as the query above printed it.
+docker compose run --rm -v recall_recall-data:/data alpine sh -c \
+  "apk add --no-cache sqlite >/dev/null && \
+   sqlite3 /data/recall.db \"DELETE FROM memory_files WHERE project_key = 'local:-Users-me-thing';\""
+
+docker compose start recall-server
+```
+
+Check the result with the same `GROUP BY` query, and confirm the server is
+healthy again with `curl -sf https://your-host/health`.
+
+### Renaming rather than deleting
+
+If the point is to move a project's history to a new key rather than discard
+it, `UPDATE` instead — and mind the primary key, which is
+`(project_key, file_path)`, so a rename onto a key that already holds the same
+paths will collide:
+
+```sql
+UPDATE memory_files SET project_key = 'me/thing'
+WHERE project_key = 'local:-Users-me-thing';
+```
+
+Run it inside a transaction, and check `SELECT changes();` before committing.
 
 ## Monitoring / inspecting the database
 
