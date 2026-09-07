@@ -10,6 +10,21 @@ use recall_paths::{project, scope, ClientConfig};
 
 use crate::project as proj;
 
+/// How the project's key was arrived at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeySource {
+    /// `RECALL_PROJECT_KEY`, and it was usable.
+    Declared,
+    /// Derived from the git remote — the ordinary case.
+    Remote,
+    /// No remote, so derived from this checkout's path. Two machines will
+    /// disagree; see `RECALL_PROJECT_KEY`.
+    LocalPath,
+    /// `RECALL_PROJECT_KEY` was set but rejected, so the key is derived.
+    DeclaredButRejected,
+}
+
 /// The `--json` shape. Stable enough to script against; that is the point of
 /// having it at all.
 #[derive(serde::Serialize)]
@@ -18,6 +33,13 @@ pub struct Report {
     pub project: String,
     /// The key it syncs under.
     pub project_key: String,
+    /// Where that key came from.
+    ///
+    /// Worth reporting on its own: a `RECALL_PROJECT_KEY` that is set but
+    /// unusable falls back to the derived key rather than failing, so
+    /// without this the only symptom is memory quietly syncing to a
+    /// different bucket than the one you asked for.
+    pub project_key_source: KeySource,
     /// Where Claude Code keeps this project's memory on this machine.
     pub memory_dir: String,
     /// How many memory files are on disk right now.
@@ -27,6 +49,10 @@ pub struct Report {
     /// The key global memories sync under, when global sync is on.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub global_key: Option<String>,
+    /// Variables that were set to a value Recall refused, so the setting did
+    /// nothing. Absent from the JSON when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rejected_vars: Vec<&'static str>,
     /// How many global memory files are on disk here.
     pub global_files: usize,
     /// Whether `MEMORY.md` links the global index. Without that link Claude
@@ -71,11 +97,13 @@ pub async fn run(as_json: bool) -> anyhow::Result<i32> {
 async fn collect(cfg: &ClientConfig) -> Report {
     let root = proj::root();
     let root_str = root.to_string_lossy().to_string();
+    let remote = proj::remote();
     let memory_dir = proj::memory_dir(&root);
 
     let mut rep = Report {
         project: root_str.clone(),
-        project_key: project::key(&proj::remote(), &root_str),
+        project_key: project::key_with_override(cfg.project_key.as_deref(), &remote, &root_str),
+        project_key_source: key_source(cfg, &remote),
         memory_dir: memory_dir.display().to_string(),
         memory_files: state::list_memory_files(&memory_dir)
             .map(|f| f.len())
@@ -84,6 +112,7 @@ async fn collect(cfg: &ClientConfig) -> Report {
             .map(|b| settings::is_wired(&b))
             .unwrap_or(false),
         global_key: cfg.global_key.clone(),
+        rejected_vars: cfg.rejected_vars.clone(),
         global_files: state::list_memory_files(&memory_dir.join(scope::GLOBAL_DIR))
             .map(|f| f.len())
             .unwrap_or(0),
@@ -128,9 +157,38 @@ async fn collect(cfg: &ClientConfig) -> Report {
     rep
 }
 
+/// Distinguishes "you did not declare a key" from "you declared one and it
+/// was thrown away", which look identical in the key itself.
+fn key_source(cfg: &ClientConfig, remote: &str) -> KeySource {
+    if cfg.project_key.is_some() {
+        return KeySource::Declared;
+    }
+    if cfg.rejected_vars.contains(&"RECALL_PROJECT_KEY") {
+        return KeySource::DeclaredButRejected;
+    }
+    if project::key_from_remote(remote).is_some() {
+        KeySource::Remote
+    } else {
+        KeySource::LocalPath
+    }
+}
+
 fn print_text(cfg: &ClientConfig, rep: &Report) {
     println!("project      : {}", rep.project);
-    println!("project_key  : {}", rep.project_key);
+    println!(
+        "project_key  : {} ({})",
+        rep.project_key,
+        match rep.project_key_source {
+            KeySource::Declared => "declared in RECALL_PROJECT_KEY",
+            KeySource::Remote => "from the git remote",
+            KeySource::LocalPath =>
+                "from this checkout's path — no git remote, so another machine will \
+                 disagree; set RECALL_PROJECT_KEY on both",
+            KeySource::DeclaredButRejected =>
+                "RECALL_PROJECT_KEY was SET BUT UNUSABLE and ignored — it must be \
+                 non-empty, free of whitespace, and not under 'global:'",
+        }
+    );
     println!("memory dir   : {}", rep.memory_dir);
     println!("memory files : {} on disk", rep.memory_files);
     println!(
@@ -144,6 +202,9 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
     println!(
         "global       : {}",
         match &rep.global_key {
+            None if rep.rejected_vars.contains(&"RECALL_GLOBAL_KEY") =>
+                "off — RECALL_GLOBAL_KEY was SET BUT EMPTY once trimmed, so it was ignored"
+                    .to_string(),
             None => "off (set RECALL_GLOBAL_KEY to share memories across projects)".to_string(),
             Some(key) if rep.global_linked => format!(
                 "{key} — {} file(s), linked from MEMORY.md",

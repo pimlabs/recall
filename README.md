@@ -46,6 +46,12 @@ git add .claude/settings.json && git commit  # so fresh clones get it too
 recall status                                # confirm it's actually working
 ```
 
+Notes about *you* rather than the repo can follow you into every project:
+set `RECALL_GLOBAL_KEY`, then `recall promote <file>` moves one there. And
+where the `owner/repo` key derived from the git remote is wrong — a repo with
+no remote, a monorepo, a fork — `RECALL_PROJECT_KEY` declares it instead.
+Both are in [`docs/install.md`](docs/install.md).
+
 Standing up the server itself is `recall serve`, in practice via [`deploy/`](deploy/README.md). To talk to it directly, see the [HTTP API reference](docs/api.md).
 
 ## Status

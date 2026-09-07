@@ -42,6 +42,10 @@
 //! A line belongs to Recall if its link target starts with `global/`. That is
 //! the whole rule — no marker comments, and nothing that breaks if the user
 //! reorders or rewords the rest of the file.
+//!
+//! There is exactly one exception, and it is [`refresh_forgetting`]: a
+//! promotion empties a path this file may link, and a link Recall itself
+//! made dead is Recall's to remove.
 
 use std::fs;
 use std::io;
@@ -58,15 +62,33 @@ use crate::state;
 /// Idempotent: with nothing changed the file comes out byte-identical, so
 /// this does not itself cause a push.
 pub(crate) fn refresh(memory_dir: &Path) -> io::Result<()> {
+    refresh_forgetting(memory_dir, None).map(|_| ())
+}
+
+/// As [`refresh`], and additionally drops any link to `vacated`.
+///
+/// The one place a project's own index line is removed rather than left
+/// alone. A promotion moves a note out from under a link the user or Claude
+/// wrote, and a link to a file that is no longer there is worse than no link:
+/// the model spends a read on it and gets nothing. Recall is what made it
+/// dead, so Recall removes it — and only that one, named exactly.
+///
+/// Returns whether a link to `vacated` was actually removed — deliberately
+/// not "whether the file changed", which is also true whenever the global
+/// links move and is the wrong question. Those are derived: every machine
+/// regenerates them for itself after a pull, and pushing them would be
+/// noise. A removed line is content, and content removed only here comes
+/// straight back with the next pull, so the caller owes it a push.
+pub(crate) fn refresh_forgetting(memory_dir: &Path, vacated: Option<&str>) -> io::Result<bool> {
     let entries = list(&memory_dir.join(GLOBAL_DIR))?;
     let path = memory_dir.join("MEMORY.md");
     let existing = read_or_empty(&path)?;
 
-    let updated = rewrite(&existing, &entries);
+    let updated = rewrite(&existing, &entries, vacated);
     if updated != existing {
         atomic::write(&path, ".recall-memory-", ".md", updated.as_bytes())?;
     }
-    Ok(())
+    Ok(vacated.is_some_and(|path| links_to(&existing, path)))
 }
 
 /// Whether `MEMORY.md` links anything in the global directory.
@@ -79,12 +101,15 @@ pub fn is_linked(memory_md: &[u8]) -> bool {
 }
 
 /// Replaces every Recall-owned line with the current set, keeping everything
-/// else exactly as it was.
-fn rewrite(existing: &str, entries: &[(String, Option<String>)]) -> String {
+/// else exactly as it was — bar a line linking `vacated`, which is dropped.
+fn rewrite(existing: &str, entries: &[(String, Option<String>)], vacated: Option<&str>) -> String {
     let marker = format!("]({GLOBAL_DIR}/");
     let mut out = String::new();
     for line in existing.lines() {
         if line.contains(&marker) {
+            continue;
+        }
+        if vacated.is_some_and(|path| links_to(line, path)) {
             continue;
         }
         out.push_str(line);
@@ -104,6 +129,15 @@ fn rewrite(existing: &str, entries: &[(String, Option<String>)]) -> String {
         }
     }
     out
+}
+
+/// Whether `text` carries a markdown link to `path`.
+///
+/// The two spellings such a link actually takes, rather than a markdown
+/// parser: this is a one-line job, and a link written some third way survives
+/// as a dead link — which is what it was before any of this existed.
+fn links_to(text: &str, path: &str) -> bool {
+    text.contains(&format!("]({path})")) || text.contains(&format!("](./{path})"))
 }
 
 /// Every file in the global directory, as (path relative to that directory,

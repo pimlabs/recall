@@ -40,9 +40,12 @@
 //!
 //! The two operations and the things they operate on are at the crate root:
 //! [`push`], [`pull`], [`Context`], [`Error`], [`PushOutcome`],
-//! [`PullOutcome`], [`is_memory_file`]. The modules below are the supporting
-//! surface, kept separate because each is useful on its own — `recall
-//! status` reads [`settings`] and [`state`] without ever pushing anything.
+//! [`PullOutcome`], [`is_memory_file`] — plus [`promote()`], which is no hook
+//! at all but the one way a note gets *into* the global scope, and its own
+//! [`PromoteOutcome`] and [`PromoteError`]. The modules below are the
+//! supporting surface, kept separate because each is useful on its own —
+//! `recall status` reads [`settings`] and [`state`] without ever pushing
+//! anything.
 //!
 //! | Module | What it holds |
 //! |---|---|
@@ -58,6 +61,7 @@
 mod atomic;
 mod context;
 mod index;
+mod promote;
 mod pull;
 mod push;
 
@@ -71,6 +75,7 @@ pub mod state;
 pub use context::{Context, Error};
 pub use index::is_linked as global_index_is_linked;
 pub use path::is_memory_file;
+pub use promote::{promote, Error as PromoteError, PromoteOutcome};
 pub use pull::{pull, PullOutcome};
 pub use push::{push, PushOutcome};
 

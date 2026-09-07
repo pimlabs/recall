@@ -21,8 +21,9 @@ No peer-to-peer link between environments — every environment only ever talks 
 ## One binary
 
 Client and server are the same Rust binary (`docs/rust-rewrite.md`):
-`recall serve` runs the server, `recall init` / `status` / `push` / `pull`
-run on a developer machine. That is not packaging convenience — the
+`recall serve` runs the server, `recall init` / `status` / `promote` /
+`push` / `pull` run on a developer machine. That is not packaging
+convenience — the
 validation rules and the tombstone/empty-file distinction previously
 existed twice, in JavaScript and in bash, with nothing keeping them in
 agreement. The `recall-wire` crate is now the single definition both
@@ -36,7 +37,7 @@ and the dependency arrows only ever point downward.
 
 ```
 recall-sync       the binary: one module per command
-   │              init · status · hook (push/pull) · serve · project
+   │              init · status · promote · hook (push/pull) · serve · project
    ├──────────────┬──────────────┐
    ▼              ▼              │
 recall-hooks   recall-server     │   the two halves
@@ -131,7 +132,25 @@ A pull that can't reach the server, or a machine with nothing configured, warns 
 - **`project_key`** (server-side, must agree across machines): the git remote's `owner/repo`, taking just the last two path segments so it normalizes identically across SSH (`git@host:owner/repo.git`), HTTPS (`https://host/owner/repo.git`), and locally-proxied remotes that cloud sandboxes rewrite `origin` to. Implemented in `recall_paths::project::key`.
 - **local memory directory** (client-side, per-machine): replicates Claude Code's own local-path-slug algorithm exactly, so the hooks read and write the same directory Claude Code itself uses on that machine. Implemented in `recall_paths::claude`. The subtlety: Claude Code's slug is a JavaScript regex replace, which operates on **UTF-16 code units**, so `é` becomes one dash and `🚀` becomes two. Iterating bytes or `chars()` both diverge for any non-ASCII path — and the shell version did exactly that, computing a directory Claude Code never writes to.
 
-Known limitation: git hosts with nested groups (e.g. GitLab subgroups) collapse to their last two path segments too, which can collide across different subgroups with the same repo name. Acceptable for Phase 0; revisit in Phase 2 if it matters in practice.
+`RECALL_PROJECT_KEY` overrides the derivation, trimmed and lowercased into
+the same namespace so a declaration on one machine and a derived key on
+another are the same string. It covers the cases no derivation reaches: a
+repo with no remote (which otherwise falls back to a `local:<path>` key that
+differs per machine — the exact split Recall exists to close), sub-projects
+of a monorepo that should or should not share one history, a fork that wants
+to keep reading the upstream's memory, and the nested-group collision below.
+
+A value that is empty, holds whitespace, or starts with `global:` is refused
+and the derived key stands. Refusing rather than failing keeps a working
+project working; the cost is a setting that silently does nothing, so
+`ClientConfig::rejected_vars` records the refusal and `recall status` reports
+it. The same applies to `RECALL_GLOBAL_KEY`.
+
+Declaring a key is as load-bearing as deriving one, in one direction only:
+the server files memory under the key it was pushed with and moves nothing,
+so *changing* a declaration strands the old history under the old key.
+
+Known limitation: git hosts with nested groups (e.g. GitLab subgroups) collapse to their last two path segments too, which can collide across different subgroups with the same repo name. `RECALL_PROJECT_KEY` is the way out; the derivation itself is unchanged.
 
 ## Scopes: what is synced, under which key
 
@@ -140,7 +159,7 @@ memory directory. There are two:
 
 | Scope | Key | Local subtree |
 |---|---|---|
-| project | `owner/repo` from the git remote | the memory directory itself |
+| project | `owner/repo` from the git remote, or `RECALL_PROJECT_KEY` | the memory directory itself |
 | global | `global:<RECALL_GLOBAL_KEY>` | `<memory dir>/global/` |
 
 The global scope exists because Claude Code stores facts about *the user*
@@ -163,6 +182,21 @@ Two rules earn their place:
   each file's own front-matter description as the gloss, because that gloss
   is what the model sees when deciding what to open. See
   [`docs/memory-loading-findings.md`](docs/memory-loading-findings.md).
+- **Getting a note *into* the scope is an explicit act**, not a heuristic.
+  `recall promote <file>` moves one note out of the project and into
+  `global/`: stored under the global key, tombstoned under the project's,
+  moved on disk, and linked from `MEMORY.md`. A move rather than a copy —
+  a note in both scopes is pulled twice into every future session of this
+  project, and the two copies drift the first time either is edited.
+  Recovery drives the ordering: nothing is sent or moved until the store
+  succeeds, the new copy is written before the old is removed (so a crash
+  leaves it in *both* places, never in neither), and the baseline is
+  refreshed last so an unsent tombstone is re-sent by the next push. A
+  re-run that finds an identical copy already in `global/` finishes the move
+  rather than refusing it. It is also the one thing allowed to delete a line
+  of the project's own `MEMORY.md` — the link to the path it just emptied,
+  which it pushes, because a line removed only locally comes back with the
+  next pull. Implemented in `recall_hooks::promote`.
 
 ## Server
 
@@ -185,11 +219,14 @@ generated docs:
 cargo doc --workspace --no-deps --open
 ```
 
-Client-side variables (`RECALL_URL`, `RECALL_TOKEN`, `RECALL_SOURCE_ENV`,
-`RECALL_GLOBAL_KEY`, and Claude Code's own `CLAUDE_CODE_REMOTE_MEMORY_DIR`)
-are in [`docs/token-setup.md`](docs/token-setup.md), which also covers the
+Client-side variables are split by where they are set. The per-machine ones
+(`RECALL_URL`, `RECALL_TOKEN`, `RECALL_SOURCE_ENV`, and Claude Code's own
+`CLAUDE_CODE_REMOTE_MEMORY_DIR`) are in
+[`docs/token-setup.md`](docs/token-setup.md), which also covers the
 per-environment network allowlist a claude.ai cloud environment needs before
-it can reach a self-hosted server at all.
+it can reach a self-hosted server at all. The two that describe a *project*
+rather than a machine — `RECALL_PROJECT_KEY` and `RECALL_GLOBAL_KEY` — are in
+[`docs/install.md`](docs/install.md).
 
 ### Deletes are tombstones, not row removal
 

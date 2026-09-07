@@ -9,6 +9,7 @@
 mod behaviour;
 mod edge_cases;
 mod global_scope;
+mod promote;
 
 use std::fs;
 use std::path::{Path, PathBuf};
