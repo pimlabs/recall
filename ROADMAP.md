@@ -51,6 +51,46 @@ No new features. The server and hooks from Phase 0 already do everything needed 
 - [x] **Rate limiting on `/sync`.** Simple in-memory per-IP fixed-window limiter (default 60 req/min, tunable via `RECALL_RATE_LIMIT_MAX`/`RECALL_RATE_LIMIT_WINDOW_MS`) — no external store needed for a single-process personal server. Counts both valid and invalid-token requests so a flood of bad tokens can't dodge it by failing auth first. `/health` stays unlimited since it's meant to be pollable. This closes out every finding from the architecture/security pass.
 - [x] Decide whether `recall-pull` should be a single static binary (e.g. Go) vs. a script needing a runtime — revisited 2026-08-12 now that Phase 1's real-world deployment is known to work: staying with bash + curl + jq. Both dependencies have now been proven present and working on every real environment tested (this laptop, and a genuine claude.ai cloud sandbox), the one real bug they caused (trailing-newline fidelity) is fixed, and a compiled-binary rewrite would trade "clone and it just works" for per-platform binary distribution to fix a problem that hasn't actually recurred. Revisit again only if curl/jq turn out missing on some future environment, or if the hooks' logic grows past what a shell script should reasonably hold.
 
+### Later additions (2026-09)
+
+Open-ended means open-ended. These surfaced only once the project was being
+shipped rather than built, and they belong here rather than in a phase of
+their own.
+
+- [x] **A committed hook must not break a machine that has no Recall.** The
+      wiring `recall init` writes is committed and reaches every clone,
+      including ones where the binary was never installed — where it errored
+      on every edit. Both commands are now guarded
+      (`if command -v recall >/dev/null 2>&1; then recall push; fi`), so a
+      machine without Recall does nothing instead of failing. `settings::is_wired`
+      matches the command as a substring so projects wired before this still
+      read as wired.
+- [x] **`main` was permanently red.** The `deploy` job ran on every push to
+      `main` and failed with "missing server host" whenever the VPS secrets
+      were absent — a fork, a clone, or this repository before deployment was
+      wired. Always-red CI is CI nobody reads, which is the structural reason
+      five PRs got merged without their failures being noticed. The job now
+      skips with a notice.
+- [x] **The ingress is a choice, and the choice is load-bearing.** The VPS
+      running Recall already routes other services through Traefik, so
+      `deploy/docker-compose.traefik.yml` sits beside the Cloudflare Tunnel
+      one. Two properties have to hold in either: no published port
+      (`expose`, never `ports`), and `RECALL_TRUSTED_IP_HEADER` naming the
+      header that ingress actually sets. They are one property — rate
+      limiting keys off that header and runs *before* auth, so a client that
+      can reach the origin directly, or supply the header itself, gets a
+      fresh bucket per request and unlimited attempts at the token.
+      `scripts/trusted-ip-check.sh` asserts it on a real socket.
+- [x] **A way to undo a project stored under the wrong key.** Recall has no
+      admin write surface by design — `GET /admin/stats` is read-only,
+      sqlite-web mounts the volume read-only, and nothing in the HTTP API can
+      delete a project, so a leaked token cannot destroy history through
+      anything the server exposes. The cost is that a badly-keyed project
+      stays. `deploy/README.md` now carries the procedure: inspect, back up,
+      stop, `DELETE` — plus the `UPDATE` rename variant, with the warning
+      that the primary key is `(project_key, file_path)` so a rename onto an
+      occupied key collides.
+
 ## Phase 5 — One Go binary — done
 
 Designed in the Go rewrite design doc (retired in Phase 7; see git history) and decided there: everything, one
@@ -193,13 +233,83 @@ exists. All three were kept "as the rollback path", which git already is.
 **Done when:** nothing in the tree is a copy of something already replaced,
 and the checks that protected the migration still run. **Done.**
 
+## Phase 8 — A scope for memories about you, not the repository — done
+
+Claude Code writes facts about the *person* into whichever project it
+happened to learn them in — it labels them `type: user` in the file's own
+front matter (`docs/memory-loading-findings.md` §2). Recall synced them
+faithfully into exactly one repository's history, which is the wrong place
+for them.
+
+- [x] **Scopes.** A scope pairs a `project_key` on the wire with a subtree of
+      the local memory directory. There are two: the project, rooted at the
+      memory directory itself, and the global one at `<memory dir>/global/`,
+      keyed `global:<RECALL_GLOBAL_KEY>`. The server learned nothing new — a
+      scope key is just another opaque `project_key`, so the frozen HTTP
+      surface and the SQLite schema are untouched and all the routing is
+      client-side, in `recall_paths::scope`. Off unless `RECALL_GLOBAL_KEY`
+      is set: files appearing in every project's memory directory is not
+      something to do to someone by surprise.
+- [x] **A path under `global/` never falls through to the project scope.**
+      With global sync off it is ignored, not absorbed. Pushing someone's
+      personal notes into one repository's history is a one-way door.
+- [x] **`MEMORY.md` is maintained, because a file nothing links may as well
+      not be on disk.** Established by probing the real CLI, not assumed: a
+      file linked from `MEMORY.md` was read at the root and in a
+      subdirectory; one linked from nothing came back `UNKNOWN`. Each link
+      carries the file's own front-matter `description`, because that gloss
+      is what the model sees when choosing what to open.
+- [x] **What that measurement actually cost, recorded rather than tidied
+      away.** Retrieval is probabilistic — the same files and the same
+      question returned `UNKNOWN` four times and the right answer the fifth,
+      with nothing changed between runs. Two conclusions drawn from single
+      runs during this work were both wrong and are retracted in
+      `docs/memory-loading-findings.md`, with the counts that refuted them.
+      The rule that came out of it: a single failed probe proves nothing, and
+      what is deterministic (the right bytes, at the right path, under the
+      right key, with the links maintained) is separated from what is not
+      (whether Claude opens the file), because only the first is testable.
+- [x] **`recall promote <file>`** — the way *into* the scope, which shipped
+      with the machinery to carry a note into every project but no way to put
+      one there. A move, not a copy: stored under the global key, tombstoned
+      under the project's, moved into `global/` on disk, linked from
+      `MEMORY.md`. Ordering follows recovery — nothing is sent or moved until
+      the store succeeds, the new copy is written before the old is removed
+      (a crash leaves the note in *both* places, never in neither), and the
+      baseline is refreshed last so an unsent tombstone is re-sent by the next
+      push hook.
+- [x] **`RECALL_PROJECT_KEY`.** Declares the key a project syncs under
+      instead of deriving it from the git remote, covering the four cases no
+      derivation reaches: a repo with no remote at all, sub-projects of a
+      monorepo that should or should not share one history, a fork that wants
+      to keep reading the upstream's memory, and the nested-subgroup
+      collision Phase 0 documented as a known limitation.
+- [x] **A refused setting is reported, not silent.** A `RECALL_PROJECT_KEY`
+      or `RECALL_GLOBAL_KEY` that cannot be used is dropped and the default
+      stands — refusing rather than failing keeps a working project working.
+      The cost of that choice is a setting that silently does nothing, which
+      is the hardest kind of misconfiguration to notice, so the refusal is
+      recorded and `recall status` reports it, alongside whether the key in
+      force was declared, taken from the git remote, or taken from this
+      checkout's path.
+- [x] **One bug the unit tests could not have found.** Driving the whole
+      chain against a real server showed that after a promotion the project's
+      `MEMORY.md` still linked the path the note had just left — and since
+      `MEMORY.md` is itself synced, that dead link returned on the next pull
+      and reached every other machine. Promotion now drops that one line and
+      pushes the result; only that line, and only when it was really there.
+
+**Done when:** a note about the user, written while working in one
+repository, is readable from every other one without being moved by hand.
+**Done.**
+
 ## Explicitly deferred
 
 - **Multi-user / a hosted "Recall as a service for others" product.** Raised and discussed 2026-08-12, shelved: use Recall personally for a while first to get real signal before committing to this. The technical shape is already mapped out if it comes back — it needs deciding on demand, not feasibility:
   - The VPS-hosting requirement is real friction, but a SaaS trades it for a different one (trusting a third party with potentially sensitive memory content), not eliminating friction outright.
   - Current auth (one shared bearer token, readable across every `project_key`) would need a full rewrite for real per-user isolation, not an extension.
   - Phase 2's planned merge shells out to a locally-logged-in `claude` CLI, which doesn't scale to many users' merges and directly conflicts with the no-API-key rule in `CLAUDE.md` — a SaaS needs a different answer to this specifically, independent of the auth question.
-  - Cross-device project-path differences (raised as a concern, turned out already solved) are *not* a blocker: `project_key` derives from the git remote, not the local checkout path, proven live during the Phase 1 cloud test. The one real gap is a project with no git remote at all, which falls back to a path-based key that won't agree across machines — a known Phase 0 limitation, not new.
+  - Cross-device project-path differences (raised as a concern, turned out already solved) are *not* a blocker: `project_key` derives from the git remote, not the local checkout path, proven live during the Phase 1 cloud test. A project with no git remote at all used to be the one real gap — it falls back to a path-based key that won't agree across machines — but Phase 8's `RECALL_PROJECT_KEY` closes it.
 - Syncing anything other than auto memory (`CLAUDE.md`, skills, settings, sessions — leave those to git, or to not existing as a problem in the first place).
 - Real-time collaborative editing between two humans.
 - A GUI. This is a backend + a couple of hook scripts.

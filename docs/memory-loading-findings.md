@@ -105,7 +105,7 @@ glosses, not a loader walking a tree. So:
   is what Claude Code puts there for this purpose.
 - `recall status` reports whether the links are present, separately from
   whether the files are — they are different failures.
-- The 190 tests verify the deterministic half: routing to the right key, the
+- The 228 tests verify the deterministic half: routing to the right key, the
   right path on disk, the links maintained in `MEMORY.md`. They cannot verify
   that Claude reads any of it, and should not pretend to.
 
