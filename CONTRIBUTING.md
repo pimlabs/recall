@@ -20,7 +20,7 @@ cargo build --release -p recall-sync    # binary at target/release/recall
 
 The first build is slow — `rusqlite` compiles SQLite from C. After that it's cached.
 
-`cargo test -p recall-wire` is the fastest useful check: that crate holds the request/response contract both halves depend on, and its tests assert byte-for-byte equality with what the deployed Node server produces.
+`cargo test -p recall-wire` is the fastest useful check: that crate holds the request/response contract both halves depend on, and its tests pin the wire format byte for byte — field order and the `null`-versus-`""` distinction included — because those were once compatibility guarantees against a second implementation and are now guarantees against the rows already in production.
 
 ### Documentation is checked, not just written
 
@@ -60,7 +60,18 @@ cargo build --release
 ./scripts/compat-check.sh target/release/recall
 ```
 
-Eleven checks across the mixed fleet: this server opening a database the Node server wrote, the old shell hooks against this server, this client against the Node server, and byte-exact round trips. It has caught two bugs that every test suite in the repo missed, both times because it used the real thing where the tests used a stand-in. Run it before a production cutover, and again after.
+Nineteen checks against `tests/fixtures/node-written.db` — a database the retired Node server actually wrote, kept because production's rows were written by it. This server opens that file, serves every row correctly (byte-exact content, no/one/two trailing newlines, an empty file, unicode, a nested path, a tombstone with its content still withheld, project isolation), and then keeps writing to it.
+
+It has caught two bugs that every test suite in the repo missed, both times because it used the real thing where the tests used a stand-in. Run it before a production cutover, and again after.
+
+### Probes cost real money
+
+`scripts/probes/` establishes what Claude Code actually does with memory
+files by running it, not by reading it. **Each probe is a real API call**,
+which is why none of them is part of `cargo test`. Retrieval is
+probabilistic, so a single run proves nothing — see
+`scripts/probes/README.md` and `docs/memory-loading-findings.md` before
+drawing a conclusion from one.
 
 ## Ground rules
 
@@ -68,7 +79,7 @@ See `CLAUDE.md`'s "Ground rules" section — same reason, one source of truth. T
 
 Two more that aren't in `CLAUDE.md` because they're about this code rather than the project's shape, and both would look like harmless cleanups:
 
-- **The SQLite schema, the HTTP JSON, the timestamp format, and the env var names are frozen.** The deployed Node server wrote the rows currently in production and speaks that JSON. See `docs/rust-rewrite.md`.
+- **The SQLite schema, the HTTP JSON, the timestamp format, and the env var names are frozen.** The rows in production were written by the Node server this one replaced, and every environment already has the variables provisioned. Nothing here is style. See `docs/rust-rewrite.md`.
 - **`recall-paths`'s `slug()` must stay UTF-16-based.** It reproduces a JavaScript regex replace inside Claude Code, which operates on UTF-16 code units. Iterating bytes or `chars()` instead is wrong for any non-ASCII path, and wrong here means silently reading and writing a directory Claude Code never touches.
 
 ## Releasing

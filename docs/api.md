@@ -4,12 +4,13 @@ Recall's server exposes five routes. Two carry memory files, two are for
 looking at the deployment, and one is a browser page.
 
 This is a **frozen** surface: field names, field order, and the difference
-between `null` and `""` are compatibility guarantees, not style. The deployed
-Node server speaks the same JSON, rows already in the database were written
-against it, and during a migration a machine on the old client and one on the
-new binary talk to the same deployment. The Rust definition of every shape
-below lives in [`recall-wire`](../crates/recall-wire/src/), which both halves
-share so they cannot drift apart.
+between `null` and `""` are compatibility guarantees, not style. The shape was
+set by the Node server this one replaced — the rows in production were written
+against it — and it stayed frozen through that migration so a machine on the
+old client and one on the new binary could talk to the same deployment. The
+Rust definition of every shape below lives in
+[`recall-wire`](../crates/recall-wire/src/), which both halves share so they
+cannot drift apart.
 
 Everything on this page is asserted against a running server by
 [`scripts/api-doc-check.sh`](../scripts/api-doc-check.sh) — status codes,

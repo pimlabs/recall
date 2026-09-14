@@ -49,7 +49,7 @@ A seventh, for symmetry, because it cuts the other way. `PushRequest`
 omitted `content` when it was empty — the natural-looking
 `skip_serializing_if = "String::is_empty"` in Rust, `json:",omitempty"` in
 Go. So pushing an **empty memory file** sent no `content` field at all, and
-the Node server answers 400 for that (`typeof undefined !== "string"`). A
+the Node server answered 400 for that (`typeof undefined !== "string"`). A
 project containing one empty note could never sync.
 
 Both implementations had it. Both test suites missed it, and missed it the
@@ -153,9 +153,11 @@ Unchanged, and not open to tidying:
   database carry it.
 - **Environment variable names** — no machine or cloud environment needs
   re-provisioning.
-- **The CLI surface** (`serve`, `init`, `status`, `push`, `pull`,
-  `version`) — projects have `recall push` committed in their
-  `.claude/settings.json`.
+- **The CLI surface** — projects have `recall push` and `recall pull`
+  committed in their `.claude/settings.json`, so those two in particular
+  cannot be renamed. The full set is `serve`, `init`, `status`, `promote`,
+  `push`, `pull`, `version`; `promote` was added afterwards, which is
+  additive and therefore fine.
 
 ## What was retired
 

@@ -10,8 +10,8 @@
   secrets needed for this job.
 - **`deploy`** — runs only after `ci` passes, and only for a push that's
   actually landed on `main` (never for PRs, never for other branches). SSHes
-  into the VPS and runs the same three commands from `deploy/README.md`'s
-  "Updating" section.
+  into the VPS, fast-forwards its clone, and rebuilds the stack — the same
+  thing `deploy/README.md`'s "Updating" section does by hand.
 
   **Without the secrets it skips, and says so, rather than failing.** That is
   deliberate: a repository with no VPS wired up is a normal state, and a
@@ -79,12 +79,30 @@ other command even if it leaked — it can only ever run that one deploy
 step. Not required to get auto-deploy working, worth doing once things are
 confirmed working without it.
 
+## Two assumptions the job makes about your deployment
+
+Both are baked into the workflow rather than configurable, so check them
+against how your server actually runs before wiring the secrets up.
+
+1. **It runs `docker compose up -d --build` with no `-f`**, so it acts on
+   `deploy/docker-compose.yml` — the Cloudflare Tunnel stack. If your server
+   runs `docker-compose.traefik.yml`, the job would build the *other* stack
+   alongside it. Add the flag to the workflow's script first.
+2. **Its final step is `curl -sf http://localhost:8787/health` on the VPS.**
+   Neither compose file publishes port 8787 to the host — both use `expose`,
+   deliberately, so nothing can bypass the ingress — so that check cannot
+   succeed as written. Verify through the public URL instead, or run the
+   check inside the container.
+
+Neither is hard to change; they are called out because both fail *after* a
+deploy that actually worked, which reads like a broken deployment when it is
+not.
+
 ## Verifying it works
 
 Merge a trivial change to `main` (or re-run the workflow from the Actions
-tab) and watch the `deploy` job's log — it ends with the `GET /health`
-response from the VPS itself. A failure at the `git pull --ff-only` step
-usually means the VPS's clone has local changes or is checked out
+tab) and watch the `deploy` job's log. A failure at the `git pull --ff-only`
+step usually means the VPS's clone has local changes or is checked out
 somewhere other than `DEPLOY_PATH`; a failure at the SSH connection step
 usually means the public key didn't make it into `authorized_keys`, or
 `DEPLOY_PORT`/`DEPLOY_HOST` doesn't match how you normally connect.

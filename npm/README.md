@@ -27,6 +27,10 @@ git add .claude/settings.json && git commit -m "Enable Recall memory sync"
 recall status
 ```
 
+Notes about *you* rather than about one repository can follow you into every
+project: set `RECALL_GLOBAL_KEY`, then `recall promote <file>` moves one
+there.
+
 `recall serve` runs the server side — the same binary, self-hosted.
 
 Full documentation, including standing up the server:

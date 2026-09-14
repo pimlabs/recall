@@ -289,9 +289,10 @@ The same binary:
 RECALL_TOKEN=... RECALL_DB_PATH=/data/recall.db recall serve
 ```
 
-In practice it runs in Docker behind a Cloudflare tunnel — see
-`../deploy/README.md`, which also covers the one-time `claude setup-token`
-step that enables semantic merge.
+In practice it runs in Docker behind an ingress — a Cloudflare Tunnel or an
+existing Traefik, one compose file each. See
+[`../deploy/README.md`](../deploy/README.md), which also covers backups and
+the one-time `claude setup-token` step that enables semantic merge.
 
 ## Releases
 

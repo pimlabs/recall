@@ -1,21 +1,20 @@
 # Deploying Recall's server
 
-Docker Compose, on whatever runs Docker — a VPS, or a Mac with
-[OrbStack](https://orbstack.dev). The choice that actually matters is not the
-machine but the **ingress**, and there are two; see the next section.
+Docker Compose, on anything that runs Docker. A small always-on VPS is the
+usual answer; a desktop or a laptop works too, with one caveat below. Nothing
+in this directory is specific to a host OS or a Docker distribution.
+
+The choice that actually matters is not the machine but the **ingress**, and
+there are two — see the next section.
 
 Either way the client side needs nothing special. Laptops and cloud sessions
 just `curl` a normal HTTPS URL, which is what keeps Recall's "zero prior setup
 on a fresh environment" property intact.
 
-The one thing to know before picking a machine: the server is only reachable
-while that machine is up. On a Mac that means memory stops syncing when the
-lid closes, which is fine for proving it works and merely annoying in daily
-use. An always-on VPS is the answer to that, and nothing in this directory
-changes except which compose file you run.
-
-Below, steps 1 and 2 are Cloudflare-specific. With Traefik you skip step 1
-entirely, and step 2 needs only `RECALL_TOKEN`.
+**The caveat:** the server is only reachable while its machine is up. On a
+laptop that means memory stops syncing when the lid closes — fine for proving
+it works, merely annoying in daily use. An always-on host is the answer, and
+nothing here changes except where you run it.
 
 ## Which ingress
 
@@ -51,26 +50,80 @@ running as non-root over a pre-existing root-owned volume, and rollback.
 
 ## Prerequisites
 
-- OrbStack installed and running.
-- A domain added to your Cloudflare account (free plan is enough). You
-  need this for a **stable** hostname — Cloudflare's zero-config "Quick
-  Tunnels" give you a random `*.trycloudflare.com` URL that changes every
-  time you start it, which means updating `RECALL_URL` everywhere each
-  restart. Not worth it beyond a five-minute smoke test.
+Both ingresses need:
 
-## 1. Create the tunnel in Cloudflare
+- **Docker Engine with Compose v2** (`docker compose`, not the old
+  `docker-compose`). Any distribution of it will do.
+- **A clone of this repository on that machine.** Neither compose file pulls
+  a published image — both build from source (`build.context` is the repo
+  root), so the source has to be there:
+
+  ```sh
+  git clone https://github.com/pimlabs/recall && cd recall
+  ```
+
+- **Enough memory to compile.** The build stage is Rust plus SQLite's C
+  amalgamation. It is the step most likely to fail on a small instance, and
+  it fails by being killed rather than by saying why:
+
+  ```
+  error: could not compile `recall-server` (signal: 9, SIGKILL: kill)
+  ```
+
+  That message means the kernel killed the compiler, not that anything is
+  wrong with the build. The fix is more memory: add swap on a small instance,
+  or build the image on a bigger machine and move it over with
+  `docker save` / `docker load`.
+
+The Cloudflare Tunnel option additionally needs a domain on your Cloudflare
+account (the free plan is enough). That is for a **stable** hostname —
+Cloudflare's zero-config "Quick Tunnels" hand out a random
+`*.trycloudflare.com` URL that changes on every restart, which would mean
+updating `RECALL_URL` everywhere each time. Not worth it beyond a
+five-minute smoke test.
+
+The Traefik option needs a Traefik already running on that machine, and a DNS
+record for your chosen hostname pointing at it. Set the DNS up first —
+Let's Encrypt cannot issue a certificate until it resolves.
+
+## 1. Set up the ingress
+
+### If you are using Cloudflare Tunnel
 
 1. Open the [Zero Trust dashboard](https://one.dash.cloudflare.com/) →
    **Networks → Tunnels → Create a tunnel**.
 2. Choose the **Cloudflared** connector type, name it (e.g. `recall`).
 3. On the install-command step, copy just the **token** value (the long
-   string after `--token`) — you don't need to run anything on this Mac
-   directly, `docker compose` will run the connector in a container.
+   string after `--token`) — nothing needs installing on the host itself,
+   `docker compose` runs the connector in a container.
 4. Still in the wizard, add a **Public Hostname**: pick a subdomain (e.g.
    `recall.yourdomain.com`), type **HTTP**, and service URL
    `recall-server:8787` — that's the other container's name and port on
    the Compose network, not `localhost`.
 5. Save.
+
+### If you are using an existing Traefik
+
+Nothing to create — but three values in `docker-compose.traefik.yml` are
+placeholders, and all three are wrong by default on most setups. The file's
+own header comment says the same thing; this is how to find each one.
+
+1. **The network name.** `traefik` in the file must be the network your
+   Traefik is actually attached to:
+
+   ```sh
+   docker inspect <your-traefik-container> -f '{{json .NetworkSettings.Networks}}'
+   ```
+
+2. **The entrypoint and certificate resolver.** `websecure` and `letsencrypt`
+   are conventional, and frequently something else:
+
+   ```sh
+   docker inspect <your-traefik-container> -f '{{range .Config.Cmd}}{{println .}}{{end}}'
+   ```
+
+3. **The hostname** in `traefik.http.routers.recall.rule: Host(...)`. It has
+   to match what `RECALL_URL` will be on every client.
 
 ## 2. Configure secrets
 
@@ -80,18 +133,34 @@ cp .env.example .env
 ```
 
 Fill in `.env`:
-- `RECALL_TOKEN` — generate with `openssl rand -hex 32`.
-- `CLOUDFLARE_TUNNEL_TOKEN` — the token copied in step 1.3.
+- `RECALL_TOKEN` — generate with `openssl rand -hex 32`. Required for both
+  ingresses.
+- `CLOUDFLARE_TUNNEL_TOKEN` — the token copied in step 1.3. **Cloudflare
+  only**; leave it empty with Traefik.
 
 `.env` is gitignored — never commit it.
 
 ## 3. Run it
 
+Cloudflare Tunnel:
+
 ```sh
 cd deploy
-docker compose up -d
+docker compose up -d --build
 docker compose logs -f   # confirm both containers report healthy/connected
 ```
+
+An existing Traefik:
+
+```sh
+cd deploy
+docker compose -f docker-compose.traefik.yml up -d --build
+docker compose -f docker-compose.traefik.yml logs -f
+```
+
+The first build takes a few minutes — that is SQLite compiling from C. Pass
+`-f` on **every** later `docker compose` command too, or Compose will read
+the default file and act on the wrong stack.
 
 ## 4. Verify from outside
 
@@ -124,6 +193,90 @@ Set on every environment that should push and pull — see [`../docs/token-setup
 
 Then, in each project you want synced, run `recall init` — it wires that
 project's own `.claude/settings.json`. See [`../docs/install.md`](../docs/install.md).
+
+## Switching ingress on a server that is already running
+
+Moving an existing deployment from one compose file to the other — Cloudflare
+Tunnel to Traefik, or back. The database is not in the container, so this does
+not touch it, but "does not touch it" is worth proving rather than assuming.
+
+**The data lives in a named Docker volume.** Both compose files declare
+`name: recall` and a `recall-data` volume, which Docker names
+`recall_recall-data`. Same project name, same volume, so switching files keeps
+the database — *provided* the old stack really was started with that project
+name. Check before you do anything else:
+
+```sh
+docker volume ls | grep recall      # expect: recall_recall-data
+```
+
+If it is named something else, the old stack was started from a different
+directory or with `-p`, and you must pass the matching `-p <name>` to every
+command below or you will start against an empty database.
+
+### 1. Back up, outside Docker
+
+```sh
+cd deploy
+docker compose exec recall-server sh -c \
+  "cp /data/recall.db /backups/before-ingress-switch-$(date +%Y%m%d-%H%M%S).db"
+ls -la backups/
+```
+
+The server also takes its own snapshots, but take one now anyway — it is the
+difference between a mistake costing five minutes and costing everything.
+
+### 2. Prepare the new file
+
+Fill in the three placeholders in `docker-compose.traefik.yml` (see step 1 of
+"Set up the ingress" above), and make sure `.env` has `RECALL_TOKEN`. Keeping
+the **same token** means no client needs re-provisioning.
+
+### 3. Switch
+
+```sh
+docker compose -f docker-compose.traefik.yml up -d --build --remove-orphans
+```
+
+`--remove-orphans` is what retires the old ingress container: `cloudflared` is
+not in the new file, so without it the tunnel keeps running and the old URL
+keeps working, which sounds harmless and is actually the confusing outcome —
+two live paths to one server, and no signal when you get one of them wrong.
+
+**Never `docker compose down -v`.** The `-v` deletes the volume, which is the
+database. Plain `down` is fine.
+
+### 4. Verify, in this order
+
+```sh
+# the row counts should match what you saw before the switch
+docker compose -f docker-compose.traefik.yml exec recall-server \
+  sh -c "ls -la /data"
+
+# from anywhere: the new URL answers, and the commit is the one you built
+curl -sf https://recall.yourdomain.com/health
+```
+
+Then a real round trip from a client, which is the only check that covers the
+whole path:
+
+```sh
+recall status        # in a project that was already syncing
+```
+
+### 5. Only then, retire the old ingress for good
+
+Delete the Cloudflare tunnel in the Zero Trust dashboard (or the Traefik
+router, going the other way) once the new path has carried real traffic for a
+while. Until then it costs nothing to leave the DNS record in place, and it is
+the fastest rollback you have: put the old compose file back, and the old
+hostname works again.
+
+If the hostname changed, every client's `RECALL_URL` has to change with it —
+laptops (shell profile) and every claude.ai cloud environment
+([`../docs/token-setup.md`](../docs/token-setup.md)). A client left pointing at
+the old hostname does not error loudly; `recall pull` warns on stderr and exits
+0, by design, so it just quietly stops syncing.
 
 ## Updating
 
