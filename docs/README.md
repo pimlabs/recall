@@ -41,4 +41,5 @@ cargo doc --workspace --no-deps --open
 |---|---|
 | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | Dev workflow: building, testing, the compatibility matrix. |
 | [`../CLAUDE.md`](../CLAUDE.md) | How Claude Code sessions should work in this repo — worktrees, the task list, PR policy, and the ground rules that are not up for negotiation. |
+| [`../scripts/probes/README.md`](../scripts/probes/README.md) | Running the probes that establish what Claude Code does with memory files. Each one costs a real API call, and one run proves nothing. |
 

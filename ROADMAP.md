@@ -18,7 +18,7 @@
 
 No new features. The server and hooks from Phase 0 already do everything needed — this phase is entirely about closing the gap between "proven in a simulated sandbox" and "a real person's memory actually syncs."
 
-- [x] **Deploy the server somewhere it stays running.** Done via OrbStack + Cloudflare Tunnel (`deploy/`) — `recall-server` and `cloudflared` containers running on the owner's Mac, public hostname `recall.pimlabs.id`. Verified from outside: `GET /sync?project_key=smoke-test` returns `{"project_key":"smoke-test","files":[]}` with a valid bearer token, `401` without one.
+- [x] **Deploy the server somewhere it stays running.** Done via OrbStack + Cloudflare Tunnel (`deploy/`) — `recall-server` and `cloudflared` containers running on the owner's Mac, public hostname `recall.pimlabs.id`. Verified from outside: `GET /sync?project_key=smoke-test` returns `{"project_key":"smoke-test","files":[]}` with a valid bearer token, `401` without one. (That is the record of what was deployed at the time, not a recommendation — `deploy/README.md` is host-neutral and covers both ingresses.)
 - [x] **Generate the real `RECALL_TOKEN`** — generated, stored in `deploy/.env` (gitignored, not committed).
 - [x] **Set `CLAUDE_CODE_REMOTE_MEMORY_DIR` as a real environment secret** on a real claude.ai cloud environment for `pimlabs/recall` (`/home/user/.claude` — that sandbox's `$HOME` is actually `/root`, but the memory-path derivation prioritizes the explicit override, so it still resolves correctly).
 - [x] **Wire the hooks into one real project's `.claude/settings.json`** — wired into `pimlabs/recall` itself, dogfooding.

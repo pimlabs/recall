@@ -38,6 +38,11 @@ cargo install recall-sync
 
 Details, and what each one actually does, in [`docs/install.md`](docs/install.md).
 
+> **No release is tagged yet.** npm, Homebrew and `install.sh` all download a
+> published binary, so until the first `v*` tag they have nothing to fetch.
+> Build from source or use `cargo install --git` in the meantime — see
+> [`docs/install.md`](docs/install.md#releases).
+
 Set `RECALL_URL` and `RECALL_TOKEN` in your shell profile ([`docs/token-setup.md`](docs/token-setup.md)), then, in each project you want synced:
 
 ```sh
@@ -56,7 +61,21 @@ Standing up the server itself is `recall serve`, in practice via [`deploy/`](dep
 
 ## Status
 
-Phases 0 through 4 done, and Recall is now a single Rust binary (`docs/rust-rewrite.md`): deployed for real behind a Cloudflare tunnel, the push/pull round-trip proven from a genuine claude.ai cloud session, conflicting edits semantically merged rather than last-write-wins, multi-project isolation verified, and the whole client and server sharing one tested implementation. The Node server and shell hooks remain in the tree as the rollback path until the Rust binary has run in production for a while. See `ROADMAP.md` for the evidence behind each phase.
+Phases 0 through 8 done. Recall is one Rust binary (`docs/rust-rewrite.md`)
+that runs both halves: deployed for real, the push/pull round-trip proven
+from a genuine claude.ai cloud session, conflicting edits semantically merged
+rather than last-write-wins, multi-project isolation verified, and a global
+scope so a note about *you* is not stuck in whichever repository Claude
+happened to learn it in.
+
+The Node server and the bash hooks it replaced are **gone** from the tree
+(Phase 7) — git history is the rollback path, and what they were really
+carrying is now `tests/fixtures/node-written.db`, a database the Node server
+actually wrote, so `scripts/compat-check.sh` still proves this server reads
+production's rows.
+
+`ROADMAP.md` has the evidence behind each phase, including what was measured
+rather than assumed and two conclusions that turned out wrong.
 
 ## Project docs
 
@@ -70,16 +89,18 @@ Phases 0 through 4 done, and Recall is now a single Rust binary (`docs/rust-rewr
 | [`docs/api.md`](docs/api.md) | The HTTP API: endpoints, schemas, status codes, examples |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | How it works, and the code map |
 | [`docs/rust-rewrite.md`](docs/rust-rewrite.md) | Why Rust, honestly — including every bug this project has shipped |
+| [`docs/memory-loading-findings.md`](docs/memory-loading-findings.md) | What Claude Code actually does with memory files, and why one probe proves nothing |
+| [`ROADMAP.md`](ROADMAP.md) | Every phase, the evidence behind it, and what is deliberately deferred |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Building, testing, and what not to "clean up" |
 
 And the tree:
 
 | Path | What's in it |
 |---|---|
-| `crates/` | The binary. `wire` (frozen contract) · `paths` · `hooks` (client) · `server` · `cli`. See ARCHITECTURE's code map. |
-| `deploy/` | The image and the OrbStack + Cloudflare Tunnel deployment. |
-| `scripts/` | `compat-check.sh` (the cutover matrix), `api-doc-check.sh`, `release.sh`, and `probes/`. |
-| `npm/`, `Formula/`, `install.sh` | The three install channels. |
+| `crates/` | The binary. `recall-wire` (frozen contract) · `recall-paths` · `recall-hooks` (client) · `recall-server` · `recall-sync` (the CLI). See ARCHITECTURE's code map. |
+| `deploy/` | The image, and a Compose file per ingress — Cloudflare Tunnel or an existing Traefik. Runs on anything with Docker. |
+| `scripts/` | `compat-check.sh` (the cutover matrix), `api-doc-check.sh`, `trusted-ip-check.sh`, `release.sh`, and `probes/`. |
+| `npm/`, `Formula/`, `install.sh` | Three of the four install channels. The fourth, `cargo install recall-sync`, needs no file here. |
 | `tests/fixtures/` | A database the retired Node server actually wrote, so the cutover stays testable without it. |
 
 ## License

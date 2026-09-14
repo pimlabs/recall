@@ -3,17 +3,16 @@
 ## Shape
 
 ```
-┌────────────────────┐        push (HTTP, direct from Claude Code hook)
-│ Laptop A            │ ─────────────────────────────────────┐
-│ ~/.claude/projects/  │                                       ▼
-│  <project>/memory/   │                             ┌──────────────────┐
-└────────────────────┘        pull (SessionStart)     │  Recall server    │
-┌────────────────────┐ ◄─────────────────────────────│  (self-hosted)    │
-│ Ephemeral cloud sesh │        push                   │                    │
-│ (fresh clone, no     │ ─────────────────────────────►│  storage:          │
-│  prior pairing)      │        pull                   │  per-project       │
-└────────────────────┘ ◄─────────────────────────────│  memory snapshots  │
-                                                        └──────────────────┘
+   Laptop                          Ephemeral cloud session
+   ~/.claude/projects/<slug>/      fresh clone, never paired
+        │  ▲                            │  ▲
+   push │  │ pull                  push │  │ pull
+        ▼  │                            ▼  │
+   ┌───────────────────────────────────────────────┐
+   │           Recall server (self-hosted)         │
+   │   one SQLite file; every row keyed by         │
+   │   (project_key, file_path)                    │
+   └───────────────────────────────────────────────┘
 ```
 
 No peer-to-peer link between environments — every environment only ever talks to the server. This is what makes the "ephemeral session with zero prior setup" requirement work: there's nothing to pair, just one URL + one token.
@@ -21,14 +20,13 @@ No peer-to-peer link between environments — every environment only ever talks 
 ## One binary
 
 Client and server are the same Rust binary (`docs/rust-rewrite.md`):
-`recall serve` runs the server, `recall init` / `status` / `promote` /
+`recall serve` runs the server; `recall init` / `status` / `promote` /
 `push` / `pull` run on a developer machine. That is not packaging
-convenience — the
-validation rules and the tombstone/empty-file distinction previously
-existed twice, in JavaScript and in bash, with nothing keeping them in
-agreement. The `recall-wire` crate is now the single definition both
-halves use, which is also why the workspace is split by boundary rather
-than being one crate.
+convenience. The validation rules and the tombstone/empty-file distinction
+previously existed twice — in JavaScript on the server and in bash on the
+client — with nothing keeping them in agreement. The `recall-wire` crate is
+now the single definition both halves use, which is also why the workspace
+is split by boundary rather than being one crate.
 
 ### Code map
 
@@ -169,10 +167,10 @@ person, not the repository.
 
 The server learns nothing new from this. A scope key is just another opaque
 `project_key`, so the frozen HTTP surface and the SQLite schema are
-untouched; `global:eko` is a project as far as storage is concerned. All the
+untouched; `global:your-name` is a project as far as storage is concerned. All the
 routing is client-side, in `recall_paths::scope`.
 
-Two rules earn their place:
+Three rules earn their place:
 
 - **A path under `global/` never falls through to the project scope.** With
   global sync off it is ignored, not absorbed. Pushing someone's personal
