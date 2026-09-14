@@ -226,16 +226,52 @@ ls -la backups/
 The server also takes its own snapshots, but take one now anyway — it is the
 difference between a mistake costing five minutes and costing everything.
 
-### 2. Prepare the new file
+### 2. Prepare the new file — in an override, not in place
 
-Fill in the three placeholders in `docker-compose.traefik.yml` (see step 1 of
-"Set up the ingress" above), and make sure `.env` has `RECALL_TOKEN`. Keeping
-the **same token** means no client needs re-provisioning.
+Make sure `.env` has `RECALL_TOKEN`; keeping the **same token** means no
+client needs re-provisioning.
+
+Then set the three placeholders — but **not** by editing
+`docker-compose.traefik.yml`. That file is tracked, so editing it leaves the
+server's clone permanently dirty and `git pull --ff-only` fails from then on,
+including the pull the auto-deploy workflow runs. Put the differences in an
+untracked override beside it instead:
+
+```yaml
+# deploy/docker-compose.traefik.local.yml
+services:
+  recall-server:
+    labels:
+      traefik.docker.network: your-traefik-network
+      traefik.http.routers.recall.rule: Host(`recall.yourdomain.com`)
+
+networks:
+  traefik:
+    external: true
+    name: your-traefik-network
+```
+
+`name:` under the network is what does the real work: it remaps the `traefik`
+alias this file uses onto whatever your network is actually called. The
+entrypoint and certificate resolver are left alone whenever `websecure` and
+`letsencrypt` already match, which they often do.
+
+Every command from here on takes both files, in order:
+
+```sh
+docker compose \
+  -f docker-compose.traefik.yml \
+  -f docker-compose.traefik.local.yml \
+  <command>
+```
 
 ### 3. Switch
 
 ```sh
-docker compose -f docker-compose.traefik.yml up -d --build --remove-orphans
+docker compose \
+  -f docker-compose.traefik.yml \
+  -f docker-compose.traefik.local.yml \
+  up -d --build --remove-orphans
 ```
 
 `--remove-orphans` is what retires the old ingress container: `cloudflared` is
@@ -245,6 +281,11 @@ two live paths to one server, and no signal when you get one of them wrong.
 
 **Never `docker compose down -v`.** The `-v` deletes the volume, which is the
 database. Plain `down` is fine.
+
+**If the deployment is also moving directory**, copy `deploy/backups/` across
+with it. That bind mount is relative to the compose file, so a new location is
+a new, empty backup directory — the old snapshots stay on disk, unmounted, and
+nothing says so until you go looking for one.
 
 ### 4. Verify, in this order
 
