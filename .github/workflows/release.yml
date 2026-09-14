@@ -57,14 +57,18 @@ jobs:
       # rusqlite's `bundled` feature compiles the SQLite amalgamation from C,
       # so a cross build would need a C toolchain per target — native runners
       # (including the arm64 Linux one) avoid that entirely.
+      # What `recall version` prints beside the version number. Read back
+      # from the checkout rather than from `github.sha`, which is the commit
+      # the run was *triggered* on: for a tag push the two agree, but for a
+      # workflow_dispatch rebuild of an existing tag `github.sha` is the
+      # dispatching branch, and the binary would name a commit it was not
+      # built from. A stamp that can be wrong is worse than no stamp.
+      - name: Record the commit that was checked out
+        shell: bash
+        run: echo "RECALL_GIT_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }} -p recall-sync
-        # What `recall version` prints beside the version number. Without it
-        # every released binary says "unknown" — deploy/Dockerfile was the
-        # only place setting it, which covers the server image and none of
-        # the four archives people actually download.
-        env:
-          RECALL_GIT_COMMIT: ${{ github.sha }}
 
       - name: Package
         shell: bash
