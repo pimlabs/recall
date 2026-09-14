@@ -101,7 +101,7 @@ And the tree:
 
 | Path | What's in it |
 |---|---|
-| `crates/` | The binary. `recall-wire` (frozen contract) · `recall-paths` · `recall-hooks` (client) · `recall-server` · `recall-sync` (the CLI). See ARCHITECTURE's code map. |
+| `crates/` | The binary. `recall-wire` (frozen contract) · `recall-paths` · `recall-hooks` (client) · `recall-server` · `recall-sync` (`main`, for both halves — `serve` included). See ARCHITECTURE's code map. |
 | `deploy/` | The image, and a Compose file per ingress — Cloudflare Tunnel or an existing Traefik. Runs on anything with Docker. |
 | `scripts/` | `compat-check.sh` (the cutover matrix), `api-doc-check.sh`, `trusted-ip-check.sh`, `release.sh`, and `probes/`. |
 | `npm/`, `Formula/`, `install.sh` | Three of the four install channels. The fourth, `cargo install recall-sync`, needs no file here. |

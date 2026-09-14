@@ -4,6 +4,19 @@
 //! runs on a developer machine or inside a Claude Code session as a hook.
 //! This file is only the dispatcher; each command lives in its own module,
 //! and the reasoning about *how loudly it is allowed to fail* lives with it.
+//!
+//! # The name is narrower than the crate
+//!
+//! This crate is named for the client, but it is the entry point for
+//! **both** halves — `serve` starts the HTTP server that `recall-server`
+//! implements. If you came looking for where the server process begins and
+//! expected `recall-server` to hold a `main`, this is the file.
+//!
+//! It was called `recall-cli` until the release preflight found that name
+//! already taken on crates.io by an unrelated project, and `recall` taken
+//! too. The name is published as of v0.1.0, so it is now fixed: renaming
+//! would strand everyone who installed with `cargo install recall-sync`.
+//! The binary it produces is still `recall`.
 
 mod hook;
 mod init;
