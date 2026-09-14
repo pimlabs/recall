@@ -63,14 +63,35 @@ the GitHub Release:
 
 | Asset | Runner |
 |---|---|
-| `recall_darwin_amd64.tar.gz` | `macos-13` |
-| `recall_darwin_arm64.tar.gz` | `macos-14` |
+| `recall_darwin_amd64.tar.gz` | `macos-15-intel` |
+| `recall_darwin_arm64.tar.gz` | `macos-15` |
 | `recall_linux_amd64.tar.gz` | `ubuntu-latest` |
 | `recall_linux_arm64.tar.gz` | `ubuntu-24.04-arm` |
 
 Those names are a contract: `install.sh` and `npm/install.js` both construct
 them from `uname` / `process.platform`. Don't rename them without changing
 both.
+
+### When a build job never starts
+
+A retired runner label does not fail — it is simply never served. The job
+sits `queued` with no runner assigned and no error, and because `publish`
+waits for all four, no release is created at all. This happened on the first
+real tag: `macos-13` had been retired, the job queued indefinitely, and
+`release.sh` timed out at step 6 with three green builds and nothing to show
+for them.
+
+The recovery does **not** involve moving the tag. `workflow_dispatch` takes
+the workflow file from `main` but checks out the ref you name, so fixing the
+matrix on `main` and re-dispatching builds the tagged code with the corrected
+runners:
+
+1. Cancel the stuck run.
+2. Fix the label in `.github/workflows/release.yml`, land it on `main`.
+3. Actions → Release → Run workflow, with `tag` set to the tag in question.
+
+Check the label against [`actions/runner-images`](https://github.com/actions/runner-images)
+before assuming anything else is wrong.
 
 **The moment this finishes, `install.sh` works.** Verify it against the real
 thing rather than assuming:

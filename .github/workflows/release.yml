@@ -19,12 +19,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Pinned versions rather than `macos-latest`, so an image rotation
+        # can't silently change what a released binary was built against.
+        # The cost is that a retired label stops being served rather than
+        # failing: v0.1.0's macos-13 job sat queued with no runner assigned
+        # and no error, and since `publish` waits for all four, the release
+        # never appeared. If a build job never starts, check the label here
+        # against actions/runner-images before looking anywhere else.
         include:
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-15-intel
             asset: recall_darwin_amd64
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
             asset: recall_darwin_arm64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
