@@ -166,6 +166,9 @@ step is deliberate rather than automated.
 ## 5. Afterwards
 
 - `recall version` on a freshly installed binary should print the new version
-  and the commit it was built from.
+  and the commit it was built from — and that commit should be the one the
+  tag points at. The workflow reads it back from the checkout for exactly
+  this reason, so a mismatch means the wrong ref was built, not a cosmetic
+  slip.
 - Cutting over the production server is separate — see `deploy/README.md`, and
   run `./scripts/compat-check.sh` before and after.
