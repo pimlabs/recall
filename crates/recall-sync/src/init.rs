@@ -73,7 +73,7 @@ fn warn_about_unset_variables() {
     export RECALL_URL=\"https://your-recall-host\"
     export RECALL_TOKEN=\"<your token>\"
 
-  See docs/token-setup.md for generating the token, and for the extra
+  See docs/reference/token-setup.md for generating the token, and for the extra
   variables a claude.ai cloud environment needs."
     );
 }

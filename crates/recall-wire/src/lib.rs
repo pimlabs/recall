@@ -37,7 +37,7 @@
 //! produces it.
 //!
 //! The full reference, including status codes and worked `curl` examples,
-//! is in `docs/api.md`.
+//! is in `docs/reference/api.md`.
 
 #![deny(missing_docs)]
 

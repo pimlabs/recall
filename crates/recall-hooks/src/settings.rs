@@ -23,7 +23,7 @@ use crate::atomic;
 
 /// Matched against the *tool name*, not the file path — Claude Code offers
 /// no path matching, which is precisely why this catches topic files Claude
-/// names on the fly. See `docs/phase-0-findings.md` §4.
+/// names on the fly. See `docs/history/phase-0-findings.md` §4.
 pub const PUSH_MATCHER: &str = "Edit|Write";
 /// The command `recall init` writes for the push hook.
 ///

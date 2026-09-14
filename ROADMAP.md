@@ -4,11 +4,11 @@
 
 - [x] Stood up the server with `POST /sync` / `GET /sync` against SQLite (`server/`), no merge — last write simply overwrites. Zero external dependencies (`node:http` + `node:sqlite`).
 - [x] Built the `PostToolUse`/`SessionStart` hooks, as bash scripts at the time — see below for why `PostToolUse` instead of `FileChanged`. (Retired in Phase 7; `recall init` now wires `recall push` / `recall pull`.)
-- [x] Confirmed empirically: **`FileChanged` doesn't exist** in the installed Claude Code CLI (v2.1.42), and neither does hook type `"http"`. Used `PostToolUse` matching `Edit|Write` (`type: "command"`) instead. Confirmed live — not just by reading the source — that this **does** catch dynamically-named topic files (e.g. `debugging.md`), because the matcher only filters on tool name and the script itself checks the actual file path per call. Full writeup: `docs/phase-0-findings.md`.
-- [x] Confirmed the project-key derivation does **not** match Claude Code's own scoping (which is local-filesystem-path-based, not git-remote-based) — and that this divergence is intentional/necessary. `project_key` derives from the git remote's `owner/repo`; the local memory directory is computed separately by replicating Claude Code's own path-slug algorithm. Details and edge cases (proxied remotes, GitLab subgroups) in `docs/phase-0-findings.md` §6.
-- Also surfaced, not originally in scope but load-bearing: auto memory is **off by default in remote/cloud sessions** unless `CLAUDE_CODE_REMOTE_MEMORY_DIR` is set (`docs/phase-0-findings.md` §5) — this has to be configured as an environment secret alongside `RECALL_TOKEN`.
+- [x] Confirmed empirically: **`FileChanged` doesn't exist** in the installed Claude Code CLI (v2.1.42), and neither does hook type `"http"`. Used `PostToolUse` matching `Edit|Write` (`type: "command"`) instead. Confirmed live — not just by reading the source — that this **does** catch dynamically-named topic files (e.g. `debugging.md`), because the matcher only filters on tool name and the script itself checks the actual file path per call. Full writeup: `docs/history/phase-0-findings.md`.
+- [x] Confirmed the project-key derivation does **not** match Claude Code's own scoping (which is local-filesystem-path-based, not git-remote-based) — and that this divergence is intentional/necessary. `project_key` derives from the git remote's `owner/repo`; the local memory directory is computed separately by replicating Claude Code's own path-slug algorithm. Details and edge cases (proxied remotes, GitLab subgroups) in `docs/history/phase-0-findings.md` §6.
+- Also surfaced, not originally in scope but load-bearing: auto memory is **off by default in remote/cloud sessions** unless `CLAUDE_CODE_REMOTE_MEMORY_DIR` is set (`docs/history/phase-0-findings.md` §5) — this has to be configured as an environment secret alongside `RECALL_TOKEN`.
 
-**Done when:** editing a memory file on one machine, then starting a fresh session (ideally an actual ephemeral cloud session) on the same project, shows the updated content — with zero manual setup on the second environment beyond having cloned the repo. **Proven at the mechanism level**: two simulated machines (different filesystem paths, different git-remote URL shapes) round-tripped `MEMORY.md` and a dynamically-named topic file through a live server instance byte-for-byte (`docs/phase-0-findings.md`, "Round-trip proof"). Deploying a real server and validating against an actual second ephemeral cloud session is the remaining operational step, not a mechanism gap — which is exactly what Phase 1 below is for.
+**Done when:** editing a memory file on one machine, then starting a fresh session (ideally an actual ephemeral cloud session) on the same project, shows the updated content — with zero manual setup on the second environment beyond having cloned the repo. **Proven at the mechanism level**: two simulated machines (different filesystem paths, different git-remote URL shapes) round-tripped `MEMORY.md` and a dynamically-named topic file through a live server instance byte-for-byte (`docs/history/phase-0-findings.md`, "Round-trip proof"). Deploying a real server and validating against an actual second ephemeral cloud session is the remaining operational step, not a mechanism gap — which is exactly what Phase 1 below is for.
 
 ## Guiding rule from here on
 
@@ -38,7 +38,7 @@ No new features. The server and hooks from Phase 0 already do everything needed 
 ## Phase 3 — Multiple projects, token/auth hardening — done
 
 - [x] **Confirmed the server separates memory by `project_key`** for more than one repo. Verified live: pushed different content under the same `file_path` (`MEMORY.md`) to two different `project_key`s, read each back — no cross-contamination. Also confirmed for deletes: tombstoning the file in one project left the other's row completely untouched, and `GET /admin/stats` bucketed both projects separately with correct per-project counts. This was already structurally guaranteed (`project_key` is half of every row's primary key, every query filters by it) — this step was confirming that empirically rather than trusting the schema by inspection alone, per this project's stated preference throughout.
-- [x] **Bearer token setup made boring**: `docs/token-setup.md` — generate once, install on a laptop shell profile and on a claude.ai cloud environment's secrets (plus the network-allowlist step that's easy to forget), verify with a couple of `curl`s, and what rotation actually involves for a single shared token.
+- [x] **Bearer token setup made boring**: `docs/reference/token-setup.md` — generate once, install on a laptop shell profile and on a claude.ai cloud environment's secrets (plus the network-allowlist step that's easy to forget), verify with a couple of `curl`s, and what rotation actually involves for a single shared token.
 
 **Done when:** two different projects synced through the same Recall server never cross-contaminate memory. **Done, verified live** (see above).
 
@@ -130,7 +130,7 @@ itself happened in Phase 7.)
 
 ## Phase 6 — Rust — done
 
-The owner chose Rust as a first project in the language. `docs/rust-rewrite.md`
+The owner chose Rust as a first project in the language. `docs/history/rust-rewrite.md`
 records that as the actual reason, along with an honest accounting: none of
 the five bugs the Go port surfaced would have been prevented by Rust, and
 the one concrete cost is cross-compilation (rusqlite's bundled SQLite is C,
@@ -156,7 +156,7 @@ CGO-free build).
       implementations, because `content` was omitted when empty and the
       Node server rejects a push without it — caught not by either test
       suite but by `scripts/compat-check.sh` running a real push at the
-      real server. Details in `docs/rust-rewrite.md`.
+      real server. Details in `docs/history/rust-rewrite.md`.
 - [x] **`scripts/compat-check.sh`** — the mixed-fleet matrix, automated:
       the new server opening a Node-written database, the old shell hooks
       against the new server, the new client against the Node server, and
@@ -173,7 +173,7 @@ CGO-free build).
       configuration before checking whether the edited file was even a
       memory file**, so an unconfigured machine with a wired project errored
       on every unrelated edit. Both fixed; details in
-      `docs/rust-rewrite.md`.
+      `docs/history/rust-rewrite.md`.
 
 - [x] **A pass over the public API and the docs.** Names first: two
       unrelated types called `Env` (the CLI had already worked around it with
@@ -187,7 +187,7 @@ CGO-free build).
       `missing_docs` is denied in every library crate and CI runs rustdoc
       with `-D warnings`, so an undocumented public item or a stale doc link
       now fails the build. The HTTP API — the actual public surface, and the
-      one part with no reference at all — is documented in `docs/api.md`, and
+      one part with no reference at all — is documented in `docs/reference/api.md`, and
       that document is *asserted* rather than trusted:
       `scripts/api-doc-check.sh` drives 27 checks against a real server on a
       real socket, covering every status code, error string, field order and
@@ -237,7 +237,7 @@ and the checks that protected the migration still run. **Done.**
 
 Claude Code writes facts about the *person* into whichever project it
 happened to learn them in — it labels them `type: user` in the file's own
-front matter (`docs/memory-loading-findings.md` §2). Recall synced them
+front matter (`docs/history/memory-loading-findings.md` §2). Recall synced them
 faithfully into exactly one repository's history, which is the wrong place
 for them.
 
@@ -264,7 +264,7 @@ for them.
       question returned `UNKNOWN` four times and the right answer the fifth,
       with nothing changed between runs. Two conclusions drawn from single
       runs during this work were both wrong and are retracted in
-      `docs/memory-loading-findings.md`, with the counts that refuted them.
+      `docs/history/memory-loading-findings.md`, with the counts that refuted them.
       The rule that came out of it: a single failed probe proves nothing, and
       what is deterministic (the right bytes, at the right path, under the
       right key, with the links maintained) is separated from what is not
@@ -350,7 +350,7 @@ which is reachable by reading the code. Recorded while the evidence is fresh;
 **none is decided**.
 
 - **`recall status` does not read the project's `.claude/settings.json`.**
-  `docs/install.md` recommends declaring `RECALL_PROJECT_KEY` there, because
+  `docs/reference/install.md` recommends declaring `RECALL_PROJECT_KEY` there, because
   that is the one place that travels with a repository. But `ClientConfig`
   reads the *process* environment, and Claude Code applies that `env` block to
   the hooks it spawns — not to an interactive shell. So the hooks sync under

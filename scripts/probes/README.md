@@ -22,6 +22,6 @@ Retrieval is a model deciding which files to open, not a loader walking a
 tree. **A single `UNKNOWN` proves nothing** — one configuration here returned
 `UNKNOWN` four times and the correct answer on the fifth run, unchanged. Two
 findings during this work were drawn from single runs and were both wrong;
-see `docs/memory-loading-findings.md` §4.
+see `docs/history/memory-loading-findings.md` §4.
 
 Run anything more than once before believing it.

@@ -31,7 +31,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps   # what CI runs
 
 `missing_docs` is denied in every library crate, so an undocumented public item fails the build; the rustdoc run above catches the other half, a doc link pointing at something that no longer exists.
 
-`docs/api.md` is checked the same way — not by review, but by assertion:
+`docs/reference/api.md` is checked the same way — not by review, but by assertion:
 
 ```sh
 cargo build --release -p recall-sync
@@ -70,7 +70,7 @@ It has caught two bugs that every test suite in the repo missed, both times beca
 files by running it, not by reading it. **Each probe is a real API call**,
 which is why none of them is part of `cargo test`. Retrieval is
 probabilistic, so a single run proves nothing — see
-`scripts/probes/README.md` and `docs/memory-loading-findings.md` before
+`scripts/probes/README.md` and `docs/history/memory-loading-findings.md` before
 drawing a conclusion from one.
 
 ## Ground rules
@@ -79,7 +79,7 @@ See `CLAUDE.md`'s "Ground rules" section — same reason, one source of truth. T
 
 Two more that aren't in `CLAUDE.md` because they're about this code rather than the project's shape, and both would look like harmless cleanups:
 
-- **The SQLite schema, the HTTP JSON, the timestamp format, and the env var names are frozen.** The rows in production were written by the Node server this one replaced, and every environment already has the variables provisioned. Nothing here is style. See `docs/rust-rewrite.md`.
+- **The SQLite schema, the HTTP JSON, the timestamp format, and the env var names are frozen.** The rows in production were written by the Node server this one replaced, and every environment already has the variables provisioned. Nothing here is style. See `docs/history/rust-rewrite.md`.
 - **`recall-paths`'s `slug()` must stay UTF-16-based.** It reproduces a JavaScript regex replace inside Claude Code, which operates on UTF-16 code units. Iterating bytes or `chars()` instead is wrong for any non-ASCII path, and wrong here means silently reading and writing a directory Claude Code never touches.
 
 ## Releasing
@@ -90,7 +90,7 @@ Two more that aren't in `CLAUDE.md` because they're about this code rather than 
 
 Runs everything above plus both real-server checkers, verifies the three
 version fields agree, and then asks before each irreversible step. See
-`docs/releasing.md` for what only the owner can push, and why.
+`docs/reference/releasing.md` for what only the owner can push, and why.
 
 ## Commit messages
 

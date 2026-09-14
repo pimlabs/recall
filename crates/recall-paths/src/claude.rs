@@ -2,7 +2,7 @@
 //! names the per-project directory.
 //!
 //! These are reverse-engineered from the installed CLI (v2.1.42), not a
-//! published contract; see docs/phase-0-findings.md. They live in their own
+//! published contract; see docs/history/phase-0-findings.md. They live in their own
 //! module precisely because they track someone else's implementation: when
 //! Claude Code changes, there is exactly one place to fix, with its own
 //! tests, instead of the assumption being smeared across the codebase.

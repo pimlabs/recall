@@ -34,7 +34,7 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-      # docs/api.md describes a frozen compatibility surface, so it is
+      # docs/reference/api.md describes a frozen compatibility surface, so it is
       # asserted rather than trusted: status codes, error wording, field
       # order, and the null-versus-empty-string distinction, against a real
       # server on a real socket.
@@ -68,7 +68,7 @@ jobs:
 
   # Only runs after CI passes, and only for a push that landed on main.
   # Needs DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY as repo secrets —
-  # see docs/github-actions-deploy.md.
+  # see docs/reference/github-actions-deploy.md.
   deploy:
     needs: ci
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -91,7 +91,7 @@ jobs:
           else
             echo "configured=false" >> "$GITHUB_OUTPUT"
             echo "::notice::DEPLOY_HOST is not set, so there is nothing to \
-            deploy to. This is not a failure — see docs/github-actions-deploy.md \
+            deploy to. This is not a failure — see docs/reference/github-actions-deploy.md \
             to wire up a VPS."
           fi
 
