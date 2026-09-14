@@ -61,12 +61,16 @@ Standing up the server itself is `recall serve`, in practice via [`deploy/`](dep
 
 ## Status
 
-Phases 0 through 8 done. Recall is one Rust binary (`docs/rust-rewrite.md`)
-that runs both halves: deployed for real, the push/pull round-trip proven
-from a genuine claude.ai cloud session, conflicting edits semantically merged
-rather than last-write-wins, multi-project isolation verified, and a global
-scope so a note about *you* is not stuck in whichever repository Claude
+Phases 0 through 9 done. Recall is one Rust binary
+(`docs/rust-rewrite.md`) that runs both halves: the push/pull round-trip
+proven from a genuine claude.ai cloud session, conflicting edits semantically
+merged rather than last-write-wins, multi-project isolation verified, and a
+global scope so a note about *you* is not stuck in whichever repository Claude
 happened to learn it in.
+
+**The Rust server runs in production as of 2026-09-14** (Phase 9), behind
+Traefik, reading the database the Node implementation wrote — no migration,
+which is what the frozen schema was always for.
 
 The Node server and the bash hooks it replaced are **gone** from the tree
 (Phase 7) — git history is the rollback path, and what they were really

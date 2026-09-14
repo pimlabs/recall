@@ -303,6 +303,79 @@ for them.
 repository, is readable from every other one without being moved by hand.
 **Done.**
 
+## Phase 9 — The production cutover that had never happened — done
+
+Every phase above described the Rust binary as finished. It had never run in
+production. The server answering `recall.pimlabs.id` was still the **Node**
+implementation, deployed 2026-08-13 and untouched since — the one Phase 7
+deleted from the tree. So the frozen schema, the frozen JSON, and
+`tests/fixtures/node-written.db` were not precautions any more; they were the
+thing standing between a month of memory and a bad afternoon.
+
+Done 2026-09-14, split into two independently reversible steps rather than one.
+
+- [x] **Node → Rust, ingress unchanged.** The rollback was secured first: the
+      Node image tagged out of the way (`up --build` overwrites the tag it
+      builds under) and exported to a tarball, because the deployed directory
+      was neither a git repository nor a tree containing `crates/` — losing
+      that image meant no way back at all.
+- [x] **Proven against the real database before switching.** The new server
+      was run against a copy of production's own `VACUUM INTO` snapshot, on a
+      loopback port, and asked for `/admin/stats`. It read every row. The
+      fixture had shown Rust could read *a* Node-written database; this showed
+      it could read *this* one.
+- [x] **Cloudflare Tunnel → Traefik.** `RECALL_TRUSTED_IP_HEADER` moved from
+      `cf-connecting-ip` to `x-real-ip`, and the DNS record from a proxied
+      tunnel to a grey-clouded `A` at the host. Grey matters: behind the proxy
+      Traefik sees Cloudflare's edge address, so every client shares one
+      rate-limit bucket and anyone can exhaust it. Verified after the switch
+      that the origin port is unreachable from outside, which is the other
+      half of the same property.
+- [x] **The whole chain proven from a real client**, not `curl /health`: a
+      laptop reading the project's files through Traefik, from the Rust
+      server, with the token unchanged from before the migration.
+
+Two things the migration taught that the documentation had wrong. Editing the
+placeholders in a tracked compose file leaves the server's clone permanently
+dirty and breaks `git pull --ff-only` forever; an untracked override file
+(`networks.traefik.name` remaps the network, labels override the host rule)
+does the same job and survives every future pull. And `./backups` is relative
+to the compose file, so moving the deployment moves the backup directory —
+quietly, with the old snapshots still on disk and no longer mounted.
+
+## Found by using it
+
+Three things surfaced by running Recall against a second real client, none of
+which is reachable by reading the code. Recorded while the evidence is fresh;
+**none is decided**.
+
+- **`recall status` does not read the project's `.claude/settings.json`.**
+  `docs/install.md` recommends declaring `RECALL_PROJECT_KEY` there, because
+  that is the one place that travels with a repository. But `ClientConfig`
+  reads the *process* environment, and Claude Code applies that `env` block to
+  the hooks it spawns — not to an interactive shell. So the hooks sync under
+  the declared key while `recall status`, typed by hand, reports the derived
+  one. A diagnostic command that disagrees with the thing it diagnoses is the
+  worst kind of bug, and this one was found within an hour of a real setup.
+- **There is no machine scope.** A directory used for general work accumulated
+  ten memory files, every one of them a fact about *the machine*: how much RAM
+  it has, which container runtime is installed, which JDK, which of two
+  conflicting `dotnet` installs wins. Recall has exactly two scopes — this
+  repository, and everywhere. The global scope is actively wrong for this
+  content: "the machine has only 8 GB" is false on the next machine, and
+  memory that is confidently wrong is worse than no memory. It was filed under
+  a declared `project_key` naming the machine, which works and is a disguise.
+  Claude Code already labels memories `type: user` in their front matter, so
+  the distinction exists upstream; only Recall is missing it.
+- **There is no first sync.** `push` sends the file that triggered the hook
+  and tombstones for files that vanished. Nothing else. A memory directory
+  that already holds files when Recall arrives keeps holding them: each one
+  reaches the server only if Claude happens to edit it, and a `touch` from the
+  shell fires no hook at all. Backfilling those ten files meant `POST /sync`
+  by hand, one `curl` per file. This is the concrete form of the
+  export/import idea, and the reason it is worth more than convenience: right
+  now Recall can only protect memory written after it was installed.
+
 ## Explicitly deferred
 
 - **Multi-user / a hosted "Recall as a service for others" product.** Raised and discussed 2026-08-12, shelved: use Recall personally for a while first to get real signal before committing to this. The technical shape is already mapped out if it comes back — it needs deciding on demand, not feasibility:
