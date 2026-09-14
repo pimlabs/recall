@@ -52,6 +52,12 @@ jobs:
       # (including the arm64 Linux one) avoid that entirely.
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }} -p recall-sync
+        # What `recall version` prints beside the version number. Without it
+        # every released binary says "unknown" — deploy/Dockerfile was the
+        # only place setting it, which covers the server image and none of
+        # the four archives people actually download.
+        env:
+          RECALL_GIT_COMMIT: ${{ github.sha }}
 
       - name: Package
         shell: bash
