@@ -3,7 +3,6 @@
 use std::path::Path;
 
 use recall_hooks::{exit, settings};
-use recall_paths::ClientConfig;
 
 use crate::project;
 
@@ -35,7 +34,7 @@ pub fn run(path: Option<&Path>) -> anyhow::Result<i32> {
         );
     }
 
-    warn_about_unset_variables();
+    warn_about_unset_variables(&root);
     Ok(exit::OK)
 }
 
@@ -53,18 +52,25 @@ fn print_commit_hint(root: &Path) {
     );
 }
 
-fn warn_about_unset_variables() {
-    let cfg = ClientConfig::from_process_env();
+/// Reports what is still missing, reading the environment the *hooks* will
+/// run under rather than this shell's.
+///
+/// The difference is not academic: a project that declares these in the
+/// `.claude/settings.json` this command just wired is fully configured, and
+/// warning about them there would send someone editing a shell profile to
+/// fix something that is not broken.
+fn warn_about_unset_variables(root: &Path) {
+    let cfg = project::resolve_at(root.to_path_buf()).cfg;
     if !cfg.url.is_empty() && !cfg.token.is_empty() {
         return;
     }
 
     println!();
     if cfg.url.is_empty() {
-        println!("  ! RECALL_URL is not set in this shell");
+        println!("  ! RECALL_URL is not set — not in this shell, nor in .claude/settings.json");
     }
     if cfg.token.is_empty() {
-        println!("  ! RECALL_TOKEN is not set in this shell");
+        println!("  ! RECALL_TOKEN is not set — not in this shell, nor in .claude/settings.json");
     }
     println!(
         "

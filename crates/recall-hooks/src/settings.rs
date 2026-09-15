@@ -121,6 +121,50 @@ pub fn is_wired(src: &[u8]) -> bool {
     })
 }
 
+/// The `env` block of one settings document, in the order it is written.
+///
+/// Claude Code writes every entry here into the environment of the processes
+/// it spawns — the push and pull hooks among them — and an entry *replaces*
+/// whatever the shell exported. That is the whole reason this function
+/// exists: without it `recall status`, typed into a shell, reports values
+/// that the hooks it is diagnosing never see.
+///
+/// Only string values are returned. The settings schema says `env` maps
+/// names to strings, and a number or an object has no defensible spelling as
+/// an environment variable, so guessing one would be inventing behaviour
+/// Claude Code does not have.
+///
+/// An empty string is kept rather than dropped. It is a real declaration
+/// with a real effect — the variable is set, to nothing — and it is exactly
+/// the case where reporting "unset" would send someone looking in the wrong
+/// place.
+///
+/// # Errors
+///
+/// [`Error::InvalidJson`] when the file is not JSON, or is JSON that is not
+/// an object. A document with no `env` key is not an error: it is the
+/// ordinary case, and it returns an empty list.
+pub fn env_block(src: &[u8]) -> Result<Vec<(String, String)>, Error> {
+    if src.iter().all(|b| b.is_ascii_whitespace()) {
+        return Ok(Vec::new());
+    }
+    let doc: Value = serde_json::from_slice(src).map_err(|_| Error::InvalidJson)?;
+    let Value::Object(doc) = doc else {
+        return Err(Error::InvalidJson);
+    };
+
+    let Some(Value::Object(env)) = doc.get("env") else {
+        return Ok(Vec::new());
+    };
+    Ok(env
+        .iter()
+        .filter_map(|(name, value)| match value {
+            Value::String(value) => Some((name.clone(), value.clone())),
+            _ => None,
+        })
+        .collect())
+}
+
 /// Applies [`wire`] to a `settings.json` on disk, creating it and its parent
 /// directory if absent.
 ///

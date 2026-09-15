@@ -27,11 +27,12 @@ pub async fn push() -> anyhow::Result<i32> {
     // configuration. A machine that has cloned a wired project without being
     // configured yet — the exact case Recall exists for — would otherwise
     // report a missing token on every unrelated file the user touches.
-    if !is_memory_file(&project::memory_dir(&project::root()), &triggered) {
+    let here = project::resolve();
+    if !is_memory_file(&here.memory_dir(), &triggered) {
         return Ok(exit::OK);
     }
 
-    let ctx = project::hook_context()?;
+    let ctx = here.hook_context()?;
     match recall_hooks::push(&ctx, &triggered).await {
         Ok(res) => {
             if res.pushed.is_some() || !res.deleted.is_empty() {
@@ -55,7 +56,7 @@ pub async fn push() -> anyhow::Result<i32> {
 pub async fn pull() -> anyhow::Result<i32> {
     // An unconfigured or unreachable server warns on stderr and exits 0,
     // leaving whatever is already on disk alone.
-    let ctx = match project::hook_context() {
+    let ctx = match project::resolve().hook_context() {
         Ok(ctx) => ctx,
         Err(err) => {
             eprintln!("recall-pull: {err}, leaving local memory untouched");

@@ -226,6 +226,20 @@ it can reach a self-hosted server at all. The two that describe a *project*
 rather than a machine — `RECALL_PROJECT_KEY` and `RECALL_GLOBAL_KEY` — are in
 [`docs/reference/install.md`](docs/reference/install.md).
 
+Where they are *read from* is a second question, and the answer is not
+`std::env`. Claude Code applies the `env` block of the settings files in
+scope to the processes it spawns, replacing what the shell exported, so the
+environment a hook runs under and the one an interactive shell holds are
+different things. `recall_hooks::declared_env` layers them in Claude Code's
+own order — the user-level `settings.json`, then the project's
+`.claude/settings.json`, then its untracked `.claude/settings.local.json`,
+all of them above the shell — and every command resolves through it, so a
+diagnostic cannot describe a different environment than the one it is
+diagnosing. Managed (enterprise) settings and command-line overrides, the two
+layers above those, are deliberately not modelled: there is no fleet here to
+be managed by, and inventing platform paths nothing can test would trade a
+known gap for an unknown one.
+
 ### Deletes are tombstones, not row removal
 
 A pushed delete (`{ project_key, file_path, deleted: true, source_env }`)

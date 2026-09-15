@@ -78,6 +78,21 @@ pub struct ClientConfig {
     pub claude: Env,
 }
 
+/// Every variable [`ClientConfig`] reads that is Recall's own.
+///
+/// Claude Code's three are [`crate::claude::VARS`]; a caller enumerating
+/// everything [`ClientConfig::from_lookup`] consults wants both lists, which
+/// is what `reads_exactly_the_variables_it_publishes` asserts. They are kept
+/// apart because they are owned by different projects — ours can be renamed
+/// here, Claude Code's cannot be renamed at all.
+pub const VARS: &[&str] = &[
+    "RECALL_URL",
+    "RECALL_TOKEN",
+    "RECALL_SOURCE_ENV",
+    "RECALL_PROJECT_KEY",
+    "RECALL_GLOBAL_KEY",
+];
+
 impl ClientConfig {
     /// Reads client configuration. It does not error on missing values —
     /// callers that need them say so via [`ClientConfig::require`], because
@@ -320,6 +335,39 @@ mod tests {
         let clean = ClientConfig::from_lookup(env(&[("RECALL_PROJECT_KEY", "acme/app")]));
         assert!(clean.rejected_vars.is_empty());
         assert!(ClientConfig::from_lookup(env(&[])).rejected_vars.is_empty());
+    }
+
+    /// The published list is what `recall status` iterates to say which
+    /// variables a settings file declares. If a new variable were added to
+    /// the reads and not to the list, status would silently stop reporting
+    /// it — the same class of quiet omission this whole type exists to
+    /// surface.
+    #[test]
+    fn reads_exactly_the_variables_it_publishes() {
+        use std::cell::RefCell;
+
+        let seen = RefCell::new(Vec::new());
+        let _ = ClientConfig::from_lookup(|key| {
+            seen.borrow_mut().push(key.to_string());
+            None
+        });
+
+        let mut seen = seen.into_inner();
+        seen.sort();
+        seen.dedup();
+
+        let mut published: Vec<String> = VARS
+            .iter()
+            .chain(crate::claude::VARS.iter())
+            .map(|v| (*v).to_string())
+            .collect();
+        published.sort();
+
+        assert_eq!(
+            seen, published,
+            "config::VARS and claude::VARS together no longer describe what \
+             ClientConfig reads"
+        );
     }
 
     /// The messages are the operator-facing half of these errors: each one

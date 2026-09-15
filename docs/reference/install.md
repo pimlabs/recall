@@ -171,6 +171,15 @@ Committed, it is the one form that reaches every machine and every fresh
 cloud session without per-machine setup. (`recall init` does not write it for
 you: which projects share a key is a decision only you can make.)
 
+**Declared here, it beats the `export` above.** Claude Code applies an `env`
+block to every process it spawns and *replaces* the value inherited from the
+shell, so the file wins wherever the two disagree — on this machine and on
+every other one. `recall status` reads the same files in the same order and
+names the one each value came from, so you never have to guess which of the
+two is in force. It did not always: it read the shell alone and reported the
+derived key while the hooks synced under the declared one, which is the
+worst way for a diagnostic to be wrong.
+
 **Changing it on a project that has already synced orphans that project's
 memory.** The server files every file under the key it was pushed with and
 moves nothing, so the old history stays where it is and the new key starts
@@ -288,14 +297,23 @@ recall status
 Reports, for the project you're standing in: the `project_key` and whether
 it was derived or declared, where Claude Code's memory directory actually is
 on this machine, how many memory files exist locally, whether the hooks are
-wired, the global scope and whether `MEMORY.md` links it, whether
-`RECALL_URL`/`RECALL_TOKEN` are set, whether the server answers, whether
-merge is actually configured server-side, and how many files the server
-holds for this project.
+wired, which variables a settings file declares and which of those are
+overriding your shell, the global scope and whether `MEMORY.md` links it,
+whether `RECALL_URL`/`RECALL_TOKEN` are set, whether the server answers,
+whether merge is actually configured server-side, and how many files the
+server holds for this project.
+
+It reports them as the *hooks* would see them, not as your shell holds them
+— which is the same thing on most machines and emphatically not the same
+thing on a project that declares anything in `.claude/settings.json`.
 
 Anything you set that Recall could not use is called out here too — a
 refused `RECALL_PROJECT_KEY` or `RECALL_GLOBAL_KEY` still leaves sync
-working, which is exactly why it would otherwise go unnoticed.
+working, which is exactly why it would otherwise go unnoticed. Two more of
+that kind: a variable declared as an empty string, which turns the setting
+off *and* hides whatever the shell had behind it, and a settings file that
+exists but is not valid JSON, which Claude Code cannot read either, so
+nothing it declares reaches the hooks at all.
 
 `recall status --json` prints the same thing machine-readably.
 

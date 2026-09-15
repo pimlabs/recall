@@ -346,8 +346,8 @@ quietly, with the old snapshots still on disk and no longer mounted.
 ## Found by using it
 
 Three things surfaced by running Recall against a second real client, none of
-which is reachable by reading the code. Recorded while the evidence is fresh;
-**none is decided**.
+which is reachable by reading the code. Recorded while the evidence is fresh.
+The first has since been fixed; the other two are **not decided**.
 
 - **`recall status` does not read the project's `.claude/settings.json`.**
   `docs/reference/install.md` recommends declaring `RECALL_PROJECT_KEY` there, because
@@ -357,6 +357,19 @@ which is reachable by reading the code. Recorded while the evidence is fresh;
   the declared key while `recall status`, typed by hand, reports the derived
   one. A diagnostic command that disagrees with the thing it diagnoses is the
   worst kind of bug, and this one was found within an hour of a real setup.
+
+  **Fixed.** The finding above is left as written and what the fix turned up
+  is appended here rather than folded in — a finding rewritten after the fact
+  stops being evidence. Two things it surfaced that the finding had not. The
+  shell does not merely *disagree* with the settings file, it **loses** to
+  it: Claude Code replaces the inherited value rather than deferring to it,
+  so a declaration is in force even on a machine whose profile exports
+  something else. And `status` was not the only command typed by hand —
+  `recall promote` resolved the key the same way, so promoting a note in a
+  project that declared its key would have pushed the move into the derived
+  key's history instead. Both of them, and the hooks, now resolve through one
+  path.
+
 - **There is no machine scope.** A directory used for general work accumulated
   ten memory files, every one of them a fact about *the machine*: how much RAM
   it has, which container runtime is installed, which JDK, which of two

@@ -316,6 +316,272 @@ fn status_says_when_a_declared_project_key_was_refused() {
 }
 
 // ---------------------------------------------------------------------------
+// status, against the environment a hook would actually see
+// ---------------------------------------------------------------------------
+
+/// `run` points `HOME` at the working directory, which for `git_repo()` makes
+/// the user-level settings file the very same path as the project's committed
+/// one — so a test naming a single layer would quietly be exercising two. The
+/// tests below hand `HOME` somewhere else and keep the layer they name the
+/// only one in play.
+fn home_elsewhere() -> tempfile::TempDir {
+    tempfile::tempdir().unwrap()
+}
+
+/// Writes one of a project's settings files, returning its path exactly as
+/// `status` will print it. Rebuilding the expected path a second way is how a
+/// test ends up asserting nothing.
+fn write_settings(repo: &Path, name: &str, body: &str) -> String {
+    let dir = repo.join(".claude");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    std::fs::write(&path, body).unwrap();
+    path.display().to_string()
+}
+
+/// `status --json`, parsed. A malformed document fails here, naming the
+/// output, rather than as an `unwrap` panic five assertions later.
+fn status_json(cwd: &Path, env: &[(&str, &str)]) -> serde_json::Value {
+    let r = run(&["status", "--json"], cwd, env, None);
+    assert_eq!(r.code, 0, "status must never fail: {}", r.stderr);
+    serde_json::from_str(&r.stdout)
+        .unwrap_or_else(|e| panic!("--json did not emit JSON ({e}): {}", r.stdout))
+}
+
+/// The `declared_env` entry for `name`, failing with the whole report when it
+/// is absent — an index-out-of-bounds panic would not say what was reported
+/// instead.
+fn declared_entry<'a>(rep: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    rep["declared_env"]
+        .as_array()
+        .unwrap_or_else(|| panic!("nothing was reported as declared at all: {rep}"))
+        .iter()
+        .find(|var| var["name"] == name)
+        .unwrap_or_else(|| panic!("{name} was not reported as declared: {rep}"))
+}
+
+/// The bug this whole layer exists for. Claude Code puts the `env` block of a
+/// project's settings into every hook it spawns, so a project that commits
+/// `RECALL_PROJECT_KEY` syncs under that key — while `status`, typed into a
+/// shell Claude Code never touched, used to answer with the git-derived
+/// `acme/app`. Someone chasing memories that never arrive would then be
+/// reading a report describing a different bucket than the one their session
+/// writes to, which is worse than having no report.
+#[test]
+fn status_reads_a_project_key_that_only_the_settings_file_declares() {
+    let repo = git_repo();
+    let file = write_settings(
+        repo.path(),
+        "settings.json",
+        r#"{"env":{"RECALL_PROJECT_KEY":"acme/monorepo-api"}}"#,
+    );
+    let home = home_elsewhere();
+    let home = home.path().to_string_lossy().into_owned();
+
+    let rep = status_json(repo.path(), &[("HOME", &home)]);
+    assert_eq!(
+        rep["project_key"], "acme/monorepo-api",
+        "the committed declaration is what the hooks sync under, and nothing \
+         in this shell said so: {rep}"
+    );
+    assert_eq!(rep["project_key_source"], "declared");
+
+    let var = declared_entry(&rep, "RECALL_PROJECT_KEY");
+    assert_eq!(
+        var["file"], file,
+        "the report has to name the file to go and edit: {rep}"
+    );
+    assert_eq!(
+        var["shadows_shell"], false,
+        "nothing in this shell was overridden, and saying otherwise sends \
+         someone hunting an export that does not exist: {rep}"
+    );
+}
+
+/// Settings and shell disagreeing is the case people actually hit, and the two
+/// possible answers look equally plausible — so the direction is asserted both
+/// ways round. Reporting the shell's value as the winner would have someone
+/// "fix" their export and watch nothing change.
+#[test]
+fn a_settings_declaration_beats_the_shell_and_not_the_other_way_round() {
+    let repo = git_repo();
+    let file = write_settings(
+        repo.path(),
+        "settings.json",
+        r#"{"env":{"RECALL_PROJECT_KEY":"acme/from-settings"}}"#,
+    );
+    let home = home_elsewhere();
+    let home = home.path().to_string_lossy().into_owned();
+
+    let rep = status_json(
+        repo.path(),
+        &[
+            ("HOME", &home),
+            ("RECALL_PROJECT_KEY", "acme/from-the-shell"),
+        ],
+    );
+    assert_eq!(
+        rep["project_key"], "acme/from-settings",
+        "the settings file is the layer that wins: {rep}"
+    );
+    assert_ne!(
+        rep["project_key"], "acme/from-the-shell",
+        "the shell value is replaced, not preferred: {rep}"
+    );
+
+    let var = declared_entry(&rep, "RECALL_PROJECT_KEY");
+    assert_eq!(var["file"], file);
+    assert_eq!(
+        var["shadows_shell"], true,
+        "a shell value that is set and not in effect is exactly the \
+         disagreement worth naming: {rep}"
+    );
+}
+
+/// `settings.local.json` is untracked, so it is where someone puts the value
+/// that differs from the team's. Naming the committed file as the source would
+/// send them editing a file they then have to un-edit before pushing.
+#[test]
+fn the_local_settings_file_wins_and_is_the_file_status_names() {
+    let repo = git_repo();
+    write_settings(
+        repo.path(),
+        "settings.json",
+        r#"{"env":{"RECALL_PROJECT_KEY":"acme/committed"}}"#,
+    );
+    let local = write_settings(
+        repo.path(),
+        "settings.local.json",
+        r#"{"env":{"RECALL_PROJECT_KEY":"acme/untracked"}}"#,
+    );
+    let home = home_elsewhere();
+    let home = home.path().to_string_lossy().into_owned();
+
+    let rep = status_json(repo.path(), &[("HOME", &home)]);
+    assert_eq!(
+        rep["project_key"], "acme/untracked",
+        "the higher-precedence file is the one in force: {rep}"
+    );
+    assert_eq!(
+        declared_entry(&rep, "RECALL_PROJECT_KEY")["file"],
+        local,
+        "the report must point at the file that actually won: {rep}"
+    );
+}
+
+/// A settings file that does not parse is one Claude Code cannot read either,
+/// so nothing it declares reaches the hooks — and the file merely being
+/// *present* is what makes that invisible. `status` is the command people run
+/// when everything is wrong, so this is a finding it prints, never a reason to
+/// fail.
+#[test]
+fn unreadable_settings_are_a_finding_rather_than_a_failure() {
+    let repo = git_repo();
+    let file = write_settings(repo.path(), "settings.json", "{ not json");
+    let home = home_elsewhere();
+    let home = home.path().to_string_lossy().into_owned();
+
+    let r = run(&["status", "--json"], repo.path(), &[("HOME", &home)], None);
+    assert_eq!(
+        r.code, 0,
+        "a broken settings file must not take the diagnostic down with it: {}",
+        r.stderr
+    );
+
+    let rep: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    let unreadable = rep["unreadable_settings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a file that cannot be parsed was skipped silently: {rep}"));
+    assert!(
+        unreadable.iter().any(|f| *f == file),
+        "the report has to name the file: {rep}"
+    );
+    assert_eq!(
+        rep["hooks_wired"], false,
+        "the same unparseable file is where hooks would have been found: {rep}"
+    );
+    assert_eq!(
+        rep["project_key"], "acme/app",
+        "with the declaration unreadable the key falls back to the remote: {rep}"
+    );
+}
+
+/// The compound failure: Recall reads an empty value as unset, so the setting
+/// is off — *and* the working value exported in this shell is hidden behind
+/// the declaration. Either half alone is confusing; together they look like
+/// global sync simply not existing.
+#[test]
+fn an_empty_declaration_turns_a_setting_off_and_hides_the_shell_value() {
+    let repo = git_repo();
+    write_settings(
+        repo.path(),
+        "settings.json",
+        r#"{"env":{"RECALL_GLOBAL_KEY":""}}"#,
+    );
+    let home = home_elsewhere();
+    let home = home.path().to_string_lossy().into_owned();
+
+    let rep = status_json(
+        repo.path(),
+        &[("HOME", &home), ("RECALL_GLOBAL_KEY", "eko")],
+    );
+    let var = declared_entry(&rep, "RECALL_GLOBAL_KEY");
+    assert_eq!(
+        var["empty"], true,
+        "an empty declaration is a declaration, not an absence: {rep}"
+    );
+    assert_eq!(
+        var["shadows_shell"], true,
+        "the shell's usable value is the thing being hidden: {rep}"
+    );
+    assert!(
+        rep.get("global_key").is_none(),
+        "global scope is off, however much the shell exported: {rep}"
+    );
+}
+
+/// The JSON is for scripts; the text is what someone pastes into a bug report
+/// at 1am. Printing the winning value without the file it came from leaves the
+/// next question — "then why is my export doing nothing?" — with nowhere to go.
+#[test]
+fn the_text_report_names_the_file_that_overrides_the_shell() {
+    let repo = git_repo();
+    let file = write_settings(
+        repo.path(),
+        "settings.json",
+        r#"{"env":{"RECALL_PROJECT_KEY":"acme/from-settings"}}"#,
+    );
+    let home = home_elsewhere();
+    let home = home.path().to_string_lossy().into_owned();
+
+    let r = run(
+        &["status"],
+        repo.path(),
+        &[
+            ("HOME", &home),
+            ("RECALL_PROJECT_KEY", "acme/from-the-shell"),
+        ],
+        None,
+    );
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(
+        r.stdout.contains(&file),
+        "the settings file has to appear by path: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("overrides the value set in this shell"),
+        "the shell value being dead has to be said, not implied: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains(&format!("set by {file}")),
+        "the project_key line should attribute the key to that file too: {}",
+        r.stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
 // promote
 // ---------------------------------------------------------------------------
 
