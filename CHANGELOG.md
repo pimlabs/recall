@@ -28,10 +28,24 @@ pipeline and the shape of the tree:
   by hand, and v0.1.0's first set of archives named the wrong commit because
   of it. They were rebuilt; `recall version` now prints `d85d225`, which is
   what `v0.1.0` points at.
-- **`brew install pimlabs/recall/recall` works.** The formula carried an
-  empty `sha256`, so the tagged-release path could not install at all and
-  `--HEAD` was the only route. This one does touch an install, which is why
-  it is here and the rest of the week's documentation work is not.
+- **Homebrew is one line and one download:**
+
+  ```sh
+  brew install pimlabs/tap/recall
+  ```
+
+  Two changes in one. The formula moved to `pimlabs/homebrew-tap`, whose name
+  lets Homebrew resolve `pimlabs/tap` without a URL, so the separate
+  `brew tap pimlabs/recall <url>` step is gone. And the release install now
+  takes the prebuilt archive — the same one npm and `install.sh` fetch —
+  instead of compiling Rust and SQLite's C amalgamation locally. Seconds
+  rather than minutes, and no Rust toolchain needed.
+
+  `brew install --HEAD pimlabs/tap/recall` still builds from `main`, since
+  there is nothing prebuilt for `main` to point at.
+
+  If you installed the old way, `brew untap pimlabs/recall` after switching;
+  nothing breaks if you don't, but the old tap will never update again.
 
 ## 0.1.0 — 2026-09-14
 

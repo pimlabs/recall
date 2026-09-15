@@ -51,8 +51,7 @@ if ! curl -fsSL "$url" -o "$tmp/$asset"; then
       git clone https://github.com/$REPO && cd recall
       cargo build --release -p recall-sync   # binary at target/release/recall
     Or, without a Rust toolchain of your own:
-      brew tap pimlabs/recall https://github.com/$REPO
-      brew install --HEAD pimlabs/recall/recall"
+      brew install --HEAD pimlabs/tap/recall"
 fi
 
 tar -xzf "$tmp/$asset" -C "$tmp"

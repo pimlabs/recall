@@ -103,21 +103,35 @@ recall version
 
 ## 2. Homebrew
 
-The formula builds from a source tarball, so it needs that tarball's hash:
+The formula installs the release archives rather than building them, so it
+carries **four** checksums — one per platform — and they come from the
+release's own `checksums.txt`. `scripts/release.sh` does this: it downloads
+that file, rewrites `Formula/recall.rb` in place, and pairs each hash with
+the archive named on the `url` line above it. Pairing matters: hashes written
+positionally would hand a platform another platform's digest, and Homebrew
+would report a corrupt download rather than a mistake in this repository.
+
+Then it pushes the result to **`pimlabs/homebrew-tap`**, which is where
+`brew install pimlabs/tap/recall` looks. That push is the step a release
+forgets when it is done by hand — and the failure arrives later, on someone
+else's machine, as a checksum error that says nothing about why.
+
+`Formula/recall.rb` here is the source; the copy in the tap is output and
+carries a generated-file header saying so. Commit the updated source in this
+repository too, so the two do not drift.
+
+By hand, if you are finishing an interrupted run:
 
 ```sh
-curl -fsSL https://github.com/pimlabs/recall/archive/refs/tags/v0.1.0.tar.gz | shasum -a 256
+curl -fsSL https://github.com/pimlabs/recall/releases/download/v0.1.0/checksums.txt
+# put each hash on the sha256 line under its own archive's url, then:
+git clone https://github.com/pimlabs/homebrew-tap /tmp/tap
+cp Formula/recall.rb /tmp/tap/Formula/recall.rb
+# commit and push /tmp/tap
 ```
 
-Put the result in `Formula/recall.rb`'s `sha256`, and update the `url` to the
-new tag. Then:
-
-```sh
-brew tap pimlabs/recall https://github.com/pimlabs/recall
-brew install pimlabs/recall/recall
-```
-
-`brew install --HEAD` keeps working between releases and needs none of this.
+`brew install --HEAD pimlabs/tap/recall` builds from `main` and needs none of
+this — it is the one path that still wants a Rust toolchain.
 
 ## 3. npm
 
