@@ -18,6 +18,7 @@
 //! would strand everyone who installed with `cargo install recall-sync`.
 //! The binary it produces is still `recall`.
 
+mod backfill;
 mod hook;
 mod init;
 mod project;
@@ -53,6 +54,8 @@ enum Cmd {
         #[arg(long)]
         path: Option<PathBuf>,
     },
+    /// Send memory files the server does not have yet — the first sync
+    Backfill,
     /// Move a note into the global scope, so it follows you into every project
     Promote {
         /// The note to promote, relative to the memory directory
@@ -88,6 +91,7 @@ fn main() {
             Ok(exit::OK)
         }
         Cmd::Init { path } => init::run(path.as_deref()),
+        Cmd::Backfill => block_on_current(backfill::run()),
         Cmd::Serve => block_on_multi(serve::run()),
         Cmd::Promote { file } => block_on_current(promote::run(&file)),
         Cmd::Status { json } => block_on_current(status::run(json)),

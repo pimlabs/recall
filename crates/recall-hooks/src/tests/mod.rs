@@ -6,6 +6,7 @@
 //! files they happen to exercise. Tests that belong to a single module (path
 //! containment, payload parsing, the settings merge) stay next to it.
 
+mod backfill;
 mod behaviour;
 mod edge_cases;
 mod global_scope;

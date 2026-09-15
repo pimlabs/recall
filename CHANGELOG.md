@@ -16,6 +16,29 @@ break will be described here in full rather than smoothed over.
 
 ## Unreleased
 
+- **`recall backfill` sends memory that predates Recall.** The push hook only
+  ever sent the file it was handed, so a project whose memory directory
+  already held files when Recall arrived kept them to itself: each one
+  reached the server only if Claude happened to edit it again, and a `touch`
+  from the shell fires no hook at all. Catching up meant one `curl` per file.
+  Recall could protect only the memory written after it was installed.
+
+  It sends less than everything on disk, on purpose. `POST /sync` overwrites
+  in place — no timestamp comparison, no conflict — so a bulk push of a local
+  directory is safe on the first machine and destructive on every other one.
+  `backfill` asks what the server holds first and sends only what is missing.
+  A file the server has with different content is left alone and named in the
+  output; so is one the server has tombstoned, because re-sending that undoes
+  a delete rather than filling a gap. Files under `global/` with
+  `RECALL_GLOBAL_KEY` unset belong to no scope and are refused rather than
+  filed into the project's history.
+
+  Every file is one request, against a server budget of 60 a minute per
+  address that is shared with the hooks in your session, so the run stops at
+  the first refusal and says what is left. Re-running finishes it and
+  re-sends nothing. It also leaves behind the baseline that makes deletes
+  detectable, which a project that never ran a successful pull did not have.
+
 - **`recall status` no longer disagrees with the hooks it diagnoses.** Claude
   Code applies a settings file's `env` block to the processes it spawns and
   *replaces* what your shell exported. So a `RECALL_PROJECT_KEY` declared in

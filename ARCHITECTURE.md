@@ -20,8 +20,8 @@ No peer-to-peer link between environments — every environment only ever talks 
 ## One binary
 
 Client and server are the same Rust binary (`docs/history/rust-rewrite.md`):
-`recall serve` runs the server; `recall init` / `status` / `promote` /
-`push` / `pull` run on a developer machine. That is not packaging
+`recall serve` runs the server; `recall init` / `status` / `backfill` /
+`promote` / `push` / `pull` run on a developer machine. That is not packaging
 convenience. The validation rules and the tombstone/empty-file distinction
 previously existed twice — in JavaScript on the server and in bash on the
 client — with nothing keeping them in agreement. The `recall-wire` crate is
@@ -35,7 +35,8 @@ and the dependency arrows only ever point downward.
 
 ```
 recall-sync       the binary: one module per command
-   │              init · status · promote · hook (push/pull) · serve · project
+   │              init · status · backfill · promote · hook (push/pull)
+   │              serve · project
    ├──────────────┬──────────────┐
    ▼              ▼              │
 recall-hooks   recall-server     │   the two halves
@@ -53,7 +54,7 @@ recall-hooks   recall-server     │   the two halves
 |---|---|---|
 | `recall-wire` | Request/response shapes and the validation both sides apply | These rules were once written twice — JavaScript and bash — and drifted. One definition is the whole point. |
 | `recall-paths` | Claude Code's memory paths, `project_key` derivation, client config | Tracks *someone else's* implementation. When the CLI changes there is one place to fix, with its own tests. |
-| `recall-hooks` | `push`, `pull`, the baseline, the HTTP client, the settings merge | Everything that runs inside a user's editing session, where being quiet matters more than being thorough. |
+| `recall-hooks` | `push`, `pull`, `backfill`, the baseline, the HTTP client, the settings merge | Everything that runs inside a user's editing session, where being quiet matters more than being thorough. |
 | `recall-server` | SQLite store, `claude -p` merge, the axum API | Everything that runs on the host. Never depends on `recall-hooks`. |
 | `recall-sync` | Argument parsing and one module per command — `serve` among them, so this is where the server process starts too | Thin. Each command's *failure policy* is documented beside the command it governs. Named for the client half only because `recall-cli` and `recall` were both taken on crates.io; published since v0.1.0, so the name is now fixed. |
 

@@ -347,7 +347,8 @@ quietly, with the old snapshots still on disk and no longer mounted.
 
 Three things surfaced by running Recall against a second real client, none of
 which is reachable by reading the code. Recorded while the evidence is fresh.
-The first has since been fixed; the other two are **not decided**.
+The first and the third have since been fixed; the machine scope is **not
+decided**.
 
 - **`recall status` does not read the project's `.claude/settings.json`.**
   `docs/reference/install.md` recommends declaring `RECALL_PROJECT_KEY` there, because
@@ -388,6 +389,21 @@ The first has since been fixed; the other two are **not decided**.
   by hand, one `curl` per file. This is the concrete form of the
   export/import idea, and the reason it is worth more than convenience: right
   now Recall can only protect memory written after it was installed.
+
+  **Fixed** — `recall backfill`, with the finding above left as written. What
+  building it turned up, which the finding had not: the naive shape is
+  dangerous. `POST /sync` overwrites in place, comparing no timestamps and
+  returning no conflict, so "send everything on disk" is safe only on the
+  very first machine — anywhere else it deletes whatever another machine
+  pushed more recently. So the command asks what the server holds before it
+  sends anything, and a file the server has with different bytes is left
+  alone and reported rather than overwritten. Two smaller things fell out of
+  the same question: a file the server has tombstoned must not be re-sent
+  either, because that undoes a delete rather than filling a gap; and because
+  every file is one request against a 60-per-minute budget shared with the
+  session's own hooks, the run stops at the first refusal instead of pushing
+  through. It resumes by construction — what was sent is on the server, and
+  the next run finds it there.
 
 ## Explicitly deferred
 

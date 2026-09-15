@@ -302,6 +302,46 @@ the project's repo for a fresh clone — especially an ephemeral cloud
 session that has never seen your machine — to pick sync up with no setup of
 its own. See `CLAUDE.md`'s ground rules.
 
+### Memory that was already here: `recall backfill`
+
+Wiring a project does not send anything. The push hook fires when Claude
+edits a memory file, so a project that already had memory when Recall
+arrived keeps it to itself: each file reaches the server only if Claude
+happens to edit it again, and a `touch` from the shell fires no hook at all.
+Until it is sent, that memory is exactly as safe as the one machine it is on.
+
+Run this once, from inside the project:
+
+```sh
+recall backfill
+```
+
+It asks the server what it already holds, then sends what is missing. It
+prints a count and then names anything it left behind.
+
+**It deliberately sends less than everything on your disk.** `POST /sync`
+overwrites in place: no timestamp comparison, no conflict, whatever arrives
+last wins. On a second machine, "push my whole directory" is not a way to
+rescue memory — it is a way to delete the first machine's newer work. So:
+
+| It leaves alone | Because |
+|---|---|
+| A file the server holds with different content | That is a real disagreement, not a gap. Run `recall pull` and reconcile it, or edit the file so the push hook sends it. |
+| A file the server has tombstoned | It was deleted on another machine. Sending it back is a resurrection, not a sync — `recall pull` will remove it here. |
+| Anything under `global/` when `RECALL_GLOBAL_KEY` is unset | It belongs to no scope. Filing personal notes into one repository's history is the one outcome worth refusing. |
+| Anything that is not text | It cannot be sent at all. This is also how a `.DS_Store` or a pasted screenshot is quietly skipped. |
+
+**It stops at the first refusal, and says so.** Every file is its own
+request, and the server allows 60 requests a minute per address — a budget
+shared with the push and pull hooks running in the session you typed this
+in. Stopping leaves the rest of that budget for them. Re-running finishes
+the job and costs nothing for what already went: the second run finds those
+files on the server and skips them.
+
+It also leaves behind the baseline that makes deletes detectable. Until a
+project has one, `recall push` cannot tell a file you deleted from one that
+was never there.
+
 ## Check it's working
 
 ```sh
