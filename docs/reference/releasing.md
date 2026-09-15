@@ -97,9 +97,67 @@ before assuming anything else is wrong.
 thing rather than assuming:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/pimlabs/recall/main/install.sh | bash
+curl -fsSL https://recall.pimlabs.id/install | bash
 recall version
 ```
+
+The version it prints must be the one you just tagged, and the commit beside
+it must be the commit that tag points at.
+
+### Where that short URL comes from
+
+A **Cloudflare Worker** on `recall.pimlabs.id/*`, from
+[`install-worker.js`](../../install-worker.js) and
+[`wrangler.toml`](../../wrangler.toml) at the root of this repository.
+
+It is **deployed by Cloudflare's Git integration** — the repository is
+connected under Workers & Pages, and a push to `main` redeploys it. Nothing
+is pasted into a dashboard, and that is not convenience: the Worker proxies
+`install.sh`, so the two have to move together, and a pasted copy would drift
+the moment either changed. `wrangler.toml` carries the route, so even the
+hostname it answers for is reviewed rather than clicked.
+
+Connecting it is a one-time step: **Workers & Pages → Create → Connect to
+Git**, pick this repository, leave the build command empty (there are no
+dependencies), deploy command `npx wrangler deploy`.
+
+| Path | Answer |
+|---|---|
+| `/install`, `/install.sh` | 200, `text/x-sh`, the contents of `install.sh` on `main` |
+| `/sync`, `/health`, `/admin`, `/admin/stats` | 410, naming `recall-server.pimlabs.id` |
+| anything else | 404, listing the installer, the API and the repository |
+
+It **proxies rather than copies**: every request fetches `install.sh` from
+`main`, so no second version of that script exists anywhere. That is not
+tidiness — `install.sh` is where the downloaded binary's SHA-256 is checked
+against the release's `checksums.txt`, so a stale copy would be an installer
+that verifies nothing, and nobody would notice.
+
+The 410s are the reason this is a Worker and not a Redirect Rule, which
+cannot answer for paths it does not match. `recall.pimlabs.id` was the API's
+address until 2026-09-15. A client still pointed at it would otherwise
+receive a bare 404 from whatever sits at the origin — and Recall's hooks exit
+0 on an unreachable server by design, so that machine would stop syncing in
+complete silence. **410 rather than a redirect** is deliberate too: sending a
+`POST /sync` onwards would hand a client's memory to a host it never
+authenticated against.
+
+`scripts/install-worker-test.js` drives all of it against a stubbed
+upstream, including the case where GitHub is down — which must fail loudly
+rather than pipe a truncated script into someone's shell.
+`scripts/wrangler-check.py` asserts the config itself: that the route covers
+the whole host, that no binding or secret has crept in, and that
+`workers_dev` is a top-level key. That last one is not hypothetical — written
+one line lower it parses as a *route* key instead, and the `*.workers.dev`
+subdomain stays quietly enabled, publishing a second address for the
+installer that nothing documents. CI runs both.
+
+The API now lives at `recall-server.pimlabs.id`, on a **DNS-only** record.
+That record must stay DNS-only: proxying it would put Cloudflare's edge
+between the client and Traefik, and every client would share one rate-limit
+bucket. The zone's `*.pimlabs.id` wildcard **is** proxied, so deleting the
+specific record would not break the hostname — it would quietly demote it,
+which is worse.
 
 ## 2. Homebrew
 

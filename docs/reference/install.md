@@ -23,7 +23,7 @@ already has.
 |---|---|
 | **npm** / bun / pnpm | `npm install -g @pimlabs/recall` |
 | **Homebrew** | `brew install pimlabs/tap/recall` |
-| **curl** | `curl -fsSL https://raw.githubusercontent.com/pimlabs/recall/main/install.sh \| bash` |
+| **curl** | `curl -fsSL https://recall.pimlabs.id/install \| bash` |
 | **cargo** | `cargo install recall-sync` |
 
 Supported: macOS and Linux, x64 and arm64. Windows needs WSL. There are no
@@ -64,12 +64,31 @@ that is the one case where you need a Rust toolchain.
 For a machine with neither npm nor Homebrew:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/pimlabs/recall/main/install.sh | bash
+curl -fsSL https://recall.pimlabs.id/install | bash
 ```
 
 Installs to `~/.local/bin/recall`. Override with `RECALL_BIN_DIR`, or pin a
 version with `RECALL_VERSION=v0.1.0`. It will tell you if that directory
 isn't on your `PATH`.
+
+That URL is a Cloudflare Worker that fetches `install.sh` from `main` on
+every request, so what runs is whatever this repository says right now —
+there is no second copy to fall behind. Read it before running it if you
+would rather not pipe a stranger's script into a shell:
+
+```sh
+curl -fsSL https://recall.pimlabs.id/install | less
+```
+
+The same bytes, with their history, are at
+[`install.sh`](https://github.com/pimlabs/recall/blob/main/install.sh) —
+that is the file the Worker serves, and
+[`install-worker.js`](https://github.com/pimlabs/recall/blob/main/install-worker.js)
+is the Worker itself.
+
+**It is not your server's address.** `recall.pimlabs.id` is where this
+project publishes its installer; `RECALL_URL` is the host *you* deploy to,
+and the two have nothing to do with each other.
 
 ### cargo
 

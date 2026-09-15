@@ -315,7 +315,7 @@ step "Done"
 cat <<EOF
     Verify each channel from a clean machine:
 
-      curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | bash
+      curl -fsSL https://recall.pimlabs.id/install | bash
       npm install -g @pimlabs/recall
       cargo install recall-sync
       brew install pimlabs/tap/recall
