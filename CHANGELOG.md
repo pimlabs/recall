@@ -28,6 +28,17 @@ pipeline and the shape of the tree:
   by hand, and v0.1.0's first set of archives named the wrong commit because
   of it. They were rebuilt; `recall version` now prints `d85d225`, which is
   what `v0.1.0` points at.
+- **The `curl` install has a short URL:**
+
+  ```sh
+  curl -fsSL https://recall.pimlabs.id/install | bash
+  ```
+
+  A 302 to the same `install.sh` on `main`, so nothing is copied and nothing
+  can fall behind. The old
+  `raw.githubusercontent.com/pimlabs/recall/main/install.sh` keeps working —
+  it is what the redirect points at.
+
 - **Homebrew is one line and one download:**
 
   ```sh

@@ -51,7 +51,7 @@ Install the binary, export two variables, and opt each project in:
 ```sh
 npm install -g @pimlabs/recall                    # or bun, or pnpm
 brew install pimlabs/tap/recall
-curl -fsSL https://raw.githubusercontent.com/pimlabs/recall/main/install.sh | bash
+curl -fsSL https://recall.pimlabs.id/install | bash
 cargo install recall-sync
 ```
 

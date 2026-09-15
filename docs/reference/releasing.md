@@ -97,9 +97,38 @@ before assuming anything else is wrong.
 thing rather than assuming:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/pimlabs/recall/main/install.sh | bash
+curl -fsSL https://recall.pimlabs.id/install | bash
 recall version
 ```
+
+The version it prints must be the one you just tagged, and the commit beside
+it must be the commit that tag points at.
+
+### Where that short URL comes from
+
+`recall.pimlabs.id/install` is a **Cloudflare Redirect Rule**, not a file
+anyone hosts:
+
+| | |
+|---|---|
+| When | `Hostname` equals `recall.pimlabs.id` **and** `URI Path` equals `/install` |
+| Then | static **302** to `https://raw.githubusercontent.com/pimlabs/recall/main/install.sh` |
+
+It is written down here because nothing in this repository would tell you it
+exists, and a rule that vanishes takes the published install command with it.
+
+Three properties are deliberate. It is a **redirect rather than a copy**, so
+the script that runs is always the one on `main` — a served copy could fall
+behind, and what it would be missing is the checksum verification.
+It is **302, not 301**, because browsers cache a permanent redirect
+permanently and it could never be moved. And the path match is **equals**,
+not *starts with*: `recall.pimlabs.id` used to be the API's hostname, and a
+broad match would answer a stale client's `POST /sync` with an installer
+script.
+
+The API now lives at `recall-server.pimlabs.id`, on a DNS-only record. That
+record must stay DNS-only — proxying it would put Cloudflare's edge between
+the client and Traefik, and every client would share one rate-limit bucket.
 
 ## 2. Homebrew
 
