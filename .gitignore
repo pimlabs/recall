@@ -5,7 +5,7 @@ data/
 # ...except the one database that is a test fixture: written by the Node
 # server before it was deleted, and the only remaining evidence of what
 # production's rows actually look like. See scripts/compat-check.sh.
-!tests/fixtures/node-written.db
+!fixtures/node-written.db
 deploy/.env
 
 # Rust

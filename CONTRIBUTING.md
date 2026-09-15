@@ -60,7 +60,7 @@ cargo build --release
 ./scripts/compat-check.sh target/release/recall
 ```
 
-Nineteen checks against `tests/fixtures/node-written.db` — a database the retired Node server actually wrote, kept because production's rows were written by it. This server opens that file, serves every row correctly (byte-exact content, no/one/two trailing newlines, an empty file, unicode, a nested path, a tombstone with its content still withheld, project isolation), and then keeps writing to it.
+Nineteen checks against `fixtures/node-written.db` — a database the retired Node server actually wrote, kept because production's rows were written by it. This server opens that file, serves every row correctly (byte-exact content, no/one/two trailing newlines, an empty file, unicode, a nested path, a tombstone with its content still withheld, project isolation), and then keeps writing to it.
 
 It has caught two bugs that every test suite in the repo missed, both times because it used the real thing where the tests used a stand-in. Run it before a production cutover, and again after.
 

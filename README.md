@@ -74,7 +74,7 @@ which is what the frozen schema was always for.
 
 The Node server and the bash hooks it replaced are **gone** from the tree
 (Phase 7) — git history is the rollback path, and what they were really
-carrying is now `tests/fixtures/node-written.db`, a database the Node server
+carrying is now `fixtures/node-written.db`, a database the Node server
 actually wrote, so `scripts/compat-check.sh` still proves this server reads
 production's rows.
 
@@ -105,7 +105,7 @@ And the tree:
 | `deploy/` | The image, and a Compose file per ingress — Cloudflare Tunnel or an existing Traefik. Runs on anything with Docker. |
 | `scripts/` | `compat-check.sh` (the cutover matrix), `api-doc-check.sh`, `trusted-ip-check.sh`, `release.sh`, and `probes/`. |
 | `npm/`, `Formula/`, `install.sh` | Three of the four install channels. The fourth, `cargo install recall-sync`, needs no file here. |
-| `tests/fixtures/` | A database the retired Node server actually wrote, so the cutover stays testable without it. |
+| `fixtures/` | A database the retired Node server actually wrote, so the cutover stays testable without it. |
 
 ## License
 

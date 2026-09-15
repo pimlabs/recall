@@ -211,7 +211,7 @@ exists. All three were kept "as the rollback path", which git already is.
       server's real value here was as a source of Node-written database rows
       for `scripts/compat-check.sh`, because production's database was
       written by Node and this server has to open it. That is now
-      `tests/fixtures/node-written.db`, a database the Node server actually
+      `fixtures/node-written.db`, a database the Node server actually
       wrote, captured before it was deleted. The matrix went from 11 checks
       to **19** and covers more: byte-exact content, no/one/two trailing
       newlines, an empty file, unicode, a nested path, a tombstone with its
@@ -309,7 +309,7 @@ Every phase above described the Rust binary as finished. It had never run in
 production. The server answering `recall.pimlabs.id` was still the **Node**
 implementation, deployed 2026-08-13 and untouched since — the one Phase 7
 deleted from the tree. So the frozen schema, the frozen JSON, and
-`tests/fixtures/node-written.db` were not precautions any more; they were the
+`fixtures/node-written.db` were not precautions any more; they were the
 thing standing between a month of memory and a bad afternoon.
 
 Done 2026-09-14, split into two independently reversible steps rather than one.
