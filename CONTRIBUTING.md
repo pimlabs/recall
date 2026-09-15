@@ -72,6 +72,23 @@ cargo build --release -p recall-sync
 
 27 checks against a real server on a real socket: every status code, error string, field order and `null`-versus-`""` claim the document makes. Change a handler without changing the doc and this fails, which is the point.
 
+### Links between documents
+
+```sh
+python3 scripts/link-check.py
+```
+
+Every relative Markdown link in the tree, resolved against the filesystem. No
+fixed number: it counts whatever is there, which is why it is the one checker
+with no count quoted here to fall out of date.
+
+It deliberately does not verify anchors (that would mean reimplementing
+GitHub's heading slugs, and getting that subtly wrong is worse than not
+claiming it), does not fetch external URLs (a link rotting on someone else's
+schedule should not turn this build red), and ignores fenced blocks — several
+documents quote what Claude writes into a memory file, and those samples link
+to files in someone's memory directory rather than in this repository.
+
 ### The rate-limit bucket is a security boundary
 
 ```sh
