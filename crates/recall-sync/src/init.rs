@@ -60,17 +60,17 @@ fn print_commit_hint(root: &Path) {
 /// warning about them there would send someone editing a shell profile to
 /// fix something that is not broken.
 fn warn_about_unset_variables(root: &Path) {
-    let cfg = project::resolve_at(root.to_path_buf()).cfg;
+    let cfg = project::resolve_at(root.to_path_buf()).config();
     if !cfg.url.is_empty() && !cfg.token.is_empty() {
         return;
     }
 
     println!();
     if cfg.url.is_empty() {
-        println!("  ! RECALL_URL is not set — not in this shell, nor in .claude/settings.json");
+        println!("  ! RECALL_URL is not set — not in this shell, nor in any settings file");
     }
     if cfg.token.is_empty() {
-        println!("  ! RECALL_TOKEN is not set — not in this shell, nor in .claude/settings.json");
+        println!("  ! RECALL_TOKEN is not set — not in this shell, nor in any settings file");
     }
     println!(
         "

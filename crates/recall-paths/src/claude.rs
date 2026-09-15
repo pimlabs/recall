@@ -90,8 +90,19 @@ impl Env {
 
     /// The user-level `settings.json`: the lowest-precedence settings file,
     /// and still above the shell.
-    pub fn user_settings_file(&self) -> PathBuf {
-        self.config_root().join("settings.json")
+    ///
+    /// [`None`] when neither `CLAUDE_CONFIG_DIR` nor `$HOME` is set, rather
+    /// than the bare `.claude/settings.json` that [`Env::config_root`] would
+    /// otherwise produce. That path is *relative*, so it resolves against
+    /// whatever directory the process happens to be in — which in a
+    /// sub-directory of a project would load that sub-directory's settings
+    /// as the user's, at the wrong precedence, under a second spelling of a
+    /// file that may already be a layer.
+    pub fn user_settings_file(&self) -> Option<PathBuf> {
+        if set(&self.config_dir).is_none() && set(&self.home).is_none() {
+            return None;
+        }
+        Some(self.config_root().join("settings.json"))
     }
 
     /// Recall's own bookkeeping for delete reconciliation. It sits *beside*
@@ -161,9 +172,19 @@ mod tests {
         assert_eq!(remote.memory_root(), Path::new("/workspace/memory"));
         assert_eq!(remote.config_root(), Path::new("/home/eko/.claude"));
         assert_eq!(
-            remote.user_settings_file(),
-            Path::new("/home/eko/.claude/settings.json")
+            remote.user_settings_file().as_deref(),
+            Some(Path::new("/home/eko/.claude/settings.json"))
         );
+
+        // A relative path here would be read against the process's working
+        // directory — a file belonging to whatever project the command was
+        // run in, loaded as though it were the user's.
+        let nowhere = Env {
+            remote_memory_dir: Some("/workspace/memory".into()),
+            config_dir: None,
+            home: None,
+        };
+        assert_eq!(nowhere.user_settings_file(), None);
 
         let explicit = Env {
             remote_memory_dir: None,

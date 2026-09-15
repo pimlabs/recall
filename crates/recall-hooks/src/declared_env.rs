@@ -55,6 +55,17 @@ pub struct Declared {
     pub empty: bool,
 }
 
+/// A variable a settings file names but could not set, because its value
+/// was not a string. Reported for the same reason everything else here is:
+/// it was plainly meant, and it did nothing.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Ignored {
+    /// The variable's name.
+    pub name: String,
+    /// The settings file that names it.
+    pub file: String,
+}
+
 struct Entry {
     value: String,
     file: PathBuf,
@@ -66,6 +77,7 @@ struct Entry {
 /// earlier one — the same rule Claude Code documents for these files.
 pub struct Environment {
     declared: BTreeMap<String, Entry>,
+    ignored: Vec<Ignored>,
     unreadable: Vec<String>,
     shell: Shell,
 }
@@ -79,14 +91,19 @@ impl Environment {
     /// then its untracked `.claude/settings.local.json`.
     pub fn discover(project_root: &Path) -> Self {
         let project = project_root.join(".claude");
-        Self::from_files(
-            &[
-                claude::Env::from_process_env().user_settings_file(),
-                project.join("settings.json"),
-                project.join("settings.local.json"),
-            ],
-            Box::new(|name| std::env::var(name).ok()),
-        )
+
+        // `from_process_env` is right here and nowhere else in this module:
+        // Claude Code resolves its own config directory from the real
+        // process environment *before* it has any settings file to apply, so
+        // the search for the lowest layer has to start where Claude Code's
+        // does. A settings file cannot relocate the lookup that found it.
+        let user = claude::Env::from_process_env().user_settings_file();
+
+        let mut files: Vec<PathBuf> = user.into_iter().collect();
+        files.push(project.join("settings.json"));
+        files.push(project.join("settings.local.json"));
+
+        Self::from_files(&files, Box::new(|name| std::env::var(name).ok()))
     }
 
     /// The same, with the files and the shell supplied — which is what makes
@@ -105,6 +122,7 @@ impl Environment {
     pub fn from_files(files: &[PathBuf], shell: Shell) -> Self {
         let mut env = Environment {
             declared: BTreeMap::new(),
+            ignored: Vec::new(),
             unreadable: Vec::new(),
             shell,
         };
@@ -114,6 +132,20 @@ impl Environment {
             if !seen.insert(file.as_path()) {
                 continue;
             }
+
+            // A settings file is a *file*. Reading a FIFO is a wait, not a
+            // read, and this runs from `recall push` on every Edit and
+            // Write — a hook that blocks is worse than one that errors,
+            // because nothing times it out.
+            match fs::metadata(file) {
+                Ok(meta) if meta.is_file() => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                _ => {
+                    env.unreadable.push(file.display().to_string());
+                    continue;
+                }
+            }
+
             let src = match fs::read(file) {
                 Ok(src) => src,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
@@ -123,8 +155,8 @@ impl Environment {
                 }
             };
             match settings::env_block(&src) {
-                Ok(vars) => {
-                    for (name, value) in vars {
+                Ok(block) => {
+                    for (name, value) in block.vars {
                         env.declared.insert(
                             name,
                             Entry {
@@ -132,6 +164,12 @@ impl Environment {
                                 file: file.clone(),
                             },
                         );
+                    }
+                    for name in block.ignored {
+                        env.ignored.push(Ignored {
+                            name,
+                            file: file.display().to_string(),
+                        });
                     }
                 }
                 Err(_) => env.unreadable.push(file.display().to_string()),
@@ -174,11 +212,26 @@ impl Environment {
                 Some(Declared {
                     name: (*name).to_string(),
                     file: entry.file.display().to_string(),
+                    // An empty shell value is not "set" anywhere else in
+                    // Recall — `ClientConfig` filters it to unset before
+                    // anything reads it — so calling it shadowed would point
+                    // at an export that was never in effect.
                     shadows_shell: (self.shell)(name)
+                        .filter(|from_shell| !from_shell.is_empty())
                         .is_some_and(|from_shell| from_shell != entry.value),
                     empty: entry.value.is_empty(),
                 })
             })
+            .collect()
+    }
+
+    /// Which of `names` a settings file names but could not set, because
+    /// the value was not a string.
+    pub fn ignored(&self, names: &[&str]) -> Vec<Ignored> {
+        self.ignored
+            .iter()
+            .filter(|var| names.contains(&var.name.as_str()))
+            .cloned()
             .collect()
     }
 
@@ -339,6 +392,63 @@ mod tests {
         let env = Environment::from_files(&[broken, array], shell(&[]));
         assert_eq!(env.unreadable().len(), 2);
         assert!(env.unreadable()[0].ends_with("settings.json"));
+    }
+
+    /// A value that is not a string cannot become an environment variable,
+    /// but somebody wrote it on purpose. Dropping it in silence leaves the
+    /// report confidently answering with a derived key while the file three
+    /// lines below it is plainly trying to set one.
+    #[test]
+    fn a_value_that_is_not_a_string_is_reported_rather_than_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(
+            dir.path(),
+            "settings.json",
+            r#"{"env":{"RECALL_PROJECT_KEY":12345,"RECALL_URL":"https://recall.example.com"}}"#,
+        );
+
+        let env = Environment::from_files(&[file], shell(&[]));
+        assert_eq!(env.get("RECALL_PROJECT_KEY"), None, "it sets nothing");
+        assert_eq!(
+            env.get("RECALL_URL").as_deref(),
+            Some("https://recall.example.com"),
+            "and it does not take the rest of the block down with it"
+        );
+
+        let ignored = env.ignored(&["RECALL_PROJECT_KEY", "RECALL_URL"]);
+        assert_eq!(ignored.len(), 1);
+        assert_eq!(ignored[0].name, "RECALL_PROJECT_KEY");
+        assert!(env.declared(&["RECALL_PROJECT_KEY"]).is_empty());
+    }
+
+    /// Reading a FIFO is a wait, not a read, and this runs from `recall
+    /// push` on every Edit and Write — a hook that blocks is worse than one
+    /// that errors, because nothing times it out. A directory stands in for
+    /// the FIFO here: same branch, no libc.
+    #[test]
+    fn a_settings_path_that_is_not_a_file_is_a_finding_not_a_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let not_a_file = dir.path().join("settings.json");
+        fs::create_dir(&not_a_file).unwrap();
+
+        let env = Environment::from_files(&[not_a_file], shell(&[]));
+        assert_eq!(env.unreadable().len(), 1);
+    }
+
+    /// Recall reads an empty variable as unset everywhere else, so an empty
+    /// export is not a value being overridden. Saying it is sends someone
+    /// hunting for a shell setting that was never in effect.
+    #[test]
+    fn an_empty_shell_value_is_not_something_to_shadow() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(
+            dir.path(),
+            "settings.json",
+            r#"{"env":{"RECALL_PROJECT_KEY":"acme/app"}}"#,
+        );
+
+        let env = Environment::from_files(&[file], shell(&[("RECALL_PROJECT_KEY", "")]));
+        assert!(!env.declared(&["RECALL_PROJECT_KEY"])[0].shadows_shell);
     }
 
     /// A project rooted at the home directory makes two of the three layers

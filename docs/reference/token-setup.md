@@ -25,7 +25,8 @@ export RECALL_URL="https://recall.yourdomain.com"
 ```
 
 Open a new terminal (or `source` the file) so the hooks pick it up — the
-environment is where Recall looks for these first.
+shell is where Recall reads these unless a settings file declares them, and a
+declaration wins.
 
 A project may also declare them in its `.claude/settings.json`, and if it
 does, **that wins**: Claude Code replaces an inherited value with the one in

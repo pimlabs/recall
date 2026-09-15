@@ -24,21 +24,25 @@ break will be described here in full rather than smoothed over.
   the key the hooks actually synced under, while `recall status`, typed into
   a shell, read the process environment and reported the derived one.
 
-  Every command now resolves configuration the way a hook does:
-  `.claude/settings.local.json`, then `.claude/settings.json`, then the
-  user-level `settings.json`, each of them above the shell. That includes
-  `recall promote`, which is also typed by hand and had the same bug — on a
-  project with a declared key it would have pushed the move into the derived
-  key's history.
+  Every command now resolves configuration the way a hook does, each layer
+  over the last: the user-level `settings.json`, then the project's
+  `.claude/settings.json`, then its untracked `.claude/settings.local.json`,
+  all of them above the shell. That includes `recall promote`, which is also
+  typed by hand and had the same bug — on a project with a declared key it
+  would have pushed the move into the derived key's history. And `recall
+  init` stops warning that `RECALL_URL` or `RECALL_TOKEN` is unset when a
+  settings file already supplies it.
 
   Status also names the file each value came from, says when a settings file
   is overriding your shell, flags a variable declared as an empty string
   (Recall reads empty as unset, so such a declaration turns the setting off
-  *and* hides the shell value behind it), and reports a settings file that
-  exists but is not valid JSON — Claude Code cannot read that one either, so
-  nothing it declares is in effect anywhere. `--json` gains `declared_env`
-  and `unreadable_settings`, both omitted when empty. Neither carries a
-  value: `RECALL_TOKEN` is one of the variables reported.
+  *and* hides the shell value behind it), names a variable whose value is not
+  a string and so could not be set at all, and reports a settings file that
+  exists but cannot be read — bad JSON, JSON that is not an object, or a
+  permissions problem. Claude Code cannot read that one either, so nothing it
+  declares is in effect anywhere. `--json` gains `declared_env`,
+  `ignored_env` and `unreadable_settings`, each omitted when empty. None of
+  them carries a value: `RECALL_TOKEN` is one of the variables reported.
 
 The rest of the work since v0.1.0 has been the release pipeline and the shape
 of the tree:

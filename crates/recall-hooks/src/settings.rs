@@ -121,6 +121,17 @@ pub fn is_wired(src: &[u8]) -> bool {
     })
 }
 
+/// What one settings document's `env` block declares.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct EnvBlock {
+    /// Name and value, in the order the file writes them.
+    pub vars: Vec<(String, String)>,
+    /// Names whose value was not a string, and so could not be turned into
+    /// an environment variable. Kept rather than discarded — see
+    /// [`env_block`].
+    pub ignored: Vec<String>,
+}
+
 /// The `env` block of one settings document, in the order it is written.
 ///
 /// Claude Code writes every entry here into the environment of the processes
@@ -132,7 +143,11 @@ pub fn is_wired(src: &[u8]) -> bool {
 /// Only string values are returned. The settings schema says `env` maps
 /// names to strings, and a number or an object has no defensible spelling as
 /// an environment variable, so guessing one would be inventing behaviour
-/// Claude Code does not have.
+/// Claude Code does not have. Their names come back in
+/// [`EnvBlock::ignored`] instead of being dropped: somebody wrote
+/// `"RECALL_PROJECT_KEY": 12345` on purpose, and a report that answers with
+/// the derived key and no remark at all is confidently wrong about the one
+/// thing it was asked.
 ///
 /// An empty string is kept rather than dropped. It is a real declaration
 /// with a real effect — the variable is set, to nothing — and it is exactly
@@ -144,9 +159,9 @@ pub fn is_wired(src: &[u8]) -> bool {
 /// [`Error::InvalidJson`] when the file is not JSON, or is JSON that is not
 /// an object. A document with no `env` key is not an error: it is the
 /// ordinary case, and it returns an empty list.
-pub fn env_block(src: &[u8]) -> Result<Vec<(String, String)>, Error> {
+pub fn env_block(src: &[u8]) -> Result<EnvBlock, Error> {
     if src.iter().all(|b| b.is_ascii_whitespace()) {
-        return Ok(Vec::new());
+        return Ok(EnvBlock::default());
     }
     let doc: Value = serde_json::from_slice(src).map_err(|_| Error::InvalidJson)?;
     let Value::Object(doc) = doc else {
@@ -154,15 +169,17 @@ pub fn env_block(src: &[u8]) -> Result<Vec<(String, String)>, Error> {
     };
 
     let Some(Value::Object(env)) = doc.get("env") else {
-        return Ok(Vec::new());
+        return Ok(EnvBlock::default());
     };
-    Ok(env
-        .iter()
-        .filter_map(|(name, value)| match value {
-            Value::String(value) => Some((name.clone(), value.clone())),
-            _ => None,
-        })
-        .collect())
+
+    let mut block = EnvBlock::default();
+    for (name, value) in env {
+        match value {
+            Value::String(value) => block.vars.push((name.clone(), value.clone())),
+            _ => block.ignored.push(name.clone()),
+        }
+    }
+    Ok(block)
 }
 
 /// Applies [`wire`] to a `settings.json` on disk, creating it and its parent
@@ -302,6 +319,40 @@ mod tests {
                  hook error on every edit in the session"
             );
         }
+    }
+
+    /// The `env` block is the one part of this file Recall *reads* rather
+    /// than writes, and the two failure modes have to stay apart: a value it
+    /// cannot use is a finding about one variable, while a document it
+    /// cannot parse is a finding about the whole file.
+    #[test]
+    fn an_env_block_separates_what_it_read_from_what_it_could_not_use() {
+        let block =
+            env_block(br#"{"env":{"A":"one","B":2,"C":{"d":1},"E":"","F":null},"hooks":{}}"#)
+                .unwrap();
+        assert_eq!(
+            block.vars,
+            vec![
+                ("A".to_string(), "one".to_string()),
+                ("E".to_string(), String::new())
+            ],
+            "an empty string is a declaration with an effect, not a missing one"
+        );
+        assert_eq!(block.ignored, vec!["B", "C", "F"]);
+
+        // No `env` key, an empty document, and whitespace are the ordinary
+        // cases on almost every machine — none of them is a finding.
+        for src in [&b"{\"hooks\":{}}"[..], b"{}", b"   \n", b""] {
+            let block = env_block(src).unwrap();
+            assert!(block.vars.is_empty() && block.ignored.is_empty());
+        }
+
+        // A document Claude Code cannot read either.
+        assert!(env_block(b"{ not json").is_err());
+        assert!(
+            env_block(b"[]").is_err(),
+            "a JSON array is not a settings file"
+        );
     }
 
     /// A project wired before the guard existed must still read as wired, or

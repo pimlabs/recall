@@ -5,7 +5,7 @@
 //! server and a project that was never wired are all *findings*, reported in
 //! the output, not errors.
 
-use recall_hooks::declared_env::Declared;
+use recall_hooks::declared_env::{Declared, Ignored};
 use recall_hooks::{client::Client, exit, settings, state};
 use recall_paths::{claude, config, project, scope, ClientConfig};
 
@@ -66,6 +66,10 @@ pub struct Report {
     /// from the JSON when there are none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub declared_env: Vec<Declared>,
+    /// Variables a settings file names but could not set, because the
+    /// value was not a string. Absent from the JSON when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ignored_env: Vec<Ignored>,
     /// Settings files that exist but are not readable JSON. Claude Code
     /// cannot read them either, so nothing they declare is in effect.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -108,18 +112,18 @@ pub struct Report {
 /// Collects the report, then prints it as text or JSON.
 pub async fn run(as_json: bool) -> anyhow::Result<i32> {
     let here = proj::resolve();
-    let rep = collect(&here).await;
+    let cfg = here.config();
+    let rep = collect(&here, &cfg).await;
 
     if as_json {
         println!("{}", serde_json::to_string_pretty(&rep)?);
     } else {
-        print_text(&here.cfg, &rep);
+        print_text(&cfg, &rep);
     }
     Ok(exit::OK)
 }
 
-async fn collect(here: &proj::Resolved) -> Report {
-    let cfg = &here.cfg;
+async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report {
     let root = &here.root;
     let root_str = root.to_string_lossy().to_string();
     let remote = proj::remote();
@@ -127,7 +131,7 @@ async fn collect(here: &proj::Resolved) -> Report {
 
     let mut rep = Report {
         project: root_str.clone(),
-        project_key: here.project_key(&remote),
+        project_key: here.project_key(cfg, &remote),
         project_key_source: key_source(cfg, &remote),
         memory_dir: memory_dir.display().to_string(),
         memory_files: state::list_memory_files(&memory_dir)
@@ -137,6 +141,7 @@ async fn collect(here: &proj::Resolved) -> Report {
             .map(|b| settings::is_wired(&b))
             .unwrap_or(false),
         declared_env: here.env.declared(&known_vars()),
+        ignored_env: here.env.ignored(&known_vars()),
         unreadable_settings: here.env.unreadable().to_vec(),
         global_key: cfg.global_key.clone(),
         rejected_vars: cfg.rejected_vars.clone(),
@@ -241,6 +246,13 @@ fn print_declared_env(rep: &Report) {
         println!("{label}: {} from {}{note}", var.name, var.file);
     }
 
+    for var in &rep.ignored_env {
+        println!(
+            "settings     : {} in {} is not a string, so it sets nothing",
+            var.name, var.file
+        );
+    }
+
     for file in &rep.unreadable_settings {
         println!("settings     : UNREADABLE — {file}");
     }
@@ -276,6 +288,16 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
              non-empty, free of whitespace, and not under 'global:'"
                 .to_string()
         }
+    };
+    // An empty declaration never reaches `rejected_vars` — an empty value
+    // reads as unset before anything can refuse it — so without this the
+    // line would report a derived key while a settings file three lines
+    // below is plainly trying to set it.
+    let key_source = match declared_in(rep, "RECALL_PROJECT_KEY") {
+        Some(file) if declared_empty(rep, "RECALL_PROJECT_KEY") => format!(
+            "{key_source}; RECALL_PROJECT_KEY is declared empty in {file}, which reads as unset"
+        ),
+        _ => key_source,
     };
     println!("project_key  : {} ({key_source})", rep.project_key);
     println!("memory dir   : {}", rep.memory_dir);

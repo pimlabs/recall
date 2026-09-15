@@ -149,10 +149,14 @@ export RECALL_PROJECT_KEY="acme/app"
 ```
 
 It is trimmed and lowercased, so `Acme/App` on one machine and `acme/app` on
-another are one key rather than two. A value that is empty, contains
-whitespace, or starts with `global:` is refused — the derived key stands and
-`recall status` says the declaration was ignored, rather than letting it pass
-silently.
+another are one key rather than two. A value that contains whitespace or
+starts with `global:` is refused — the derived key stands and `recall status`
+says the declaration was ignored, rather than letting it pass silently.
+
+An empty value is a different case: it reads as *unset* before anything gets
+the chance to refuse it, so the derived key stands with nothing to report.
+`recall status` can still see it when it was declared in a settings file, and
+says so — that is the case where something was plainly meant and did nothing.
 
 **This is per-project, not per-machine.** Exporting it from your shell
 profile would give *every* project the same key and pool their memory into
@@ -174,11 +178,21 @@ you: which projects share a key is a decision only you can make.)
 **Declared here, it beats the `export` above.** Claude Code applies an `env`
 block to every process it spawns and *replaces* the value inherited from the
 shell, so the file wins wherever the two disagree — on this machine and on
-every other one. `recall status` reads the same files in the same order and
-names the one each value came from, so you never have to guess which of the
-two is in force. It did not always: it read the shell alone and reported the
-derived key while the hooks synced under the declared one, which is the
-worst way for a diagnostic to be wrong.
+every other one.
+
+Four places can set any of Recall's variables. Lowest precedence first:
+
+1. your shell
+2. `~/.claude/settings.json` — yours, every project
+3. the project's committed `.claude/settings.json` — this project, every machine
+4. the project's `.claude/settings.local.json` — this project, this machine
+
+The last one that names a variable wins, and `recall status` prints which file
+that was. The fourth is worth knowing about even if you never write one: it is
+untracked, so it is invisible to everyone else working on the repository and it
+outranks the file they can see. **Add it to `.gitignore` if you use it** —
+nothing does that for you, and it is the natural place to accidentally commit a
+token.
 
 **Changing it on a project that has already synced orphans that project's
 memory.** The server files every file under the key it was pushed with and
@@ -311,9 +325,12 @@ Anything you set that Recall could not use is called out here too — a
 refused `RECALL_PROJECT_KEY` or `RECALL_GLOBAL_KEY` still leaves sync
 working, which is exactly why it would otherwise go unnoticed. Two more of
 that kind: a variable declared as an empty string, which turns the setting
-off *and* hides whatever the shell had behind it, and a settings file that
-exists but is not valid JSON, which Claude Code cannot read either, so
-nothing it declares reaches the hooks at all.
+off *and* hides whatever the shell had behind it; a variable whose value is
+not a string, such as `"RECALL_PROJECT_KEY": 12345`, which cannot become an
+environment variable at all; and a settings file that exists but cannot be
+read — bad JSON, JSON that is not an object, or a permissions problem. Claude
+Code cannot read that last one either, so nothing it declares reaches the
+hooks at all.
 
 `recall status --json` prints the same thing machine-readably.
 

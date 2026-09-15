@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use recall_hooks::{client::Client, declared_env, Context};
-use recall_paths::{project, scope, ClientConfig};
+use recall_paths::{claude, project, scope, ClientConfig};
 
 /// The project root, resolved the way Claude Code resolves it: the git root,
 /// falling back to the working directory.
@@ -47,9 +47,6 @@ pub struct Resolved {
     /// The settings files layered over the shell, as Claude Code layers
     /// them. Kept so `recall status` can say *where* a value came from.
     pub env: declared_env::Environment,
-    /// Configuration read through [`Resolved::env`], not through
-    /// `std::env` — which is the whole point of this type.
-    pub cfg: ClientConfig,
 }
 
 /// Resolves the current directory's project and environment.
@@ -67,8 +64,7 @@ pub fn resolve() -> Resolved {
 /// just wired.
 pub fn resolve_at(root: PathBuf) -> Resolved {
     let env = declared_env::Environment::discover(&root);
-    let cfg = ClientConfig::from_lookup(env.lookup());
-    Resolved { root, env, cfg }
+    Resolved { root, env }
 }
 
 impl Resolved {
@@ -80,14 +76,29 @@ impl Resolved {
     /// being set up yet — the exact case Recall exists for — does not report
     /// a missing token on every unrelated file the user touches.
     pub fn memory_dir(&self) -> PathBuf {
-        self.cfg.claude.memory_dir(&self.root.to_string_lossy())
+        claude::Env::from_lookup(self.env.lookup()).memory_dir(&self.root.to_string_lossy())
+    }
+
+    /// Recall's configuration, resolved through [`Resolved::env`].
+    ///
+    /// Built on demand rather than alongside the rest, and that is
+    /// load-bearing: resolving `source_env` falls back to the hostname,
+    /// which may fork a `hostname(1)`. `recall push` asks for
+    /// [`Resolved::memory_dir`] on every Edit and Write *before* it knows
+    /// whether the file concerns it at all, and that path must stay free of
+    /// work this size.
+    pub fn config(&self) -> ClientConfig {
+        ClientConfig::from_lookup(self.env.lookup())
     }
 
     /// The key this project syncs under: the declared one if there is a
     /// usable one, otherwise derived from `remote`.
-    pub fn project_key(&self, remote: &str) -> String {
+    ///
+    /// Takes the configuration rather than building its own, so a caller
+    /// that already has one does not pay for a second.
+    pub fn project_key(&self, cfg: &ClientConfig, remote: &str) -> String {
         project::key_with_override(
-            self.cfg.project_key.as_deref(),
+            cfg.project_key.as_deref(),
             remote,
             &self.root.to_string_lossy(),
         )
@@ -98,15 +109,16 @@ impl Resolved {
     /// Fails when the server is not configured, which is the one thing a
     /// hook cannot work around.
     pub fn hook_context(&self) -> anyhow::Result<Context> {
-        self.cfg.require()?;
+        let cfg = self.config();
+        cfg.require()?;
 
         let root_str = self.root.to_string_lossy().to_string();
         Ok(Context {
-            memory_dir: self.cfg.claude.memory_dir(&root_str),
-            state_file: self.cfg.claude.state_file(&root_str),
-            scopes: scope::scopes(self.project_key(&remote()), self.cfg.global_key.clone()),
-            source_env: self.cfg.source_env.clone(),
-            client: Client::new(&self.cfg.url, &self.cfg.token)?,
+            memory_dir: cfg.claude.memory_dir(&root_str),
+            state_file: cfg.claude.state_file(&root_str),
+            scopes: scope::scopes(self.project_key(&cfg, &remote()), cfg.global_key.clone()),
+            source_env: cfg.source_env.clone(),
+            client: Client::new(&cfg.url, &cfg.token)?,
         })
     }
 }
