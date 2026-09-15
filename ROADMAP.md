@@ -412,6 +412,12 @@ decided**.
   a claim that this disk and the server have been compared and half a
   comparison is not one.
 
+## Found by reviewing it
+
+Not from using Recall but from reading it — the counterpart to the section
+above, and worth keeping apart from it, because "nobody could have found this
+without running it" is the whole claim those three make.
+
 - **`route()` matches the global directory case-sensitively.** Found while
   reviewing the backfill, and left undecided rather than fixed in passing.
   `scope.rs` compares `rel` against the literal `global`, so a directory

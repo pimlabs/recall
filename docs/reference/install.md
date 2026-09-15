@@ -98,9 +98,9 @@ cargo install --git https://github.com/pimlabs/recall recall-sync   # from main
 ```
 
 The crate is `recall-sync`; the binary it installs is **`recall`**. They
-differ because both `recall` and `recall-cli` were already taken on crates.io
-by unrelated projects — a crate name is global and first-come, while a binary
-name is only yours to collide with. `fd-find` installing `fd` is the same
+differ because both `recall` and `recall-cli` were taken on crates.io by
+unrelated projects when this was first published — a crate name is global and
+first-come, while a binary name is only yours to collide with. `fd-find` installing `fd` is the same
 situation.
 
 The `--git` form needs no release, so it is also the answer for anything
