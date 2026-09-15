@@ -15,3 +15,11 @@ deploy/.env
 # a worktree is a nested checkout — it must never be committed into the repo
 # it is a checkout of.
 .claude/worktrees/
+
+# The machine-local half of Claude Code's settings. `.claude/settings.json` is
+# committed on purpose — it is what makes a fresh clone and a cloud session
+# sync without per-machine setup — but this one is its opposite: it outranks
+# the committed file, and it is where a per-machine RECALL_URL or token would
+# go. Committing it would push one machine's values onto everyone else's, and
+# a token into the history.
+.claude/settings.local.json

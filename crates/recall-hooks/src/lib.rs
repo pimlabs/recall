@@ -66,6 +66,7 @@ mod pull;
 mod push;
 
 pub mod client;
+pub mod declared_env;
 pub mod exit;
 pub mod path;
 pub mod payload;

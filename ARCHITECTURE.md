@@ -138,11 +138,18 @@ differs per machine — the exact split Recall exists to close), sub-projects
 of a monorepo that should or should not share one history, a fork that wants
 to keep reading the upstream's memory, and the nested-group collision below.
 
-A value that is empty, holds whitespace, or starts with `global:` is refused
-and the derived key stands. Refusing rather than failing keeps a working
-project working; the cost is a setting that silently does nothing, so
+A value that holds whitespace or starts with `global:` is refused and the
+derived key stands. Refusing rather than failing keeps a working project
+working; the cost is a setting that silently does nothing, so
 `ClientConfig::rejected_vars` records the refusal and `recall status` reports
 it. The same applies to `RECALL_GLOBAL_KEY`.
+
+An empty value never reaches that machinery: `config::var` filters it to
+`None` first, matching what every previous implementation did by construction,
+so it reads as unset rather than as refused. That is fine when it came from a
+shell and misleading when it came from a settings file, where someone plainly
+meant something — so `recall status` reports an empty *declaration* from the
+`declared_env` side instead.
 
 Declaring a key is as load-bearing as deriving one, in one direction only:
 the server files memory under the key it was pushed with and moves nothing,
@@ -225,6 +232,23 @@ per-environment network allowlist a claude.ai cloud environment needs before
 it can reach a self-hosted server at all. The two that describe a *project*
 rather than a machine — `RECALL_PROJECT_KEY` and `RECALL_GLOBAL_KEY` — are in
 [`docs/reference/install.md`](docs/reference/install.md).
+
+Where they are *read from* is a second question, and the answer is not
+`std::env`. Claude Code applies the `env` block of the settings files in
+scope to the processes it spawns, replacing what the shell exported, so the
+environment a hook runs under and the one an interactive shell holds are
+different things. `recall_hooks::declared_env` layers them in Claude Code's
+own order — the user-level `settings.json`, then the project's
+`.claude/settings.json`, then its untracked `.claude/settings.local.json`,
+all of them above the shell — and every command resolves through it, so a
+diagnostic cannot describe a different environment than the one it is
+diagnosing. Managed (enterprise) settings and command-line overrides, the two
+layers above those, are deliberately not modelled: there is no fleet here to
+be managed by, and inventing platform paths nothing can test would trade a
+known gap for an unknown one. One more thing it cannot do: the *location* of
+the user-level file is read from the process environment, since something has
+to be — so `CLAUDE_CONFIG_DIR` declared in a project's settings moves the
+memory directory but not the lookup that found that settings file.
 
 ### Deletes are tombstones, not row removal
 

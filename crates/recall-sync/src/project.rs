@@ -1,10 +1,17 @@
-//! Answering "where am I, and what is this project called" — once, for every
-//! command that needs it.
+//! Answering "where am I, what is this project called, and what does the
+//! environment say" — once, for every command that needs it.
+//!
+//! The "what does the environment say" half is not `std::env`. Claude Code
+//! applies the `env` block of the settings files in scope to the hooks it
+//! spawns, replacing what the shell exported, so the environment a hook runs
+//! under and the one an interactive shell holds are different things.
+//! Resolving through [`Resolved`] is what keeps `recall status` describing
+//! the first rather than the second.
 
 use std::path::PathBuf;
 use std::process::Command;
 
-use recall_hooks::{client::Client, Context};
+use recall_hooks::{client::Client, declared_env, Context};
 use recall_paths::{claude, project, scope, ClientConfig};
 
 /// The project root, resolved the way Claude Code resolves it: the git root,
@@ -28,38 +35,92 @@ pub fn git_root() -> Option<PathBuf> {
     git(&["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
 
-/// The memory directory Claude Code uses for the project at `root` on this
-/// machine.
+/// Where a command is, and what the environment says there.
 ///
-/// Separate from [`hook_context`] on purpose: `recall push` needs this
-/// answer *before* it asks for a server URL or a token, so an unconfigured
-/// machine doesn't error on every unrelated edit.
-pub fn memory_dir(root: &std::path::Path) -> PathBuf {
-    claude::Env::from_process_env().memory_dir(&root.to_string_lossy())
+/// One type rather than three lookups because the three used to disagree:
+/// `recall push` read the Claude variables once for the memory directory and
+/// again for its context, and `recall status` read the process environment
+/// while the hooks it was reporting on ran under a different one.
+pub struct Resolved {
+    /// The project root.
+    pub root: PathBuf,
+    /// The settings files layered over the shell, as Claude Code layers
+    /// them. Kept so `recall status` can say *where* a value came from.
+    pub env: declared_env::Environment,
 }
 
-/// Everything the hook commands need, assembled from the environment.
+/// Resolves the current directory's project and environment.
 ///
-/// Fails when the server is not configured, which is the one thing a hook
-/// cannot work around.
-pub fn hook_context() -> anyhow::Result<Context> {
-    let cfg = ClientConfig::from_process_env();
-    cfg.require()?;
+/// Never fails: every command here has to be useful on a machine where
+/// nothing is configured yet, which is exactly when someone runs them.
+pub fn resolve() -> Resolved {
+    resolve_at(root())
+}
 
-    let root = root();
-    let root_str = root.to_string_lossy().to_string();
-    let claude = claude::Env::from_process_env();
+/// The same, for a project root the caller already knows.
+///
+/// `recall init` takes one on the command line, and resolving the current
+/// directory instead would report on a different project than the one it
+/// just wired.
+pub fn resolve_at(root: PathBuf) -> Resolved {
+    let env = declared_env::Environment::discover(&root);
+    Resolved { root, env }
+}
 
-    Ok(Context {
-        memory_dir: claude.memory_dir(&root_str),
-        state_file: claude.state_file(&root_str),
-        scopes: scope::scopes(
-            project::key_with_override(cfg.project_key.as_deref(), &remote(), &root_str),
-            cfg.global_key.clone(),
-        ),
-        source_env: cfg.source_env.clone(),
-        client: Client::new(&cfg.url, &cfg.token)?,
-    })
+impl Resolved {
+    /// The memory directory Claude Code uses for this project on this
+    /// machine.
+    ///
+    /// `recall push` asks this before it asks whether a server is configured
+    /// at all, so that a machine which has cloned a wired project without
+    /// being set up yet — the exact case Recall exists for — does not report
+    /// a missing token on every unrelated file the user touches.
+    pub fn memory_dir(&self) -> PathBuf {
+        claude::Env::from_lookup(self.env.lookup()).memory_dir(&self.root.to_string_lossy())
+    }
+
+    /// Recall's configuration, resolved through [`Resolved::env`].
+    ///
+    /// Built on demand rather than alongside the rest, and that is
+    /// load-bearing: resolving `source_env` falls back to the hostname,
+    /// which may fork a `hostname(1)`. `recall push` asks for
+    /// [`Resolved::memory_dir`] on every Edit and Write *before* it knows
+    /// whether the file concerns it at all, and that path must stay free of
+    /// work this size.
+    pub fn config(&self) -> ClientConfig {
+        ClientConfig::from_lookup(self.env.lookup())
+    }
+
+    /// The key this project syncs under: the declared one if there is a
+    /// usable one, otherwise derived from `remote`.
+    ///
+    /// Takes the configuration rather than building its own, so a caller
+    /// that already has one does not pay for a second.
+    pub fn project_key(&self, cfg: &ClientConfig, remote: &str) -> String {
+        project::key_with_override(
+            cfg.project_key.as_deref(),
+            remote,
+            &self.root.to_string_lossy(),
+        )
+    }
+
+    /// Everything the hook commands need.
+    ///
+    /// Fails when the server is not configured, which is the one thing a
+    /// hook cannot work around.
+    pub fn hook_context(&self) -> anyhow::Result<Context> {
+        let cfg = self.config();
+        cfg.require()?;
+
+        let root_str = self.root.to_string_lossy().to_string();
+        Ok(Context {
+            memory_dir: cfg.claude.memory_dir(&root_str),
+            state_file: cfg.claude.state_file(&root_str),
+            scopes: scope::scopes(self.project_key(&cfg, &remote()), cfg.global_key.clone()),
+            source_env: cfg.source_env.clone(),
+            client: Client::new(&cfg.url, &cfg.token)?,
+        })
+    }
 }
 
 fn git(args: &[&str]) -> Option<String> {

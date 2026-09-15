@@ -78,6 +78,27 @@ pub struct ClientConfig {
     pub claude: Env,
 }
 
+/// Every variable [`ClientConfig`] reads that is Recall's own.
+///
+/// Claude Code's three are [`crate::claude::VARS`]; a caller enumerating
+/// everything [`ClientConfig::from_lookup`] consults wants both lists, which
+/// is what `reads_exactly_the_variables_it_publishes` asserts. They are kept
+/// apart because they are owned by different projects — ours can be renamed
+/// here, Claude Code's cannot be renamed at all.
+pub const VARS: &[&str] = &[
+    "RECALL_URL",
+    "RECALL_TOKEN",
+    "RECALL_SOURCE_ENV",
+    "RECALL_PROJECT_KEY",
+    "RECALL_GLOBAL_KEY",
+    // Not Recall's, but read here as the last fallback for `source_env`, and
+    // through the same lookup as the rest. Reading it from `std::env`
+    // directly — which is what this did — left one variable resolving
+    // against the shell while every other one resolved against the settings
+    // files, which is the precise inversion the layering exists to remove.
+    "HOSTNAME",
+];
+
 impl ClientConfig {
     /// Reads client configuration. It does not error on missing values —
     /// callers that need them say so via [`ClientConfig::require`], because
@@ -118,17 +139,19 @@ impl ClientConfig {
         ClientConfig {
             url: var(&lookup, "RECALL_URL").unwrap_or_default(),
             token: var(&lookup, "RECALL_TOKEN").unwrap_or_default(),
-            source_env: resolve_source_env(var(&lookup, "RECALL_SOURCE_ENV"), hostname),
+            // Read eagerly, though it is the last fallback of three: it is a
+            // map lookup, and threading it in is what lets `hostname` stay
+            // free of `std::env` — and what lets the test below see it at
+            // all, on a machine where `hostname(1)` answers first.
+            source_env: {
+                let from_env = var(&lookup, "HOSTNAME");
+                resolve_source_env(var(&lookup, "RECALL_SOURCE_ENV"), || hostname(from_env))
+            },
             project_key,
             global_key,
             rejected_vars,
             claude: Env::from_lookup(&lookup),
         }
-    }
-
-    /// Reads client configuration from the real process environment.
-    pub fn from_process_env() -> Self {
-        Self::from_lookup(env_var)
     }
 
     /// Reports what's missing for an operation that actually talks to the
@@ -142,10 +165,6 @@ impl ClientConfig {
         }
         Ok(())
     }
-}
-
-fn env_var(key: &str) -> Option<String> {
-    std::env::var(key).ok()
 }
 
 /// A variable that is present but empty counts as unset, which is what the
@@ -176,7 +195,7 @@ where
 /// a dependency. `hostname(1)` is what actually agrees with `gethostname` on
 /// both Linux and macOS; the other two are for when it is missing (minimal
 /// container images) or unspawnable.
-fn hostname() -> Option<String> {
+fn hostname(from_env: Option<String>) -> Option<String> {
     let from_command = Command::new("hostname")
         .output()
         .ok()
@@ -185,7 +204,7 @@ fn hostname() -> Option<String> {
 
     from_command
         .or_else(|| std::fs::read_to_string(Path::new("/etc/hostname")).ok())
-        .or_else(|| std::env::var("HOSTNAME").ok())
+        .or(from_env)
         .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty())
 }
@@ -320,6 +339,39 @@ mod tests {
         let clean = ClientConfig::from_lookup(env(&[("RECALL_PROJECT_KEY", "acme/app")]));
         assert!(clean.rejected_vars.is_empty());
         assert!(ClientConfig::from_lookup(env(&[])).rejected_vars.is_empty());
+    }
+
+    /// The published list is what `recall status` iterates to say which
+    /// variables a settings file declares. If a new variable were added to
+    /// the reads and not to the list, status would silently stop reporting
+    /// it — the same class of quiet omission this whole type exists to
+    /// surface.
+    #[test]
+    fn reads_exactly_the_variables_it_publishes() {
+        use std::cell::RefCell;
+
+        let seen = RefCell::new(Vec::new());
+        let _ = ClientConfig::from_lookup(|key| {
+            seen.borrow_mut().push(key.to_string());
+            None
+        });
+
+        let mut seen = seen.into_inner();
+        seen.sort();
+        seen.dedup();
+
+        let mut published: Vec<String> = VARS
+            .iter()
+            .chain(crate::claude::VARS.iter())
+            .map(|v| (*v).to_string())
+            .collect();
+        published.sort();
+
+        assert_eq!(
+            seen, published,
+            "config::VARS and claude::VARS together no longer describe what \
+             ClientConfig reads"
+        );
     }
 
     /// The messages are the operator-facing half of these errors: each one

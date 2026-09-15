@@ -320,9 +320,12 @@ hostname works again.
 
 If the hostname changed, every client's `RECALL_URL` has to change with it —
 laptops (shell profile) and every claude.ai cloud environment
-([`../docs/reference/token-setup.md`](../docs/reference/token-setup.md)). A client left pointing at
+([`../docs/reference/token-setup.md`](../docs/reference/token-setup.md)) — and
+any `.claude/settings.json` or `.claude/settings.local.json` that declares it,
+which outranks the shell profile you just updated. A client left pointing at
 the old hostname does not error loudly; `recall pull` warns on stderr and exits
-0, by design, so it just quietly stops syncing.
+0, by design, so it just quietly stops syncing. `recall status` names the file
+behind the URL it is actually using.
 
 ## Updating
 

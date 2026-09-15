@@ -14,7 +14,7 @@ use crate::project;
 
 /// Promotes `file`, then says where it went and who will see it.
 pub async fn run(file: &Path) -> anyhow::Result<i32> {
-    let ctx = project::hook_context()?;
+    let ctx = project::resolve().hook_context()?;
     let target = resolve(&ctx.memory_dir, file);
 
     match recall_hooks::promote(&ctx, &target).await {

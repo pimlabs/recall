@@ -25,6 +25,14 @@ pub struct Env {
     pub home: Option<String>,
 }
 
+/// Every variable [`Env`] reads.
+///
+/// Published so a caller that has to *enumerate* them — `recall status`,
+/// reporting which of them a settings file declares — cannot drift from what
+/// [`Env::from_lookup`] actually consults. The
+/// `reads_exactly_the_variables_it_publishes` test holds the two together.
+pub const VARS: &[&str] = &["CLAUDE_CODE_REMOTE_MEMORY_DIR", "CLAUDE_CONFIG_DIR", "HOME"];
+
 impl Env {
     /// Reads the three variables through a caller-supplied lookup.
     pub fn from_lookup<F>(lookup: F) -> Self
@@ -61,6 +69,40 @@ impl Env {
     /// at `project_root`: `<root>/projects/<slug>/memory`.
     pub fn memory_dir(&self, project_root: &str) -> PathBuf {
         self.project_dir(project_root).join("memory")
+    }
+
+    /// Where Claude Code reads its *settings* from, which is deliberately
+    /// not [`Env::memory_root`]:
+    ///
+    /// `CLAUDE_CONFIG_DIR` > `$HOME/.claude`
+    ///
+    /// `CLAUDE_CODE_REMOTE_MEMORY_DIR` is absent from that order on purpose.
+    /// It moves where auto-memory is *kept* and nothing else — a remote
+    /// session that sets it still reads its settings from the config
+    /// directory — so letting it win here would send `recall status` looking
+    /// for a settings file inside the memory directory.
+    pub fn config_root(&self) -> PathBuf {
+        if let Some(dir) = set(&self.config_dir) {
+            return PathBuf::from(dir);
+        }
+        Path::new(self.home.as_deref().unwrap_or("")).join(".claude")
+    }
+
+    /// The user-level `settings.json`: the lowest-precedence settings file,
+    /// and still above the shell.
+    ///
+    /// [`None`] when neither `CLAUDE_CONFIG_DIR` nor `$HOME` is set, rather
+    /// than the bare `.claude/settings.json` that [`Env::config_root`] would
+    /// otherwise produce. That path is *relative*, so it resolves against
+    /// whatever directory the process happens to be in — which in a
+    /// sub-directory of a project would load that sub-directory's settings
+    /// as the user's, at the wrong precedence, under a second spelling of a
+    /// file that may already be a layer.
+    pub fn user_settings_file(&self) -> Option<PathBuf> {
+        if set(&self.config_dir).is_none() && set(&self.home).is_none() {
+            return None;
+        }
+        Some(self.config_root().join("settings.json"))
     }
 
     /// Recall's own bookkeeping for delete reconciliation. It sits *beside*
@@ -115,6 +157,62 @@ pub fn slug(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Settings and memory are two different roots, and the variable that
+    /// separates them is the one a cloud session sets. Getting this wrong
+    /// would send `recall status` hunting for a settings file inside the
+    /// memory directory and reporting, wrongly, that nothing is declared.
+    #[test]
+    fn settings_live_in_the_config_root_not_the_memory_root() {
+        let remote = Env {
+            remote_memory_dir: Some("/workspace/memory".into()),
+            config_dir: None,
+            home: Some("/home/eko".into()),
+        };
+        assert_eq!(remote.memory_root(), Path::new("/workspace/memory"));
+        assert_eq!(remote.config_root(), Path::new("/home/eko/.claude"));
+        assert_eq!(
+            remote.user_settings_file().as_deref(),
+            Some(Path::new("/home/eko/.claude/settings.json"))
+        );
+
+        // A relative path here would be read against the process's working
+        // directory — a file belonging to whatever project the command was
+        // run in, loaded as though it were the user's.
+        let nowhere = Env {
+            remote_memory_dir: Some("/workspace/memory".into()),
+            config_dir: None,
+            home: None,
+        };
+        assert_eq!(nowhere.user_settings_file(), None);
+
+        let explicit = Env {
+            remote_memory_dir: None,
+            config_dir: Some("/cfg".into()),
+            home: Some("/home/eko".into()),
+        };
+        assert_eq!(explicit.config_root(), Path::new("/cfg"));
+    }
+
+    /// [`VARS`] exists so callers can enumerate what is read. A list that
+    /// drifts from the reads is worse than no list, so it is asserted
+    /// against the reads themselves rather than maintained by hand.
+    #[test]
+    fn reads_exactly_the_variables_it_publishes() {
+        use std::cell::RefCell;
+
+        let seen = RefCell::new(Vec::new());
+        let _ = Env::from_lookup(|key| {
+            seen.borrow_mut().push(key.to_string());
+            None
+        });
+
+        let mut seen = seen.into_inner();
+        seen.sort();
+        let mut published: Vec<String> = VARS.iter().map(|v| (*v).to_string()).collect();
+        published.sort();
+        assert_eq!(seen, published, "VARS no longer matches what Env reads");
+    }
 
     /// The expected values here are what the real Claude Code CLI produces —
     /// its JS is `path.replace(/[^a-zA-Z0-9]/g, "-")`, which replaces per

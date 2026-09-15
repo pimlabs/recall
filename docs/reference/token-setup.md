@@ -24,9 +24,17 @@ export RECALL_TOKEN="<the value from step 1>"
 export RECALL_URL="https://recall.yourdomain.com"
 ```
 
-Open a new terminal (or `source` the file) so the hooks pick it up —
-`recall push` / `recall pull` read these from the environment,
-not from a config file.
+Open a new terminal (or `source` the file) so the hooks pick it up — the
+shell is where Recall reads these unless a settings file declares them, and a
+declaration wins.
+
+A project may also declare them in its `.claude/settings.json`, and if it
+does, **that wins**: Claude Code replaces an inherited value with the one in
+the file. That is the right home for a value that describes the *project*
+(see [`install.md`](install.md)); for a token and a URL, which describe a
+machine, the shell profile is still the place — and committing a token to a
+settings file would publish it. `recall status` names the file behind any
+value that came from one, so the two can never quietly disagree.
 
 ## 3. Install it on a claude.ai cloud environment
 
