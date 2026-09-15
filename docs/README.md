@@ -63,6 +63,7 @@ cargo doc --workspace --no-deps --open
 
 | Document | Read it when |
 |---|---|
-| [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | Dev workflow: building, testing, the checkers that gate a release. |
+| [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | Dev workflow: building, testing, where a test goes, the checkers that gate a release. |
+| [`../CHANGELOG.md`](../CHANGELOG.md) | What changed between releases. Reference, and the one document written for someone who is *already* running Recall. |
 | [`../CLAUDE.md`](../CLAUDE.md) | How Claude Code sessions should work in this repo — worktrees, the task list, PR policy, and the ground rules that are not up for negotiation. |
 | [`../scripts/probes/README.md`](../scripts/probes/README.md) | Running the probes that establish what Claude Code does with memory files. Each one costs a real API call, and one run proves nothing. |

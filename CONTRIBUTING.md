@@ -22,6 +22,38 @@ The first build is slow — `rusqlite` compiles SQLite from C. After that it's c
 
 `cargo test -p recall-wire` is the fastest useful check: that crate holds the request/response contract both halves depend on, and its tests pin the wire format byte for byte — field order and the `null`-versus-`""` distinction included — because those were once compatibility guarantees against a second implementation and are now guarantees against the rows already in production.
 
+### Where a test goes
+
+Three places, and the choice is not taste:
+
+- **Beside the code, in `src/`.** Use this when the test needs something
+  private: an internal invariant, an error path reachable only by building
+  internal state, a helper nobody outside the crate should see. Most of the
+  suite lives here.
+- **In the crate's `tests/`.** Use this when *the point* of the test is that
+  the public API is enough. These compile against the crate as a dependency,
+  so anything they can reach, a user can reach.
+- **In a doc comment.** An example that would be worth reading anyway;
+  `cargo test` runs it, so it cannot drift from the code it documents.
+
+The tell, and the only rule that really matters: **if putting a test in
+`tests/` would make you mark something `pub` that nobody outside the crate
+needs, it belongs beside the code instead.** A public surface widened for a
+test is still a public surface, and `missing_docs` will then ask you to
+document, and therefore commit to, something you never meant to expose.
+
+That is why the split across crates looks uneven — `recall-wire`,
+`recall-paths` and `recall-hooks` are entirely in-crate, while
+`recall-server` and `recall-sync` also have a `tests/`. It follows what each
+crate is: the first three are libraries whose interesting behaviour is
+internal, and the last two are asked whether their outside edge — an HTTP
+surface, a command-line one — behaves for someone who only has the outside.
+
+Note that `tests/` means **`crates/<name>/tests/`**. Cargo does not compile a
+`tests/` at the root of a workspace; a directory there would silently never
+run. `fixtures/` at the root holds data, not tests, and says so in its own
+README.
+
 ### Documentation is checked, not just written
 
 ```sh
