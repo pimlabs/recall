@@ -3,10 +3,11 @@
 #
 #   curl -fsSL https://recall.pimlabs.id/install | bash
 #
-# That URL redirects here, to this file on main. The redirect exists so the
-# published command stays short; this file stays the only copy, so there is
-# nothing that can serve a stale installer — which matters, because the
-# checksum verification below is the thing a stale copy would be missing.
+# That URL is a Cloudflare Worker that fetches this file from main on every
+# request — install-worker.js in this repository. It proxies rather than
+# copies, so this file stays the only version of the installer and nothing
+# can serve a stale one, which matters because the checksum verification
+# below is exactly what a stale copy would be missing.
 #
 # Downloads the prebuilt binary for this platform from the latest GitHub
 # release. Installs to ~/.local/bin/recall; override with RECALL_BIN_DIR,

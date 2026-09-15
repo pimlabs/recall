@@ -71,14 +71,20 @@ Installs to `~/.local/bin/recall`. Override with `RECALL_BIN_DIR`, or pin a
 version with `RECALL_VERSION=v0.1.0`. It will tell you if that directory
 isn't on your `PATH`.
 
-That URL is a 302 to the script in this repository, so what runs is whatever
-`install.sh` says on `main` — there is no second copy to fall behind. Read it
-first if you would rather not pipe a stranger's script into a shell; the
-redirect takes you to the file on GitHub, history and all:
+That URL is a Cloudflare Worker that fetches `install.sh` from `main` on
+every request, so what runs is whatever this repository says right now —
+there is no second copy to fall behind. Read it before running it if you
+would rather not pipe a stranger's script into a shell:
 
 ```sh
 curl -fsSL https://recall.pimlabs.id/install | less
 ```
+
+The same bytes, with their history, are at
+[`install.sh`](https://github.com/pimlabs/recall/blob/main/install.sh) —
+that is the file the Worker serves, and
+[`install-worker.js`](https://github.com/pimlabs/recall/blob/main/install-worker.js)
+is the Worker itself.
 
 **It is not your server's address.** `recall.pimlabs.id` is where this
 project publishes its installer; `RECALL_URL` is the host *you* deploy to,

@@ -34,10 +34,10 @@ pipeline and the shape of the tree:
   curl -fsSL https://recall.pimlabs.id/install | bash
   ```
 
-  A 302 to the same `install.sh` on `main`, so nothing is copied and nothing
-  can fall behind. The old
+  A Cloudflare Worker that fetches the same `install.sh` from `main` on every
+  request, so nothing is copied and nothing can fall behind. The old
   `raw.githubusercontent.com/pimlabs/recall/main/install.sh` keeps working —
-  it is what the redirect points at.
+  it is the file the Worker serves.
 
 - **Homebrew is one line and one download:**
 

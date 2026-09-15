@@ -106,29 +106,42 @@ it must be the commit that tag points at.
 
 ### Where that short URL comes from
 
-`recall.pimlabs.id/install` is a **Cloudflare Redirect Rule**, not a file
-anyone hosts:
+A **Cloudflare Worker** on `recall.pimlabs.id/*`, deployed from
+[`install-worker.js`](../../install-worker.js) at the root of this
+repository. That file is the source; what runs at the edge is a deployment
+of it.
 
-| | |
+| Path | Answer |
 |---|---|
-| When | `Hostname` equals `recall.pimlabs.id` **and** `URI Path` equals `/install` |
-| Then | static **302** to `https://raw.githubusercontent.com/pimlabs/recall/main/install.sh` |
+| `/install`, `/install.sh` | 200, `text/x-sh`, the contents of `install.sh` on `main` |
+| `/sync`, `/health`, `/admin`, `/admin/stats` | 410, naming `recall-server.pimlabs.id` |
+| anything else | 404, listing the installer, the API and the repository |
 
-It is written down here because nothing in this repository would tell you it
-exists, and a rule that vanishes takes the published install command with it.
+It **proxies rather than copies**: every request fetches `install.sh` from
+`main`, so no second version of that script exists anywhere. That is not
+tidiness — `install.sh` is where the downloaded binary's SHA-256 is checked
+against the release's `checksums.txt`, so a stale copy would be an installer
+that verifies nothing, and nobody would notice.
 
-Three properties are deliberate. It is a **redirect rather than a copy**, so
-the script that runs is always the one on `main` — a served copy could fall
-behind, and what it would be missing is the checksum verification.
-It is **302, not 301**, because browsers cache a permanent redirect
-permanently and it could never be moved. And the path match is **equals**,
-not *starts with*: `recall.pimlabs.id` used to be the API's hostname, and a
-broad match would answer a stale client's `POST /sync` with an installer
-script.
+The 410s are the reason this is a Worker and not a Redirect Rule, which
+cannot answer for paths it does not match. `recall.pimlabs.id` was the API's
+address until 2026-09-15. A client still pointed at it would otherwise
+receive a bare 404 from whatever sits at the origin — and Recall's hooks exit
+0 on an unreachable server by design, so that machine would stop syncing in
+complete silence. **410 rather than a redirect** is deliberate too: sending a
+`POST /sync` onwards would hand a client's memory to a host it never
+authenticated against.
 
-The API now lives at `recall-server.pimlabs.id`, on a DNS-only record. That
-record must stay DNS-only — proxying it would put Cloudflare's edge between
-the client and Traefik, and every client would share one rate-limit bucket.
+`install-worker.test.js` drives all of it against a stubbed upstream,
+including the case where GitHub is down — which must fail loudly rather than
+pipe a truncated script into someone's shell. CI runs it.
+
+The API now lives at `recall-server.pimlabs.id`, on a **DNS-only** record.
+That record must stay DNS-only: proxying it would put Cloudflare's edge
+between the client and Traefik, and every client would share one rate-limit
+bucket. The zone's `*.pimlabs.id` wildcard **is** proxied, so deleting the
+specific record would not break the hostname — it would quietly demote it,
+which is worse.
 
 ## 2. Homebrew
 

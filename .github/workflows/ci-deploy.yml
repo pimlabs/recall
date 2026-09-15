@@ -52,6 +52,14 @@ jobs:
           cargo build --release -p recall-sync --locked
           ./scripts/trusted-ip-check.sh target/release/recall
 
+      # The Worker that publishes recall.pimlabs.id/install. Its routing is
+      # easy to get subtly wrong in ways no one would notice: a redirect
+      # where a 410 belongs would forward a stale client's POST /sync to a
+      # host it never authenticated against, and an upstream failure served
+      # as 200 would pipe a truncated script into someone's shell.
+      - name: Install worker still routes correctly
+        run: node install-worker.test.js
+
       - name: Shipped shell scripts still parse
         run: |
           bash -n install.sh
