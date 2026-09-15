@@ -59,6 +59,7 @@
 #![deny(missing_docs)]
 
 mod atomic;
+mod backfill;
 mod context;
 mod index;
 mod promote;
@@ -73,6 +74,7 @@ pub mod payload;
 pub mod settings;
 pub mod state;
 
+pub use backfill::{backfill, Disposition, Entry, Outcome as BackfillOutcome};
 pub use context::{Context, Error};
 pub use index::is_linked as global_index_is_linked;
 pub use path::is_memory_file;

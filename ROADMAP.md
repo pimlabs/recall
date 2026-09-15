@@ -347,7 +347,8 @@ quietly, with the old snapshots still on disk and no longer mounted.
 
 Three things surfaced by running Recall against a second real client, none of
 which is reachable by reading the code. Recorded while the evidence is fresh.
-The first has since been fixed; the other two are **not decided**.
+The first and the third have since been fixed; the machine scope is **not
+decided**.
 
 - **`recall status` does not read the project's `.claude/settings.json`.**
   `docs/reference/install.md` recommends declaring `RECALL_PROJECT_KEY` there, because
@@ -388,6 +389,48 @@ The first has since been fixed; the other two are **not decided**.
   by hand, one `curl` per file. This is the concrete form of the
   export/import idea, and the reason it is worth more than convenience: right
   now Recall can only protect memory written after it was installed.
+
+  **Fixed** — `recall backfill`, with the finding above left as written. What
+  building it turned up, which the finding had not: the naive shape is
+  dangerous. `POST /sync` overwrites in place, comparing no timestamps and
+  returning no conflict, so "send everything on disk" is safe only on the
+  very first machine — anywhere else it deletes whatever another machine
+  pushed more recently. So the command asks what the server holds before it
+  sends anything, and a file the server has with different bytes is left
+  alone and reported rather than overwritten. Two smaller things fell out of
+  the same question: a file the server has tombstoned must not be re-sent
+  either, because that undoes a delete rather than filling a gap; and because
+  every file is one request against a 60-per-minute budget shared with the
+  session's own hooks, the run stops at a refusal about the *run* instead of
+  pushing through. It resumes by construction — what was sent is on the
+  server, and the next run finds it there.
+
+  Reviewing it surfaced two more, both of which are now guarded: a refusal
+  about one *file* must not end the run, or a single name the validator
+  rejects makes everything sorted after it permanently unsendable; and a run
+  that stops early must not write the delete baseline, because a baseline is
+  a claim that this disk and the server have been compared and half a
+  comparison is not one.
+
+## Found by reviewing it
+
+Not from using Recall but from reading it — the counterpart to the section
+above, and worth keeping apart from it, because "nobody could have found this
+without running it" is the whole claim those three make.
+
+- **`route()` matches the global directory case-sensitively.** Found while
+  reviewing the backfill, and left undecided rather than fixed in passing.
+  `scope.rs` compares `rel` against the literal `global`, so a directory
+  named `Global/` or `GLOBAL/` routes to the *project* scope — with global
+  sync on or off. On a case-insensitive filesystem, which is the macOS
+  default, that directory **is** the global directory as far as the user and
+  Claude Code are concerned. The consequence is the one the scope guard
+  exists to prevent: personal notes filed into one repository's history. It
+  has always been reachable through `push`, one file at a time; `backfill` is
+  the first thing that would sweep a whole directory that way. Fixing it
+  means a case-insensitive prefix match in `route()` and its inverse
+  `local_path`, which is the same surface as the `route()` guard already
+  noted above — so the two belong together.
 
 ## Explicitly deferred
 

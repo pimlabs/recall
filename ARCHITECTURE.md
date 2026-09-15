@@ -20,8 +20,8 @@ No peer-to-peer link between environments — every environment only ever talks 
 ## One binary
 
 Client and server are the same Rust binary (`docs/history/rust-rewrite.md`):
-`recall serve` runs the server; `recall init` / `status` / `promote` /
-`push` / `pull` run on a developer machine. That is not packaging
+`recall serve` runs the server; `recall init` / `status` / `backfill` /
+`promote` / `push` / `pull` run on a developer machine. That is not packaging
 convenience. The validation rules and the tombstone/empty-file distinction
 previously existed twice — in JavaScript on the server and in bash on the
 client — with nothing keeping them in agreement. The `recall-wire` crate is
@@ -35,7 +35,8 @@ and the dependency arrows only ever point downward.
 
 ```
 recall-sync       the binary: one module per command
-   │              init · status · promote · hook (push/pull) · serve · project
+   │              init · status · backfill · promote · hook (push/pull)
+   │              serve · project
    ├──────────────┬──────────────┐
    ▼              ▼              │
 recall-hooks   recall-server     │   the two halves
@@ -53,9 +54,9 @@ recall-hooks   recall-server     │   the two halves
 |---|---|---|
 | `recall-wire` | Request/response shapes and the validation both sides apply | These rules were once written twice — JavaScript and bash — and drifted. One definition is the whole point. |
 | `recall-paths` | Claude Code's memory paths, `project_key` derivation, client config | Tracks *someone else's* implementation. When the CLI changes there is one place to fix, with its own tests. |
-| `recall-hooks` | `push`, `pull`, the baseline, the HTTP client, the settings merge | Everything that runs inside a user's editing session, where being quiet matters more than being thorough. |
+| `recall-hooks` | `push`, `pull`, `backfill`, the baseline, the HTTP client, the settings merge | Everything that runs inside a user's editing session, where being quiet matters more than being thorough. |
 | `recall-server` | SQLite store, `claude -p` merge, the axum API | Everything that runs on the host. Never depends on `recall-hooks`. |
-| `recall-sync` | Argument parsing and one module per command — `serve` among them, so this is where the server process starts too | Thin. Each command's *failure policy* is documented beside the command it governs. Named for the client half only because `recall-cli` and `recall` were both taken on crates.io; published since v0.1.0, so the name is now fixed. |
+| `recall-sync` | Argument parsing and one module per command — `serve` among them, so this is where the server process starts too | Thin. Each command's *failure policy* is documented beside the command it governs. Named for the client half only because `recall-cli` and `recall` were both taken on crates.io when v0.1.0 was published. |
 
 The generated API docs (`cargo doc --workspace --open`) are the reference;
 `missing_docs` is denied in every library crate and CI runs rustdoc with
@@ -274,6 +275,11 @@ memory edit — and it is why a **missing** baseline is treated differently from
 an **empty** one: with no baseline at all, an empty memory directory would
 read as "everything was deleted" and tombstone the project's whole history.
 
+`recall pull` and `recall backfill` are the two commands that leave a baseline
+behind. That matters most on a machine that has never had one, which is
+exactly the machine `backfill` is for: until the first one is written, a
+delete is indistinguishable from a file that was never there.
+
 ## Merge strategy
 
 **Implemented in Phase 2 (see `ROADMAP.md`).** Not append-only, not naive last-write-wins. `POST /sync` only attempts a merge when there's actually something to reconcile — an existing, non-tombstoned row whose stored content differs byte-for-byte from the incoming push; a brand-new file, a revived tombstone, or a client re-pushing unchanged content all skip straight to a plain write. When it does attempt one, it shells out to the *local* `claude` CLI (`claude -p`), never the Anthropic API directly, keeping the no-API-key rule in `CLAUDE.md` intact — merge rides whatever account is logged into that CLI on the server host (`claude setup-token`, a one-time interactive step documented in `deploy/README.md`; a real operational requirement, not an afterthought).
@@ -286,7 +292,8 @@ Structured/settings-like data, if Recall ever expands beyond auto memory (it cur
 
 ## What's deliberately not here
 
-- No client daemon or background watcher — hooks are the entire client.
+- No client daemon or background watcher — the hooks are the only part of
+  the client that runs unprompted.
 - No multi-user auth, no OAuth, no billing.
 - No Anthropic API key anywhere in the request path.
 - No attempt to sync `CLAUDE.md`, skills, or settings — git already does `CLAUDE.md`, and the rest is out of scope (see "Explicitly deferred" in `ROADMAP.md`).

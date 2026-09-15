@@ -61,6 +61,7 @@ export RECALL_TOKEN="..."                    # docs/reference/token-setup.md
 
 recall init                                  # wires .claude/settings.json
 git add .claude/settings.json && git commit  # so fresh clones get it too
+recall backfill                              # send memory that predates all this
 recall status                                # confirm it's actually working
 ```
 

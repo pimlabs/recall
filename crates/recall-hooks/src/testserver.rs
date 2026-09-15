@@ -27,7 +27,18 @@ struct Inner {
     /// calling `set_files`.
     files: HashMap<String, Vec<File>>,
     pulled_keys: Vec<String>,
+    /// Every `POST /sync` that arrived, refused ones included. `pushes`
+    /// records only the ones that were accepted, which makes "it stopped
+    /// after the first refusal" and "it kept going and was refused every
+    /// time" indistinguishable — the exact difference a backfill's stop rule
+    /// turns on.
+    push_attempts: usize,
     fail_with: Option<(u16, String)>,
+    /// Failing *only* pushes, which `fail_with` cannot express. A backfill
+    /// reads what the server holds before it sends anything, so the case
+    /// worth testing — the read succeeds, a write is refused partway — needs
+    /// the two halves to be able to disagree.
+    fail_pushes_with: Option<(u16, String)>,
     last_authorization: Option<String>,
 }
 
@@ -96,6 +107,16 @@ impl FakeServer {
     /// Make every subsequent request fail with this status and body.
     pub fn fail_with(&self, code: u16, body: &str) {
         self.inner.lock().expect("test lock").fail_with = Some((code, body.to_string()));
+    }
+
+    /// How many pushes were attempted, whether or not they were accepted.
+    pub fn push_attempts(&self) -> usize {
+        self.inner.lock().expect("test lock").push_attempts
+    }
+
+    /// Make every subsequent `POST /sync` fail, leaving `GET /sync` working.
+    pub fn fail_pushes_with(&self, code: u16, body: &str) {
+        self.inner.lock().expect("test lock").fail_pushes_with = Some((code, body.to_string()));
     }
 
     pub fn last_authorization(&self) -> Option<String> {
@@ -169,6 +190,21 @@ async fn push(
     body: axum::body::Bytes,
 ) -> Response {
     if let Some(failure) = intercept(&state, &headers) {
+        return failure;
+    }
+    let refused = {
+        let mut inner = state.lock().expect("test lock");
+        inner.push_attempts += 1;
+        inner.fail_pushes_with.clone()
+    }
+    .map(|(code, body)| {
+        (
+            StatusCode::from_u16(code).expect("a valid test status"),
+            body,
+        )
+            .into_response()
+    });
+    if let Some(failure) = refused {
         return failure;
     }
     // Decoded from raw bytes rather than through an extractor so a

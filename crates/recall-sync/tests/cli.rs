@@ -827,6 +827,54 @@ fn version_prints_and_exits_zero() {
     assert!(r.stdout.starts_with("recall "), "stdout: {}", r.stdout);
 }
 
+// ---------------------------------------------------------------------------
+// backfill
+// ---------------------------------------------------------------------------
+
+/// `backfill` is typed on purpose, so an unconfigured machine is told rather
+/// than quietly doing nothing — the opposite of the hooks, which must never
+/// be the reason a session breaks. Exit 1 is the code reserved for what only
+/// the user can fix.
+#[test]
+fn backfill_is_loud_about_missing_configuration() {
+    let repo = git_repo();
+    let r = run(&["backfill"], repo.path(), &[], None);
+
+    assert_eq!(r.code, 1, "stdout: {} stderr: {}", r.stdout, r.stderr);
+    assert!(
+        r.stderr.contains("RECALL_URL"),
+        "the refusal should name the variable to set: {}",
+        r.stderr
+    );
+}
+
+/// A backfill against an unreachable server exits 2, not 0. The hooks
+/// swallow that case deliberately, and this one must not: someone who typed
+/// this is waiting to be told their memory is safe, and silence would read
+/// as yes.
+#[test]
+fn backfill_exits_two_when_the_server_cannot_be_reached() {
+    let repo = git_repo();
+    std::fs::create_dir_all(repo.path().join(".claude")).unwrap();
+    let r = run(
+        &["backfill"],
+        repo.path(),
+        &[("RECALL_URL", DEAD_SERVER), ("RECALL_TOKEN", "t")],
+        None,
+    );
+
+    assert_eq!(r.code, 2, "stdout: {} stderr: {}", r.stdout, r.stderr);
+    assert!(
+        !r.stderr.is_empty(),
+        "an unreachable server has to say so rather than exit quietly"
+    );
+    assert!(
+        !r.stdout.contains(" sent,"),
+        "nothing was sent, so it must not print a summary that implies it was: {}",
+        r.stdout
+    );
+}
+
 #[test]
 fn an_unknown_subcommand_fails_with_usage() {
     let dir = tempfile::tempdir().unwrap();

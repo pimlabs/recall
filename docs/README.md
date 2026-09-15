@@ -35,7 +35,7 @@ design, so there is no third party here.
 
 | Document | Read it when |
 |---|---|
-| [`reference/install.md`](reference/install.md) | Installing the `recall` CLI (npm, Homebrew, curl, cargo), opting a project in with `recall init`, declaring a `project_key` by hand, and promoting a note into the global scope. |
+| [`reference/install.md`](reference/install.md) | Installing the `recall` CLI (npm, Homebrew, curl, cargo), opting a project in with `recall init`, sending memory that predates the install with `recall backfill`, declaring a `project_key` by hand, and promoting a note into the global scope. |
 | [`reference/api.md`](reference/api.md) | Talking to the server directly instead: endpoints, schemas, status codes, `curl` examples. |
 
 ### Keeping it running

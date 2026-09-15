@@ -24,6 +24,7 @@ And once per project you want synced:
 ```sh
 recall init
 git add .claude/settings.json && git commit -m "Enable Recall memory sync"
+recall backfill
 recall status
 ```
 
