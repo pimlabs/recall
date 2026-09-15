@@ -22,7 +22,7 @@ already has.
 | Channel | Command |
 |---|---|
 | **npm** / bun / pnpm | `npm install -g @pimlabs/recall` |
-| **Homebrew** | `brew tap pimlabs/recall https://github.com/pimlabs/recall`<br>`brew install pimlabs/recall/recall` |
+| **Homebrew** | `brew install pimlabs/tap/recall` |
 | **curl** | `curl -fsSL https://raw.githubusercontent.com/pimlabs/recall/main/install.sh \| bash` |
 | **cargo** | `cargo install recall-sync` |
 
@@ -44,18 +44,20 @@ delivery mechanism.
 
 ### Homebrew
 
-The tap needs its URL given explicitly, since this repo isn't named
-`homebrew-recall` and Homebrew only infers that convention:
-
 ```sh
-brew tap pimlabs/recall https://github.com/pimlabs/recall
-brew install pimlabs/recall/recall          # latest tagged release
-brew install --HEAD pimlabs/recall/recall   # straight from main
+brew install pimlabs/tap/recall          # latest release
+brew install --HEAD pimlabs/tap/recall   # built from main, between releases
 ```
 
-Built from source rather than pulling a release binary — Homebrew already has
-a Rust toolchain available as a build dependency, and it means `--HEAD` works
-against `main` between releases.
+No separate `brew tap` step and no URL: the formula lives in
+`pimlabs/homebrew-tap`, and Homebrew resolves `pimlabs/tap` to a repository
+named `homebrew-*` on its own. A formula kept in this repository could not be
+found that way, since `recall` is not named `homebrew-recall`.
+
+The release install is a **download**, not a build — the same archive npm and
+`install.sh` fetch, with the same checksum verified by Homebrew. `--HEAD`
+still compiles, because there is nothing prebuilt for `main` to point at, and
+that is the one case where you need a Rust toolchain.
 
 ### curl
 
