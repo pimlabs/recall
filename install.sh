@@ -73,6 +73,6 @@ esac
 
 cat <<'EOF'
 
-Next: set RECALL_URL and RECALL_TOKEN (see docs/token-setup.md), then run
+Next: set RECALL_URL and RECALL_TOKEN (see docs/reference/token-setup.md), then run
 'recall init' inside a project you want synced.
 EOF

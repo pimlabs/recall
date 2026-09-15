@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Checks that docs/api.md describes what the server actually does.
+# Checks that docs/reference/api.md describes what the server actually does.
 #
 # The API reference is a frozen compatibility surface, so it is worth more
 # than prose: every claim it makes about status codes, error wording, field

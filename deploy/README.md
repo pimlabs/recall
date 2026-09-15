@@ -183,7 +183,7 @@ session too — it's just an HTTPS request either way.
 
 ## 5. Point real environments at it
 
-Set on every environment that should push and pull — see [`../docs/token-setup.md`](../docs/token-setup.md):
+Set on every environment that should push and pull — see [`../docs/reference/token-setup.md`](../docs/reference/token-setup.md):
 
 | Variable | Value |
 |---|---|
@@ -192,7 +192,7 @@ Set on every environment that should push and pull — see [`../docs/token-setup
 | `CLAUDE_CODE_REMOTE_MEMORY_DIR` | (remote/cloud environments only) that environment's `~/.claude` |
 
 Then, in each project you want synced, run `recall init` — it wires that
-project's own `.claude/settings.json`. See [`../docs/install.md`](../docs/install.md).
+project's own `.claude/settings.json`. See [`../docs/reference/install.md`](../docs/reference/install.md).
 
 ## Switching ingress on a server that is already running
 
@@ -315,7 +315,7 @@ hostname works again.
 
 If the hostname changed, every client's `RECALL_URL` has to change with it —
 laptops (shell profile) and every claude.ai cloud environment
-([`../docs/token-setup.md`](../docs/token-setup.md)). A client left pointing at
+([`../docs/reference/token-setup.md`](../docs/reference/token-setup.md)). A client left pointing at
 the old hostname does not error loudly; `recall pull` warns on stderr and exits
 0, by design, so it just quietly stops syncing.
 
@@ -334,7 +334,7 @@ without it still works, `/health` just reports `"unknown"` for
 `git_commit`.
 
 This can also run automatically on every push to `main` instead of by
-hand — see `docs/github-actions-deploy.md` for wiring up
+hand — see `docs/reference/github-actions-deploy.md` for wiring up
 `.github/workflows/ci-deploy.yml` against this VPS.
 
 The SQLite file lives in the named `recall-data` volume, so it survives

@@ -5,7 +5,7 @@
 //! path, which differs on every machine and every clone. Recall needs a key
 //! two environments agree on without ever having met, so it comes from the
 //! git remote instead. The two solve different problems and are meant to
-//! disagree; see docs/phase-0-findings.md §6.
+//! disagree; see docs/history/phase-0-findings.md §6.
 
 use crate::claude::slug;
 
@@ -134,7 +134,7 @@ mod tests {
     use super::*;
 
     /// The first three rows are the exact forms verified live in
-    /// docs/phase-0-findings.md and must keep producing what the shell
+    /// docs/history/phase-0-findings.md and must keep producing what the shell
     /// implementation produced.
     #[test]
     fn normalizes_every_remote_form_to_the_same_key() {

@@ -12,7 +12,7 @@
 # deprecated but not removed, and a crates.io version can be yanked but never
 # deleted.
 #
-# See docs/releasing.md for what each step does and why the order matters.
+# See docs/reference/releasing.md for what each step does and why the order matters.
 set -uo pipefail
 
 TAG="${1:-}"
@@ -176,7 +176,7 @@ done
 if ! curl -sfI "$release_url/checksums.txt" >/dev/null 2>&1; then
   printf '\n'
   warn "timed out. Check https://github.com/$REPO/actions, then re-run steps 6-8 by hand"
-  warn "(docs/releasing.md has each command)"
+  warn "(docs/reference/releasing.md has each command)"
   exit 1
 fi
 

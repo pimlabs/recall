@@ -18,7 +18,7 @@ Recall exists for that specific gap: **a central service any environment can tal
 
 No custom client daemon. Claude Code's own hook system does the work:
 
-- **Push**: a `PostToolUse` hook matching `Edit|Write` runs `recall push`, which checks whether the edited file is a memory file and, if so, sends it to Recall's API. (An earlier design assumed a `FileChanged` event and a declarative `http` hook type — neither exists in the installed CLI; see [`docs/phase-0-findings.md`](docs/phase-0-findings.md).)
+- **Push**: a `PostToolUse` hook matching `Edit|Write` runs `recall push`, which checks whether the edited file is a memory file and, if so, sends it to Recall's API. (An earlier design assumed a `FileChanged` event and a declarative `http` hook type — neither exists in the installed CLI; see [`docs/history/phase-0-findings.md`](docs/history/phase-0-findings.md).)
 - **Pull**: a `SessionStart` hook runs `recall pull`, which fetches the latest synced state before Claude loads context.
 
 Neither can break a session: an unreachable server or an unconfigured machine warns on stderr and exits 0.
@@ -36,14 +36,14 @@ curl -fsSL https://raw.githubusercontent.com/pimlabs/recall/main/install.sh | ba
 cargo install recall-sync
 ```
 
-Details, and what each one actually does, in [`docs/install.md`](docs/install.md).
+Details, and what each one actually does, in [`docs/reference/install.md`](docs/reference/install.md).
 
 > **No release is tagged yet.** npm, Homebrew and `install.sh` all download a
 > published binary, so until the first `v*` tag they have nothing to fetch.
 > Build from source or use `cargo install --git` in the meantime — see
-> [`docs/install.md`](docs/install.md#releases).
+> [`docs/reference/install.md`](docs/reference/install.md#releases).
 
-Set `RECALL_URL` and `RECALL_TOKEN` in your shell profile ([`docs/token-setup.md`](docs/token-setup.md)), then, in each project you want synced:
+Set `RECALL_URL` and `RECALL_TOKEN` in your shell profile ([`docs/reference/token-setup.md`](docs/reference/token-setup.md)), then, in each project you want synced:
 
 ```sh
 recall init                                  # wires .claude/settings.json
@@ -55,14 +55,14 @@ Notes about *you* rather than the repo can follow you into every project:
 set `RECALL_GLOBAL_KEY`, then `recall promote <file>` moves one there. And
 where the `owner/repo` key derived from the git remote is wrong — a repo with
 no remote, a monorepo, a fork — `RECALL_PROJECT_KEY` declares it instead.
-Both are in [`docs/install.md`](docs/install.md).
+Both are in [`docs/reference/install.md`](docs/reference/install.md).
 
-Standing up the server itself is `recall serve`, in practice via [`deploy/`](deploy/README.md). To talk to it directly, see the [HTTP API reference](docs/api.md).
+Standing up the server itself is `recall serve`, in practice via [`deploy/`](deploy/README.md). To talk to it directly, see the [HTTP API reference](docs/reference/api.md).
 
 ## Status
 
 Phases 0 through 9 done. Recall is one Rust binary
-(`docs/rust-rewrite.md`) that runs both halves: the push/pull round-trip
+(`docs/history/rust-rewrite.md`) that runs both halves: the push/pull round-trip
 proven from a genuine claude.ai cloud session, conflicting edits semantically
 merged rather than last-write-wins, multi-project isolation verified, and a
 global scope so a note about *you* is not stuck in whichever repository Claude
@@ -87,13 +87,13 @@ rather than assumed and two conclusions that turned out wrong.
 
 | Start here | For |
 |---|---|
-| [`docs/install.md`](docs/install.md) | Installing the CLI and opting a project in |
-| [`docs/releasing.md`](docs/releasing.md) | Cutting a release across all four channels |
-| [`docs/token-setup.md`](docs/token-setup.md) | Getting a token onto every machine, laptop and cloud |
-| [`docs/api.md`](docs/api.md) | The HTTP API: endpoints, schemas, status codes, examples |
+| [`docs/reference/install.md`](docs/reference/install.md) | Installing the CLI and opting a project in |
+| [`docs/reference/releasing.md`](docs/reference/releasing.md) | Cutting a release across all four channels |
+| [`docs/reference/token-setup.md`](docs/reference/token-setup.md) | Getting a token onto every machine, laptop and cloud |
+| [`docs/reference/api.md`](docs/reference/api.md) | The HTTP API: endpoints, schemas, status codes, examples |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | How it works, and the code map |
-| [`docs/rust-rewrite.md`](docs/rust-rewrite.md) | Why Rust, honestly — including every bug this project has shipped |
-| [`docs/memory-loading-findings.md`](docs/memory-loading-findings.md) | What Claude Code actually does with memory files, and why one probe proves nothing |
+| [`docs/history/rust-rewrite.md`](docs/history/rust-rewrite.md) | Why Rust, honestly — including every bug this project has shipped |
+| [`docs/history/memory-loading-findings.md`](docs/history/memory-loading-findings.md) | What Claude Code actually does with memory files, and why one probe proves nothing |
 | [`ROADMAP.md`](ROADMAP.md) | Every phase, the evidence behind it, and what is deliberately deferred |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Building, testing, and what not to "clean up" |
 

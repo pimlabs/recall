@@ -144,7 +144,7 @@ you: which projects share a key is a decision only you can make.)
 memory.** The server files every file under the key it was pushed with and
 moves nothing, so the old history stays where it is and the new key starts
 empty. Nothing is lost, and nothing follows either —
-[`../deploy/README.md`](../deploy/README.md) has the SQL for renaming or
+[`deploy/README.md`](../../deploy/README.md) has the SQL for renaming or
 removing a key you no longer want.
 
 ## Memories that follow you into every project
@@ -173,7 +173,7 @@ A few things worth knowing:
   with global off will carry links to files it never fetches.
 - **Writing the file is not enough for Claude to read it** — it has to be
   linked from `MEMORY.md`, which Recall does for you. Why, and how that was
-  established, is in [`memory-loading-findings.md`](memory-loading-findings.md).
+  established, is in [`memory-loading-findings.md`](../history/memory-loading-findings.md).
 
 Nothing changes if you leave `RECALL_GLOBAL_KEY` unset.
 
@@ -291,7 +291,7 @@ RECALL_TOKEN=... RECALL_DB_PATH=/data/recall.db recall serve
 
 In practice it runs in Docker behind an ingress — a Cloudflare Tunnel or an
 existing Traefik, one compose file each. See
-[`../deploy/README.md`](../deploy/README.md), which also covers backups and
+[`deploy/README.md`](../../deploy/README.md), which also covers backups and
 the one-time `claude setup-token` step that enables semantic merge.
 
 ## Releases

@@ -65,4 +65,4 @@ echo "  asking Claude, in project beta, with machine B's memory:"
   timeout 240 claude -p "Without using any tools other than reading your own memory, reply with just the editor codename, or UNKNOWN." 2>&1 | sed 's/^/    /')
 echo
 echo "  Expect the codename. A single UNKNOWN is not a failure — retrieval is"
-echo "  probabilistic; see docs/memory-loading-findings.md. Run this a few times."
+echo "  probabilistic; see docs/history/memory-loading-findings.md. Run this a few times."

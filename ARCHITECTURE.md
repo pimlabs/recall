@@ -19,7 +19,7 @@ No peer-to-peer link between environments — every environment only ever talks 
 
 ## One binary
 
-Client and server are the same Rust binary (`docs/rust-rewrite.md`):
+Client and server are the same Rust binary (`docs/history/rust-rewrite.md`):
 `recall serve` runs the server; `recall init` / `status` / `promote` /
 `push` / `pull` run on a developer machine. That is not packaging
 convenience. The validation rules and the tombstone/empty-file distinction
@@ -68,7 +68,7 @@ Both directions are implemented as hooks in the **project's own `.claude/setting
 
 ### Push — `PostToolUse` matching `Edit|Write`, `type: "command"`
 
-**Resolved in Phase 0 (see `docs/phase-0-findings.md`):** the installed Claude Code CLI (v2.1.42) has no `FileChanged` event and no `"http"` hook type at all. Memory files are written through the plain `Write`/`Edit` tools, so the push hook is a `PostToolUse` hook matching `Edit|Write`, `type: "command"`, running `recall push`, which makes the HTTP call itself:
+**Resolved in Phase 0 (see `docs/history/phase-0-findings.md`):** the installed Claude Code CLI (v2.1.42) has no `FileChanged` event and no `"http"` hook type at all. Memory files are written through the plain `Write`/`Edit` tools, so the push hook is a `PostToolUse` hook matching `Edit|Write`, `type: "command"`, running `recall push`, which makes the HTTP call itself:
 
 ```json
 {
@@ -121,11 +121,11 @@ earns the property back with the guard. Not installed is a silent no-op.
 
 A pull that can't reach the server, or a machine with nothing configured, warns on stderr and exits **0**. A hook must not be the reason a session fails to start.
 
-**Load-bearing prerequisite found in Phase 0, not in the original design:** in a remote/cloud session, Claude Code's auto-memory feature is *disabled by default* unless `CLAUDE_CODE_REMOTE_MEMORY_DIR` is set (see `docs/phase-0-findings.md` §5). `recall pull` writing files is necessary but not sufficient — that env var has to be set on the remote environment (as a secret, alongside `RECALL_TOKEN`; it can't be baked into committed `settings.json`, whose `env` values don't support `$HOME` expansion) or Claude Code never looks at the memory directory at all.
+**Load-bearing prerequisite found in Phase 0, not in the original design:** in a remote/cloud session, Claude Code's auto-memory feature is *disabled by default* unless `CLAUDE_CODE_REMOTE_MEMORY_DIR` is set (see `docs/history/phase-0-findings.md` §5). `recall pull` writing files is necessary but not sufficient — that env var has to be set on the remote environment (as a secret, alongside `RECALL_TOKEN`; it can't be baked into committed `settings.json`, whose `env` values don't support `$HOME` expansion) or Claude Code never looks at the memory directory at all.
 
 ## Project identity
 
-**Resolved in Phase 0 (see `docs/phase-0-findings.md` §6):** Claude Code does *not* scope its own memory storage by git remote — it uses the local filesystem path (git root, or cwd if none) with non-alphanumeric characters replaced by `-`. That's machine-local by construction (a laptop clone and a cloud clone of the same repo get different slugs), which is exactly the gap Recall exists to bridge — so Recall deliberately uses a *different* derivation than Claude Code's own:
+**Resolved in Phase 0 (see `docs/history/phase-0-findings.md` §6):** Claude Code does *not* scope its own memory storage by git remote — it uses the local filesystem path (git root, or cwd if none) with non-alphanumeric characters replaced by `-`. That's machine-local by construction (a laptop clone and a cloud clone of the same repo get different slugs), which is exactly the gap Recall exists to bridge — so Recall deliberately uses a *different* derivation than Claude Code's own:
 
 - **`project_key`** (server-side, must agree across machines): the git remote's `owner/repo`, taking just the last two path segments so it normalizes identically across SSH (`git@host:owner/repo.git`), HTTPS (`https://host/owner/repo.git`), and locally-proxied remotes that cloud sandboxes rewrite `origin` to. Implemented in `recall_paths::project::key`.
 - **local memory directory** (client-side, per-machine): replicates Claude Code's own local-path-slug algorithm exactly, so the hooks read and write the same directory Claude Code itself uses on that machine. Implemented in `recall_paths::claude`. The subtlety: Claude Code's slug is a JavaScript regex replace, which operates on **UTF-16 code units**, so `é` becomes one dash and `🚀` becomes two. Iterating bytes or `chars()` both diverge for any non-ASCII path — and the shell version did exactly that, computing a directory Claude Code never writes to.
@@ -179,7 +179,7 @@ Three rules earn their place:
   `MEMORY.md` links. `recall pull` maintains a link per global file, carrying
   each file's own front-matter description as the gloss, because that gloss
   is what the model sees when deciding what to open. See
-  [`docs/memory-loading-findings.md`](docs/memory-loading-findings.md).
+  [`docs/history/memory-loading-findings.md`](docs/history/memory-loading-findings.md).
 - **Getting a note *into* the scope is an explicit act**, not a heuristic.
   `recall promote <file>` moves one note out of the project and into
   `global/`: stored under the global key, tombstoned under the project's,
@@ -198,7 +198,7 @@ Three rules earn their place:
 
 ## Server
 
-Deliberately boring. Two endpoints do the work and three exist to look at it. The full reference — schemas, status codes, worked `curl` examples — is **[`docs/api.md`](docs/api.md)**.
+Deliberately boring. Two endpoints do the work and three exist to look at it. The full reference — schemas, status codes, worked `curl` examples — is **[`docs/reference/api.md`](docs/reference/api.md)**.
 
 - `POST /sync` — one memory file, or one delete. Runs merge (see below) against the stored version and persists the result. `content` is omitted only when `deleted: true` — see "Deletes are tombstones, not row removal" below.
 - `GET /sync?project_key=...` — the current merged set for that project, tombstones included, so a puller can remove local copies.
@@ -220,11 +220,11 @@ cargo doc --workspace --no-deps --open
 Client-side variables are split by where they are set. The per-machine ones
 (`RECALL_URL`, `RECALL_TOKEN`, `RECALL_SOURCE_ENV`, and Claude Code's own
 `CLAUDE_CODE_REMOTE_MEMORY_DIR`) are in
-[`docs/token-setup.md`](docs/token-setup.md), which also covers the
+[`docs/reference/token-setup.md`](docs/reference/token-setup.md), which also covers the
 per-environment network allowlist a claude.ai cloud environment needs before
 it can reach a self-hosted server at all. The two that describe a *project*
 rather than a machine — `RECALL_PROJECT_KEY` and `RECALL_GLOBAL_KEY` — are in
-[`docs/install.md`](docs/install.md).
+[`docs/reference/install.md`](docs/reference/install.md).
 
 ### Deletes are tombstones, not row removal
 
@@ -254,7 +254,7 @@ read as "everything was deleted" and tombstone the project's whole history.
 
 **Implemented in Phase 2 (see `ROADMAP.md`).** Not append-only, not naive last-write-wins. `POST /sync` only attempts a merge when there's actually something to reconcile — an existing, non-tombstoned row whose stored content differs byte-for-byte from the incoming push; a brand-new file, a revived tombstone, or a client re-pushing unchanged content all skip straight to a plain write. When it does attempt one, it shells out to the *local* `claude` CLI (`claude -p`), never the Anthropic API directly, keeping the no-API-key rule in `CLAUDE.md` intact — merge rides whatever account is logged into that CLI on the server host (`claude setup-token`, a one-time interactive step documented in `deploy/README.md`; a real operational requirement, not an afterthought).
 
-The merge prompt instructs the model to preserve every distinct fact from both versions, collapse restated facts to one clear wording, and keep both sides of a genuine contradiction with an inline marker for a human to resolve later — confirmed live to do exactly that, including on a real contradiction (`docs/phase-0-findings.md`-style empirical check, not just a read of the prompt). The call runs with a minimal custom system prompt, `--exclude-dynamic-system-prompt-sections`, and `--strict-mcp-config`, in a neutral working directory: confirmed live that skipping all three (i.e. plain `claude -p` from inside a real project directory) balloons a trivial merge call from roughly $0.01 to $0.19 in wasted cache-creation tokens, since the task needs no tools and no project context.
+The merge prompt instructs the model to preserve every distinct fact from both versions, collapse restated facts to one clear wording, and keep both sides of a genuine contradiction with an inline marker for a human to resolve later — confirmed live to do exactly that, including on a real contradiction (`docs/history/phase-0-findings.md`-style empirical check, not just a read of the prompt). The call runs with a minimal custom system prompt, `--exclude-dynamic-system-prompt-sections`, and `--strict-mcp-config`, in a neutral working directory: confirmed live that skipping all three (i.e. plain `claude -p` from inside a real project directory) balloons a trivial merge call from roughly $0.01 to $0.19 in wasted cache-creation tokens, since the task needs no tools and no project context.
 
 Every failure mode — CLI missing, not logged in, non-zero exit, malformed output, a `RECALL_MERGE_TIMEOUT_MS`-exceeding hang (default 45s) — falls back to last-write-wins rather than rejecting the sync, because a broken or not-yet-configured merge step must never be able to take basic sync down with it. `GET /health`'s `merge` object (`claude_cli.logged_in`, `last_merge_at`, `last_merge_error`) exists specifically so this degraded state is visible from outside instead of silent.
 

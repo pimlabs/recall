@@ -1,33 +1,57 @@
 # Recall documentation
 
 Start at the [README](../README.md) if you just want to know what this is.
-Everything else is here, grouped by what you're trying to do.
 
-## Using it
+Everything here is split by **how it ages**, because that turned out to be
+the question people actually need answered:
+
+- **[`reference/`](reference/)** must be true. If it disagrees with the code,
+  the document is wrong and should be fixed.
+- **[`history/`](history/)** is a record of what was found and decided at a
+  point in time. It is not maintained, and it should not be updated to match
+  today's code — a finding rewritten after the fact stops being evidence.
+
+An audit in September 2026 found four documents stale in the same way:
+written when they were true, never revisited. Nothing about the directory
+they sat in said which kind they were, so nobody knew which ones to check.
+
+## Reference — kept true
 
 | Document | Read it when |
 |---|---|
-| [`install.md`](install.md) | Installing the `recall` CLI (npm, Homebrew, curl, cargo), opting a project in with `recall init`, declaring a `project_key` by hand, and promoting a note into the global scope. |
-| [`token-setup.md`](token-setup.md) | Generating `RECALL_TOKEN` and installing it on every environment — including the extra variable a claude.ai cloud session needs. |
-| [`api.md`](api.md) | Talking to the server directly: endpoints, schemas, status codes, `curl` examples. |
-
-## Running it
-
-| Document | Read it when |
-|---|---|
+| [`reference/install.md`](reference/install.md) | Installing the `recall` CLI (npm, Homebrew, curl, cargo), opting a project in with `recall init`, declaring a `project_key` by hand, and promoting a note into the global scope. |
+| [`reference/token-setup.md`](reference/token-setup.md) | Generating `RECALL_TOKEN` and installing it on every environment — including the extra variable a claude.ai cloud session needs. |
+| [`reference/api.md`](reference/api.md) | Talking to the server directly: endpoints, schemas, status codes, `curl` examples. |
 | [`../deploy/README.md`](../deploy/README.md) | Standing the server up in Docker behind either ingress (Cloudflare Tunnel or an existing Traefik), enabling merge, backups, and cleaning up a project stored under the wrong key. |
-| [`github-actions-deploy.md`](github-actions-deploy.md) | Wiring CI checks on every PR and auto-deploy to a VPS on push to `main`. |
-| [`releasing.md`](releasing.md) | Cutting a release across all four install channels — what the tag automates, and what only the owner can push. |
+| [`reference/github-actions-deploy.md`](reference/github-actions-deploy.md) | Wiring CI checks on every PR and auto-deploy to a VPS on push to `main`. |
+| [`reference/releasing.md`](reference/releasing.md) | Cutting a release across all four install channels — what the tag automates, what only the owner can push, and what to do when a build job never starts. |
 
-## Understanding it
+`reference/api.md` is the one with teeth: `scripts/api-doc-check.sh` asserts
+it against a running server on every CI run, so it cannot quietly drift.
+
+## History — a record, not a manual
+
+| Document | What it records |
+|---|---|
+| [`history/rust-rewrite.md`](history/rust-rewrite.md) | Why Rust, honestly — what it cost, what it caught, and the bugs this project has actually shipped and fixed. |
+| [`history/memory-loading-findings.md`](history/memory-loading-findings.md) | What Claude Code actually does with memory files — the entry point, subdirectories, and why a single failed probe means nothing. |
+| [`history/phase-0-findings.md`](history/phase-0-findings.md) | What the Claude Code CLI *actually* does, verified by running it, versus what the original design assumed. Still the source of several load-bearing constraints. |
+
+These are cited from the code: `recall-paths` points at `phase-0-findings.md`
+for why its path derivation looks the way it does. That is the value of not
+maintaining them — a comment can point at what was known *then*, and the
+answer stays put.
+
+## Neither — the shape of the thing
 
 | Document | Read it when |
 |---|---|
 | [`../ARCHITECTURE.md`](../ARCHITECTURE.md) | Hook wiring, the code map, project-key derivation, merge strategy, and what is deliberately absent. |
-| [`rust-rewrite.md`](rust-rewrite.md) | Why Rust, honestly — what it cost, what it caught, and the nine bugs this project has actually shipped and fixed. |
-| [`memory-loading-findings.md`](memory-loading-findings.md) | What Claude Code actually does with memory files — the entry point, subdirectories, and why a single failed probe means nothing. |
-| [`phase-0-findings.md`](phase-0-findings.md) | What the Claude Code CLI *actually* does, verified by running it, versus what the original design assumed. Still the source of several load-bearing constraints. |
 | [`../ROADMAP.md`](../ROADMAP.md) | The phased build plan, the evidence behind each phase, and what is explicitly deferred. |
+
+`ARCHITECTURE.md` is reference and must stay true. `ROADMAP.md` is mostly
+record — completed phases are not rewritten — with the open questions at the
+end being the part that still moves.
 
 Generated API docs for the Rust crates:
 
@@ -39,7 +63,6 @@ cargo doc --workspace --no-deps --open
 
 | Document | Read it when |
 |---|---|
-| [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | Dev workflow: building, testing, the compatibility matrix. |
+| [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | Dev workflow: building, testing, the checkers that gate a release. |
 | [`../CLAUDE.md`](../CLAUDE.md) | How Claude Code sessions should work in this repo — worktrees, the task list, PR policy, and the ground rules that are not up for negotiation. |
 | [`../scripts/probes/README.md`](../scripts/probes/README.md) | Running the probes that establish what Claude Code does with memory files. Each one costs a real API call, and one run proves nothing. |
-

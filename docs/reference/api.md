@@ -9,11 +9,11 @@ set by the Node server this one replaced — the rows in production were written
 against it — and it stayed frozen through that migration so a machine on the
 old client and one on the new binary could talk to the same deployment. The
 Rust definition of every shape below lives in
-[`recall-wire`](../crates/recall-wire/src/), which both halves share so they
+[`recall-wire`](../../crates/recall-wire/src/), which both halves share so they
 cannot drift apart.
 
 Everything on this page is asserted against a running server by
-[`scripts/api-doc-check.sh`](../scripts/api-doc-check.sh) — status codes,
+[`scripts/api-doc-check.sh`](../../scripts/api-doc-check.sh) — status codes,
 error wording, field order, and the `null`-versus-`""` distinction. If a
 handler changes and this document doesn't, that script fails.
 
@@ -95,7 +95,7 @@ Stores one memory file, or tombstones one.
 
 | Field | Type | Required | Notes |
 |---|---|:---:|---|
-| `project_key` | string | yes | How two machines agree they mean the same project. See [Project identity](../ARCHITECTURE.md#project-identity). |
+| `project_key` | string | yes | How two machines agree they mean the same project. See [Project identity](../../ARCHITECTURE.md#project-identity). |
 | `file_path` | string | yes | Relative to the memory directory, forward slashes. Validated — see below. |
 | `content` | string | for a write | The file's **exact** bytes, trailing newlines included. |
 | `source_env` | string | no | A display label for the machine. Nothing keys off it. |
