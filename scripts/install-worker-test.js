@@ -1,6 +1,8 @@
 // Exercises install-worker.js against a stubbed upstream, so the routing is
-// tested rather than assumed. Run: node install-worker.test.js
-import worker from "./install-worker.js";
+// tested rather than assumed. Run from the repository root:
+//
+//   node scripts/install-worker-test.js
+import worker from "../install-worker.js";
 
 const SCRIPT = "#!/usr/bin/env bash\necho hello\n";
 

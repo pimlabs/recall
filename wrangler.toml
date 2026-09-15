@@ -1,0 +1,34 @@
+# The Worker behind recall.pimlabs.id — see install-worker.js for what it does
+# and docs/reference/releasing.md for why.
+#
+# Deployed by Cloudflare's Git integration: connect this repository once under
+# Workers & Pages, and every push to `main` redeploys. That is the point of
+# the file existing at all — the Worker is a proxy for install.sh, so the two
+# have to move together, and a copy pasted into a dashboard would drift the
+# moment either changed.
+#
+# There is no build step and no dependency. Leave the build command empty;
+# the deploy command is `npx wrangler deploy`.
+
+name = "recall-install"
+main = "install-worker.js"
+compatibility_date = "2026-09-15"
+
+# The *.workers.dev subdomain would publish a second address for the
+# installer that nothing documents and no one thinks to revoke. One address.
+#
+# Top-level on purpose: everything after a [[routes]] header belongs to that
+# table, so this line below the route would silently become a route key and
+# the subdomain would stay on.
+workers_dev = false
+
+# The whole hostname, not just /install. The 410s for the API's former paths
+# are half the reason this is a Worker rather than a redirect rule, and a
+# route scoped to /install* could not serve them.
+[[routes]]
+pattern = "recall.pimlabs.id/*"
+zone_name = "pimlabs.id"
+
+# Deliberately absent: any binding, secret or variable. The Worker fetches one
+# public URL and needs nothing else, so anything here would be a credential at
+# the edge that does not have to exist.

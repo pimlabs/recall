@@ -22,13 +22,15 @@
 //      total silence. This says what happened, in a place someone debugging
 //      will actually look.
 //
-// Deploy: wrangler, or paste into the dashboard. Routes:
-//
-//   recall.pimlabs.id/*
+// Deployed by Cloudflare's Git integration: this repository is connected
+// under Workers & Pages, and a push to `main` redeploys. wrangler.toml holds
+// the name and the route. Nothing is pasted anywhere — the Worker proxies
+// install.sh, so the two must move together, and a dashboard copy would
+// drift the moment either changed.
 //
 // See docs/reference/releasing.md for why each response looks the way it
-// does, and keep this file the source — the copy running at the edge is a
-// deployment of it, not a second original.
+// does. scripts/install-worker-test.js covers the routing, including the
+// case where GitHub is down.
 
 const UPSTREAM =
   "https://raw.githubusercontent.com/pimlabs/recall/main/install.sh";

@@ -106,10 +106,20 @@ it must be the commit that tag points at.
 
 ### Where that short URL comes from
 
-A **Cloudflare Worker** on `recall.pimlabs.id/*`, deployed from
-[`install-worker.js`](../../install-worker.js) at the root of this
-repository. That file is the source; what runs at the edge is a deployment
-of it.
+A **Cloudflare Worker** on `recall.pimlabs.id/*`, from
+[`install-worker.js`](../../install-worker.js) and
+[`wrangler.toml`](../../wrangler.toml) at the root of this repository.
+
+It is **deployed by Cloudflare's Git integration** — the repository is
+connected under Workers & Pages, and a push to `main` redeploys it. Nothing
+is pasted into a dashboard, and that is not convenience: the Worker proxies
+`install.sh`, so the two have to move together, and a pasted copy would drift
+the moment either changed. `wrangler.toml` carries the route, so even the
+hostname it answers for is reviewed rather than clicked.
+
+Connecting it is a one-time step: **Workers & Pages → Create → Connect to
+Git**, pick this repository, leave the build command empty (there are no
+dependencies), deploy command `npx wrangler deploy`.
 
 | Path | Answer |
 |---|---|
@@ -132,9 +142,15 @@ complete silence. **410 rather than a redirect** is deliberate too: sending a
 `POST /sync` onwards would hand a client's memory to a host it never
 authenticated against.
 
-`install-worker.test.js` drives all of it against a stubbed upstream,
-including the case where GitHub is down — which must fail loudly rather than
-pipe a truncated script into someone's shell. CI runs it.
+`scripts/install-worker-test.js` drives all of it against a stubbed
+upstream, including the case where GitHub is down — which must fail loudly
+rather than pipe a truncated script into someone's shell.
+`scripts/wrangler-check.py` asserts the config itself: that the route covers
+the whole host, that no binding or secret has crept in, and that
+`workers_dev` is a top-level key. That last one is not hypothetical — written
+one line lower it parses as a *route* key instead, and the `*.workers.dev`
+subdomain stays quietly enabled, publishing a second address for the
+installer that nothing documents. CI runs both.
 
 The API now lives at `recall-server.pimlabs.id`, on a **DNS-only** record.
 That record must stay DNS-only: proxying it would put Cloudflare's edge

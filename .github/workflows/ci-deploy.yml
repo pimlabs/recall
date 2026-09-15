@@ -58,7 +58,9 @@ jobs:
       # host it never authenticated against, and an upstream failure served
       # as 200 would pipe a truncated script into someone's shell.
       - name: Install worker still routes correctly
-        run: node install-worker.test.js
+        run: |
+          node scripts/install-worker-test.js
+          python3 scripts/wrangler-check.py
 
       - name: Shipped shell scripts still parse
         run: |
