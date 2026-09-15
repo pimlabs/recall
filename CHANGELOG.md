@@ -33,11 +33,18 @@ break will be described here in full rather than smoothed over.
   `RECALL_GLOBAL_KEY` unset belong to no scope and are refused rather than
   filed into the project's history.
 
-  Every file is one request, against a server budget of 60 a minute per
-  address that is shared with the hooks in your session, so the run stops at
-  the first refusal and says what is left. Re-running finishes it and
-  re-sends nothing. It also leaves behind the baseline that makes deletes
-  detectable, which a project that never ran a successful pull did not have.
+  Two kinds of refusal are treated differently, because treating them alike
+  meant one awkward filename made every file sorted after it permanently
+  unsendable. A file the server will never accept — a name its validator
+  rejects, a body past its size limit — is reported and stepped over. A
+  refusal about the run, the rate limit above all, ends it and says where and
+  how many files went unreached: every file is one request against a budget of
+  60 a minute per address by default, shared with the hooks in your session.
+  Re-running carries on and re-sends nothing.
+
+  A run that finishes leaves behind the baseline that makes deletes
+  detectable, which a project that never completed a pull did not have. A run
+  that stopped early deliberately does not, and says so.
 
 - **`recall status` no longer disagrees with the hooks it diagnoses.** Claude
   Code applies a settings file's `env` block to the processes it spawns and

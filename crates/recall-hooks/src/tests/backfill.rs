@@ -30,7 +30,6 @@ fn disposition_of(outcome: &backfill::Outcome, path: &str) -> Disposition {
         .find(|e| e.path == path)
         .unwrap_or_else(|| panic!("{path} was not considered at all: {:?}", outcome.entries))
         .disposition
-        .clone()
 }
 
 /// The whole point: a memory directory that existed before Recall did.
@@ -45,7 +44,7 @@ async fn memory_that_predates_recall_reaches_the_server() {
 
     let out = backfill(&fx.ctx).await.unwrap();
 
-    assert_eq!(out.count(&Disposition::Sent), 3);
+    assert_eq!(out.count(Disposition::Sent), 3);
     assert!(out.stopped.is_none());
 
     let mut sent: Vec<String> = fx
@@ -113,7 +112,10 @@ async fn a_file_the_server_tombstoned_is_not_resurrected() {
     let fx = Fixture::new().await;
     fx.server.set_files(vec![File {
         file_path: "topics/old.md".into(),
-        content: None,
+        // Carrying content *and* the flag on purpose: with `content: None`
+        // this test passes even if the `deleted` check is deleted, because
+        // there is nothing to compare against either way.
+        content: Some("what it said before it was removed\n".into()),
         source_env: "other-machine".into(),
         updated_at: "2026-01-01T00:00:00.000Z".into(),
         deleted: true,
@@ -188,7 +190,7 @@ async fn a_file_that_is_not_text_is_skipped_without_ending_the_run() {
         disposition_of(&out, "topics/diagram.png"),
         Disposition::NotUtf8
     );
-    assert_eq!(out.count(&Disposition::Sent), 1);
+    assert_eq!(out.count(Disposition::Sent), 1);
     assert!(out.stopped.is_none());
 }
 
@@ -216,14 +218,55 @@ async fn a_refusal_stops_the_run_and_says_what_to_do_about_it() {
         "it has to name the cause and the remedy: {stopped}"
     );
     assert_eq!(
-        out.count(&Disposition::Sent),
-        0,
-        "nothing was accepted, so nothing should be reported as sent"
+        fx.server.push_attempts(),
+        1,
+        "it must stop at the first refusal rather than spending the rest of a \
+         budget the session's own hooks are sharing"
+    );
+    assert_eq!(out.not_reached, 1, "and say how many it did not get to");
+    assert_eq!(out.count(Disposition::Sent), 0);
+    assert!(
+        out.baseline.is_some(),
+        "a half-finished comparison must not leave a baseline behind, and has \
+         to say it did not"
     );
     assert!(
-        !out.entries.iter().any(|e| e.path == "b.md"),
-        "the second file was never reached, so it is absent rather than \
-         reported as untouched"
+        crate::state::load(&fx.ctx.state_file).unwrap().is_none(),
+        "writing one here would let a later local delete tombstone a file this \
+         run never even looked at"
+    );
+}
+
+/// A name this client refuses before sending — and therefore one the server
+/// would refuse too — must not take the rest of the directory down with it.
+/// `list_memory_files` sorts, so a single bad name would otherwise make every
+/// file after it permanently unsendable, run after run.
+#[tokio::test]
+async fn one_file_the_server_will_never_accept_does_not_wedge_the_rest() {
+    let fx = Fixture::new().await;
+    write(&fx.memory("a.md"), "first\n");
+    // Rejected by `validate_file_path`: byte 1 is a colon, which reads as a
+    // Windows drive prefix. A perfectly legal filename on this machine.
+    write(&fx.memory("a:b.md"), "the awkward one\n");
+    write(&fx.memory("zzz.md"), "last\n");
+
+    let out = backfill(&fx.ctx).await.unwrap();
+
+    assert!(out.stopped.is_none(), "{:?}", out.stopped);
+    assert_eq!(disposition_of(&out, "a:b.md"), Disposition::Refused);
+    assert_eq!(
+        disposition_of(&out, "zzz.md"),
+        Disposition::Sent,
+        "the file sorted after the refused one still has to go"
+    );
+    assert!(
+        out.entries
+            .iter()
+            .find(|e| e.path == "a:b.md")
+            .unwrap()
+            .detail
+            .is_some(),
+        "and the refusal has to say why, or there is nothing to act on"
     );
 }
 

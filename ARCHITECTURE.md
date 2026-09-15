@@ -275,6 +275,11 @@ memory edit — and it is why a **missing** baseline is treated differently from
 an **empty** one: with no baseline at all, an empty memory directory would
 read as "everything was deleted" and tombstone the project's whole history.
 
+`recall pull` and `recall backfill` are the two commands that leave a baseline
+behind. That matters most on a machine that has never had one, which is
+exactly the machine `backfill` is for: until the first one is written, a
+delete is indistinguishable from a file that was never there.
+
 ## Merge strategy
 
 **Implemented in Phase 2 (see `ROADMAP.md`).** Not append-only, not naive last-write-wins. `POST /sync` only attempts a merge when there's actually something to reconcile — an existing, non-tombstoned row whose stored content differs byte-for-byte from the incoming push; a brand-new file, a revived tombstone, or a client re-pushing unchanged content all skip straight to a plain write. When it does attempt one, it shells out to the *local* `claude` CLI (`claude -p`), never the Anthropic API directly, keeping the no-API-key rule in `CLAUDE.md` intact — merge rides whatever account is logged into that CLI on the server host (`claude setup-token`, a one-time interactive step documented in `deploy/README.md`; a real operational requirement, not an afterthought).
@@ -287,7 +292,8 @@ Structured/settings-like data, if Recall ever expands beyond auto memory (it cur
 
 ## What's deliberately not here
 
-- No client daemon or background watcher — hooks are the entire client.
+- No client daemon or background watcher — the hooks are the only part of
+  the client that runs unprompted.
 - No multi-user auth, no OAuth, no billing.
 - No Anthropic API key anywhere in the request path.
 - No attempt to sync `CLAUDE.md`, skills, or settings — git already does `CLAUDE.md`, and the rest is out of scope (see "Explicitly deferred" in `ROADMAP.md`).

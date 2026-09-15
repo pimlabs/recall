@@ -17,22 +17,33 @@
 //!
 //! This asks the server what it already has, once per scope, and sends only
 //! what is missing. A file the server holds with different bytes is left
-//! alone and reported: that is a real disagreement, and the path for it is
-//! `pull` and the server's merge, not a backfill that overwrites. A file the
-//! server has tombstoned is left alone too — it was deleted somewhere, and
-//! re-sending it from this disk would be a resurrection rather than a sync.
+//! alone and reported: that is a real disagreement, and nothing here is
+//! entitled to pick the winner. A file the server has tombstoned is left
+//! alone too — it was deleted somewhere, and re-sending it from this disk
+//! would be a resurrection rather than a sync.
 //!
-//! # Why it stops rather than pushes through
+//! That guarantee is as of the moment it asked. The frozen HTTP surface has
+//! no conditional write, so a file another machine pushes *during* a long
+//! run is not in the snapshot and can still be overwritten. Nothing here can
+//! close that window; saying so is the honest alternative to implying it is
+//! closed.
+//!
+//! # Why one refusal does not end the run, and another does
 //!
 //! Every file is its own request; the HTTP surface is frozen and has no
-//! batch. The server allows 60 requests a minute per IP by default, before
-//! authentication, and that budget is shared with the push and pull hooks
-//! running in the session this was typed into. So the first refusal ends the
-//! run and says what is left. Re-running resumes by construction: what was
-//! sent is now on the server, and the second run will not send it again.
+//! batch. Two very different things can go wrong, and treating them alike
+//! was a bug: a file the server will *never* accept — a name its validator
+//! rejects, a body over the size limit — must not stop the files behind it,
+//! or one bad name makes everything sorted after it permanently unsendable.
+//! Those are recorded and skipped. A refusal about the *run* — the rate
+//! limit, a bad token, a server error — ends it, because continuing only
+//! burns a budget shared with the push and pull hooks in the session this
+//! was typed into. Re-running then resumes: what was sent is on the server,
+//! and the second pass finds it there.
 
 use std::collections::HashMap;
 use std::fs;
+use std::io;
 
 use recall_paths::scope;
 use recall_wire::PushRequest;
@@ -41,7 +52,7 @@ use crate::context::{Context, Error};
 use crate::{index, state};
 
 /// What became of one file on disk.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Disposition {
     /// It was missing from the server, and was sent.
     Sent,
@@ -59,8 +70,20 @@ pub enum Disposition {
     /// repository's history is the one outcome worth refusing.
     Unroutable,
     /// Not UTF-8, so it cannot be sent at all. Also how a `.DS_Store` or a
-    /// stray image in the memory directory ends up quietly skipped.
+    /// stray image in the memory directory ends up skipped.
     NotUtf8,
+    /// The server, or this client's own validation, refused this particular
+    /// file and would refuse it again. Skipped so that the files behind it
+    /// still go.
+    Refused,
+    /// It is on disk but could not be read — permissions, a symlink to a
+    /// directory, a bad block. Reported rather than dropped: a file missing
+    /// from both the sync and the report is the failure this whole command
+    /// exists to end.
+    Ignored,
+    /// One of Recall's own half-written files, which `atomic::write` creates
+    /// in the destination directory and removes on drop.
+    Internal,
 }
 
 /// One file and what became of it.
@@ -70,40 +93,67 @@ pub struct Entry {
     pub path: String,
     /// What happened to it.
     pub disposition: Disposition,
+    /// Why, when the disposition alone does not say.
+    pub detail: Option<String>,
 }
 
 /// What one backfill did.
 #[derive(Debug, Default)]
 pub struct Outcome {
-    /// Every file considered, in the order they were walked, each with what
-    /// became of it. Files after an early stop are absent rather than
-    /// recorded as untouched — they were never reached.
+    /// Every file reached, in the order they were walked, each with what
+    /// became of it.
     pub entries: Vec<Entry>,
-    /// Why the run ended before the end of the directory, if it did. The
-    /// files already sent stay sent, so a re-run picks up where this left
-    /// off.
+    /// Why the run ended before the end of the directory, if it did.
     pub stopped: Option<String>,
+    /// How many files were never reached because the run ended early.
+    pub not_reached: usize,
+    /// Why the baseline was not written, when it was not. It is skipped
+    /// after an early stop on purpose: the baseline is a claim about a
+    /// finished comparison, and half of one is not that.
+    pub baseline: Option<String>,
 }
 
 impl Outcome {
     /// How many files fell into one disposition.
-    pub fn count(&self, what: &Disposition) -> usize {
+    pub fn count(&self, what: Disposition) -> usize {
         self.entries
             .iter()
-            .filter(|e| &e.disposition == what)
+            .filter(|e| e.disposition == what)
             .count()
     }
+
+    fn push(&mut self, path: String, disposition: Disposition, detail: Option<String>) {
+        self.entries.push(Entry {
+            path,
+            disposition,
+            detail,
+        });
+    }
+}
+
+/// Whether a failed push should end the run, or only this file.
+enum Refusal {
+    ThisFile(String),
+    TheRun(String),
 }
 
 /// Sends every memory file the server does not already have.
 ///
 /// # Errors
 ///
-/// Only for the round trip that asks what the server holds. Without that
-/// answer there is no safe way to continue: sending blind is exactly the
-/// overwrite this command exists to avoid. Failures of individual pushes end
-/// the run and are reported in [`Outcome::stopped`] instead.
+/// Only before anything is sent: the round trip that asks what the server
+/// holds, and the local reads that precede the loop. Without the server's
+/// answer there is no safe way to continue, because sending blind is exactly
+/// the overwrite this command exists to avoid. Everything that can go wrong
+/// once sending has begun is reported in the [`Outcome`] instead, so a
+/// partial run can still say what it did.
 pub async fn backfill(ctx: &Context) -> Result<Outcome, Error> {
+    // Asked before anything local is touched. `index::refresh` below rewrites
+    // `MEMORY.md`, and a command whose contract is "ask first, then send"
+    // must not have already edited a memory file on the path where it sends
+    // nothing at all. This is the ordering `promote` argues for.
+    let known = ask_what_the_server_has(ctx).await?;
+
     // `MEMORY.md` is a memory file and is about to be sent, and its global
     // links are regenerated rather than synced. Refreshing first costs
     // nothing — the rewrite is byte-idempotent — and skipping it would put a
@@ -112,20 +162,19 @@ pub async fn backfill(ctx: &Context) -> Result<Outcome, Error> {
         index::refresh(&ctx.memory_dir)?;
     }
 
-    let known = ask_what_the_server_has(ctx).await?;
+    let files = state::list_memory_files(&ctx.memory_dir)?;
     let mut out = Outcome::default();
 
-    for rel in state::list_memory_files(&ctx.memory_dir)? {
-        // Recall's own half-written files. `atomic::write` creates them in
-        // the destination directory and removes them on drop, so one is only
-        // ever visible to a walk that races a write — but a backfill is the
-        // first thing here to walk a directory it did not write.
+    for (i, rel) in files.iter().enumerate() {
+        let rel = rel.clone();
+
         if is_temp(&rel) {
+            out.push(rel, Disposition::Internal, None);
             continue;
         }
 
         let Some((scope, path)) = scope::route(&ctx.scopes, &rel) else {
-            out.push(rel, Disposition::Unroutable);
+            out.push(rel, Disposition::Unroutable, None);
             continue;
         };
 
@@ -133,30 +182,33 @@ pub async fn backfill(ctx: &Context) -> Result<Outcome, Error> {
             Ok(bytes) => match String::from_utf8(bytes) {
                 Ok(content) => content,
                 Err(_) => {
-                    out.push(rel, Disposition::NotUtf8);
+                    out.push(rel, Disposition::NotUtf8, None);
                     continue;
                 }
             },
-            // Vanished between the walk and the read. Not a finding: the
-            // next push will tombstone it.
-            Err(_) => continue,
+            // Gone between the walk and the read is nothing at all — the next
+            // push tombstones it. Anything else is a file that exists and
+            // cannot be read, which has to be said out loud.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                out.push(rel, Disposition::Ignored, Some(e.to_string()));
+                continue;
+            }
         };
 
         match known.get(&scope.key).and_then(|files| files.get(&path)) {
             Some(None) => {
-                out.push(rel, Disposition::Deleted);
+                out.push(rel, Disposition::Deleted, None);
                 continue;
             }
             Some(Some(theirs)) => {
                 let same = *theirs == content;
-                out.push(
-                    rel,
-                    if same {
-                        Disposition::Matches
-                    } else {
-                        Disposition::Held
-                    },
-                );
+                let what = if same {
+                    Disposition::Matches
+                } else {
+                    Disposition::Held
+                };
+                out.push(rel, what, None);
                 continue;
             }
             None => {}
@@ -170,20 +222,70 @@ pub async fn backfill(ctx: &Context) -> Result<Outcome, Error> {
             deleted: false,
         };
         match ctx.client.push(&req).await {
-            Ok(_) => out.push(rel, Disposition::Sent),
-            Err(err) => {
-                out.stopped = Some(why_it_stopped(&rel, &err));
-                break;
-            }
+            Ok(_) => out.push(rel, Disposition::Sent, None),
+            Err(err) => match classify(&err) {
+                Refusal::ThisFile(why) => out.push(rel, Disposition::Refused, Some(why)),
+                Refusal::TheRun(why) => {
+                    out.stopped = Some(format!("at {rel}: {why}"));
+                    out.not_reached = files.len() - i - 1;
+                    break;
+                }
+            },
         }
     }
 
-    // Written whether or not the run finished. The baseline records what is
-    // on disk, not what was sent, and a machine that has never had one is
-    // exactly the machine a backfill runs on — until it has one, `push`
-    // cannot detect a delete at all.
-    ctx.refresh_state()?;
+    write_baseline(ctx, &mut out);
     Ok(out)
+}
+
+/// The baseline is what lets a later `push` tell a deleted file from one
+/// that was never there — and a machine whose memory predates Recall is
+/// exactly the machine that has none.
+///
+/// It is not written after an early stop. `pull` declines for the same
+/// reason in its own empty case: a baseline invented from whatever happens
+/// to be on disk, when the comparison against the server never finished, is
+/// a claim this run has not earned.
+fn write_baseline(ctx: &Context, out: &mut Outcome) {
+    if out.stopped.is_some() {
+        out.baseline = Some(
+            "the run stopped early, so the delete baseline was left as it was — \
+             finish the run to write one"
+                .to_string(),
+        );
+        return;
+    }
+    if let Err(err) = ctx.refresh_state() {
+        out.baseline = Some(format!(
+            "everything above still happened, but the delete baseline could not be \
+             written ({err}), so the next push cannot detect a deleted file"
+        ));
+    }
+}
+
+/// Whether this refusal is about the file or about the run.
+///
+/// The distinction is the difference between skipping one file and making
+/// every file sorted after it permanently unsendable.
+fn classify(err: &crate::client::Error) -> Refusal {
+    match err {
+        // Caught by this client before sending, by the same rules the server
+        // applies. Retrying changes nothing.
+        crate::client::Error::Invalid(e) => Refusal::ThisFile(e.to_string()),
+        // The server's judgement of this body: a name it will not take, or
+        // one too large for it. Also permanent.
+        crate::client::Error::Status { code, body } if *code == 400 || *code == 413 => {
+            Refusal::ThisFile(format!("the server refused it ({code}: {body})"))
+        }
+        crate::client::Error::Status { code, .. } if *code == 429 => Refusal::TheRun(
+            "the server's rate limit was reached — it allows 60 requests a minute per \
+             address by default, and that budget is shared with the hooks in your \
+             session. What was sent is on the server; run this again in a minute to \
+             carry on"
+                .to_string(),
+        ),
+        other => Refusal::TheRun(other.to_string()),
+    }
 }
 
 /// Every file the server holds, per scope key: the content, or [`None`] for
@@ -214,30 +316,10 @@ async fn ask_what_the_server_has(
     Ok(known)
 }
 
-/// The sentence a user reads when the run ends early. It has to say what to
-/// do next, because "43 of 60 sent" with no verb is just an alarm.
-fn why_it_stopped(path: &str, err: &crate::client::Error) -> String {
-    if let crate::client::Error::Status { code: 429, .. } = err {
-        return format!(
-            "the server's rate limit was reached at {path} — it allows 60 requests a \
-             minute per address by default, shared with the hooks in your session. \
-             Everything sent so far is on the server; run this again in a minute to \
-             continue"
-        );
-    }
-    format!("{path} could not be sent ({err}) — nothing after it was tried")
-}
-
 /// Whether this is one of `atomic::write`'s temporary files rather than a
 /// memory file.
 fn is_temp(rel: &str) -> bool {
     rel.rsplit('/')
         .next()
         .is_some_and(|name| name.starts_with(".recall-"))
-}
-
-impl Outcome {
-    fn push(&mut self, path: String, disposition: Disposition) {
-        self.entries.push(Entry { path, disposition });
-    }
 }

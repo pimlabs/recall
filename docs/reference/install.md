@@ -12,7 +12,7 @@ here sets up access for anyone else.
 
 Recall is a single Rust binary, and the same artifact runs both halves
 (`recall serve` is the server). Install once per machine, then run
-`recall init` once per project.
+`recall init` and `recall backfill` once per project.
 
 ## Install
 
@@ -197,9 +197,10 @@ token.
 **Changing it on a project that has already synced orphans that project's
 memory.** The server files every file under the key it was pushed with and
 moves nothing, so the old history stays where it is and the new key starts
-empty. Nothing is lost, and nothing follows either —
+empty. Nothing is lost, and nothing follows either — but the files are still
+on your disk, so `recall backfill` refills the new key from them.
 [`deploy/README.md`](../../deploy/README.md) has the SQL for renaming or
-removing a key you no longer want.
+removing the rows left under the old one, which is only needed to tidy up.
 
 ## Memories that follow you into every project
 
@@ -229,7 +230,9 @@ A few things worth knowing:
   linked from `MEMORY.md`, which Recall does for you. Why, and how that was
   established, is in [`memory-loading-findings.md`](../history/memory-loading-findings.md).
 
-Nothing changes if you leave `RECALL_GLOBAL_KEY` unset.
+Nothing syncs differently if you leave `RECALL_GLOBAL_KEY` unset — though
+`recall backfill` will then name anything in `global/` as belonging to no
+scope, because with the key unset it does.
 
 ### Putting a note there: `recall promote`
 
@@ -316,6 +319,12 @@ Run this once, from inside the project:
 recall backfill
 ```
 
+**On a machine that is not your first, pull before you backfill** — start a
+Claude session, which runs the pull hook. Otherwise every file the server
+already has is reported as a disagreement, and you will be reading a long
+list of things that are not actually wrong. After a pull, what is left to
+send is only what this machine has and the server has never seen.
+
 It asks the server what it already holds, then sends what is missing. It
 prints a count and then names anything it left behind.
 
@@ -326,21 +335,57 @@ rescue memory — it is a way to delete the first machine's newer work. So:
 
 | It leaves alone | Because |
 |---|---|
-| A file the server holds with different content | That is a real disagreement, not a gap. Run `recall pull` and reconcile it, or edit the file so the push hook sends it. |
+| A file the server holds with different content | That is a real disagreement, not a gap — see below. |
 | A file the server has tombstoned | It was deleted on another machine. Sending it back is a resurrection, not a sync — `recall pull` will remove it here. |
 | Anything under `global/` when `RECALL_GLOBAL_KEY` is unset | It belongs to no scope. Filing personal notes into one repository's history is the one outcome worth refusing. |
 | Anything that is not text | It cannot be sent at all. This is also how a `.DS_Store` or a pasted screenshot is quietly skipped. |
 
-**It stops at the first refusal, and says so.** Every file is its own
-request, and the server allows 60 requests a minute per address — a budget
-shared with the push and pull hooks running in the session you typed this
-in. Stopping leaves the rest of that budget for them. Re-running finishes
-the job and costs nothing for what already went: the second run finds those
-files on the server and skips them.
+**Nothing on this machine reconciles a held-back file**, and the obvious
+moves all pick a winner rather than merging:
 
-It also leaves behind the baseline that makes deletes detectable. Until a
-project has one, `recall push` cannot tell a file you deleted from one that
-was never there.
+- `recall pull` overwrites your local copy with the server's, without
+  comparing them. Copy yours aside first if you want to keep it.
+- **Deleting your local copy deletes the server's too.** Deletes propagate,
+  so that is the one move that loses both versions instead of one.
+- Editing the file in your editor sends nothing at all: the push hook is
+  `PostToolUse`, so it fires when *Claude* writes a memory file, not when you
+  do.
+
+The one thing that actually merges is the server. Ask Claude to edit the
+file, and the push that follows is merged against the stored version — when
+`recall status` reports `merge: ready`. When it reports that merge is not
+configured, the server keeps whatever arrived last instead.
+
+**A file the server will never accept is skipped; a refusal about the run
+stops it.** Those are different things, and treating them alike would mean
+one awkward filename made every file sorted after it permanently unsendable.
+A name the server's validator rejects, or a file past its 5 MiB limit, is
+reported and stepped over. The rate limit is the one that ends the run: every
+file is its own request, the server allows 60 a minute per address by
+default, and that budget is shared with the push and pull hooks running in
+the session you typed this in. Stopping leaves the rest of it for them.
+Re-running carries on and costs nothing for what already went — the second
+run finds those files on the server and skips them. A directory much larger
+than the limit therefore takes a few runs, a minute apart.
+
+**What it sends is decided from one snapshot**, taken when it asked. If
+another machine pushes a file *during* a long run, that file is not in the
+snapshot and can still be overwritten. The HTTP API has no conditional write,
+so nothing here can close that window — it is small, and worth knowing about
+rather than pretending away.
+
+It exits `0` when it finished, `2` when it could not read the server or
+stopped early, and `1` when `RECALL_URL` or `RECALL_TOKEN` is not set. A `2`
+from a stopped run means *not done yet*, not broken — worth knowing before
+you put this in a `set -e` setup script.
+
+A run that finishes also leaves behind the baseline that makes deletes
+detectable; until a project has one, `recall push` cannot tell a file you
+deleted from one that was never there. A run that stopped early does **not**
+write one, and says so: the baseline is a claim that this disk and the server
+have been compared, and half a comparison is not that. And with global sync
+on, it refreshes `MEMORY.md`'s links to your `global/` files before sending —
+after asking the server, so a run that cannot reach it changes nothing at all.
 
 ## Check it's working
 

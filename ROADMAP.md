@@ -401,9 +401,30 @@ decided**.
   the same question: a file the server has tombstoned must not be re-sent
   either, because that undoes a delete rather than filling a gap; and because
   every file is one request against a 60-per-minute budget shared with the
-  session's own hooks, the run stops at the first refusal instead of pushing
-  through. It resumes by construction — what was sent is on the server, and
-  the next run finds it there.
+  session's own hooks, the run stops at a refusal about the *run* instead of
+  pushing through. It resumes by construction — what was sent is on the
+  server, and the next run finds it there.
+
+  Reviewing it surfaced two more, both of which are now guarded: a refusal
+  about one *file* must not end the run, or a single name the validator
+  rejects makes everything sorted after it permanently unsendable; and a run
+  that stops early must not write the delete baseline, because a baseline is
+  a claim that this disk and the server have been compared and half a
+  comparison is not one.
+
+- **`route()` matches the global directory case-sensitively.** Found while
+  reviewing the backfill, and left undecided rather than fixed in passing.
+  `scope.rs` compares `rel` against the literal `global`, so a directory
+  named `Global/` or `GLOBAL/` routes to the *project* scope — with global
+  sync on or off. On a case-insensitive filesystem, which is the macOS
+  default, that directory **is** the global directory as far as the user and
+  Claude Code are concerned. The consequence is the one the scope guard
+  exists to prevent: personal notes filed into one repository's history. It
+  has always been reachable through `push`, one file at a time; `backfill` is
+  the first thing that would sweep a whole directory that way. Fixing it
+  means a case-insensitive prefix match in `route()` and its inverse
+  `local_path`, which is the same surface as the `route()` guard already
+  noted above — so the two belong together.
 
 ## Explicitly deferred
 

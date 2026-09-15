@@ -55,6 +55,13 @@ Rate limiting is per client IP, defaulting to **60 requests per 60 seconds**
 the auth check — so a flood of invalid tokens is limited too, rather than
 escaping the limiter by never reaching auth.
 
+There is no batch endpoint: a client with many files sends one `POST /sync`
+each, so a run longer than `RECALL_RATE_LIMIT_MAX` files in one window is cut
+short. `Retry-After` carries the whole window in seconds — `60` by default —
+rather than the time remaining in it. `recall backfill` is such a client, and
+stops rather than retrying, so that the push and pull hooks running in the
+same session keep their share of the same bucket.
+
 The client's address is read from exactly one request header, named by
 `RECALL_TRUSTED_IP_HEADER` — `cf-connecting-ip` behind a Cloudflare tunnel,
 `x-real-ip` behind Traefik or nginx. One header, not a list: anything the
@@ -360,4 +367,6 @@ intentional:
 A memory file that is not valid UTF-8 is refused outright rather than being
 sent, because `content` is a JSON string and there is no lossless way to carry
 arbitrary bytes in one. Refusing is louder than the alternative — the
-alternative is silent corruption.
+alternative is silent corruption. The push hook fails on such a file; a bulk
+send skips it and names it, since one stray image should not stop the rest of
+a directory from reaching the server.

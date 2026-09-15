@@ -197,7 +197,9 @@ Set on every environment that should push and pull — see [`../docs/reference/t
 | `CLAUDE_CODE_REMOTE_MEMORY_DIR` | (remote/cloud environments only) that environment's `~/.claude` |
 
 Then, in each project you want synced, run `recall init` — it wires that
-project's own `.claude/settings.json`. See [`../docs/reference/install.md`](../docs/reference/install.md).
+project's own `.claude/settings.json` — and then `recall backfill`, which
+sends the memory that project already had. See
+[`../docs/reference/install.md`](../docs/reference/install.md).
 
 ## Switching ingress on a server that is already running
 
