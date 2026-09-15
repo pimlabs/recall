@@ -31,6 +31,12 @@ repository secret**:
 | `DEPLOY_PORT` | Optional, defaults to `22` |
 | `DEPLOY_PATH` | Optional, defaults to `~/recall` on the VPS |
 
+And one **variable**, not a secret — it names filenames, nothing sensitive:
+
+| Variable | Value |
+|---|---|
+| `DEPLOY_COMPOSE_FILES` | The `-f` flags your server is built from — see below |
+
 ## Generating a dedicated deploy key
 
 Don't reuse your personal SSH key for this — GitHub's Actions runners hold
@@ -79,24 +85,53 @@ other command even if it leaked — it can only ever run that one deploy
 step. Not required to get auto-deploy working, worth doing once things are
 confirmed working without it.
 
-## Two assumptions the job makes about your deployment
+## `DEPLOY_COMPOSE_FILES` — a variable, not a secret
 
-Both are baked into the workflow rather than configurable, so check them
-against how your server actually runs before wiring the secrets up.
+This repository ships two ingresses, so the job cannot know which compose
+files your server is built from. It does not guess: if `DEPLOY_HOST` is set
+and this is not, the job stops and says so.
 
-1. **It runs `docker compose up -d --build` with no `-f`**, so it acts on
-   `deploy/docker-compose.yml` — the Cloudflare Tunnel stack. If your server
-   runs `docker-compose.traefik.yml`, the job would build the *other* stack
-   alongside it. Add the flag to the workflow's script first.
-2. **Its final step is `curl -sf http://localhost:8787/health` on the VPS.**
-   Neither compose file publishes port 8787 to the host — both use `expose`,
-   deliberately, so nothing can bypass the ingress — so that check cannot
-   succeed as written. Verify through the public URL instead, or run the
-   check inside the container.
+Set it under **Settings → Secrets and variables → Actions → Variables** (it
+holds no secret — it is a pair of filenames):
 
-Neither is hard to change; they are called out because both fail *after* a
-deploy that actually worked, which reads like a broken deployment when it is
-not.
+```
+-f docker-compose.traefik.yml -f docker-compose.traefik.local.yml
+```
+
+or, for the Cloudflare Tunnel stack:
+
+```
+-f docker-compose.yml
+```
+
+Include the local override if your server has one. `deploy/README.md`
+recommends keeping host-specific values — the real Traefik network name, your
+hostname — in an untracked `docker-compose.traefik.local.yml` beside the
+tracked file, precisely so `git pull --ff-only` keeps working; the deploy has
+to pass both or it will start a container without them.
+
+This used to be hardcoded to no `-f` at all, which acts on
+`docker-compose.yml`. On a host running the Traefik stack that quietly built
+and started the *other* ingress alongside the real one.
+
+## How the health check reaches a port that is not published
+
+Neither compose file publishes 8787 to the host — both use `expose`,
+deliberately, so nothing can reach the origin around the ingress. The job
+therefore asks from *inside* the container:
+
+```sh
+docker compose $COMPOSE_FILES exec -T recall-server \
+  wget -qO- http://127.0.0.1:8787/health
+```
+
+The previous version ran `curl -sf http://localhost:8787/health` on the VPS,
+which could never have succeeded — and it fails *after* a deploy that worked,
+which reads like a broken deployment when it is not.
+
+That the image contains `wget` is asserted by the `ci` job on the same image
+the deploy runs, rather than assumed. An untested assumption in this exact
+place is what produced the bug above.
 
 ## Verifying it works
 

@@ -74,7 +74,16 @@ jobs:
       # rename slipped through once: the Dockerfile has no file extension and
       # was missed by the search that updated everything else.
       - name: Server image builds
-        run: docker build -f deploy/Dockerfile -t recall-server-ci .
+        run: |
+          docker build -f deploy/Dockerfile -t recall-server-ci .
+
+          # The deploy job asks the server for its health from *inside* this
+          # image, since neither compose file publishes 8787 to the host. So
+          # the tool it asks with has to exist in the image. Asserted here,
+          # on the same image the deploy runs, rather than discovered on a
+          # server — which is how the previous health check spent months
+          # being impossible without anyone noticing.
+          docker run --rm --entrypoint sh recall-server-ci -c 'command -v wget'
 
   # Only runs after CI passes, and only for a push that landed on main.
   # Needs DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY as repo secrets —
@@ -105,6 +114,24 @@ jobs:
             to wire up a VPS."
           fi
 
+      # This repository ships two ingresses, so the job cannot know which
+      # compose files a given deployment is built from — and guessing is
+      # worse than refusing. It used to run `docker compose up -d --build`
+      # with no `-f`, which acts on docker-compose.yml: on a host running the
+      # Traefik stack that quietly builds and starts the *other* ingress
+      # alongside the real one.
+      - name: Is the compose file named?
+        if: steps.secrets.outputs.configured == 'true'
+        run: |
+          if [ -z "${{ vars.DEPLOY_COMPOSE_FILES }}" ]; then
+            echo "::error::DEPLOY_HOST is set but DEPLOY_COMPOSE_FILES is not, \
+            so this job does not know which ingress your server runs and will \
+            not guess. Set it as a repository variable, e.g. \
+            '-f docker-compose.traefik.yml -f docker-compose.traefik.local.yml'. \
+            See docs/reference/github-actions-deploy.md."
+            exit 1
+          fi
+
       - name: Deploy over SSH
         if: steps.secrets.outputs.configured == 'true'
         uses: appleboy/ssh-action@v1
@@ -123,9 +150,19 @@ jobs:
             # something this workflow should silently overwrite.
             git pull --ff-only origin main
             cd deploy
-            GIT_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --build
+            GIT_COMMIT=$(git rev-parse --short HEAD) \
+              docker compose $COMPOSE_FILES up -d --build
+
+            # Asked from inside the container, because neither compose file
+            # publishes 8787 to the host — both use `expose`, deliberately,
+            # so nothing can reach the origin around the ingress. The old
+            # check hit localhost:8787 on the VPS and could therefore never
+            # have passed, which reads like a broken deploy when the deploy
+            # in fact worked.
             sleep 5
-            curl -sf http://localhost:8787/health
-          envs: DEPLOY_PATH
+            docker compose $COMPOSE_FILES exec -T recall-server \
+              wget -qO- http://127.0.0.1:8787/health
+          envs: DEPLOY_PATH,COMPOSE_FILES
         env:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          COMPOSE_FILES: ${{ vars.DEPLOY_COMPOSE_FILES }}
