@@ -25,9 +25,28 @@ Neither can break a session: an unreachable server or an unconfigured machine wa
 
 Both hooks live in the **project's own `.claude/settings.json`**, checked into git — so any environment that clones the repo (laptop or fresh cloud session) picks up sync automatically. See `ARCHITECTURE.md`.
 
-## Quick start
+## Start here
 
-Recall is a single Rust binary — the same artifact runs the server and the client. Install once per machine, whichever way suits it:
+Recall is a single Rust binary that is both halves: `recall serve` runs the
+server, everything else runs beside your editor. Which half you need depends
+on what you already have.
+
+### A. You don't have a server yet — [**set one up**](deploy/README.md)
+
+Do this first. Every client instruction below asks for a `RECALL_URL` and a
+`RECALL_TOKEN`, and both come from the server; there is nothing to connect to
+until it exists.
+
+What it costs, before you start: a host that stays up (a small VPS is the
+usual answer), Docker with Compose v2, a clone of this repository on that
+host — both compose files build from source — and either a domain you control
+or a Cloudflare account, depending on which ingress you pick.
+[`deploy/README.md`](deploy/README.md) walks the whole thing, ingress first,
+because that is the choice everything else follows from.
+
+### B. You have a server — [**connect a machine to it**](docs/reference/install.md)
+
+Install the binary, export two variables, and opt each project in:
 
 ```sh
 npm install -g @pimlabs/recall                    # or bun, or pnpm
@@ -36,28 +55,33 @@ curl -fsSL https://raw.githubusercontent.com/pimlabs/recall/main/install.sh | ba
 cargo install recall-sync
 ```
 
-Details, and what each one actually does, in [`docs/reference/install.md`](docs/reference/install.md).
-
-> **No release is tagged yet.** npm, Homebrew and `install.sh` all download a
-> published binary, so until the first `v*` tag they have nothing to fetch.
-> Build from source or use `cargo install --git` in the meantime — see
-> [`docs/reference/install.md`](docs/reference/install.md#releases).
-
-Set `RECALL_URL` and `RECALL_TOKEN` in your shell profile ([`docs/reference/token-setup.md`](docs/reference/token-setup.md)), then, in each project you want synced:
-
 ```sh
+export RECALL_URL="https://recall.yourdomain.com"
+export RECALL_TOKEN="..."                    # docs/reference/token-setup.md
+
 recall init                                  # wires .claude/settings.json
 git add .claude/settings.json && git commit  # so fresh clones get it too
 recall status                                # confirm it's actually working
 ```
 
-Notes about *you* rather than the repo can follow you into every project:
-set `RECALL_GLOBAL_KEY`, then `recall promote <file>` moves one there. And
-where the `owner/repo` key derived from the git remote is wrong — a repo with
-no remote, a monorepo, a fork — `RECALL_PROJECT_KEY` declares it instead.
-Both are in [`docs/reference/install.md`](docs/reference/install.md).
+**"Connect" means your own second machine**, or a fresh cloud session — not
+someone else's. Recall is single-owner by design: one token, no accounts, no
+per-user anything. See `CLAUDE.md`'s ground rules for why that is a decision
+rather than an omission.
 
-Standing up the server itself is `recall serve`, in practice via [`deploy/`](deploy/README.md). To talk to it directly, see the [HTTP API reference](docs/reference/api.md).
+What each install channel actually does, and the rest of the client story, is
+in [`docs/reference/install.md`](docs/reference/install.md).
+
+### Then, whichever door you came through
+
+Notes about *you* rather than the repo can follow you into every project: set
+`RECALL_GLOBAL_KEY`, then `recall promote <file>` moves one there. And where
+the `owner/repo` key derived from the git remote is wrong — a repo with no
+remote, a monorepo, a fork — `RECALL_PROJECT_KEY` declares it instead. Both
+are in [`docs/reference/install.md`](docs/reference/install.md).
+
+To talk to the server directly, see the
+[HTTP API reference](docs/reference/api.md).
 
 ## Status
 
@@ -87,9 +111,10 @@ rather than assumed and two conclusions that turned out wrong.
 
 | Start here | For |
 |---|---|
-| [`docs/reference/install.md`](docs/reference/install.md) | Installing the CLI and opting a project in |
+| [`deploy/README.md`](deploy/README.md) | **Door A** — standing the server up, ingress first |
+| [`docs/reference/install.md`](docs/reference/install.md) | **Door B** — installing the CLI and opting a project in |
+| [`docs/reference/token-setup.md`](docs/reference/token-setup.md) | The token both doors need, onto every machine, laptop and cloud |
 | [`docs/reference/releasing.md`](docs/reference/releasing.md) | Cutting a release across all four channels |
-| [`docs/reference/token-setup.md`](docs/reference/token-setup.md) | Getting a token onto every machine, laptop and cloud |
 | [`docs/reference/api.md`](docs/reference/api.md) | The HTTP API: endpoints, schemas, status codes, examples |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | How it works, and the code map |
 | [`docs/history/rust-rewrite.md`](docs/history/rust-rewrite.md) | Why Rust, honestly — including every bug this project has shipped |

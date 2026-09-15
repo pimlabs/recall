@@ -17,12 +17,31 @@ they sat in said which kind they were, so nobody knew which ones to check.
 
 ## Reference — kept true
 
+Two things people arrive wanting, in the order they have to happen. There is
+no server-shaped step in the second list and no client-shaped step in the
+first, which is the point: the server is a prerequisite, not an alternative.
+
+### Setting up the server
+
+| Document | Read it when |
+|---|---|
+| [`../deploy/README.md`](../deploy/README.md) | **Start here if you have no server.** Standing it up in Docker behind either ingress (Cloudflare Tunnel or an existing Traefik), enabling merge, backups, and cleaning up a project stored under the wrong key. |
+| [`reference/token-setup.md`](reference/token-setup.md) | Generating `RECALL_TOKEN` — the server checks it, every environment sends it. Step 1 belongs to the server; the rest belongs to the machines. |
+
+### Connecting a machine
+
+Your own second machine, or a fresh cloud session. Recall is single-owner by
+design, so there is no third party here.
+
 | Document | Read it when |
 |---|---|
 | [`reference/install.md`](reference/install.md) | Installing the `recall` CLI (npm, Homebrew, curl, cargo), opting a project in with `recall init`, declaring a `project_key` by hand, and promoting a note into the global scope. |
-| [`reference/token-setup.md`](reference/token-setup.md) | Generating `RECALL_TOKEN` and installing it on every environment — including the extra variable a claude.ai cloud session needs. |
-| [`reference/api.md`](reference/api.md) | Talking to the server directly: endpoints, schemas, status codes, `curl` examples. |
-| [`../deploy/README.md`](../deploy/README.md) | Standing the server up in Docker behind either ingress (Cloudflare Tunnel or an existing Traefik), enabling merge, backups, and cleaning up a project stored under the wrong key. |
+| [`reference/api.md`](reference/api.md) | Talking to the server directly instead: endpoints, schemas, status codes, `curl` examples. |
+
+### Keeping it running
+
+| Document | Read it when |
+|---|---|
 | [`reference/github-actions-deploy.md`](reference/github-actions-deploy.md) | Wiring CI checks on every PR and auto-deploy to a VPS on push to `main`. |
 | [`reference/releasing.md`](reference/releasing.md) | Cutting a release across all four install channels — what the tag automates, what only the owner can push, and what to do when a build job never starts. |
 

@@ -1,4 +1,9 @@
-# Deploying Recall's server
+# Setting up Recall's server
+
+This document is the **server** half, and it comes first: the `RECALL_URL`
+and `RECALL_TOKEN` that every machine needs are produced here. Once it
+answers, connect your machines with
+[`../docs/reference/install.md`](../docs/reference/install.md).
 
 Docker Compose, on anything that runs Docker. A small always-on VPS is the
 usual answer; a desktop or a laptop works too, with one caveat below. Nothing

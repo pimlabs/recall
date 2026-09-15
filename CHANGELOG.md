@@ -28,6 +28,10 @@ pipeline and the shape of the tree:
   by hand, and v0.1.0's first set of archives named the wrong commit because
   of it. They were rebuilt; `recall version` now prints `d85d225`, which is
   what `v0.1.0` points at.
+- **`brew install pimlabs/recall/recall` works.** The formula carried an
+  empty `sha256`, so the tagged-release path could not install at all and
+  `--HEAD` was the only route. This one does touch an install, which is why
+  it is here and the rest of the week's documentation work is not.
 
 ## 0.1.0 — 2026-09-14
 
