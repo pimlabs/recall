@@ -1,8 +1,18 @@
-# Installing and using Recall
+# Connecting a machine to Recall
 
-Recall is a single Rust binary. The same artifact runs the server
-(`recall serve`) and everything on a developer machine — install once per
-machine, then run `recall init` once per project.
+This document is the **client** half: getting the binary onto a machine and
+opting projects into sync. It assumes a server already exists, because every
+step below needs a `RECALL_URL` and a `RECALL_TOKEN` that only a server can
+give you. If you do not have one yet, start at
+[`../../deploy/README.md`](../../deploy/README.md) and come back.
+
+"Machine" means yours — a second laptop, a desktop, a fresh claude.ai cloud
+session. Recall is single-owner by design: one token, no accounts. Nothing
+here sets up access for anyone else.
+
+Recall is a single Rust binary, and the same artifact runs both halves
+(`recall serve` is the server). Install once per machine, then run
+`recall init` once per project.
 
 ## Install
 
@@ -297,9 +307,18 @@ the one-time `claude setup-token` step that enables semantic merge.
 ## Releases
 
 Binaries are published by a GitHub Actions workflow when a `v*` tag is
-pushed. Until the first tag exists, install via Homebrew `--HEAD` or build
-from source; npm and `install.sh` both need a published release to download
-from, and both say so plainly rather than failing obscurely.
+pushed: four archives — macOS and Linux, x64 and arm64 — plus a
+`checksums.txt` that npm's installer verifies against. `v0.1.0` was the
+first, on 2026-09-14.
+
+npm and `install.sh` download those archives, so both are tied to a released
+version; npm's `postinstall` looks for a release named after its *own*
+version and says so plainly rather than failing obscurely. Homebrew and
+`cargo install --git` build from source and need no release at all, which is
+why `brew install --HEAD` worked before any tag existed.
+
+`CHANGELOG.md` says what changed between versions, and what deliberately does
+not appear there.
 
 ## If a project is still wired to the old shell hooks
 

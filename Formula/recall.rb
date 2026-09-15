@@ -5,7 +5,7 @@
 #
 #   brew tap pimlabs/recall https://github.com/pimlabs/recall
 #   brew install pimlabs/recall/recall          # latest tagged release
-#   brew install --HEAD pimlabs/recall/recall   # straight from main
+#   brew install --HEAD pimlabs/recall/recall   # straight from main, between releases
 #
 # Built from source rather than pulling a release binary: Homebrew already
 # has a Rust toolchain available as a build dependency, and building here
@@ -14,8 +14,7 @@ class Recall < Formula
   desc "Sync Claude Code's auto memory across machines and cloud sessions"
   homepage "https://github.com/pimlabs/recall"
   url "https://github.com/pimlabs/recall/archive/refs/tags/v0.1.0.tar.gz"
-  # Filled in when v0.1.0 is actually tagged; until then use --HEAD.
-  sha256 ""
+  sha256 "47f8463357421732f24266672b8e411c64aa6da1c05be208e87742caf7ede254"
   license "MIT"
   head "https://github.com/pimlabs/recall.git", branch: "main"
 
