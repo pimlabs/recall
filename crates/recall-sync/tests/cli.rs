@@ -153,6 +153,73 @@ fn push_ignores_a_malformed_hook_payload() {
     }
 }
 
+/// A directory holding a `hostname` shim that records having been run, and the
+/// marker it writes. Returned together with a `PATH` that *prepends* the shim
+/// rather than replacing the real one: `recall` shells out to `git` to find
+/// the project root, and a test that broke that would pass for the wrong
+/// reason.
+fn hostname_shim() -> (tempfile::TempDir, PathBuf, String) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("hostname-was-run");
+    let script = dir.path().join("hostname");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\n: > '{}'\necho shimmed\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    (dir, marker, path)
+}
+
+/// `push` is synchronous inside a Claude Code session and fires on every Edit
+/// and Write, so anything it does before the "is this file even mine?" check
+/// is done hundreds of times a session for nothing. Resolving configuration
+/// is exactly that: `RECALL_SOURCE_ENV` falls back to the hostname, and that
+/// fallback forks `hostname(1)`. A refactor that reads configuration up front
+/// leaves no visible symptom — just a process spawned per keystroke-sized
+/// edit — which is why it has to be caught here rather than noticed.
+///
+/// `RECALL_SOURCE_ENV` is deliberately absent from the environment below: set
+/// it and the fallback never runs, and the test proves nothing.
+#[test]
+fn push_does_not_fork_hostname_before_deciding_a_file_is_not_its_business() {
+    let repo = git_repo();
+    let (_shim, marker, path) = hostname_shim();
+
+    // The positive control, and it is not ceremony: without it this test
+    // would pass just as happily if the shim were never reachable at all.
+    // `status` does resolve configuration, so it must trip the marker.
+    let r = run(&["status"], repo.path(), &[("PATH", &path)], None);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(
+        marker.exists(),
+        "the shim did not run even where configuration *is* resolved, so \
+         nothing below could have detected a fork: {}",
+        r.stdout
+    );
+    std::fs::remove_file(&marker).unwrap();
+
+    let payload = format!(
+        r#"{{"tool_input":{{"file_path":"{}/src/main.rs"}}}}"#,
+        repo.path().to_string_lossy()
+    );
+    let r = run(&["push"], repo.path(), &[("PATH", &path)], Some(&payload));
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(
+        !marker.exists(),
+        "push forked hostname(1) for a file it went on to ignore — that is \
+         one spawned process per edit in every session"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Where being loud is correct
 // ---------------------------------------------------------------------------
@@ -578,6 +645,99 @@ fn the_text_report_names_the_file_that_overrides_the_shell() {
         r.stdout.contains(&format!("set by {file}")),
         "the project_key line should attribute the key to that file too: {}",
         r.stdout
+    );
+}
+
+/// `Environment::discover` builds its file list as `[user, project, local]`,
+/// and that argument order is the only thing making the user-level file the
+/// lowest layer — write it `[project, local, user]` and every other test still
+/// passes, because they exercise `from_files`, which takes the order as a
+/// parameter. So this pins what `discover` itself chooses.
+///
+/// Both halves are load-bearing. The project winning on the key it also
+/// declares is the precedence; `RECALL_GLOBAL_KEY` still arriving from the
+/// home file is what proves the user layer is read at all, rather than never
+/// opened — an ordering bug that skipped it would be invisible to the first
+/// assertion alone.
+#[test]
+fn the_user_settings_file_is_the_lowest_layer_and_is_still_read() {
+    let repo = git_repo();
+    let home = home_elsewhere();
+    let user_file = write_settings(
+        home.path(),
+        "settings.json",
+        r#"{"env":{"RECALL_PROJECT_KEY":"acme/from-home","RECALL_GLOBAL_KEY":"eko-home"}}"#,
+    );
+    let project_file = write_settings(
+        repo.path(),
+        "settings.json",
+        r#"{"env":{"RECALL_PROJECT_KEY":"acme/from-the-project"}}"#,
+    );
+    let home = home.path().to_string_lossy().into_owned();
+
+    let rep = status_json(repo.path(), &[("HOME", &home)]);
+    assert_eq!(
+        rep["project_key"], "acme/from-the-project",
+        "the project's file sits above the user's: {rep}"
+    );
+    assert_eq!(
+        declared_entry(&rep, "RECALL_PROJECT_KEY")["file"],
+        project_file,
+        "the winning layer is the one to name: {rep}"
+    );
+
+    assert_eq!(
+        declared_entry(&rep, "RECALL_GLOBAL_KEY")["file"],
+        user_file,
+        "a variable no higher layer declares still comes from the user file, \
+         which is how we know it was opened: {rep}"
+    );
+    assert_eq!(
+        rep["global_key"], "global:eko-home",
+        "and the value it supplies is actually in force, namespaced the way \
+         any accepted global key is: {rep}"
+    );
+}
+
+/// `"RECALL_PROJECT_KEY": 12345` is somebody plainly meaning to set the key.
+/// A number cannot become an environment variable, so it sets nothing — and
+/// before this was reported, `status` answered that with a confident derived
+/// key and no remark at all, which is the report being wrong about the single
+/// thing it was asked.
+#[test]
+fn a_non_string_declaration_is_reported_rather_than_silently_dropped() {
+    let repo = git_repo();
+    let file = write_settings(
+        repo.path(),
+        "settings.json",
+        r#"{"env":{"RECALL_PROJECT_KEY":12345}}"#,
+    );
+    let home = home_elsewhere();
+    let home = home.path().to_string_lossy().into_owned();
+
+    let rep = status_json(repo.path(), &[("HOME", &home)]);
+    let ignored = rep["ignored_env"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a declaration that sets nothing went unremarked: {rep}"));
+    assert!(
+        ignored
+            .iter()
+            .any(|var| var["name"] == "RECALL_PROJECT_KEY" && var["file"] == file),
+        "the report has to name both the variable and the file: {rep}"
+    );
+
+    let declared: Vec<&str> = rep["declared_env"]
+        .as_array()
+        .map(|vars| vars.iter().filter_map(|var| var["name"].as_str()).collect())
+        .unwrap_or_default();
+    assert!(
+        !declared.contains(&"RECALL_PROJECT_KEY"),
+        "a variable that was never set must not also be reported as declared, \
+         or the two halves of the report contradict each other: {rep}"
+    );
+    assert_eq!(
+        rep["project_key"], "acme/app",
+        "nothing was set, so the key is the derived one: {rep}"
     );
 }
 
