@@ -23,3 +23,7 @@ deploy/.env
 # go. Committing it would push one machine's values onto everyone else's, and
 # a token into the history.
 .claude/settings.local.json
+
+# Python bytecode from the two checkers in scripts/. Nothing there is
+# importable as a module, so this only appears when one is run directly.
+__pycache__/

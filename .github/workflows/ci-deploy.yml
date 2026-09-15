@@ -62,6 +62,13 @@ jobs:
           node scripts/install-worker-test.js
           python3 scripts/wrangler-check.py
 
+      # Not a style check. The doc set has been reorganised twice — `docs/`
+      # split into reference/ and history/, `tests/` renamed to `fixtures/` —
+      # and a link left pointing at nothing is exactly what neither move
+      # would have announced.
+      - name: Documentation links still resolve
+        run: python3 scripts/link-check.py
+
       - name: Shipped shell scripts still parse
         run: |
           bash -n install.sh
