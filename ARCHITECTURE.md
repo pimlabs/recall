@@ -55,7 +55,7 @@ recall-hooks   recall-server     │   the two halves
 | `recall-paths` | Claude Code's memory paths, `project_key` derivation, client config | Tracks *someone else's* implementation. When the CLI changes there is one place to fix, with its own tests. |
 | `recall-hooks` | `push`, `pull`, the baseline, the HTTP client, the settings merge | Everything that runs inside a user's editing session, where being quiet matters more than being thorough. |
 | `recall-server` | SQLite store, `claude -p` merge, the axum API | Everything that runs on the host. Never depends on `recall-hooks`. |
-| `recall-sync` | Argument parsing and one module per command | Thin. Each command's *failure policy* is documented beside the command it governs. |
+| `recall-sync` | Argument parsing and one module per command — `serve` among them, so this is where the server process starts too | Thin. Each command's *failure policy* is documented beside the command it governs. Named for the client half only because `recall-cli` and `recall` were both taken on crates.io; published since v0.1.0, so the name is now fixed. |
 
 The generated API docs (`cargo doc --workspace --open`) are the reference;
 `missing_docs` is denied in every library crate and CI runs rustdoc with
