@@ -96,6 +96,7 @@ rather than assumed and two conclusions that turned out wrong.
 | [`docs/history/memory-loading-findings.md`](docs/history/memory-loading-findings.md) | What Claude Code actually does with memory files, and why one probe proves nothing |
 | [`ROADMAP.md`](ROADMAP.md) | Every phase, the evidence behind it, and what is deliberately deferred |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Building, testing, and what not to "clean up" |
+| [`CHANGELOG.md`](CHANGELOG.md) | What changed between releases, for someone deciding whether to upgrade |
 
 And the tree:
 
