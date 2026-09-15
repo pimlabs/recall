@@ -22,7 +22,7 @@ use crate::now;
 
 /// The admin page is embedded so the binary stays self-contained — there is
 /// no asset directory to forget to ship.
-const ADMIN_HTML: &str = include_str!("../../admin.html");
+const ADMIN_HTML: &str = include_str!("../../assets/admin.html");
 
 /// The token the page holds lives in sessionStorage on this origin;
 /// `default-src 'none'` with `connect-src 'self'` means even a future

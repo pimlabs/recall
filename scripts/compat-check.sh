@@ -7,7 +7,7 @@
 #   ./scripts/compat-check.sh target/release/recall
 #
 # The Node server itself is gone from the tree; what remains of it is
-# `tests/fixtures/node-written.db`, a database it actually wrote, captured
+# `fixtures/node-written.db`, a database it actually wrote, captured
 # before it was deleted. That is the part that matters: production's database
 # was written by Node, and this server has to open it, serve every row
 # faithfully, and then keep writing to it.
@@ -18,7 +18,7 @@ set -u
 
 BIN="${1:-target/release/recall}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FIXTURE="$REPO_ROOT/tests/fixtures/node-written.db"
+FIXTURE="$REPO_ROOT/fixtures/node-written.db"
 TOKEN="compat-token"
 PORT=8794
 WORK=$(mktemp -d)

@@ -168,7 +168,7 @@ implementations rather than one.
 `server/index.js` and `hooks/*.sh` — the Node server and the bash hooks —
 are gone too, along with the `server/` directory itself. They were kept for
 a while as the rollback path; what replaced them is narrower and more
-useful: `tests/fixtures/node-written.db`, a database the Node server
+useful: `fixtures/node-written.db`, a database the Node server
 actually wrote, captured before it was deleted.
 
 That fixture is the part that mattered. Production's database was written by
