@@ -1,23 +1,45 @@
-//! `recall promote` — move one note out of this project and into the global
-//! scope.
+//! `recall promote` — move one note out of this project, into the global or
+//! the machine scope.
 //!
 //! The only command a user runs *at* their memory rather than about it, and
-//! the only way into the global scope that doesn't involve `mkdir`. It is
-//! loud where the hooks are quiet: nobody typed it by accident, so a refusal
-//! is worth an error and a non-zero exit rather than a warning nobody reads.
+//! the only way into either scope that doesn't involve `mkdir`. It is loud
+//! where the hooks are quiet: nobody typed it by accident, so a refusal is
+//! worth an error and a non-zero exit rather than a warning nobody reads.
 
 use std::path::{Path, PathBuf};
 
-use recall_hooks::{exit, PromoteError};
+use recall_hooks::{exit, PromoteError, PromoteTarget};
 
 use crate::project;
 
-/// Promotes `file`, then says where it went and who will see it.
-pub async fn run(file: &Path) -> anyhow::Result<i32> {
-    let ctx = project::resolve().hook_context()?;
-    let target = resolve(&ctx.memory_dir, file);
+/// The destinations `--to` accepts.
+///
+/// A separate enum from `recall_hooks::PromoteTarget` only because that crate
+/// does not depend on clap and should not start: this is the argument
+/// parser's vocabulary, and the `From` below is the one place the two meet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Target {
+    /// Follows you into every project you sync.
+    Global,
+    /// Stays with this machine.
+    Machine,
+}
 
-    match recall_hooks::promote(&ctx, &target).await {
+impl From<Target> for PromoteTarget {
+    fn from(t: Target) -> Self {
+        match t {
+            Target::Global => PromoteTarget::Global,
+            Target::Machine => PromoteTarget::Machine,
+        }
+    }
+}
+
+/// Promotes `file`, then says where it went and who will see it.
+pub async fn run(file: &Path, to: Target) -> anyhow::Result<i32> {
+    let ctx = project::resolve().hook_context()?;
+    let path = resolve(&ctx.memory_dir, file);
+
+    match recall_hooks::promote(&ctx, &path, to.into()).await {
         Ok(res) => {
             if res.resumed {
                 println!(
@@ -27,13 +49,31 @@ pub async fn run(file: &Path) -> anyhow::Result<i32> {
             } else {
                 println!("recall: promoted {} → {}", res.from, res.to);
             }
-            if let Some(global) = ctx.global() {
-                println!(
-                    "
+            // What happens next differs by scope, and getting it wrong in
+            // either direction is the confusion this command exists to
+            // prevent: a machine note is not going to appear in every
+            // project, and saying so would be a promise Recall does not keep.
+            match to {
+                Target::Global => {
+                    if let Some(global) = ctx.global() {
+                        println!(
+                            "
   It is stored under {} and linked from MEMORY.md. Every other project
   picks it up at its next session start, when the pull hook runs.",
-                    global.key
-                );
+                            global.key
+                        );
+                    }
+                }
+                Target::Machine => {
+                    if let Some(machine) = ctx.machine() {
+                        println!(
+                            "
+  It is stored under {} and linked from MEMORY.md. It follows this machine
+  into every project here, and reaches no other machine.",
+                            machine.key
+                        );
+                    }
+                }
             }
             Ok(exit::OK)
         }

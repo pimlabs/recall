@@ -9,7 +9,7 @@
 
 use super::{write, Fixture};
 use crate::context::Error as SyncError;
-use crate::promote::{promote, Error};
+use crate::promote::{promote, Error, Target};
 use crate::state;
 
 /// Front matter Claude Code would actually have written on a note about the
@@ -25,7 +25,9 @@ async fn a_promoted_note_leaves_the_project_and_lands_in_the_global_subtree() {
     let f = Fixture::with_global_scope().await;
     write(&f.memory("user.md"), NOTE);
 
-    let res = promote(&f.ctx, &f.memory("user.md")).await.unwrap();
+    let res = promote(&f.ctx, &f.memory("user.md"), Target::Global)
+        .await
+        .unwrap();
 
     assert_eq!(res.from, "user.md");
     assert_eq!(res.to, "global/user.md");
@@ -43,7 +45,9 @@ async fn the_note_is_stored_under_the_global_key_and_its_old_path_tombstoned_und
     let f = Fixture::with_global_scope().await;
     write(&f.memory("user.md"), NOTE);
 
-    promote(&f.ctx, &f.memory("user.md")).await.unwrap();
+    promote(&f.ctx, &f.memory("user.md"), Target::Global)
+        .await
+        .unwrap();
 
     // Both requests name `user.md`; only the key and the flag tell them
     // apart, which is exactly the confusion worth testing.
@@ -79,7 +83,9 @@ async fn a_promoted_note_is_linked_from_memory_md() {
     );
     write(&f.memory("user.md"), NOTE);
 
-    promote(&f.ctx, &f.memory("user.md")).await.unwrap();
+    promote(&f.ctx, &f.memory("user.md"), Target::Global)
+        .await
+        .unwrap();
 
     let memory_md = read(&f.memory("MEMORY.md"));
     assert!(
@@ -104,7 +110,9 @@ async fn the_projects_own_link_to_the_note_goes_with_it() {
     );
     write(&f.memory("topics/user.md"), NOTE);
 
-    promote(&f.ctx, &f.memory("topics/user.md")).await.unwrap();
+    promote(&f.ctx, &f.memory("topics/user.md"), Target::Global)
+        .await
+        .unwrap();
 
     let memory_md = read(&f.memory("MEMORY.md"));
     assert!(
@@ -133,7 +141,9 @@ async fn the_rewritten_index_is_pushed_so_the_dead_link_cannot_come_back() {
     );
     write(&f.memory("topics/user.md"), NOTE);
 
-    promote(&f.ctx, &f.memory("topics/user.md")).await.unwrap();
+    promote(&f.ctx, &f.memory("topics/user.md"), Target::Global)
+        .await
+        .unwrap();
 
     let pushes = f.server.pushes();
     let index = pushes
@@ -157,7 +167,9 @@ async fn an_index_that_did_not_mention_the_note_is_not_pushed() {
     let f = Fixture::with_global_scope().await;
     write(&f.memory("user.md"), NOTE);
 
-    promote(&f.ctx, &f.memory("user.md")).await.unwrap();
+    promote(&f.ctx, &f.memory("user.md"), Target::Global)
+        .await
+        .unwrap();
 
     let pushes = f.server.pushes();
     assert!(
@@ -174,7 +186,9 @@ async fn the_baseline_ends_the_run_describing_the_new_layout() {
     let f = Fixture::with_global_scope().await;
     write(&f.memory("user.md"), NOTE);
 
-    promote(&f.ctx, &f.memory("user.md")).await.unwrap();
+    promote(&f.ctx, &f.memory("user.md"), Target::Global)
+        .await
+        .unwrap();
 
     let baseline = state::load(&f.ctx.state_file).unwrap().unwrap();
     assert!(
@@ -194,7 +208,9 @@ async fn a_nested_note_is_promoted_to_the_top_of_the_global_scope() {
     let f = Fixture::with_global_scope().await;
     write(&f.memory("topics/user.md"), NOTE);
 
-    let res = promote(&f.ctx, &f.memory("topics/user.md")).await.unwrap();
+    let res = promote(&f.ctx, &f.memory("topics/user.md"), Target::Global)
+        .await
+        .unwrap();
 
     assert_eq!(res.to, "global/user.md");
     assert!(f.memory("global/user.md").exists());
@@ -215,9 +231,11 @@ async fn promoting_with_global_sync_off_is_refused_and_moves_nothing() {
     let f = Fixture::new().await;
     write(&f.memory("user.md"), NOTE);
 
-    let err = promote(&f.ctx, &f.memory("user.md")).await.unwrap_err();
+    let err = promote(&f.ctx, &f.memory("user.md"), Target::Global)
+        .await
+        .unwrap_err();
 
-    assert!(matches!(err, Error::GlobalNotConfigured), "{err:?}");
+    assert!(matches!(err, Error::ScopeNotConfigured { .. }), "{err:?}");
     assert_eq!(read(&f.memory("user.md")), NOTE);
     assert!(
         !f.memory("global/user.md").exists(),
@@ -240,7 +258,7 @@ async fn a_path_that_is_not_a_memory_file_of_this_project_is_refused() {
         f.ctx.memory_dir.clone(),
         f.memory("topics"),
     ] {
-        let err = promote(&f.ctx, &path).await.unwrap_err();
+        let err = promote(&f.ctx, &path, Target::Global).await.unwrap_err();
         assert!(
             matches!(err, Error::NotAMemoryFile { .. }),
             "for {}: {err:?}",
@@ -257,11 +275,11 @@ async fn a_note_that_is_already_global_is_refused() {
     let f = Fixture::with_global_scope().await;
     write(&f.memory("global/user.md"), NOTE);
 
-    let err = promote(&f.ctx, &f.memory("global/user.md"))
+    let err = promote(&f.ctx, &f.memory("global/user.md"), Target::Global)
         .await
         .unwrap_err();
 
-    assert!(matches!(err, Error::AlreadyGlobal { .. }), "{err:?}");
+    assert!(matches!(err, Error::AlreadyThere { .. }), "{err:?}");
     assert_eq!(read(&f.memory("global/user.md")), NOTE);
     assert!(f.server.pushes().is_empty(), "{:?}", f.server.pushes());
 }
@@ -270,7 +288,7 @@ async fn a_note_that_is_already_global_is_refused() {
 async fn a_note_that_does_not_exist_is_refused() {
     let f = Fixture::with_global_scope().await;
 
-    let err = promote(&f.ctx, &f.memory("never-written.md"))
+    let err = promote(&f.ctx, &f.memory("never-written.md"), Target::Global)
         .await
         .unwrap_err();
 
@@ -286,7 +304,9 @@ async fn the_projects_index_cannot_be_promoted() {
     let f = Fixture::with_global_scope().await;
     write(&f.memory("MEMORY.md"), "# Memory\n");
 
-    let err = promote(&f.ctx, &f.memory("MEMORY.md")).await.unwrap_err();
+    let err = promote(&f.ctx, &f.memory("MEMORY.md"), Target::Global)
+        .await
+        .unwrap_err();
 
     assert!(matches!(err, Error::IsTheIndex), "{err:?}");
     assert_eq!(read(&f.memory("MEMORY.md")), "# Memory\n");
@@ -302,7 +322,9 @@ async fn a_name_already_taken_in_the_global_scope_is_refused_rather_than_overwri
     write(&f.memory("global/user.md"), "the global note\n");
     write(&f.memory("user.md"), "this project's note\n");
 
-    let err = promote(&f.ctx, &f.memory("user.md")).await.unwrap_err();
+    let err = promote(&f.ctx, &f.memory("user.md"), Target::Global)
+        .await
+        .unwrap_err();
 
     assert!(matches!(err, Error::NameTaken { .. }), "{err:?}");
     assert_eq!(read(&f.memory("global/user.md")), "the global note\n");
@@ -320,7 +342,9 @@ async fn promoting_again_after_an_interrupted_run_finishes_the_move() {
     write(&f.memory("global/user.md"), NOTE);
     write(&f.memory("user.md"), NOTE);
 
-    let res = promote(&f.ctx, &f.memory("user.md")).await.unwrap();
+    let res = promote(&f.ctx, &f.memory("user.md"), Target::Global)
+        .await
+        .unwrap();
 
     assert!(res.resumed, "{res:?}");
     assert_eq!(res.to, "global/user.md");
@@ -348,7 +372,9 @@ async fn a_note_that_is_not_valid_utf8_is_refused_before_anything_moves() {
     write(&f.memory("user.md"), "");
     std::fs::write(f.memory("user.md"), [0xff, 0xfe, 0x00, 0x9f]).unwrap();
 
-    let err = promote(&f.ctx, &f.memory("user.md")).await.unwrap_err();
+    let err = promote(&f.ctx, &f.memory("user.md"), Target::Global)
+        .await
+        .unwrap_err();
 
     assert!(
         matches!(err, Error::Sync(SyncError::NotUtf8 { .. })),
@@ -368,7 +394,9 @@ async fn a_server_that_refuses_the_store_leaves_the_note_exactly_where_it_was() 
     write(&f.memory("user.md"), NOTE);
     f.server.fail_with(500, "boom");
 
-    let err = promote(&f.ctx, &f.memory("user.md")).await.unwrap_err();
+    let err = promote(&f.ctx, &f.memory("user.md"), Target::Global)
+        .await
+        .unwrap_err();
 
     assert!(
         matches!(err, Error::Sync(SyncError::Push { .. })),
@@ -383,4 +411,91 @@ async fn a_server_that_refuses_the_store_leaves_the_note_exactly_where_it_was() 
         !f.memory("global/user.md").exists(),
         "a global copy was left behind for a store the server refused"
     );
+}
+
+/// The gap this command was written to close, reappearing for the scope that
+/// arrived later: a note about the box had no way in but `mkdir`.
+#[tokio::test]
+async fn a_note_can_be_promoted_into_the_machine_scope() {
+    let f = Fixture::with_machine_scope().await;
+    write(&f.memory("ram.md"), "# 8 GB\n");
+
+    let res = promote(&f.ctx, &f.memory("ram.md"), Target::Machine)
+        .await
+        .unwrap();
+
+    assert_eq!(res.from, "ram.md");
+    assert_eq!(res.to, "machine/ram.md");
+    assert!(f.memory("machine/ram.md").exists());
+    assert!(!f.memory("ram.md").exists());
+
+    let pushes = f.server.pushes();
+    let stored = pushes
+        .iter()
+        .find(|p| p.file_path == "ram.md" && !p.deleted)
+        .expect("the note is stored under the machine key");
+    assert_eq!(stored.project_key, "machine:mbp");
+
+    let tombstone = pushes
+        .iter()
+        .find(|p| p.deleted)
+        .expect("and tombstoned under the project's");
+    assert_eq!(tombstone.project_key, "acme/app");
+}
+
+/// Naming the variable matters: "not configured" alone leaves the reader to
+/// guess which of two it meant.
+#[tokio::test]
+async fn promoting_to_a_scope_that_is_off_says_which_variable_turns_it_on() {
+    let f = Fixture::with_global_scope().await;
+    write(&f.memory("ram.md"), "# 8 GB\n");
+
+    let err = promote(&f.ctx, &f.memory("ram.md"), Target::Machine)
+        .await
+        .unwrap_err();
+
+    match err {
+        Error::ScopeNotConfigured { scope, variable } => {
+            assert_eq!(scope, "machine");
+            assert_eq!(variable, "RECALL_MACHINE_KEY");
+        }
+        other => panic!("{other:?}"),
+    }
+    // And nothing moved: the global scope was configured, and must not have
+    // been used as a substitute for the one that was asked for.
+    assert!(f.memory("ram.md").exists());
+    assert!(!f.memory("global/ram.md").exists());
+}
+
+#[tokio::test]
+async fn a_note_already_in_the_machine_scope_is_refused() {
+    let f = Fixture::with_machine_scope().await;
+    write(&f.memory("machine/ram.md"), "# 8 GB\n");
+
+    let err = promote(&f.ctx, &f.memory("machine/ram.md"), Target::Machine)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, Error::AlreadyThere { .. }), "{err:?}");
+}
+
+/// Refused rather than implemented. The index push at the end of a promotion
+/// sends MEMORY.md under the *source* scope's key, which is correct only
+/// while the source is always the project — so a global-to-machine move would
+/// file this project's index into the global scope's history.
+#[tokio::test]
+async fn a_note_cannot_be_moved_from_one_reserved_scope_to_another() {
+    let f = Fixture::with_both_scopes().await;
+    write(&f.memory("global/ram.md"), "# 8 GB\n");
+
+    let err = promote(&f.ctx, &f.memory("global/ram.md"), Target::Machine)
+        .await
+        .unwrap_err();
+
+    match err {
+        Error::CrossScope { from, .. } => assert_eq!(from, "global"),
+        other => panic!("{other:?}"),
+    }
+    assert!(f.memory("global/ram.md").exists(), "nothing moved");
+    assert!(f.server.pushes().is_empty(), "and nothing was sent");
 }

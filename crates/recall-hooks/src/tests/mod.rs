@@ -30,21 +30,37 @@ pub(crate) struct Fixture {
 
 impl Fixture {
     pub(crate) async fn new() -> Self {
-        Self::with_global(None).await
+        Self::with_scopes(None, None).await
     }
 
     /// A fixture whose memory directory also carries a global scope.
     pub(crate) async fn with_global_scope() -> Self {
-        Self::with_global(Some("global:eko".to_string())).await
+        Self::with_scopes(Some("global:eko".to_string()), None).await
     }
 
-    async fn with_global(global: Option<String>) -> Self {
+    /// One carrying a machine scope, and no global one — so a test about the
+    /// machine scope cannot pass because the global scope happened to catch
+    /// the file.
+    pub(crate) async fn with_machine_scope() -> Self {
+        Self::with_scopes(None, Some("machine:mbp".to_string())).await
+    }
+
+    /// Both, for the cases that only exist when two reserved directories do.
+    pub(crate) async fn with_both_scopes() -> Self {
+        Self::with_scopes(
+            Some("global:eko".to_string()),
+            Some("machine:mbp".to_string()),
+        )
+        .await
+    }
+
+    async fn with_scopes(global: Option<String>, machine: Option<String>) -> Self {
         let server = FakeServer::start().await;
         let dir = tempfile::tempdir().unwrap();
         let ctx = Context {
             memory_dir: dir.path().join("memory"),
             state_file: dir.path().join(".recall-state.json"),
-            scopes: crate::scope::scopes("acme/app".into(), global, None),
+            scopes: crate::scope::scopes("acme/app".into(), global, machine),
             source_env: "test".into(),
             client: Client::new(&server.url, "token").unwrap(),
         };

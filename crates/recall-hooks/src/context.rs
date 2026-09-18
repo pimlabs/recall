@@ -47,7 +47,22 @@ impl Context {
 
     /// The global scope, when one is configured.
     pub fn global(&self) -> Option<&Scope> {
-        self.scopes.iter().find(|s| s.is_global())
+        self.reserved(crate::scope::GLOBAL_DIR)
+    }
+
+    /// The machine scope, when one is configured.
+    pub fn machine(&self) -> Option<&Scope> {
+        self.reserved(crate::scope::MACHINE_DIR)
+    }
+
+    /// The scope owning a reserved directory, when it is switched on.
+    ///
+    /// One lookup behind both of the above, so "is this scope configured" is
+    /// answered the same way whichever scope is asking.
+    pub fn reserved(&self, dir: &str) -> Option<&Scope> {
+        self.scopes
+            .iter()
+            .find(|s| s.prefix.as_deref() == Some(dir))
     }
 
     /// Rewrites the baseline to match what is on disk right now.

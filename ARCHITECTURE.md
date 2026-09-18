@@ -218,7 +218,8 @@ Three rules earn their place:
   [`docs/history/memory-loading-findings.md`](docs/history/memory-loading-findings.md).
 - **Getting a note *into* the scope is an explicit act**, not a heuristic.
   `recall promote <file>` moves one note out of the project and into
-  `global/`: stored under the global key, tombstoned under the project's,
+  `global/` or `machine/` — `--to` picks, defaulting to global: stored under
+  that scope's key, tombstoned under the project's,
   moved on disk, and linked from `MEMORY.md`. A move rather than a copy —
   a note in both scopes is pulled twice into every future session of this
   project, and the two copies drift the first time either is edited.

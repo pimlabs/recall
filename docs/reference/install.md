@@ -296,7 +296,7 @@ rather than the project.
 them on its `machine` line; `recall backfill` names this variable for any file
 it skipped under `machine/`.
 
-### Putting a note there: `recall promote`
+### Putting a note in either: `recall promote`
 
 Claude writes a note about *you* while you happen to be working in one
 repository. Move it into the global scope:
@@ -309,6 +309,24 @@ The path is relative to the memory directory (`recall status` prints where
 that is), or absolute. The note is stored under the global key, tombstoned
 under this project's key, moved into `global/` on disk, and linked from
 `MEMORY.md`. Every other wired project picks it up at its next session start.
+
+**`--to machine` sends it to the machine scope instead**, for a note that turns
+out to describe the box rather than you:
+
+```sh
+recall promote jdk.md --to machine
+```
+
+`--to` defaults to `global`, so the command above without it behaves exactly as
+it always has. The refusal when a scope is off names the variable that turns it
+on, rather than leaving you to work out which of two it meant.
+
+It will not move a note *between* `global/` and `machine/`. That is a refusal
+rather than an omission: the index push at the end of a promotion sends
+`MEMORY.md` under the source scope's key, which is only correct while the
+source is this project — so a global-to-machine move would file this project's
+index into the global scope's history. Move the file yourself and the next push
+follows it.
 
 It is a move, not a copy. A note left in both scopes would be pulled twice
 into every future session of this project, and the two copies would drift
