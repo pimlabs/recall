@@ -32,7 +32,12 @@ break will be described here in full rather than smoothed over.
   new scope is for the case it cannot cover: machine facts sitting *beside* a
   real project's memory.
 
-  `recall status` gains a `machine` line; `recall backfill` now names the
+  `recall pull` links these from `MEMORY.md` the way it links global ones —
+  Claude Code opens what that file links and nothing else, so a scope whose
+  files are never linked is memory that syncs and is never read.
+
+  `recall status` gains a `machine` line, which reports the link state as well
+  as the count for exactly that reason; `recall backfill` now names the
   variable that would sync a skipped file instead of always suggesting
   `RECALL_GLOBAL_KEY`.
 - **A memory directory whose global folder is spelled `Global/` no longer

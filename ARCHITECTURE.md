@@ -209,7 +209,10 @@ Three rules earn their place:
   the miscased-name guard read, so a fourth scope cannot be added to one and
   forgotten in the other.
 - **Files are only useful if Claude reads them**, and it reads what
-  `MEMORY.md` links. `recall pull` maintains a link per global file, carrying
+  `MEMORY.md` links. `recall pull` maintains a link per file in *every*
+  reserved directory — the machine scope shipped without this and was inert
+  for one release, syncing correctly into a directory nothing pointed at —
+  carrying
   each file's own front-matter description as the gloss, because that gloss
   is what the model sees when deciding what to open. See
   [`docs/history/memory-loading-findings.md`](docs/history/memory-loading-findings.md).
