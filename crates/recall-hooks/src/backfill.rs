@@ -174,7 +174,16 @@ pub async fn backfill(ctx: &Context) -> Result<Outcome, Error> {
         }
 
         let Some((scope, path)) = scope::route(&ctx.scopes, &rel) else {
-            out.push(rel, Disposition::Unroutable, None);
+            // Unroutable has two causes now and they need different actions
+            // from the reader, so the one that is not "turn global sync on"
+            // says so per file rather than leaving the heading to guess.
+            let detail = scope::miscased_global_dir(&rel).map(|dir| {
+                format!(
+                    "'{dir}/' is not '{}/' — rename it and run this again",
+                    scope::GLOBAL_DIR
+                )
+            });
+            out.push(rel, Disposition::Unroutable, detail);
             continue;
         };
 

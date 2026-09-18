@@ -233,6 +233,17 @@ A few things worth knowing:
 - **`global/` is reserved.** A project topic file must not live there; with
   global sync on it would be shared with every project, and with it off it is
   ignored rather than swept into the current project.
+- **The name is `global`, lowercase, and Recall will not guess.** A folder
+  called `Global/` or `GLOBAL/` syncs nothing — not to the global scope and,
+  more to the point, not into this project's history either. On macOS the
+  default filesystem is case-insensitive, so `Global/` *is* the global
+  directory and treating it as a project folder would file your personal notes
+  into one repository; on Linux it really is a separate folder, so treating it
+  as global would do the reverse. Recall cannot tell which one you are on, so
+  it refuses and says so — `recall status` names the folder, and `recall
+  backfill` names the files. Rename it to `global/` and they sync. Only the
+  folder at the top of the memory directory is reserved: `globalish/`,
+  `Global.md` and `topics/Global/` are ordinary project files.
 - **Turn it on everywhere or nowhere.** `recall pull` maintains links in
   `MEMORY.md`, and `MEMORY.md` is itself synced per project, so a machine
   with global off will carry links to files it never fetches.

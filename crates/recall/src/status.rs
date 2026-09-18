@@ -84,6 +84,11 @@ pub struct Report {
     pub rejected_vars: Vec<&'static str>,
     /// How many global memory files are on disk here.
     pub global_files: usize,
+    /// A directory beside the memory root that names the global one in the
+    /// wrong case, if there is one. Nothing under it syncs, and on macOS it
+    /// looks like the real thing, so it is worth saying out loud.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub miscased_global: Option<String>,
     /// Whether `MEMORY.md` links the global index. Without that link Claude
     /// Code never reads any of it, so it is worth reporting separately from
     /// "the files are here".
@@ -149,6 +154,16 @@ async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report {
         global_files: state::list_memory_files(&memory_dir.join(scope::GLOBAL_DIR))
             .map(|f| f.len())
             .unwrap_or(0),
+        // Only the memory root is read, not the whole tree: the reserved
+        // name is reserved at the root, so a `Global/` three levels down is
+        // an ordinary directory and routes to the project correctly.
+        miscased_global: std::fs::read_dir(&memory_dir).ok().and_then(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.path().is_dir())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .find(|name| scope::miscased_global_dir(name).is_some())
+        }),
         global_linked: std::fs::read(memory_dir.join("MEMORY.md"))
             .map(|b| recall_hooks::global_index_is_linked(&b))
             .unwrap_or(false),
@@ -338,6 +353,16 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
             ),
         }
     );
+    if let Some(dir) = &rep.miscased_global {
+        println!(
+            "             ! '{dir}/' is not '{}/', so nothing under it syncs. On \
+             macOS the two are the same directory and on Linux they are not, so \
+             Recall refuses rather than file it somewhere you did not mean. \
+             Rename it to '{}'.",
+            scope::GLOBAL_DIR,
+            scope::GLOBAL_DIR
+        );
+    }
     println!(
         "RECALL_URL   : {}",
         if cfg.url.is_empty() {

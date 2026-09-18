@@ -74,8 +74,9 @@ pub async fn run() -> anyhow::Result<i32> {
     list(
         &outcome.entries,
         Disposition::Unroutable,
-        "not in any scope — global sync is off, so these belong nowhere. Set \
-         RECALL_GLOBAL_KEY to sync them:",
+        "not in any scope, so these belong nowhere. Either global sync is off \
+         and they are under 'global/' — set RECALL_GLOBAL_KEY to sync them — or \
+         the line says what else is wrong with the path:",
     );
     list(
         &outcome.entries,

@@ -16,6 +16,25 @@ break will be described here in full rather than smoothed over.
 
 ## Unreleased
 
+- **A memory directory whose global folder is spelled `Global/` no longer
+  syncs into the project's history.** It used to, with global sync on or off
+  — nothing under it matched the reserved `global/`, so the project scope,
+  which matches everything left, took it. On macOS that folder *is* the
+  global one: the default filesystem is case-insensitive, so what a user and
+  Claude Code both see as the global directory was being filed into one
+  repository's memory, where every future session on that project would read
+  it.
+
+  Recall now refuses the path instead of guessing, because the right answer
+  depends on a filesystem it cannot see — on Linux `Global/` really is a
+  separate directory. `recall backfill` skips the file and names it, and
+  `recall status` reports the directory with what to rename it to. **If you
+  have such a directory, rename it to `global/` and those files sync as you
+  meant.** Anything already pushed under the wrong scope stays where it is;
+  Recall will not move it for you.
+
+  Only the directory name is reserved, and only at the top of the memory
+  directory: `globalish/`, `Global.md` and `topics/Global/` are untouched.
 - **`recall --version` and `recall -V` work.** They used to fail with
   `error: unexpected argument '--version' found` and exit 2, because the flag
   was disabled in favour of the `recall version` subcommand. Both exist now
