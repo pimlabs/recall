@@ -5,6 +5,38 @@ on:
     branches: [main]
   pull_request:
 
+# Pushing again to a pull request makes the run for the commit it replaced
+# worthless: nobody is waiting on an answer about a commit that is no longer
+# the branch tip. PR #64 took four pushes and ran all four to completion — 198s,
+# 216s, 209s, 183s — and only the last one was being read. The minutes matter
+# less than the queue: three dead runs sit in front of the live one.
+#
+# `deploy` must never be cancelled. It SSHes to the VPS and runs
+# `docker compose up -d --build`; interrupted halfway that leaves production
+# part-way through a rebuild, which is a far worse outcome than any number of
+# wasted runner-minutes. So this must cancel pull-request runs and nothing else.
+#
+# Two independent things keep a push to `main` out of the way, because one
+# would be relying on the other never being edited:
+#
+#   - The group. A pull_request run is keyed by its PR number, so the four runs
+#     on PR #64 share `CI & Deploy-pr-64` and supersede one another. Anything
+#     else is keyed by `github.run_id`, which is unique per run — so a push to
+#     main is alone in its group and there is no other run for it to be
+#     cancelled by, whatever `cancel-in-progress` says.
+#   - `cancel-in-progress`, which is only true for a pull_request event.
+#
+# `github.ref` is the usual key and would also separate the two (a PR run's ref
+# is `refs/pull/64/merge`, a main push's is `refs/heads/main`), but it separates
+# them by accident of naming rather than on purpose: with `cancel-in-progress:
+# true` alongside it, two pushes landing on main in quick succession share the
+# group `refs/heads/main` and the first deploy is killed mid-flight. That is the
+# exact failure this block exists to make unreachable, so the condition it turns
+# on is named here instead of inferred from a ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('uncancellable-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   ci:
     runs-on: ubuntu-latest
