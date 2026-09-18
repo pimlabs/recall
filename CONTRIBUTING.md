@@ -15,7 +15,7 @@ cargo test --workspace                 # what CI runs
 cargo test -p recall-hooks             # just one crate, much faster
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
-cargo build --release -p recall-sync    # binary at target/release/recall
+cargo build --release -p recall    # binary at target/release/recall
 ```
 
 The first build is slow — `rusqlite` compiles SQLite from C. After that it's cached.
@@ -44,7 +44,7 @@ document, and therefore commit to, something you never meant to expose.
 
 That is why the split across crates looks uneven — `recall-wire`,
 `recall-paths` and `recall-hooks` are entirely in-crate, while
-`recall-server` and `recall-sync` also have a `tests/`. It follows what each
+`recall-server` and `recall` also have a `tests/`. It follows what each
 crate is: the first three are libraries whose interesting behaviour is
 internal, and the last two are asked whether their outside edge — an HTTP
 surface, a command-line one — behaves for someone who only has the outside.
@@ -66,7 +66,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps   # what CI runs
 `docs/reference/api.md` is checked the same way — not by review, but by assertion:
 
 ```sh
-cargo build --release -p recall-sync
+cargo build --release -p recall
 ./scripts/api-doc-check.sh target/release/recall
 ```
 

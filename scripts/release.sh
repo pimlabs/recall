@@ -23,7 +23,7 @@ REPO="pimlabs/recall"
 # The shared Homebrew tap. Being named homebrew-* is what lets Homebrew
 # resolve `pimlabs/tap/recall` with no URL and no separate `brew tap` step.
 TAP="pimlabs/homebrew-tap"
-CRATES=(recall-wire recall-paths recall-hooks recall-server recall-sync)
+CRATES=(recall-wire recall-paths recall-hooks recall-server recall)
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
@@ -136,7 +136,13 @@ esac
 step "4/8  crates.io names"
 # --------------------------------------------------------------------------
 # Only meaningful on a first publish, but cheap, and the reason recall-cli
-# had to become recall-sync.
+# had to become recall-sync for v0.1.0.
+#
+# `recall` now reports 200 for a third reason, which is neither of the two the
+# warning below names: the name was transferred to us, and the unrelated 2019
+# crate's versions are still on the index under it. That is expected. It is
+# also why 0.1.x is unavailable to us forever — a version number is never
+# reusable — and why this project went from 0.1.0 straight to 0.2.0.
 taken=0
 for n in "${CRATES[@]}"; do
   a=${n:0:2}; b=${n:2:2}
@@ -306,7 +312,7 @@ if confirm "publish ${#CRATES[@]} crates to crates.io (a version can be yanked, 
     i=$((i + 1))
     [ "$i" -eq "${#CRATES[@]}" ] || sleep 20
   done
-  ok "published — verify with: cargo install recall-sync && recall version"
+  ok "published — verify with: cargo install recall && recall version"
 else
   warn "skipped crates.io"
 fi
@@ -317,7 +323,7 @@ cat <<EOF
 
       curl -fsSL https://recall.pimlabs.id/install | bash
       npm install -g @pimlabs/recall
-      cargo install recall-sync
+      cargo install recall
       brew install pimlabs/tap/recall
 
     Commit the Formula/recall.rb change here too — the tap has the built

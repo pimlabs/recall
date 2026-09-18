@@ -68,7 +68,7 @@ jobs:
         run: echo "RECALL_GIT_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }} -p recall-sync
+        run: cargo build --release --locked --target ${{ matrix.target }} -p recall
 
       - name: Package
         shell: bash

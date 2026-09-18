@@ -221,7 +221,7 @@ crate names are global and first-come, and a half-published set is awkward to
 back out of:
 
 ```sh
-for n in recall-wire recall-paths recall-hooks recall-server recall-sync; do
+for n in recall-wire recall-paths recall-hooks recall-server recall; do
   a=$(echo "$n" | cut -c1-2); b=$(echo "$n" | cut -c3-4)
   printf '%-16s %s\n' "$n" \
     "$(curl -s -o /dev/null -w '%{http_code}' "https://index.crates.io/$a/$b/$n")"
@@ -231,8 +231,16 @@ done
 
 This is not hypothetical: the binary crate was called `recall-cli` until that
 check found the name already belonged to an unrelated project — a TUI session
-browser for AI coding assistants, in almost exactly this space. `recall` is
-taken too. Hence `recall-sync`, publishing a binary still called `recall`.
+browser for AI coding assistants, in almost exactly this space. `recall` was
+taken as well, so v0.1.0 shipped as `recall-sync`.
+
+`recall` has since been transferred to us, and the crate took it at **0.2.0**.
+That is the part worth carrying forward: a transferred name arrives with its
+old versions still on the index, and a version number is never reusable. The
+2019 crate's `0.1.0` sits under that name for good, so 0.1.x was never
+available and the first publishable number was 0.2.0. A `200` from the check
+above no longer means "pick another name" when the name is already ours — it
+means look at which versions are there before choosing the next one.
 
 Then, bottom-up:
 
@@ -241,7 +249,7 @@ cargo publish -p recall-wire
 cargo publish -p recall-paths
 cargo publish -p recall-hooks
 cargo publish -p recall-server
-cargo publish -p recall-sync
+cargo publish -p recall
 ```
 
 Wait for each to land before the next — the index takes a few seconds, and
@@ -249,7 +257,7 @@ Wait for each to land before the next — the index takes a few seconds, and
 of it. Then:
 
 ```sh
-cargo install recall-sync
+cargo install recall
 ```
 
 **crates.io is permanent.** A published version can be yanked but never

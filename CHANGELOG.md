@@ -16,6 +16,31 @@ break will be described here in full rather than smoothed over.
 
 ## Unreleased
 
+- **The crate is `recall`, and the version jumps to 0.2.0.** Installing from
+  crates.io is now:
+
+  ```sh
+  cargo install recall
+  ```
+
+  Through v0.1.0 it was `cargo install recall-sync`, because `recall` and
+  `recall-cli` were both taken on crates.io when that release's preflight ran.
+  The name has since been transferred, and this is a **break** rather than a
+  tidy-up, described here as the file's own rule asks: `cargo install
+  recall-sync` still works and still installs 0.1.0, but it will never see
+  another release. Anyone tracking that crate has to move to `recall`. In
+  practice that is one person, which is why it was worth doing at all.
+
+  The binary has always been `recall` and still is. Nothing about the CLI, the
+  hook commands in a committed `.claude/settings.json`, the HTTP surface or the
+  database changes, so npm, Homebrew and `install.sh` are unaffected — only the
+  cargo line moves.
+
+  **0.2.0, not 0.1.1**, and the reason generalises: crates.io never lets a
+  version number be reused, and `recall` 0.1.0 belongs permanently to the
+  unrelated crate that published it in 2019. 0.1.x was never available to take.
+  A transferred name arrives with someone else's history attached.
+
 - **`recall backfill` sends memory that predates Recall.** The push hook only
   ever sent the file it was handed, so a project whose memory directory
   already held files when Recall arrived kept them to itself: each one
