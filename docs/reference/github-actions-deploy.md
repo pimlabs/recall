@@ -8,6 +8,13 @@
   server), a syntax check of the shipped shell scripts, and a `docker build`
   of `deploy/Dockerfile` (build check only, nothing is pushed anywhere). No
   secrets needed for this job.
+
+  The image build is the expensive part — 124s of a 177-second run — so on a
+  **pull request** it is skipped unless the diff touches `crates/`,
+  `Cargo.toml`, `Cargo.lock` or `deploy/`. On a **push to `main`** it always
+  runs, whatever changed. If that path list ever turns out to be too narrow,
+  the asymmetry is what catches it: `main` goes red before `deploy` (which
+  `needs: ci`) can ship the broken image.
 - **`deploy`** — runs only after `ci` passes, and only for a push that's
   actually landed on `main` (never for PRs, never for other branches). SSHes
   into the VPS, fast-forwards its clone, and rebuilds the stack — the same
