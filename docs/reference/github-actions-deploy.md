@@ -19,6 +19,17 @@
   did exactly that for a while — `error: missing server host` — and five PRs
   were merged over a red build before anyone looked.
 
+Runs for a pull request supersede each other. Push again and the run for the
+commit you replaced is cancelled, because nobody is waiting on an answer about
+a commit that is no longer the branch tip — PR #64 ran four of those to
+completion before this was in place, and they queue ahead of the run you are
+actually waiting for. **Runs for a push to `main` are never cancelled**, since
+`deploy` rebuilds the stack on the VPS and interrupting that halfway leaves
+production part-built. The `concurrency` block at the top of the workflow keys
+pull-request runs by PR number, and everything else by `github.run_id` — unique
+per run, so a push to `main` is alone in its group with nothing in there that
+could supersede it.
+
 The `deploy` job needs secrets it doesn't have by default — set these once
 under the repo's **Settings → Secrets and variables → Actions → New
 repository secret**:
