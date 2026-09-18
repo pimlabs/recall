@@ -101,8 +101,12 @@ The crate and the binary are both `recall` as of 0.2.0. Through v0.1.0 the
 crate was `recall-sync`, because `recall` and `recall-cli` were both taken on
 crates.io by unrelated projects when that preflight ran — a crate name is
 global and first-come, while a binary name is only yours to collide with.
-`cargo install recall-sync` still works and still installs 0.1.0; it will not
-see another release.
+`cargo install recall-sync` no longer works. The crate is still listed, but
+`recall-paths` 0.1.0 — one of the four libraries it was built from — has been
+yanked, and that was its only version. A yanked version cannot be chosen by a
+fresh dependency resolution, so the install fails while resolving rather than
+with a missing-crate error, which is worth knowing if you meet the message
+cold. Use `cargo install recall`.
 
 The version skips 0.1.x under the new name, which is worth knowing if you ever
 inherit a crate name: crates.io never lets a version number be reused, and

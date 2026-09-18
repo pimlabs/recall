@@ -32,10 +32,19 @@ break will be described here in full rather than smoothed over.
   Through v0.1.0 it was `cargo install recall-sync`, because `recall` and
   `recall-cli` were both taken on crates.io when that release's preflight ran.
   The name has since been transferred, and this is a **break** rather than a
-  tidy-up, described here as the file's own rule asks: `cargo install
-  recall-sync` still works and still installs 0.1.0, but it will never see
-  another release. Anyone tracking that crate has to move to `recall`. In
-  practice that is one person, which is why it was worth doing at all.
+  tidy-up, described here as the file's own rule asks: **`cargo install
+  recall-sync` stops working.** Anyone tracking that crate has to move to
+  `recall`. In practice that is one person, which is why it was worth doing at
+  all.
+
+  The way it stops is worth stating, because the error will not name the crate
+  you typed. `recall-sync` itself stays on the index; what is yanked is
+  `recall-paths` 0.1.0, one of the four libraries it depends on, and 0.1.0 was
+  that library's only version. Cargo will not pick a yanked version for a
+  fresh resolution, so the install fails while resolving dependencies. The
+  library is yanked because 0.2.0 folded it into `recall-hooks` and it will
+  never be published again; leaving a crate on the index that nothing will
+  ever update is worse than withdrawing it.
 
   The binary has always been `recall` and still is. Nothing about the CLI, the
   hook commands in a committed `.claude/settings.json`, the HTTP surface or the
