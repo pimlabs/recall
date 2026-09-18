@@ -26,6 +26,21 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --locked
 
+      # The same tests again with TMPDIR behind a symlink, which is what
+      # macOS has by default: its per-user temporary directory lives under
+      # /var, a symlink to /private/var. The binary finds its project root
+      # with `git rev-parse --show-toplevel`, and git resolves symlinks — so
+      # a fixture built from the unresolved spelling and a path the binary
+      # prints are different strings. Seven tests could not pass on macOS
+      # while this runner stayed green, because /tmp here is a real directory
+      # and both spellings agree. One symlink is the entire difference, so
+      # the runner may as well have one.
+      - name: cargo test, with TMPDIR behind a symlink (what macOS has)
+        run: |
+          mkdir -p "$RUNNER_TEMP/real"
+          ln -sfn "$RUNNER_TEMP/real" "$RUNNER_TEMP/link"
+          TMPDIR="$RUNNER_TEMP/link" cargo test --workspace --locked
+
       # `missing_docs` is denied in each library crate, so an undocumented
       # public item already fails the build above. This catches the other
       # half: a doc comment that links to something that no longer exists.

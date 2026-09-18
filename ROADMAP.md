@@ -432,6 +432,32 @@ without running it" is the whole claim those three make.
   `local_path`, which is the same surface as the `route()` guard already
   noted above — so the two belong together.
 
+## Found by releasing it
+
+- **Seven tests could not pass on macOS, and CI never knew.** Found by running
+  `./scripts/release.sh v0.2.0` for real — step 3 stopped at `cargo test`
+  with seven failures in `crates/recall/tests/cli.rs`, every one of them a
+  path compared against a path.
+
+  macOS puts the per-user temporary directory under `/var`, which is a
+  symlink to `/private/var`. `recall` finds its project root with `git
+  rev-parse --show-toplevel`, and git resolves symlinks — so the fixtures
+  built expectations from `/var/folders/…` while every path the binary
+  printed said `/private/var/folders/…`. Not a product bug: the binary was
+  reporting the path Claude Code will use.
+
+  What makes it worth recording is not the symlink. It is that the suite was
+  green on every run anyone had done — the Linux runner's `/tmp` is a real
+  directory, so both spellings agree there and the assertions passed without
+  ever being *tested*. A whole class of assertion was inert on the only
+  machine that ran it, and the first thing to notice was the release.
+
+  **Fixed**, and the reproduction is the useful part: setting `TMPDIR` to a
+  symlink on Linux fails exactly the same seven tests, by name. So the fixture
+  resolves the path once, where it is created, and CI now runs the suite a
+  second time behind a symlinked `TMPDIR` — a runner that cannot see a class
+  of failure is a runner that will let it back in.
+
 ## Explicitly deferred
 
 - **Multi-user / a hosted "Recall as a service for others" product.** Raised and discussed 2026-08-12, shelved: use Recall personally for a while first to get real signal before committing to this. The technical shape is already mapped out if it comes back — it needs deciding on demand, not feasibility:
