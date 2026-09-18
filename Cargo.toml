@@ -5,22 +5,22 @@ members = [
     "crates/recall-paths",
     "crates/recall-hooks",
     "crates/recall-server",
-    "crates/recall-sync",
+    "crates/recall",
 ]
 
 # Shared across every crate so versions can't drift between the halves.
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.82"
 license = "MIT"
 repository = "https://github.com/pimlabs/recall"
 
 [workspace.dependencies]
-recall-wire = { path = "crates/recall-wire", version = "0.1.0" }
-recall-paths = { path = "crates/recall-paths", version = "0.1.0" }
-recall-hooks = { path = "crates/recall-hooks", version = "0.1.0" }
-recall-server = { path = "crates/recall-server", version = "0.1.0" }
+recall-wire = { path = "crates/recall-wire", version = "0.2.0" }
+recall-paths = { path = "crates/recall-paths", version = "0.2.0" }
+recall-hooks = { path = "crates/recall-hooks", version = "0.2.0" }
+recall-server = { path = "crates/recall-server", version = "0.2.0" }
 
 anyhow = "1"
 thiserror = "2"

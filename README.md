@@ -52,7 +52,7 @@ Install the binary, export two variables, and opt each project in:
 npm install -g @pimlabs/recall                    # or bun, or pnpm
 brew install pimlabs/tap/recall
 curl -fsSL https://recall.pimlabs.id/install | bash
-cargo install recall-sync
+cargo install recall
 ```
 
 ```sh
@@ -72,6 +72,12 @@ rather than an omission.
 
 What each install channel actually does, and the rest of the client story, is
 in [`docs/reference/install.md`](docs/reference/install.md).
+
+**On the crate name.** `cargo install recall` has installed this project since
+0.2.0; through v0.1.0 the crate was `recall-sync`. Version `0.1.0` under the
+`recall` name is a different project entirely — a flashcard CLI by Matthew
+Blode, still at [mblode/recall](https://github.com/mblode/recall) — and it
+stays on the index where it is. Thanks to him for handing the name over.
 
 ### Then, whichever door you came through
 
@@ -128,10 +134,10 @@ And the tree:
 
 | Path | What's in it |
 |---|---|
-| `crates/` | The binary. `recall-wire` (frozen contract) · `recall-paths` · `recall-hooks` (client) · `recall-server` · `recall-sync` (`main`, for both halves — `serve` included). See ARCHITECTURE's code map. |
+| `crates/` | The binary. `recall-wire` (frozen contract) · `recall-paths` · `recall-hooks` (client) · `recall-server` · `recall` (`main`, for both halves — `serve` included). See ARCHITECTURE's code map. |
 | `deploy/` | The image, and a Compose file per ingress — Cloudflare Tunnel or an existing Traefik. Runs on anything with Docker. |
 | `scripts/` | `compat-check.sh` (the cutover matrix), `api-doc-check.sh`, `trusted-ip-check.sh`, `install-worker-test.js`, `wrangler-check.py`, `release.sh`, and `probes/`. |
-| `npm/`, `Formula/`, `install.sh` | Three of the four install channels. The fourth, `cargo install recall-sync`, needs no file here. |
+| `npm/`, `Formula/`, `install.sh` | Three of the four install channels. The fourth, `cargo install recall`, needs no file here. |
 | `fixtures/` | A database the retired Node server actually wrote, so the cutover stays testable without it. |
 
 ## License

@@ -24,7 +24,7 @@ already has.
 | **npm** / bun / pnpm | `npm install -g @pimlabs/recall` |
 | **Homebrew** | `brew install pimlabs/tap/recall` |
 | **curl** | `curl -fsSL https://recall.pimlabs.id/install \| bash` |
-| **cargo** | `cargo install recall-sync` |
+| **cargo** | `cargo install recall` |
 
 Supported: macOS and Linux, x64 and arm64. Windows needs WSL. There are no
 runtime dependencies — no `jq`, no `curl`, no Node — except on the server,
@@ -93,15 +93,21 @@ and the two have nothing to do with each other.
 ### cargo
 
 ```sh
-cargo install recall-sync                                   # from crates.io
-cargo install --git https://github.com/pimlabs/recall recall-sync   # from main
+cargo install recall                                   # from crates.io
+cargo install --git https://github.com/pimlabs/recall recall   # from main
 ```
 
-The crate is `recall-sync`; the binary it installs is **`recall`**. They
-differ because both `recall` and `recall-cli` were taken on crates.io by
-unrelated projects when this was first published — a crate name is global and
-first-come, while a binary name is only yours to collide with. `fd-find` installing `fd` is the same
-situation.
+The crate and the binary are both `recall` as of 0.2.0. Through v0.1.0 the
+crate was `recall-sync`, because `recall` and `recall-cli` were both taken on
+crates.io by unrelated projects when that preflight ran — a crate name is
+global and first-come, while a binary name is only yours to collide with.
+`cargo install recall-sync` still works and still installs 0.1.0; it will not
+see another release.
+
+The version skips 0.1.x under the new name, which is worth knowing if you ever
+inherit a crate name: crates.io never lets a version number be reused, and
+`recall` 0.1.0 belongs permanently to the unrelated crate that published it in
+2019. The first number available was 0.2.0.
 
 The `--git` form needs no release, so it is also the answer for anything
 unreleased.
@@ -110,7 +116,7 @@ unreleased.
 
 ```sh
 git clone https://github.com/pimlabs/recall && cd recall
-cargo build --release -p recall-sync
+cargo build --release -p recall
 # binary at target/release/recall
 ```
 

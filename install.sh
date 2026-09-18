@@ -55,7 +55,7 @@ if ! curl -fsSL "$url" -o "$tmp/$asset"; then
   die "could not download $url
     If no release exists yet, build from source instead:
       git clone https://github.com/$REPO && cd recall
-      cargo build --release -p recall-sync   # binary at target/release/recall
+      cargo build --release -p recall   # binary at target/release/recall
     Or, without a Rust toolchain of your own:
       brew install --HEAD pimlabs/tap/recall"
 fi

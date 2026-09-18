@@ -9,7 +9,7 @@ RUN apk add --no-cache musl-dev
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-RUN cargo build --release --locked -p recall-sync
+RUN cargo build --release --locked -p recall
 
 # ...then assemble a runtime that still has Node in it.
 #

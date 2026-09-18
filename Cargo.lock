@@ -872,8 +872,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "recall"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "recall-hooks",
+ "recall-paths",
+ "recall-server",
+ "recall-wire",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "recall-hooks"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "recall-paths",
@@ -888,14 +904,14 @@ dependencies = [
 
 [[package]]
 name = "recall-paths"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "recall-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -911,24 +927,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "recall-sync"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "recall-hooks",
- "recall-paths",
- "recall-server",
- "recall-wire",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "recall-wire"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",

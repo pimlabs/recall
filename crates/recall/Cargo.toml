@@ -1,5 +1,5 @@
 [package]
-name = "recall-sync"
+name = "recall"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 description = "Sync Claude Code's auto memory across machines and cloud sessions"
 
+# Redundant with the package name, and kept anyway. The binary name is
+# load-bearing in a way the package name is not: it is what `install.sh`,
+# the npm shim, the Homebrew formula and — above all — the hook commands
+# committed into users' `.claude/settings.json` all invoke. Pinning it here
+# means a future package rename cannot quietly rename the binary, which is
+# the mistake this crate's own history is made of.
 [[bin]]
 name = "recall"
 path = "src/main.rs"

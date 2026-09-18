@@ -40,7 +40,7 @@ jobs:
       # server on a real socket.
       - name: API reference still matches the server
         run: |
-          cargo build --release -p recall-sync --locked
+          cargo build --release -p recall --locked
           ./scripts/api-doc-check.sh target/release/recall
 
       # Rate limiting runs before auth, so the bucket key is a security
@@ -49,7 +49,7 @@ jobs:
       # client_ip in isolation.
       - name: Rate-limit bucket cannot be chosen by the client
         run: |
-          cargo build --release -p recall-sync --locked
+          cargo build --release -p recall --locked
           ./scripts/trusted-ip-check.sh target/release/recall
 
       # The Worker that publishes recall.pimlabs.id/install. Its routing is

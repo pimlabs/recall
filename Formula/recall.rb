@@ -52,7 +52,7 @@ class Recall < Formula
 
   def install
     if build.head?
-      system "cargo", "install", *std_cargo_args(path: "crates/recall-sync")
+      system "cargo", "install", *std_cargo_args(path: "crates/recall")
     else
       # Each archive holds a single file named for its platform —
       # recall_darwin_arm64 and so on. install.sh renames it the same way.

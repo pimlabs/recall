@@ -55,7 +55,7 @@ check_bytes() {
   fi
 }
 
-[ -x "$BIN" ] || { echo "no binary at $BIN — build it first (cargo build -p recall-sync)"; exit 1; }
+[ -x "$BIN" ] || { echo "no binary at $BIN — build it first (cargo build -p recall)"; exit 1; }
 BIN="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
 [ -f "$FIXTURE" ] || { echo "missing $FIXTURE"; exit 1; }
 
