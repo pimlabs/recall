@@ -65,7 +65,38 @@ fn run(args: &[&str], cwd: &Path, env: &[(&str, &str)], stdin: Option<&str>) -> 
     }
 }
 
-fn git_repo() -> tempfile::TempDir {
+/// A temporary git repository, and the path the binary will call it.
+///
+/// Those are not always the same string, which is the whole reason this type
+/// exists rather than a bare `TempDir`. `recall` finds its project root with
+/// `git rev-parse --show-toplevel`, and git resolves symlinks. On macOS the
+/// per-user temporary directory lives under `/var`, which is a symlink to
+/// `/private/var` — so `TempDir::path()` says `/var/folders/…` while every
+/// path the binary prints says `/private/var/folders/…`, and a test naming a
+/// file compares one spelling against the other.
+///
+/// It fails only on macOS. The Linux runner's `/tmp` is a real directory, so
+/// both spellings agree there and CI stayed green while seven tests could not
+/// pass on the machine this project is developed on.
+///
+/// `home_elsewhere()` deliberately stays a plain `TempDir`: `HOME` is read
+/// from the environment verbatim and never goes through git, so the files
+/// under it really are reported with the unresolved spelling.
+struct Repo {
+    /// Held for its `Drop`, which removes the directory. Never read — reading
+    /// it is the mistake this type exists to make impossible.
+    _dir: tempfile::TempDir,
+    path: PathBuf,
+}
+
+impl Repo {
+    /// Where the repository is, spelled the way the binary will spell it.
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+fn git_repo() -> Repo {
     let dir = tempfile::tempdir().unwrap();
     for args in [
         vec!["init", "-q"],
@@ -78,7 +109,34 @@ fn git_repo() -> tempfile::TempDir {
             .unwrap()
             .success());
     }
-    dir
+    // Resolved once, here, rather than at each assertion: rebuilding an
+    // expected path a second way is how a test ends up asserting nothing.
+    let path = std::fs::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
+    Repo { _dir: dir, path }
+}
+
+/// The guard for the above, and it is filesystem-independent on purpose: it
+/// asks git what it thinks the root is and compares that with what the tests
+/// build their expectations from. On Linux both answers are the unresolved
+/// path and this passes trivially; on macOS they differ unless `git_repo()`
+/// resolves, which is exactly the bug.
+#[test]
+fn the_repo_helper_agrees_with_git_about_where_the_repo_is() {
+    let repo = git_repo();
+    let out = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git rev-parse failed in the fixture");
+    let git_says = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert_eq!(
+        repo.path().display().to_string(),
+        git_says,
+        "the tests build expected paths from one spelling and the binary \
+         reports another, so every assertion naming a path is comparing two \
+         different strings"
+    );
 }
 
 /// An address nothing is listening on, so the client's failure path runs
