@@ -64,22 +64,33 @@ ssh-keygen -t ed25519 -f "$d/recall-deploy-key" -N "" -C "github-actions-recall-
 ```
 
 That makes two files in `$d`: `recall-deploy-key` (private) and
-`recall-deploy-key.pub` (public). Copy each to where it belongs — the public
-one to the VPS, the private one into the GitHub secret — and then
-`rm -rf "$d"`, in that order. Afterwards the private key exists in exactly
-one place, which is the point of making a key for this and nothing else.
+`recall-deploy-key.pub` (public).
+
+**Keep `$d` until the end of this section.** The order is: install the public
+half, *prove the key works*, paste the private half into the secret, then
+`rm -rf "$d"`. Deleting before the proof is what turns a later failure into a
+guess — a deploy that cannot connect looks identical whether the key was
+wrong, the account cannot take a login, or the secret was pasted short a line.
+
+Nothing on this machine reads the private key afterwards. Its one consumer is
+the Actions runner, and GitHub secrets cannot be read back out, so a copy kept
+here is a credential with no reader. `~/.ssh/` would work too, with
+`chmod 600` — the reason to prefer a scratch directory is not permissions but
+which way the default points: in `~/.ssh/` keeping it is what happens unless
+you remember to delete it, and a key with no purpose tends to outlive the one
+it had, following you onto the next machine.
 
 **Install the public key on the VPS**, appended to the deploy user's
 `authorized_keys`:
 
 ```sh
-ssh-copy-id -i "$d/recall-deploy-key.pub" -p <port> <user>@<vps-host>
+ssh-copy-id -i "$d/recall-deploy-key.pub" -p <port> <deploy-user>@<vps-host>
 ```
 
-Both of those need to log in as the deploy user, which is exactly what does
-not work yet if that account has never had a key. When the deploy user is a
-separate account you reach through your own, go in as yourself and write the
-file with `sudo` instead:
+That needs to log in as the deploy user, which is exactly what does not work
+yet if that account has never had a key. When the deploy user is a separate
+account you reach through your own, go in as yourself and write the file with
+`sudo` instead:
 
 ```sh
 sudo -u <deploy-user> mkdir -p /home/<deploy-user>/.ssh
@@ -93,11 +104,27 @@ Check the account can actually take an SSH login first — `getent passwd
 <deploy-user>` ending in `/usr/sbin/nologin` or `/bin/false` means it cannot,
 whatever you put in `authorized_keys`.
 
-**Put the private key into the `DEPLOY_SSH_KEY` secret** — paste the
+**Prove the key works before GitHub depends on it.** From your own machine,
+with the key you have not yet pasted anywhere:
+
+```sh
+ssh -i "$d/recall-deploy-key" <deploy-user>@<vps-host> \
+  'cd <DEPLOY_PATH> && git log --oneline -1'
+```
+
+A commit, with no password prompt, means the key, the account and the path are
+all right. Anything else is cheaper to fix now than through a merge-and-watch
+cycle, and it tells you *which* of the three is wrong, which a failed deploy
+does not.
+
+**Then put the private key into the `DEPLOY_SSH_KEY` secret** — paste the
 entire contents of `$d/recall-deploy-key` (including the
 `-----BEGIN OPENSSH PRIVATE KEY-----`/`-----END...-----` lines) as the
-secret value. Then `rm -rf "$d"`: it only needs to exist in the one GitHub
-secret from here on.
+secret value. A truncated paste fails the same way a wrong key does, which is
+the other reason to have run the check above: it narrows what changed.
+
+**Then `rm -rf "$d"`.** It only needs to exist in the one GitHub secret from
+here on.
 
 ## Optional hardening: restrict what the key can do
 
