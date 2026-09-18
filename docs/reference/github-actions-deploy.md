@@ -84,8 +84,20 @@ directory," consider forcing this specific key to only run the deploy
 command, via a `command=` prefix on its line in `authorized_keys`:
 
 ```
-command="cd ~/recall/deploy && git -C .. pull --ff-only origin main && docker compose up -d --build",restrict ssh-ed25519 AAAA... github-actions-recall-deploy
+command="cd /home/recall-deploy/recall-rust/deploy && git -C .. pull --ff-only origin main && docker compose -f docker-compose.traefik.yml -f docker-compose.traefik.local.yml up -d --build",restrict ssh-ed25519 AAAA... github-actions-recall-deploy
 ```
+
+**The `-f` flags are not optional here**, and this example used to omit them
+— which is precisely the failure the next section describes: with no `-f`,
+`docker compose` acts on `docker-compose.yml`, so on a host running the
+Traefik stack it quietly builds and starts the *other* ingress alongside the
+real one. Whatever you set `DEPLOY_COMPOSE_FILES` to has to appear here too,
+or the hardening silently deploys something different from what the workflow
+deploys.
+
+Paths and filenames above are an example; use your own. `docker compose ls`
+on the VPS prints the config files the running stack was actually built
+from, which is the answer rather than a guess.
 
 With that in place, this key can't be used for an interactive shell or any
 other command even if it leaked — it can only ever run that one deploy
