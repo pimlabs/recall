@@ -9,7 +9,7 @@ jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -117,7 +117,7 @@ jobs:
     steps:
       # Full history, because the last step counts how far behind production
       # is, and a shallow clone cannot see a commit from four days ago.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -137,9 +137,10 @@ jobs:
             echo "configured=true" >> "$GITHUB_OUTPUT"
           else
             echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::DEPLOY_HOST is not set, so there is nothing to \
-            deploy to. This is not a failure — see docs/reference/github-actions-deploy.md \
-            to wire up a VPS."
+            # One line on purpose. A `\` continuation inside a quoted
+            # shell string keeps the next line's indentation, so the
+            # annotation came out with runs of spaces in it.
+            echo "::notice::DEPLOY_HOST is not set, so there is nothing to deploy to. This is not a failure — see docs/reference/github-actions-deploy.md to wire up a VPS."
           fi
 
       # This repository ships two ingresses, so the job cannot know which
@@ -152,11 +153,7 @@ jobs:
         if: steps.secrets.outputs.configured == 'true'
         run: |
           if [ -z "${{ vars.DEPLOY_COMPOSE_FILES }}" ]; then
-            echo "::error::DEPLOY_HOST is set but DEPLOY_COMPOSE_FILES is not, \
-            so this job does not know which ingress your server runs and will \
-            not guess. Set it as a repository variable, e.g. \
-            '-f docker-compose.traefik.yml -f docker-compose.traefik.local.yml'. \
-            See docs/reference/github-actions-deploy.md."
+            echo "::error::DEPLOY_HOST is set but DEPLOY_COMPOSE_FILES is not, so this job does not know which ingress your server runs and will not guess. Set it as a repository variable, e.g. '-f docker-compose.traefik.yml -f docker-compose.traefik.local.yml'. See docs/reference/github-actions-deploy.md."
             exit 1
           fi
 

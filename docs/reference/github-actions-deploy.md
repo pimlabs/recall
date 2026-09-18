@@ -52,30 +52,87 @@ rotating your access everywhere, not just here. A key scoped to this one
 purpose costs nothing extra and only needs revoking in one place if it
 ever needs to be.
 
-On your own machine (not the VPS):
+On your own machine (not the VPS), and **not inside a git checkout** — `-f
+./recall-deploy-key` writes to the working directory, and this document used
+to be read while standing in this repository, where nothing in `.gitignore`
+would have caught it. A scratch directory costs one line and cannot be
+committed by accident:
 
 ```sh
-ssh-keygen -t ed25519 -f ./recall-deploy-key -N "" -C "github-actions-recall-deploy"
+d=$(mktemp -d)
+ssh-keygen -t ed25519 -f "$d/recall-deploy-key" -N "" -C "github-actions-recall-deploy"
 ```
 
-This makes two files: `recall-deploy-key` (private) and
+That makes two files in `$d`: `recall-deploy-key` (private) and
 `recall-deploy-key.pub` (public).
+
+These are stages, not a script. The public half has to reach the VPS and the
+private half has to reach GitHub, both by hand, in between — so pasting the
+whole section in one go runs the check before the key is installed, and the
+delete before the secret is saved.
+
+`$d` also lives only in the shell that ran `mktemp`, so stay in that terminal,
+or note the path it printed: the directory outlives the variable.
+
+**Keep `$d` until the end of this section.** The order is: install the public
+half, *prove the key works*, paste the private half into the secret, then
+`rm -rf "$d"`. Deleting before the proof is what turns a later failure into a
+guess — a deploy that cannot connect looks identical whether the key was
+wrong, the account cannot take a login, or the secret was pasted short a line.
+
+Nothing on this machine reads the private key afterwards. Its one consumer is
+the Actions runner, and GitHub secrets cannot be read back out, so a copy kept
+here is a credential with no reader. `~/.ssh/` would work too, with
+`chmod 600` — the reason to prefer a scratch directory is not permissions but
+which way the default points: in `~/.ssh/` keeping it is what happens unless
+you remember to delete it, and a key with no purpose tends to outlive the one
+it had, following you onto the next machine.
 
 **Install the public key on the VPS**, appended to the deploy user's
 `authorized_keys`:
 
 ```sh
-ssh-copy-id -i recall-deploy-key.pub -p <port> <user>@<vps-host>
-# or, if ssh-copy-id isn't available:
-cat recall-deploy-key.pub | ssh <user>@<vps-host> "cat >> ~/.ssh/authorized_keys"
+ssh-copy-id -i "$d/recall-deploy-key.pub" -p <port> <deploy-user>@<vps-host>
 ```
 
-**Put the private key into the `DEPLOY_SSH_KEY` secret** — paste the
-entire contents of `recall-deploy-key` (including the
+That needs to log in as the deploy user, which is exactly what does not work
+yet if that account has never had a key. When the deploy user is a separate
+account you reach through your own, go in as yourself and write the file with
+`sudo` instead:
+
+```sh
+sudo -u <deploy-user> mkdir -p /home/<deploy-user>/.ssh
+sudo -u <deploy-user> chmod 700 /home/<deploy-user>/.ssh
+echo 'ssh-ed25519 AAAA... github-actions-recall-deploy' \
+  | sudo -u <deploy-user> tee -a /home/<deploy-user>/.ssh/authorized_keys
+sudo -u <deploy-user> chmod 600 /home/<deploy-user>/.ssh/authorized_keys
+```
+
+Check the account can actually take an SSH login first — `getent passwd
+<deploy-user>` ending in `/usr/sbin/nologin` or `/bin/false` means it cannot,
+whatever you put in `authorized_keys`.
+
+**Prove the key works before GitHub depends on it.** From your own machine,
+with the key you have not yet pasted anywhere:
+
+```sh
+ssh -i "$d/recall-deploy-key" <deploy-user>@<vps-host> \
+  'cd <DEPLOY_PATH> && git log --oneline -1'
+```
+
+A commit, with no password prompt, means the key, the account and the path are
+all right. Anything else is cheaper to fix now than through a merge-and-watch
+cycle, and it tells you *which* of the three is wrong, which a failed deploy
+does not.
+
+**Then put the private key into the `DEPLOY_SSH_KEY` secret** — paste the
+entire contents of `$d/recall-deploy-key` (including the
 `-----BEGIN OPENSSH PRIVATE KEY-----`/`-----END...-----` lines) as the
-secret value. Then delete the local copy of the private key —
-`rm recall-deploy-key` — it only needs to exist in the one GitHub secret
-from here on.
+secret value. A truncated paste fails the same way a wrong key does, which is
+the other reason to have run the check above: it narrows what changed.
+
+**Then `rm -rf "$d"`.** It only needs to exist in the one GitHub secret from
+here on.
 
 ## Optional hardening: restrict what the key can do
 
@@ -84,8 +141,20 @@ directory," consider forcing this specific key to only run the deploy
 command, via a `command=` prefix on its line in `authorized_keys`:
 
 ```
-command="cd ~/recall/deploy && git -C .. pull --ff-only origin main && docker compose up -d --build",restrict ssh-ed25519 AAAA... github-actions-recall-deploy
+command="cd /home/recall-deploy/recall-rust/deploy && git -C .. pull --ff-only origin main && docker compose -f docker-compose.traefik.yml -f docker-compose.traefik.local.yml up -d --build",restrict ssh-ed25519 AAAA... github-actions-recall-deploy
 ```
+
+**The `-f` flags are not optional here**, and this example used to omit them
+— which is precisely the failure the next section describes: with no `-f`,
+`docker compose` acts on `docker-compose.yml`, so on a host running the
+Traefik stack it quietly builds and starts the *other* ingress alongside the
+real one. Whatever you set `DEPLOY_COMPOSE_FILES` to has to appear here too,
+or the hardening silently deploys something different from what the workflow
+deploys.
+
+Paths and filenames above are an example; use your own. `docker compose ls`
+on the VPS prints the config files the running stack was actually built
+from, which is the answer rather than a guess.
 
 With that in place, this key can't be used for an interactive shell or any
 other command even if it leaked — it can only ever run that one deploy

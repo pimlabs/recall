@@ -24,6 +24,14 @@ deploy/.env
 # a token into the history.
 .claude/settings.local.json
 
+# A deploy key generated while standing in this directory, which
+# docs/reference/github-actions-deploy.md used to invite. That document now
+# makes the key in a scratch directory instead, and this is only a backstop —
+# a private key that reaches a checkout has already been somewhere it should
+# not be, and ignoring it does not undo that.
+recall-deploy-key
+recall-deploy-key.pub
+
 # Python bytecode from the two checkers in scripts/. Nothing there is
 # importable as a module, so this only appears when one is run directly.
 __pycache__/
