@@ -51,13 +51,21 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use crate::scope::GLOBAL_DIR;
+use crate::scope::{GLOBAL_DIR, MACHINE_DIR, RESERVED_DIRS};
 
 use crate::atomic;
 use crate::state;
 
-/// Rewrites the `MEMORY.md` lines that point into the global directory, so
+/// Rewrites the `MEMORY.md` lines that point into a reserved directory, so
 /// they name exactly the files that are there.
+///
+/// Every scope with a directory of its own needs this, not just the global
+/// one. A synced file that nothing links is memory that exists and is never
+/// read — `docs/history/memory-loading-findings.md` established by probing
+/// the real CLI that Claude Code opens what `MEMORY.md` links and nothing
+/// else. The machine scope shipped without it and was inert for exactly that
+/// reason, which is why this is driven off [`RESERVED_DIRS`] rather than
+/// naming a directory.
 ///
 /// Idempotent: with nothing changed the file comes out byte-identical, so
 /// this does not itself cause a push.
@@ -80,11 +88,14 @@ pub(crate) fn refresh(memory_dir: &Path) -> io::Result<()> {
 /// noise. A removed line is content, and content removed only here comes
 /// straight back with the next pull, so the caller owes it a push.
 pub(crate) fn refresh_forgetting(memory_dir: &Path, vacated: Option<&str>) -> io::Result<bool> {
-    let entries = list(&memory_dir.join(GLOBAL_DIR))?;
+    let mut sets = Vec::new();
+    for dir in RESERVED_DIRS {
+        sets.push((dir, list(&memory_dir.join(dir))?));
+    }
     let path = memory_dir.join("MEMORY.md");
     let existing = read_or_empty(&path)?;
 
-    let updated = rewrite(&existing, &entries, vacated);
+    let updated = rewrite(&existing, &sets, vacated);
     if updated != existing {
         atomic::write(&path, ".recall-memory-", ".md", updated.as_bytes())?;
     }
@@ -97,16 +108,37 @@ pub(crate) fn refresh_forgetting(memory_dir: &Path, vacated: Option<&str>) -> io
 /// here" and "Claude Code can reach them" are different questions, and
 /// `recall status` has to answer the second one.
 pub fn is_linked(memory_md: &[u8]) -> bool {
-    String::from_utf8_lossy(memory_md).contains(&format!("]({GLOBAL_DIR}/"))
+    links_into(memory_md, GLOBAL_DIR)
 }
+
+/// The same question about the machine directory.
+///
+/// A separate function rather than a parameter on the last one, because both
+/// call sites want to name the scope they are asking about — but one body, so
+/// the two answers are produced the same way.
+pub fn machine_is_linked(memory_md: &[u8]) -> bool {
+    links_into(memory_md, MACHINE_DIR)
+}
+
+fn links_into(memory_md: &[u8], dir: &str) -> bool {
+    String::from_utf8_lossy(memory_md).contains(&format!("]({dir}/"))
+}
+
+/// One linkable file: its path inside the reserved directory, and the
+/// front-matter description that becomes the gloss.
+///
+/// Named because clippy is right that the bare tuple had stopped being
+/// readable once it gained a second level — and the gloss is the part the
+/// model sees when deciding what to open, which is worth having a word for.
+type Entry = (String, Option<String>);
 
 /// Replaces every Recall-owned line with the current set, keeping everything
 /// else exactly as it was — bar a line linking `vacated`, which is dropped.
-fn rewrite(existing: &str, entries: &[(String, Option<String>)], vacated: Option<&str>) -> String {
-    let marker = format!("]({GLOBAL_DIR}/");
+fn rewrite(existing: &str, sets: &[(&str, Vec<Entry>)], vacated: Option<&str>) -> String {
+    let markers: Vec<String> = sets.iter().map(|(dir, _)| format!("]({dir}/")).collect();
     let mut out = String::new();
     for line in existing.lines() {
-        if line.contains(&marker) {
+        if markers.iter().any(|m| line.contains(m.as_str())) {
             continue;
         }
         if vacated.is_some_and(|path| links_to(line, path)) {
@@ -121,11 +153,18 @@ fn rewrite(existing: &str, entries: &[(String, Option<String>)], vacated: Option
         out.pop();
     }
 
-    for (path, description) in entries {
-        let title = title_of(path);
-        match description {
-            Some(d) => out.push_str(&format!("- [{title}]({GLOBAL_DIR}/{path}) — {d}\n")),
-            None => out.push_str(&format!("- [{title}]({GLOBAL_DIR}/{path})\n")),
+    // In RESERVED_DIRS order, so the file is stable rather than dependent on
+    // which scopes happen to have files. The directory is visible in every
+    // link, which is the only signal the model gets that "8 GB of RAM"
+    // describes this machine and not the project — so the prefix is carried
+    // rather than stripped for tidiness.
+    for (dir, entries) in sets {
+        for (path, description) in entries {
+            let title = title_of(path);
+            match description {
+                Some(d) => out.push_str(&format!("- [{title}]({dir}/{path}) — {d}\n")),
+                None => out.push_str(&format!("- [{title}]({dir}/{path})\n")),
+            }
         }
     }
     out
@@ -264,6 +303,73 @@ mod tests {
             memory_md.contains("- [Deep](topics/a/b.md) — also kept"),
             "{memory_md}"
         );
+    }
+
+    /// The machine scope shipped syncing files that Claude Code would never
+    /// open, because this index only ever knew about `global/`. A file that
+    /// nothing links is memory that exists and is never read — which is worse
+    /// than the effort of syncing it suggests, because everything about it
+    /// looks like it is working.
+    #[test]
+    fn a_machine_file_is_linked_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem = dir.path();
+        write(
+            &mem.join("global/editor.md"),
+            "---\ndescription: tabs\n---\nx\n",
+        );
+        write(
+            &mem.join("machine/ram.md"),
+            "---\ndescription: 8 GB\n---\ny\n",
+        );
+
+        refresh(mem).unwrap();
+
+        let memory_md = read(&mem.join("MEMORY.md"));
+        assert!(
+            memory_md.contains("](machine/ram.md)"),
+            "a machine memory has to be reachable from MEMORY.md: {memory_md}"
+        );
+        assert!(memory_md.contains("](global/editor.md)"), "{memory_md}");
+        // The prefix is the only signal the model gets that this fact is
+        // about the machine rather than the project, so it stays in the link.
+        assert!(memory_md.contains("— 8 GB"), "{memory_md}");
+    }
+
+    /// Each reserved directory owns only its own lines: refreshing after a
+    /// machine file goes away must not take the global links with it, and the
+    /// reverse.
+    #[test]
+    fn the_two_scopes_do_not_rewrite_each_others_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem = dir.path();
+        write(&mem.join("global/editor.md"), "x\n");
+        write(&mem.join("machine/ram.md"), "y\n");
+        write(&mem.join("machine/jdk.md"), "z\n");
+        refresh(mem).unwrap();
+
+        fs::remove_file(mem.join("machine/jdk.md")).unwrap();
+        refresh(mem).unwrap();
+
+        let memory_md = read(&mem.join("MEMORY.md"));
+        assert!(!memory_md.contains("machine/jdk.md"), "{memory_md}");
+        assert!(memory_md.contains("machine/ram.md"), "{memory_md}");
+        assert!(memory_md.contains("global/editor.md"), "{memory_md}");
+    }
+
+    /// `recall status` asks these two separately, and has to get two answers.
+    #[test]
+    fn linkedness_is_answered_per_scope() {
+        let only_global = b"- [E](global/editor.md)\n";
+        assert!(is_linked(only_global));
+        assert!(!machine_is_linked(only_global));
+
+        let only_machine = b"- [R](machine/ram.md)\n";
+        assert!(!is_linked(only_machine));
+        assert!(machine_is_linked(only_machine));
+
+        assert!(!is_linked(b"- [N](note.md)\n"));
+        assert!(!machine_is_linked(b"- [N](note.md)\n"));
     }
 
     /// A global file that goes away must lose its line, or `MEMORY.md` points

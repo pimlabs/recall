@@ -400,6 +400,14 @@ shape it took is at the end of its entry.
   default: it is a new machine every time, it declares no key, and it gets no
   machine scope — rather than inheriting a laptop's RAM.
 
+  One thing it shipped broken, found by asking the next obvious question
+  rather than by a test: `index.rs` knew only `global/`, so machine files
+  synced into a directory `MEMORY.md` never linked — and Claude Code reads
+  what that file links. The scope worked in every mechanical sense and the
+  memory was inert. The index is now driven off the same `RESERVED_DIRS` list
+  as the router, and `recall status` reports link state per scope so the same
+  gap cannot be invisible twice.
+
   Proven against a real server rather than in unit tests alone: with
   `RECALL_MACHINE_KEY=mbp` the three files split cleanly across
   `acme/app`, `global:eko` and `machine:mbp`; a second machine declaring

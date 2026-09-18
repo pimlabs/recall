@@ -103,6 +103,11 @@ pub struct Report {
     pub machine_key: Option<String>,
     /// How many machine memory files are on disk here.
     pub machine_files: usize,
+    /// Whether `MEMORY.md` links the machine index. Reported separately from
+    /// the count for the same reason as the global one: files being present
+    /// and Claude Code being able to reach them are different questions, and
+    /// the machine scope shipped answering only the first.
+    pub machine_linked: bool,
     /// A directory at the memory root naming a reserved one in the wrong
     /// case, if there is one. Nothing under it syncs, and on macOS it looks
     /// like the real thing, so it is worth saying out loud.
@@ -180,6 +185,9 @@ async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report {
         machine_files: state::list_memory_files(&memory_dir.join(scope::MACHINE_DIR))
             .map(|f| f.len())
             .unwrap_or(0),
+        machine_linked: std::fs::read(memory_dir.join("MEMORY.md"))
+            .map(|b| recall_hooks::machine_index_is_linked(&b))
+            .unwrap_or(false),
         miscased_dir: std::fs::read_dir(&memory_dir).ok().and_then(|entries| {
             entries
                 .flatten()
@@ -396,7 +404,19 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
             // someone wants; this content is true of one machine only, and a
             // cloud session — a new machine every time — should leave it off.
             None => "off (set RECALL_MACHINE_KEY for memories about this machine only)".to_string(),
-            Some(key) => format!("{key} — {} file(s)", rep.machine_files),
+            Some(key) if rep.machine_files == 0 => format!("{key} — no files yet"),
+            Some(key) if rep.machine_linked => {
+                format!(
+                    "{key} — {} file(s), linked from MEMORY.md",
+                    rep.machine_files
+                )
+            }
+            // The state this scope shipped in: the files arrive and Claude
+            // Code never opens them, because it reads what MEMORY.md links.
+            Some(key) => format!(
+                "{key} — {} file(s), NOT linked from MEMORY.md yet (run 'recall pull')",
+                rep.machine_files
+            ),
         }
     );
     if let Some(d) = &rep.miscased_dir {

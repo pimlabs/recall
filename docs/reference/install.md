@@ -286,9 +286,15 @@ machine; it never reaches a different one.
   real project's memory, in a repository, where the override would make you
   choose between them.
 
-`recall status` shows the key and the file count on its `machine` line, and
-`recall backfill` names this variable for any file it skipped under
-`machine/`.
+`recall pull` links these from `MEMORY.md` the same way it links global
+notes, because that is the only way Claude Code reads them — see
+[`memory-loading-findings.md`](../history/memory-loading-findings.md). The link
+keeps the `machine/` prefix, which is the signal that a fact describes the box
+rather than the project.
+
+`recall status` shows the key, the file count, and whether `MEMORY.md` links
+them on its `machine` line; `recall backfill` names this variable for any file
+it skipped under `machine/`.
 
 ### Putting a note there: `recall promote`
 
