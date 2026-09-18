@@ -19,8 +19,12 @@
 //! to take, because crates.io never lets a version number be reused and an
 //! unrelated 2019 crate holds that one under this name for good.
 //!
-//! `cargo install recall-sync` still works and still installs 0.1.0. It will
-//! not see another release.
+//! `cargo install recall-sync` no longer resolves. Not because that crate
+//! was withdrawn — it is still on the index — but because `recall-paths`
+//! 0.1.0, which it depends on, is yanked, and 0.1.0 was that crate's only
+//! version. A yanked version cannot be picked by a fresh resolution, so the
+//! install fails at the dependency rather than at the name. `cargo install
+//! recall` is the way in.
 
 mod backfill;
 mod hook;
