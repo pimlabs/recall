@@ -5,7 +5,9 @@
 #   ./scripts/release.sh v0.1.0 --dry-run    # every check, no pushing
 #   ./scripts/release.sh v0.1.0              # the real thing
 #
-# Everything up to the tag is automated and safe to re-run. The three steps
+# Everything up to the tag is automated and safe to re-run, and so is the
+# whole script: it reads each registry before publishing, so a run that
+# failed part-way is finished by running the same command again. The three steps
 # that need your credentials — the tag push, `npm publish`, `cargo publish` —
 # each stop and ask first, because none of them can be undone: a tag can be
 # force-moved but people may already have pinned it, an npm version can be
@@ -59,10 +61,27 @@ VERSION="${TAG#v}"
 $DRY_RUN && printf '%s(dry run — nothing will be pushed or published)%s\n' "$yellow" "$off"
 
 # --------------------------------------------------------------------------
-step "1/8  Working tree"
+step "1/9  Working tree"
 # --------------------------------------------------------------------------
-[ -z "$(git status --porcelain)" ] || die "uncommitted changes — commit or stash first"
-ok "clean"
+# Formula/recall.rb is allowed to be dirty and nothing else is: the last
+# step of this script rewrites it, and it lands via a pull request afterwards
+# like every other change, so a resumed run finds it modified. Treating that
+# as "uncommitted changes" would make the script unable to finish what it
+# started.
+dirty="$(git status --porcelain)"
+# Anchored on the whole porcelain line — two status characters, a space,
+# then exactly that path. Matching the path unanchored would also excuse a
+# vendor/Formula/recall.rb, which is a different file with the same ending.
+others="$(printf '%s\n' "$dirty" | grep -v '^.. Formula/recall\.rb$' | grep -v '^$' || true)"
+if [ -n "$others" ]; then
+  printf '%s\n' "$others"
+  die "uncommitted changes — commit or stash first"
+fi
+if [ -n "$dirty" ]; then
+  warn "Formula/recall.rb is modified — this script's own output from an earlier run"
+else
+  ok "clean"
+fi
 
 branch="$(git rev-parse --abbrev-ref HEAD)"
 [ "$branch" = "main" ] || die "on '$branch'; releases are cut from main"
@@ -73,16 +92,54 @@ git fetch origin main --quiet || die "could not reach origin"
   || die "main is not in sync with origin/main — pull or push first"
 ok "in sync with origin/main"
 
-if git rev-parse "$TAG" >/dev/null 2>&1; then
-  die "$TAG already exists locally. A released tag must not be moved."
+# An existing tag used to end the run, which meant a release that failed
+# anywhere after step 5 could never be finished — the tag it had just pushed
+# locked the door behind it. A tag pointing at this exact commit is not a
+# collision, it is the previous attempt, so the run resumes and every step
+# below skips what is already done.
+RESUMING=false
+remote_tag="$(git ls-remote --tags origin "refs/tags/$TAG^{}" | cut -f1)"
+[ -n "$remote_tag" ] || remote_tag="$(git ls-remote --tags origin "refs/tags/$TAG" | cut -f1)"
+if [ -n "$remote_tag" ]; then
+  if [ "$remote_tag" = "$(git rev-parse HEAD)" ]; then
+    RESUMING=true
+    warn "$TAG is already on origin, pointing here — resuming an earlier run"
+  elif git merge-base --is-ancestor "$remote_tag" HEAD 2>/dev/null; then
+    # The ordinary way a resume arrives: the release failed part-way, the fix
+    # for whatever broke it was merged, and main has moved on. What gets
+    # published would then be this tree and not the tagged one, so the
+    # difference is printed rather than described — a crate's package only
+    # contains its own directory, so commits touching nothing under crates/
+    # change nothing that reaches the registry, and that is visible here.
+    RESUMING=true
+    warn "$TAG is on origin at ${remote_tag:0:8}, and main has moved on since:"
+    git --no-pager log --oneline "$remote_tag..HEAD" | sed 's/^/      /'
+    echo "    what differs from the tag:"
+    git --no-pager diff --stat "$remote_tag..HEAD" | sed 's/^/      /'
+    # Asked, not assumed — but never in a dry run, where `confirm` always
+    # answers no and would make the one mode meant for looking around the
+    # only one that cannot reach the steps below.
+    if $DRY_RUN; then
+      warn "dry run: would ask whether to publish from HEAD rather than from $TAG"
+    elif ! confirm "publish from HEAD rather than from $TAG"; then
+      die "stopped. Either cut a new version, or check out $TAG and run from there."
+    fi
+  else
+    die "$TAG is on origin at ${remote_tag:0:8}, which is not an ancestor of HEAD. Releases are immutable; bump the version."
+  fi
+elif git rev-parse "$TAG" >/dev/null 2>&1; then
+  die "$TAG exists locally but not on origin. Delete it or push it; do not move it."
+else
+  ok "$TAG is unused"
 fi
-if git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
-  die "$TAG already exists on origin. Releases are immutable; bump the version."
-fi
-ok "$TAG is unused"
+
+# Channels that were asked to publish and did not. Kept as a string rather
+# than an array: under `set -u`, bash 3.2 — which macOS still ships — errors
+# on ${arr[@]} when the array is empty.
+failed=""
 
 # --------------------------------------------------------------------------
-step "2/8  Versions agree"
+step "2/9  Versions agree"
 # --------------------------------------------------------------------------
 # These three are not linked to each other. npm's postinstall looks for a
 # release named after its *own* version, so a drift here ships a package that
@@ -110,7 +167,7 @@ printf '    Cargo.toml %s | npm %s | Formula %s | tag %s\n' \
 ok "versions line up"
 
 # --------------------------------------------------------------------------
-step "3/8  The suite"
+step "3/9  The suite"
 # --------------------------------------------------------------------------
 run() {
   local label="$1"; shift
@@ -144,7 +201,7 @@ case "$built" in
 esac
 
 # --------------------------------------------------------------------------
-step "4/8  crates.io names"
+step "4/9  crates.io names"
 # --------------------------------------------------------------------------
 # Only meaningful on a first publish, but cheap, and the reason recall-cli
 # had to become recall-sync for v0.1.0.
@@ -168,9 +225,11 @@ done
   || warn "$taken already on crates.io — fine if that is you republishing, fatal if not"
 
 # --------------------------------------------------------------------------
-step "5/8  Tag and push"
+step "5/9  Tag and push"
 # --------------------------------------------------------------------------
-if confirm "create and push $TAG (this publishes a GitHub Release)"; then
+if $RESUMING; then
+  ok "$TAG is already pushed — skipping"
+elif confirm "create and push $TAG (this publishes a GitHub Release)"; then
   git tag -a "$TAG" -m "recall $VERSION" || die "could not create the tag"
   git push origin "$TAG" || { git tag -d "$TAG"; die "could not push the tag (local tag removed)"; }
   ok "pushed $TAG — the release workflow is now building four targets"
@@ -181,7 +240,7 @@ else
 fi
 
 # --------------------------------------------------------------------------
-step "6/8  Wait for the release, then fix the formula"
+step "6/9  Wait for the release"
 # --------------------------------------------------------------------------
 printf '    waiting for the release assets (native runners, ~5-10 min)'
 release_url="https://github.com/$REPO/releases/download/$TAG"
@@ -195,8 +254,10 @@ done
 
 if ! curl -sfI "$release_url/checksums.txt" >/dev/null 2>&1; then
   printf '\n'
-  warn "timed out. Check https://github.com/$REPO/actions, then re-run steps 6-8 by hand"
-  warn "(docs/reference/releasing.md has each command)"
+  warn "timed out. Check https://github.com/$REPO/actions — if the builds are"
+  warn "still running, run this same command again once they finish; nothing"
+  warn "published so far is republished. docs/reference/releasing.md has each"
+  warn "command if you would rather finish by hand."
   exit 1
 fi
 
@@ -208,6 +269,71 @@ for asset in recall_darwin_amd64 recall_darwin_arm64 recall_linux_amd64 recall_l
   fi
 done
 
+# --------------------------------------------------------------------------
+step "7/9  npm"
+# --------------------------------------------------------------------------
+# Scoped packages default to private, hence --access public. postinstall never
+# runs during publish, so the download path is only exercised on install.
+if curl -sf "https://registry.npmjs.org/@pimlabs%2Frecall/$VERSION" >/dev/null 2>&1; then
+  ok "npm already has $VERSION — skipping"
+elif confirm "npm publish @pimlabs/recall@$VERSION (a version cannot be unpublished after 72h)"; then
+  if (cd npm && npm publish --access public); then
+    ok "published — verify with: npm install -g @pimlabs/recall && recall version"
+  else
+    # Not fatal. crates.io has nothing to do with npm, and ending the run here
+    # is what left v0.2.0 with four crates unpublished and no way to re-run.
+    warn "npm publish failed — continuing, the steps below do not depend on it"
+    warn "a 404 on PUT usually means a stale token, not a missing package: npm login"
+    failed="$failed npm"
+  fi
+else
+  warn "skipped npm"
+fi
+
+# --------------------------------------------------------------------------
+step "8/9  crates.io"
+# --------------------------------------------------------------------------
+# Bottom-up, because each crate must be on the index before anything that
+# depends on it can even be packaged.
+if confirm "publish ${#CRATES[@]} crates to crates.io (a version can be yanked, never deleted)"; then
+  i=0
+  for n in "${CRATES[@]}"; do
+    i=$((i + 1))
+    # Asking the index costs one request and saves publishing a version that
+    # is already there, which is what makes a second run of this script safe.
+    if curl -sf "https://index.crates.io/${n:0:2}/${n:2:2}/$n" 2>/dev/null \
+         | grep -q "\"vers\":\"$VERSION\""; then
+      printf '    %-16s already at %s\n' "$n" "$VERSION"
+      continue
+    fi
+    printf '    publishing %s ... ' "$n"
+    if cargo publish -p "$n" >/tmp/release-publish.log 2>&1; then
+      printf '%sok%s\n' "$green" "$off"
+    else
+      printf '%sFAILED%s\n' "$red" "$off"
+      tail -20 /tmp/release-publish.log
+      # Stop the loop but not the script: the crates after this one depend on
+      # it and would fail anyway, while the formula below does not.
+      warn "stopped at $n — the ones before it are published and will be skipped next run"
+      failed="$failed crates.io"
+      break
+    fi
+    # The index needs a moment; publishing the next crate too early fails
+    # with "no matching package named ...". Indexed rather than ${CRATES[-1]},
+    # which needs bash 4.3 — macOS still ships 3.2.
+    [ "$i" -eq "${#CRATES[@]}" ] || sleep 20
+  done
+  [ -n "$failed" ] || ok "published — verify with: cargo install recall && recall version"
+else
+  warn "skipped crates.io"
+fi
+
+# --------------------------------------------------------------------------
+step "9/9  Formula, and the tap"
+# --------------------------------------------------------------------------
+# Last, and that is the point: this rewrites Formula/recall.rb, and cargo
+# refuses to publish from a repository with uncommitted changes anywhere in
+# it. Run before step 8, as it used to be, it guarantees crates.io fails.
 # The formula installs the prebuilt archives, so it needs the release's own
 # four checksums rather than a hash of the source tarball. They are taken
 # from checksums.txt, which the workflow generated from the artifacts it had
@@ -259,7 +385,7 @@ ok "Formula/recall.rb updated"
 git --no-pager diff --stat Formula/recall.rb
 
 # --------------------------------------------------------------------------
-step "6b/8  Publish the formula to the tap"
+step "9b/9  Publish the formula to the tap"
 # --------------------------------------------------------------------------
 # The formula has to reach $TAP for `brew install pimlabs/tap/recall` to see
 # it. This used to end at "open a PR by hand", which is the step a release
@@ -289,45 +415,6 @@ else
   warn "skipped — brew will keep installing whatever the tap currently has"
 fi
 
-# --------------------------------------------------------------------------
-step "7/8  npm"
-# --------------------------------------------------------------------------
-# Scoped packages default to private, hence --access public. postinstall never
-# runs during publish, so the download path is only exercised on install.
-if confirm "npm publish @pimlabs/recall@$VERSION (a version cannot be unpublished after 72h)"; then
-  (cd npm && npm publish --access public) || die "npm publish failed"
-  ok "published — verify with: npm install -g @pimlabs/recall && recall version"
-else
-  warn "skipped npm"
-fi
-
-# --------------------------------------------------------------------------
-step "8/8  crates.io"
-# --------------------------------------------------------------------------
-# Bottom-up, because each crate must be on the index before anything that
-# depends on it can even be packaged.
-if confirm "publish ${#CRATES[@]} crates to crates.io (a version can be yanked, never deleted)"; then
-  i=0
-  for n in "${CRATES[@]}"; do
-    printf '    publishing %s ... ' "$n"
-    if cargo publish -p "$n" >/tmp/release-publish.log 2>&1; then
-      printf '%sok%s\n' "$green" "$off"
-    else
-      printf '%sFAILED%s\n' "$red" "$off"
-      tail -20 /tmp/release-publish.log
-      die "stopped at $n. Fix it, then resume from here — the ones before it are already published."
-    fi
-    # The index needs a moment; publishing the next crate too early fails
-    # with "no matching package named ...". Indexed rather than ${CRATES[-1]},
-    # which needs bash 4.3 — macOS still ships 3.2.
-    i=$((i + 1))
-    [ "$i" -eq "${#CRATES[@]}" ] || sleep 20
-  done
-  ok "published — verify with: cargo install recall && recall version"
-else
-  warn "skipped crates.io"
-fi
-
 step "Done"
 cat <<EOF
     Verify each channel from a clean machine:
@@ -337,7 +424,15 @@ cat <<EOF
       cargo install recall
       brew install pimlabs/tap/recall
 
-    Commit the Formula/recall.rb change here too — the tap has the built
-    copy, this repository keeps the source it was built from.
+    Formula/recall.rb is modified and still needs a pull request — the tap
+    has the built copy, this repository keeps the source it was built from,
+    and until that merges this repository still names the previous version.
     Cutting the production server over is separate — see deploy/README.md.
 EOF
+
+if [ -n "$failed" ]; then
+  warn "did not publish:$failed"
+  echo "    Fix the cause and run the same command again. It reads each registry"
+  echo "    first, so anything already published is skipped rather than retried."
+  exit 1
+fi

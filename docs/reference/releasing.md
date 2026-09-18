@@ -14,11 +14,26 @@ Order matters, because three of the four depend on the release existing.
 ```
 
 That script is this document, executable. It runs the preflight, checks the
-three version fields agree, runs the full suite plus both real-server
+three version fields agree, runs the full suite plus all three real-server
 checkers, checks the crate names are still free, then walks the three
 irreversible steps — tag, `npm publish`, `cargo publish` — **asking before
 each one**. Answering anything but `y` skips that step; nothing is published
 by accident.
+
+**Run it again if it stops part-way.** It reads each registry before
+publishing anything, so a channel that already has this version is skipped
+rather than retried, and a tag already on origin is a resume rather than a
+collision. A failure in one channel no longer ends the run either: npm and
+crates.io have nothing to do with each other, so the one that can still work
+does. Whatever did not publish is named at the end and the script exits
+non-zero.
+
+If main has moved on since the tag — the ordinary case, because the fix for
+whatever broke the release gets merged — the script prints what differs from
+the tag and asks before publishing from `HEAD` instead. A crate's package
+contains only its own directory, so commits that touch nothing under
+`crates/` change nothing that reaches the registry; the diff it prints is how
+you tell.
 
 The rest of this page is what it does and why, for when a step fails and you
 need to finish by hand.
@@ -34,7 +49,7 @@ cargo fmt --all --check
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
 cargo build --release
-./scripts/compat-check.sh target/release/recall     # 11 checks
+./scripts/compat-check.sh target/release/recall     # 19 checks
 ./scripts/api-doc-check.sh target/release/recall    # 27 checks
 ./scripts/trusted-ip-check.sh target/release/recall # 9 checks
 ```
@@ -160,6 +175,14 @@ specific record would not break the hostname — it would quietly demote it,
 which is worse.
 
 ## 2. Homebrew
+
+> Ordered last in `release.sh`, after both registries, and not for tidiness:
+> rewriting `Formula/recall.rb` leaves the working tree dirty, and `cargo
+> publish` refuses to package from a repository with uncommitted changes
+> anywhere in it. With the formula written first — as it was through v0.2.0 —
+> crates.io could not run at all. The formula still needs a pull request of
+> its own afterwards; the script does not commit it, and says so when it
+> finishes.
 
 The formula installs the release archives rather than building them, so it
 carries **four** checksums — one per platform — and they come from the
