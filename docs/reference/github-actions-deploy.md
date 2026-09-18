@@ -31,11 +31,18 @@ repository secret**:
 | `DEPLOY_PORT` | Optional, defaults to `22` |
 | `DEPLOY_PATH` | Optional, defaults to `~/recall` on the VPS |
 
-And one **variable**, not a secret — it names filenames, nothing sensitive:
+And two **variables**, not secrets — one names filenames, the other a URL
+that is already public:
 
 | Variable | Value |
 |---|---|
 | `DEPLOY_COMPOSE_FILES` | The `-f` flags your server is built from — see below |
+| `DEPLOY_HEALTH_URL` | Your server's `/health` URL, e.g. `https://recall.example.com/health` |
+
+`DEPLOY_HEALTH_URL` is independent of everything above: set it even if you
+deploy by hand and never wire up the secrets. It is what makes every push to
+`main` state, on the run's summary page, which build production is actually
+serving — see below.
 
 ## Generating a dedicated deploy key
 
@@ -132,6 +139,33 @@ which reads like a broken deployment when it is not.
 That the image contains `wget` is asserted by the `ci` job on the same image
 the deploy runs, rather than assumed. An untested assumption in this exact
 place is what produced the bug above.
+
+## Every push says what production is running
+
+Whether or not the deploy steps ran, the last step of the job asks
+`DEPLOY_HEALTH_URL` for its `git_commit` and writes the answer to the run's
+summary:
+
+> ### Production is NOT running this push
+>
+> | | commit |
+> |---|---|
+> | production | `5f35be3` — 25 commits behind |
+> | this push | `30fee03` |
+
+This exists because the alternative is silence. When `DEPLOY_HOST` is unset
+the deploy steps skip and the job still reports success — correct for a fork,
+and invisible for a repository that does have a server. On 2026-09-18 four
+pushes landed on `main`, every run was green, and the VPS stayed on a build
+from the 14th. Nothing was broken; nothing said anything either.
+
+It never fails the job. Deploying by hand is a legitimate choice, and a
+workflow that goes red over a choice is a workflow that gets ignored — which
+is the same mistake, one step along. It emits a warning annotation instead.
+
+`/health` needs no authentication, which is why this works without the deploy
+secrets. If the variable is unset, the summary says that too, rather than
+leaving you to wonder whether it checked.
 
 ## Verifying it works
 
