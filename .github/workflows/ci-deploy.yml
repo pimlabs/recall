@@ -89,6 +89,14 @@ jobs:
           bash -n install.sh
           bash -n scripts/compat-check.sh
           bash -n scripts/api-doc-check.sh
+          bash -n deploy/backup-offbox.sh
+
+      # The off-box backup runs against a stub rclone, so it needs no bucket
+      # and no credentials. What it asserts cannot be seen from the script's
+      # output: a run that wrongly deleted the remote and one that did not
+      # look identical from here.
+      - name: Off-box backup never asks rclone to delete
+        run: ./scripts/backup-offbox-check.sh
           bash -n scripts/trusted-ip-check.sh
           bash -n scripts/release.sh
 
