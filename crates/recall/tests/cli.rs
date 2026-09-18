@@ -819,12 +819,104 @@ fn promote_is_loud_about_missing_configuration() {
 // Surface
 // ---------------------------------------------------------------------------
 
+/// Every command the CLI offers. A new one added without a line here is a
+/// command the help tests below will not notice is missing from the help.
+const COMMANDS: &[&str] = &[
+    "init", "backfill", "promote", "status", "serve", "push", "pull", "version", "help",
+];
+
 #[test]
 fn version_prints_and_exits_zero() {
     let dir = tempfile::tempdir().unwrap();
     let r = run(&["version"], dir.path(), &[], None);
     assert_eq!(r.code, 0);
+    // `scripts/release.sh` matches on this prefix to confirm the binary it
+    // just built is the one being tagged, so the shape is a contract with the
+    // release, not a formatting preference.
     assert!(r.stdout.starts_with("recall "), "stdout: {}", r.stdout);
+}
+
+/// Three ways to ask, one answer. The subcommand is the older surface and
+/// cannot be dropped; `--version` is what everyone's fingers type and what
+/// scripts reach for. Having both is fine. Having both disagree is the bug
+/// class this project keeps finding in itself, so they are pinned together
+/// rather than each to a literal.
+#[test]
+fn the_three_ways_to_ask_for_the_version_give_the_same_answer() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let sub = run(&["version"], dir.path(), &[], None);
+    let long = run(&["--version"], dir.path(), &[], None);
+    let short = run(&["-V"], dir.path(), &[], None);
+
+    for (name, r) in [("version", &sub), ("--version", &long), ("-V", &short)] {
+        assert_eq!(r.code, 0, "{name} exited {}: {}", r.code, r.stderr);
+    }
+    assert_eq!(
+        long.stdout, sub.stdout,
+        "`--version` and `version` disagree, so one of them is lying"
+    );
+    assert_eq!(short.stdout, sub.stdout, "`-V` drifted from the other two");
+}
+
+/// Help has to be reachable by every reflex someone might have, and has to
+/// name everything it can do. A command that exists but is absent from the
+/// help is a command nobody finds.
+#[test]
+fn help_answers_to_every_form_and_names_every_command() {
+    let dir = tempfile::tempdir().unwrap();
+
+    for form in [vec!["--help"], vec!["-h"], vec!["help"]] {
+        let r = run(&form, dir.path(), &[], None);
+        assert_eq!(r.code, 0, "{form:?} exited {}: {}", r.code, r.stderr);
+        for command in COMMANDS {
+            assert!(
+                r.stdout.contains(command),
+                "{form:?} does not mention `{command}`: {}",
+                r.stdout
+            );
+        }
+    }
+    assert!(
+        run(&["--help"], dir.path(), &[], None)
+            .stdout
+            .contains("--version"),
+        "the version flag should be discoverable from the help that mentions it"
+    );
+}
+
+/// Per-command help, both ways round. `recall help status` and `recall status
+/// --help` are the same question asked by people with different habits.
+#[test]
+fn per_command_help_works_from_either_direction() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let before = run(&["help", "status"], dir.path(), &[], None);
+    let after = run(&["status", "--help"], dir.path(), &[], None);
+
+    assert_eq!(before.code, 0, "stderr: {}", before.stderr);
+    assert_eq!(after.code, 0, "stderr: {}", after.stderr);
+    assert_eq!(before.stdout, after.stdout);
+    assert!(
+        before.stdout.contains("--json"),
+        "a command's own flags belong in its help: {}",
+        before.stdout
+    );
+}
+
+/// Running the bare binary is a question, not an instruction, and answering
+/// it with silence and success would be the wrong answer to both halves.
+#[test]
+fn no_arguments_prints_help_and_does_not_look_successful() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = run(&[], dir.path(), &[], None);
+
+    assert_ne!(r.code, 0, "a bare `recall` should not read as success");
+    let combined = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("Usage") && combined.contains("init"),
+        "it should print the help it is refusing to guess at: {combined}"
+    );
 }
 
 // ---------------------------------------------------------------------------

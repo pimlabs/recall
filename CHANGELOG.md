@@ -16,6 +16,12 @@ break will be described here in full rather than smoothed over.
 
 ## Unreleased
 
+- **`recall --version` and `recall -V` work.** They used to fail with
+  `error: unexpected argument '--version' found` and exit 2, because the flag
+  was disabled in favour of the `recall version` subcommand. Both exist now
+  and print the same bytes, including the commit the binary was built from.
+  `recall version` is unchanged, so nothing that used it needs to move.
+
 - **The crate is `recall`, and the version jumps to 0.2.0.** Installing from
   crates.io is now:
 
