@@ -432,6 +432,29 @@ without running it" is the whole claim those three make.
   `local_path`, which is the same surface as the `route()` guard already
   noted above — so the two belong together.
 
+  **Fixed**, though not the way the last sentence above guesses, and the
+  divergence is the interesting part. A case-insensitive match cannot be
+  right: `local_path` *generates* a path and has no case to be insensitive
+  about, and the correct destination genuinely differs by filesystem. On
+  macOS `Global/` **is** the global directory, so routing it there is right.
+  On Linux — where the cloud sessions run — it is a different directory, so
+  routing it there files a project's notes into the user's every project.
+  Recall cannot see which filesystem a path came from.
+
+  So `route()` refuses instead: a first segment that matches `global`
+  case-insensitively but not exactly belongs to no scope. That is correct on
+  both, and it is the direction that can be walked back — a file not synced
+  is fixed by renaming a directory, while a file synced to the wrong scope is
+  the one-way door this guard exists for.
+
+  Refusing silently would only have traded one invisible bug for another, so
+  the refusal is visible: `backfill` names the file and the fix per line, and
+  `recall status` reports the directory. Proven end to end rather than by unit
+  test alone — against a local server, the unguarded binary put
+  `Global/notes.md` into `acme/app`'s history, and the guarded one sent 2 of 3
+  files and said why the third stayed. `globalish/` still syncs, because the
+  reserved name is the directory name and not a word that resembles it.
+
 ## Explicitly deferred
 
 - **Multi-user / a hosted "Recall as a service for others" product.** Raised and discussed 2026-08-12, shelved: use Recall personally for a while first to get real signal before committing to this. The technical shape is already mapped out if it comes back — it needs deciding on demand, not feasibility:

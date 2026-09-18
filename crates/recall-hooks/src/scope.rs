@@ -118,14 +118,55 @@ pub fn global_key(raw: &str) -> Option<String> {
     Some(format!("global:{raw}"))
 }
 
+/// The first segment of `rel` when it names the reserved global directory
+/// in a casing other than the canonical one.
+///
+/// This exists because the answer depends on a filesystem Recall cannot see.
+/// macOS's default is case-insensitive, so a directory created as `Global/`
+/// **is** the global directory there — one inode, and `read_dir` reports the
+/// name it happened to be created with. On Linux, where the cloud sessions
+/// run, `Global/` is a different directory that merely looks like this one.
+/// Both readings are defensible and they route the same file to different
+/// keys, so [`route`] refuses rather than guess. This names the directory so
+/// the refusal can say which one it meant.
+///
+/// ASCII case folding on purpose. [`GLOBAL_DIR`] is ASCII, and full Unicode
+/// folding brings in cases — the Kelvin sign, the dotless i — that have no
+/// business deciding whose history someone's notes land in.
+///
+/// ```
+/// # use recall_hooks::scope::miscased_global_dir;
+/// assert_eq!(miscased_global_dir("Global/editor.md"), Some("Global"));
+/// assert_eq!(miscased_global_dir("global/editor.md"), None); // canonical
+/// assert_eq!(miscased_global_dir("globals/thing.md"), None); // another word
+/// ```
+pub fn miscased_global_dir(rel: &str) -> Option<&str> {
+    let head = rel.split('/').next()?;
+    (head != GLOBAL_DIR && head.eq_ignore_ascii_case(GLOBAL_DIR)).then_some(head)
+}
+
 /// Which scope owns `rel`, and what that scope calls it.
 ///
 /// `rel` is relative to the memory directory, slash-separated. Returns
-/// [`None`] for a path that belongs to no scope — today that is only the
-/// global directory itself when global sync is off, which must *not* fall
-/// through to the project scope: pushing someone's global notes into one
-/// repository's history is the one outcome worth refusing.
+/// [`None`] for a path that belongs to no scope. Two things land there, and
+/// both must *not* fall through to the project scope — pushing someone's
+/// global notes into one repository's history is the one outcome worth
+/// refusing:
+///
+/// - the global directory itself, and anything under it while global sync is
+///   off;
+/// - a directory that names the global one in the wrong case, which on a
+///   case-insensitive filesystem *is* that directory — see
+///   [`miscased_global_dir`].
 pub fn route<'a>(scopes: &'a [Scope], rel: &str) -> Option<(&'a Scope, String)> {
+    // Ahead of the loop, because this has to hold whether global sync is on
+    // or off. With it on, a miscased directory missed the global prefix and
+    // fell through; with it off, it missed the guard below. Both landed in
+    // the project scope, which is the one outcome this module exists to
+    // refuse. See [`miscased_global_dir`] for why refusing beats guessing.
+    if miscased_global_dir(rel).is_some() {
+        return None;
+    }
     for scope in scopes {
         let Some(prefix) = &scope.prefix else {
             // The project scope matches anything left, except the global
@@ -212,6 +253,54 @@ mod tests {
             (scope.key.as_str(), path.as_str()),
             ("acme/app", "MEMORY.md")
         );
+    }
+
+    /// The finding this guard was added for: on macOS a directory created as
+    /// `Global/` is the global directory, and Recall was filing everything
+    /// under it into the repository's own history instead — with global sync
+    /// on *or* off, which is what made it worth refusing rather than
+    /// re-routing.
+    #[test]
+    fn a_miscased_global_directory_is_never_swept_into_the_project() {
+        let on = both();
+        let off = scopes("acme/app".into(), None);
+
+        for rel in [
+            "Global/editor.md",
+            "GLOBAL/editor.md",
+            "gLoBaL/deep/nested.md",
+            "Global",
+        ] {
+            assert!(route(&on, rel).is_none(), "global on, for {rel}");
+            assert!(route(&off, rel).is_none(), "global off, for {rel}");
+        }
+    }
+
+    /// The refusal is narrow on purpose: it is the *directory name*, not any
+    /// word that resembles it, and not a file.
+    #[test]
+    fn only_the_directory_name_is_reserved_in_any_case() {
+        let s = both();
+        for rel in [
+            "Globalish.md",
+            "Globals/thing.md",
+            "Global.md",
+            "a/Global/b.md",
+        ] {
+            let (scope, path) = route(&s, rel).expect("should still route");
+            assert_eq!(scope.key, "acme/app", "for {rel}");
+            assert_eq!(path, rel, "for {rel}");
+        }
+    }
+
+    #[test]
+    fn miscased_global_dir_names_the_directory_it_refused() {
+        assert_eq!(miscased_global_dir("Global/editor.md"), Some("Global"));
+        assert_eq!(miscased_global_dir("GLOBAL"), Some("GLOBAL"));
+        // The canonical one is not miscased, and neither is another word.
+        assert_eq!(miscased_global_dir("global/editor.md"), None);
+        assert_eq!(miscased_global_dir("globals/thing.md"), None);
+        assert_eq!(miscased_global_dir(""), None);
     }
 
     #[test]
