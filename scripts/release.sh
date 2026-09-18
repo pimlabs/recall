@@ -89,12 +89,23 @@ step "2/8  Versions agree"
 # installs nothing.
 cargo_v=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
 npm_v=$(grep -m1 '"version"' npm/package.json | cut -d'"' -f4)
-formula_v=$(grep -m1 'refs/tags' Formula/recall.rb | sed 's#.*refs/tags/v\([^.]*\.[^.]*\.[^.]*\)\.tar\.gz.*#\1#')
+# Read from the same line step 6 rewrites, deliberately. This used to parse a
+# `refs/tags/vX.Y.Z` URL, which the formula stopped containing when it moved
+# to prebuilt archives — so it matched nothing, `formula_v` was empty, and the
+# warning below printed "still points at v" and could never be right. A check
+# and the write it guards have to agree on where the value lives.
+formula_v=$(grep -m1 '^  version "' Formula/recall.rb | cut -d'"' -f2)
 
 printf '    Cargo.toml %s | npm %s | Formula %s | tag %s\n' \
   "$cargo_v" "$npm_v" "$formula_v" "$VERSION"
 [ "$cargo_v" = "$VERSION" ] || die "Cargo.toml says $cargo_v, you asked for $VERSION"
 [ "$npm_v" = "$VERSION" ]   || die "npm/package.json says $npm_v, you asked for $VERSION"
+# An empty read is not a stale formula, it is a broken parser, and the two
+# have to be told apart out loud. Reading nothing is exactly how the previous
+# pattern rotted unnoticed: it printed "still points at v" — a version with no
+# number in it — for every release after the formula changed shape.
+[ -n "$formula_v" ] \
+  || die "could not read a version from Formula/recall.rb — the grep above has stopped matching, so this check is not checking anything"
 [ "$formula_v" = "$VERSION" ] || warn "Formula still points at v$formula_v — step 6 fixes this"
 ok "versions line up"
 
