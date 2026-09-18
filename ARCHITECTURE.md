@@ -138,8 +138,8 @@ A pull that can't reach the server, or a machine with nothing configured, warns 
 
 **Resolved in Phase 0 (see `docs/history/phase-0-findings.md` §6):** Claude Code does *not* scope its own memory storage by git remote — it uses the local filesystem path (git root, or cwd if none) with non-alphanumeric characters replaced by `-`. That's machine-local by construction (a laptop clone and a cloud clone of the same repo get different slugs), which is exactly the gap Recall exists to bridge — so Recall deliberately uses a *different* derivation than Claude Code's own:
 
-- **`project_key`** (server-side, must agree across machines): the git remote's `owner/repo`, taking just the last two path segments so it normalizes identically across SSH (`git@host:owner/repo.git`), HTTPS (`https://host/owner/repo.git`), and locally-proxied remotes that cloud sandboxes rewrite `origin` to. Implemented in `recall_paths::project::key`.
-- **local memory directory** (client-side, per-machine): replicates Claude Code's own local-path-slug algorithm exactly, so the hooks read and write the same directory Claude Code itself uses on that machine. Implemented in `recall_paths::claude`. The subtlety: Claude Code's slug is a JavaScript regex replace, which operates on **UTF-16 code units**, so `é` becomes one dash and `🚀` becomes two. Iterating bytes or `chars()` both diverge for any non-ASCII path — and the shell version did exactly that, computing a directory Claude Code never writes to.
+- **`project_key`** (server-side, must agree across machines): the git remote's `owner/repo`, taking just the last two path segments so it normalizes identically across SSH (`git@host:owner/repo.git`), HTTPS (`https://host/owner/repo.git`), and locally-proxied remotes that cloud sandboxes rewrite `origin` to. Implemented in `recall_hooks::project::key`.
+- **local memory directory** (client-side, per-machine): replicates Claude Code's own local-path-slug algorithm exactly, so the hooks read and write the same directory Claude Code itself uses on that machine. Implemented in `recall_hooks::claude`. The subtlety: Claude Code's slug is a JavaScript regex replace, which operates on **UTF-16 code units**, so `é` becomes one dash and `🚀` becomes two. Iterating bytes or `chars()` both diverge for any non-ASCII path — and the shell version did exactly that, computing a directory Claude Code never writes to.
 
 `RECALL_PROJECT_KEY` overrides the derivation, trimmed and lowercased into
 the same namespace so a declaration on one machine and a derived key on
@@ -171,28 +171,43 @@ Known limitation: git hosts with nested groups (e.g. GitLab subgroups) collapse 
 ## Scopes: what is synced, under which key
 
 A **scope** pairs a `project_key` on the wire with a subtree of the local
-memory directory. There are two:
+memory directory. There are three:
 
-| Scope | Key | Local subtree |
-|---|---|---|
-| project | `owner/repo` from the git remote, or `RECALL_PROJECT_KEY` | the memory directory itself |
-| global | `global:<RECALL_GLOBAL_KEY>` | `<memory dir>/global/` |
+| Scope | Key | Local subtree | Travels to |
+|---|---|---|---|
+| project | `owner/repo` from the git remote, or `RECALL_PROJECT_KEY` | the memory directory itself | anyone syncing that repository |
+| global | `global:<RECALL_GLOBAL_KEY>` | `<memory dir>/global/` | every project you sync |
+| machine | `machine:<RECALL_MACHINE_KEY>` | `<memory dir>/machine/` | only a machine declaring the same key |
 
 The global scope exists because Claude Code stores facts about *the user*
 inside whichever project it happened to learn them in — it even labels them
 `type: user` in the file's own front matter — and those should follow the
 person, not the repository.
 
+The machine scope exists because some of what it records describes neither:
+how much RAM this box has, which of two `dotnet` installs wins here. The
+global scope is not a loose fit for that, it is a way of making memory
+confidently wrong — "this machine has 8 GB" is false on the next machine, and
+that is worse than having no memory of it at all. Both extra scopes are
+off unless their variable is set, for different reasons: global because
+sharing more than someone expected is rude, machine because a box that has
+not said which box it is must not be handed another's facts. That also makes
+an ephemeral cloud session right by default — new machine every time, no key,
+no machine scope.
+
 The server learns nothing new from this. A scope key is just another opaque
 `project_key`, so the frozen HTTP surface and the SQLite schema are
 untouched; `global:your-name` is a project as far as storage is concerned. All the
-routing is client-side, in `recall_paths::scope`.
+routing is client-side, in `recall_hooks::scope`.
 
 Three rules earn their place:
 
-- **A path under `global/` never falls through to the project scope.** With
-  global sync off it is ignored, not absorbed. Pushing someone's personal
-  notes into one repository's history is a one-way door.
+- **A path under a reserved directory never falls through to the project
+  scope.** With that scope off it is ignored, not absorbed. Pushing someone's
+  personal notes, or one machine's facts, into a repository's history is a
+  one-way door. The reserved names live in one list that both the router and
+  the miscased-name guard read, so a fourth scope cannot be added to one and
+  forgotten in the other.
 - **Files are only useful if Claude reads them**, and it reads what
   `MEMORY.md` links. `recall pull` maintains a link per global file, carrying
   each file's own front-matter description as the gloss, because that gloss

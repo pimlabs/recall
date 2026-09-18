@@ -41,6 +41,20 @@ pub enum KeySource {
     DeclaredButRejected,
 }
 
+/// A directory at the memory root that names a reserved one in the wrong
+/// case.
+///
+/// Both halves are carried rather than the offending name alone, so the text
+/// report and the JSON say the same thing without either of them working out
+/// the answer a second time.
+#[derive(serde::Serialize)]
+pub struct MiscasedDir {
+    /// The name on disk, e.g. `Global`.
+    pub found: String,
+    /// The name it would have to be, e.g. `global`.
+    pub reserved: &'static str,
+}
+
 /// The `--json` shape. Stable enough to script against; that is the point of
 /// having it at all.
 #[derive(serde::Serialize)]
@@ -84,11 +98,16 @@ pub struct Report {
     pub rejected_vars: Vec<&'static str>,
     /// How many global memory files are on disk here.
     pub global_files: usize,
-    /// A directory beside the memory root that names the global one in the
-    /// wrong case, if there is one. Nothing under it syncs, and on macOS it
-    /// looks like the real thing, so it is worth saying out loud.
+    /// The key machine memories sync under, when a machine scope is set.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub miscased_global: Option<String>,
+    pub machine_key: Option<String>,
+    /// How many machine memory files are on disk here.
+    pub machine_files: usize,
+    /// A directory at the memory root naming a reserved one in the wrong
+    /// case, if there is one. Nothing under it syncs, and on macOS it looks
+    /// like the real thing, so it is worth saying out loud.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub miscased_dir: Option<MiscasedDir>,
     /// Whether `MEMORY.md` links the global index. Without that link Claude
     /// Code never reads any of it, so it is worth reporting separately from
     /// "the files are here".
@@ -157,12 +176,21 @@ async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report {
         // Only the memory root is read, not the whole tree: the reserved
         // name is reserved at the root, so a `Global/` three levels down is
         // an ordinary directory and routes to the project correctly.
-        miscased_global: std::fs::read_dir(&memory_dir).ok().and_then(|entries| {
+        machine_key: cfg.machine_key.clone(),
+        machine_files: state::list_memory_files(&memory_dir.join(scope::MACHINE_DIR))
+            .map(|f| f.len())
+            .unwrap_or(0),
+        miscased_dir: std::fs::read_dir(&memory_dir).ok().and_then(|entries| {
             entries
                 .flatten()
                 .filter(|e| e.path().is_dir())
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .find(|name| scope::miscased_global_dir(name).is_some())
+                .find_map(|e| {
+                    let found = e.file_name().to_string_lossy().into_owned();
+                    scope::miscased_reserved_dir(&found).map(|(_, reserved)| MiscasedDir {
+                        found: found.clone(),
+                        reserved,
+                    })
+                })
         }),
         global_linked: std::fs::read(memory_dir.join("MEMORY.md"))
             .map(|b| recall_hooks::global_index_is_linked(&b))
@@ -353,14 +381,31 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
             ),
         }
     );
-    if let Some(dir) = &rep.miscased_global {
+    println!(
+        "machine      : {}",
+        match &rep.machine_key {
+            None if rep.rejected_vars.contains(&"RECALL_MACHINE_KEY") =>
+                "off — RECALL_MACHINE_KEY was SET BUT EMPTY once trimmed, so it was ignored"
+                    .to_string(),
+            None if declared_empty(rep, "RECALL_MACHINE_KEY") => format!(
+                "off — RECALL_MACHINE_KEY is declared empty in {}, which reads as unset",
+                declared_in(rep, "RECALL_MACHINE_KEY").unwrap_or("a settings file")
+            ),
+            // Deliberately not phrased as an invitation. The global line
+            // suggests setting a key because sharing more is usually what
+            // someone wants; this content is true of one machine only, and a
+            // cloud session — a new machine every time — should leave it off.
+            None => "off (set RECALL_MACHINE_KEY for memories about this machine only)".to_string(),
+            Some(key) => format!("{key} — {} file(s)", rep.machine_files),
+        }
+    );
+    if let Some(d) = &rep.miscased_dir {
         println!(
-            "             ! '{dir}/' is not '{}/', so nothing under it syncs. On \
+            "             ! '{}/' is not '{}/', so nothing under it syncs. On \
              macOS the two are the same directory and on Linux they are not, so \
              Recall refuses rather than file it somewhere you did not mean. \
              Rename it to '{}'.",
-            scope::GLOBAL_DIR,
-            scope::GLOBAL_DIR
+            d.found, d.reserved, d.reserved
         );
     }
     println!(

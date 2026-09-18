@@ -347,8 +347,8 @@ quietly, with the old snapshots still on disk and no longer mounted.
 
 Three things surfaced by running Recall against a second real client, none of
 which is reachable by reading the code. Recorded while the evidence is fresh.
-The first and the third have since been fixed; the machine scope is **not
-decided**.
+All three have since been fixed; the machine scope was the last, and the
+shape it took is at the end of its entry.
 
 - **`recall status` does not read the project's `.claude/settings.json`.**
   `docs/reference/install.md` recommends declaring `RECALL_PROJECT_KEY` there, because
@@ -381,6 +381,33 @@ decided**.
   a declared `project_key` naming the machine, which works and is a disguise.
   Claude Code already labels memories `type: user` in their front matter, so
   the distinction exists upstream; only Recall is missing it.
+
+  **Fixed**, as a third scope mirroring the global one: `machine/` on disk,
+  keyed `machine:<RECALL_MACHINE_KEY>`, off unless that variable is set.
+
+  Deciding it turned up something the finding above had not. The
+  `RECALL_PROJECT_KEY` workaround is not only a disguise — in a directory of
+  general work with no repository it is the *right* answer, because there is
+  no project scope for it to be standing in for. The gap it cannot cover is
+  narrower and more specific: machine facts **alongside** project memory,
+  inside a real repository, where the workaround forces a choice between
+  them.
+
+  Opt-in for a different reason than the global scope. Global is opt-in
+  because sharing more than someone expected is rude; this is opt-in because
+  a machine that has not said which machine it is must not receive another
+  one's facts. That also makes the ephemeral cloud session correct by
+  default: it is a new machine every time, it declares no key, and it gets no
+  machine scope — rather than inheriting a laptop's RAM.
+
+  Proven against a real server rather than in unit tests alone: with
+  `RECALL_MACHINE_KEY=mbp` the three files split cleanly across
+  `acme/app`, `global:eko` and `machine:mbp`; a second machine declaring
+  `vps` sees an empty machine scope, so "this machine has 8 GB" does not
+  reach it; and with no key declared the directory is skipped rather than
+  swept into the project's history. Running it also showed `backfill`
+  advising `RECALL_GLOBAL_KEY` for a path under `machine/`, which no test
+  would have caught because the wrong advice is still a refusal.
 - **There is no first sync.** `push` sends the file that triggered the hook
   and tombstones for files that vanished. Nothing else. A memory directory
   that already holds files when Recall arrives keeps holding them: each one

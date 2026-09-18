@@ -21,7 +21,7 @@
 //! let ctx = Context {
 //!     memory_dir: PathBuf::from("/home/me/.claude/projects/-home-me-app/memory"),
 //!     state_file: PathBuf::from("/home/me/.claude/projects/-home-me-app/.recall-state.json"),
-//!     scopes: recall_hooks::scope::scopes("acme/app".into(), None),
+//!     scopes: recall_hooks::scope::scopes("acme/app".into(), None, None),
 //!     source_env: "laptop".to_string(),
 //!     client: Client::new("https://recall.example.com", "token")?,
 //! };

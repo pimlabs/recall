@@ -65,6 +65,17 @@ pub struct ClientConfig {
     /// turning it on makes files appear in every synced project's memory
     /// directory, which is not something to do to someone by surprise.
     pub global_key: Option<String>,
+    /// `RECALL_MACHINE_KEY`: the key for memories that describe *this
+    /// machine*, normalised by
+    /// [`scope::machine_key`](crate::scope::machine_key).
+    ///
+    /// [`None`] — the default — means there is no machine scope here, and
+    /// anything under `machine/` is left alone rather than swept into the
+    /// project. Opt-in for a different reason than the global scope: the
+    /// content is only true of one machine, so a machine that has not said
+    /// which one it is must not receive another's facts. An ephemeral cloud
+    /// session is a new machine every time and should leave this unset.
+    pub machine_key: Option<String>,
     /// Names of variables that were set to a value the normaliser refused,
     /// so the derived default stands instead.
     ///
@@ -91,6 +102,7 @@ pub const VARS: &[&str] = &[
     "RECALL_SOURCE_ENV",
     "RECALL_PROJECT_KEY",
     "RECALL_GLOBAL_KEY",
+    "RECALL_MACHINE_KEY",
     // Not Recall's, but read here as the last fallback for `source_env`, and
     // through the same lookup as the rest. Reading it from `std::env`
     // directly — which is what this did — left one variable resolving
@@ -117,6 +129,10 @@ impl ClientConfig {
         let global_key = declared_global
             .as_deref()
             .and_then(crate::scope::global_key);
+        let declared_machine = var(&lookup, "RECALL_MACHINE_KEY");
+        let machine_key = declared_machine
+            .as_deref()
+            .and_then(crate::scope::machine_key);
 
         let mut rejected_vars = Vec::new();
         for (declared, accepted, name) in [
@@ -129,6 +145,11 @@ impl ClientConfig {
                 declared_global.is_some(),
                 global_key.is_some(),
                 "RECALL_GLOBAL_KEY",
+            ),
+            (
+                declared_machine.is_some(),
+                machine_key.is_some(),
+                "RECALL_MACHINE_KEY",
             ),
         ] {
             if declared && !accepted {
@@ -149,6 +170,7 @@ impl ClientConfig {
             },
             project_key,
             global_key,
+            machine_key,
             rejected_vars,
             claude: Env::from_lookup(&lookup),
         }

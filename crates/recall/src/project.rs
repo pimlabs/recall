@@ -115,7 +115,11 @@ impl Resolved {
         Ok(Context {
             memory_dir: cfg.claude.memory_dir(&root_str),
             state_file: cfg.claude.state_file(&root_str),
-            scopes: scope::scopes(self.project_key(&cfg, &remote()), cfg.global_key.clone()),
+            scopes: scope::scopes(
+                self.project_key(&cfg, &remote()),
+                cfg.global_key.clone(),
+                cfg.machine_key.clone(),
+            ),
             source_env: cfg.source_env.clone(),
             client: Client::new(&cfg.url, &cfg.token)?,
         })

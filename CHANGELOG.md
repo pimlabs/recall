@@ -16,6 +16,25 @@ break will be described here in full rather than smoothed over.
 
 ## Unreleased
 
+- **`RECALL_MACHINE_KEY` adds a third scope, for memories true of one machine
+  and no other.** Files under `<memory dir>/machine/` sync under
+  `machine:<key>` and come back only on a machine declaring the same key. The
+  global scope was the only place for this content and is actively wrong for
+  it: "this machine has 8 GB" is false on the next machine, and memory that is
+  confidently wrong is worse than none.
+
+  **Off unless you set it**, and on an ephemeral cloud session you should not:
+  it is a new machine every time, and facts about your laptop do not describe
+  it. With no key set, `machine/` is ignored — not filed under the project.
+
+  If you were naming a machine through `RECALL_PROJECT_KEY`, that still works
+  and is still right for a directory of general work with no repository. The
+  new scope is for the case it cannot cover: machine facts sitting *beside* a
+  real project's memory.
+
+  `recall status` gains a `machine` line; `recall backfill` now names the
+  variable that would sync a skipped file instead of always suggesting
+  `RECALL_GLOBAL_KEY`.
 - **A memory directory whose global folder is spelled `Global/` no longer
   syncs into the project's history.** It used to, with global sync on or off
   — nothing under it matched the reserved `global/`, so the project scope,
