@@ -115,6 +115,12 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
+      # Full history, because the last step counts how far behind production
+      # is, and a shallow clone cannot see a commit from four days ago.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       # Not having the deploy secrets is a normal state, not a failure: a
       # fork, a clone, or this repository before the VPS was wired up. This
       # job used to fail on every push to main with "missing server host",
@@ -155,6 +161,7 @@ jobs:
           fi
 
       - name: Deploy over SSH
+        id: ssh
         if: steps.secrets.outputs.configured == 'true'
         uses: appleboy/ssh-action@v1
         with:
@@ -188,3 +195,79 @@ jobs:
         env:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           COMPOSE_FILES: ${{ vars.DEPLOY_COMPOSE_FILES }}
+
+      # Whichever way the steps above went, say what production is actually
+      # running — on the run's summary page, where it is read, rather than in
+      # a log nobody opens.
+      #
+      # The skip when DEPLOY_HOST is unset is right for a fork and invisible
+      # for a repository that does have a server: on 2026-09-18 four pushes
+      # landed on main, every run was green, and the VPS stayed on a build
+      # from the 14th — twenty-five commits back — because this job reported
+      # success while doing nothing. A green tick that means "did not deploy"
+      # is the same shape of bug as a test that cannot fail.
+      #
+      # `/health` needs no auth and no secrets, so this works in both cases.
+      # It never fails the job: deploying by hand is a legitimate choice, and
+      # a workflow that goes red for a choice is a workflow that gets ignored.
+      - name: What is production actually running?
+        if: always()
+        env:
+          HEALTH_URL: ${{ vars.DEPLOY_HEALTH_URL }}
+          PUSHED: ${{ github.sha }}
+        run: |
+          say() { echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
+
+          if [ -z "$HEALTH_URL" ]; then
+            say "### Production was not asked"
+            say ""
+            say "No \`DEPLOY_HEALTH_URL\` repository variable, so this run cannot"
+            say "say what the server is running. Set it to the \`/health\` URL to"
+            say "have every push report the live commit here."
+            exit 0
+          fi
+
+          if ! body="$(curl -fsS --max-time 20 "$HEALTH_URL")"; then
+            say "### Production did not answer"
+            say ""
+            say "\`$HEALTH_URL\` was unreachable. That may be the server, or the"
+            say "ingress, or a transient network failure — this step does not"
+            say "guess, and does not fail the job over it."
+            exit 0
+          fi
+
+          live="$(printf '%s' "$body" | sed -n 's/.*"git_commit":"\([^"]*\)".*/\1/p')"
+          if [ -z "$live" ]; then
+            say "### Production answered without a commit"
+            say ""
+            say "\`/health\` returned no \`git_commit\`, so the build it is running"
+            say "cannot be identified. A server started without \`GIT_COMMIT\` set"
+            say "reports \`unknown\`; an empty field means something else."
+            exit 0
+          fi
+
+          short="$(echo "$PUSHED" | cut -c1-7)"
+          case "$live" in
+            "$short"*|"$PUSHED")
+              say "### Production is up to date"
+              say ""
+              say "Running \`$live\`, which is this push."
+              ;;
+            *)
+              behind=""
+              if git rev-parse --verify --quiet "$live^{commit}" >/dev/null 2>&1; then
+                behind=" — $(git rev-list --count "$live..$PUSHED" 2>/dev/null) commits behind"
+              fi
+              say "### Production is NOT running this push"
+              say ""
+              say "| | commit |"
+              say "|---|---|"
+              say "| production | \`$live\`$behind |"
+              say "| this push | \`$short\` |"
+              say ""
+              say "Expected if you deploy by hand. If you did not mean to, the"
+              say "deploy secrets are the usual reason — see"
+              say "\`docs/reference/github-actions-deploy.md\`."
+              echo "::warning::production is running $live, not $short"
+              ;;
+          esac
