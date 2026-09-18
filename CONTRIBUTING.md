@@ -74,12 +74,12 @@ needs, it belongs beside the code instead.** A public surface widened for a
 test is still a public surface, and `missing_docs` will then ask you to
 document, and therefore commit to, something you never meant to expose.
 
-That is why the split across crates looks uneven — `recall-wire`,
-`recall-paths` and `recall-hooks` are entirely in-crate, while
-`recall-server` and `recall` also have a `tests/`. It follows what each
-crate is: the first three are libraries whose interesting behaviour is
-internal, and the last two are asked whether their outside edge — an HTTP
-surface, a command-line one — behaves for someone who only has the outside.
+That is why the split across crates looks uneven — `recall-wire` and
+`recall-hooks` are entirely in-crate, while `recall-server` and `recall`
+also have a `tests/`. It follows what each crate is: the first two are
+libraries whose interesting behaviour is internal, and the last two are
+asked whether their outside edge — an HTTP surface, a command-line one —
+behaves for someone who only has the outside.
 
 Note that `tests/` means **`crates/<name>/tests/`**. Cargo does not compile a
 `tests/` at the root of a workspace; a directory there would silently never
@@ -161,7 +161,7 @@ See `CLAUDE.md`'s "Ground rules" section — same reason, one source of truth. T
 Two more that aren't in `CLAUDE.md` because they're about this code rather than the project's shape, and both would look like harmless cleanups:
 
 - **The SQLite schema, the HTTP JSON, the timestamp format, and the env var names are frozen.** The rows in production were written by the Node server this one replaced, and every environment already has the variables provisioned. Nothing here is style. See `docs/history/rust-rewrite.md`.
-- **`recall-paths`'s `slug()` must stay UTF-16-based.** It reproduces a JavaScript regex replace inside Claude Code, which operates on UTF-16 code units. Iterating bytes or `chars()` instead is wrong for any non-ASCII path, and wrong here means silently reading and writing a directory Claude Code never touches.
+- **`recall-hooks`'s `claude::slug()` must stay UTF-16-based.** It reproduces a JavaScript regex replace inside Claude Code, which operates on UTF-16 code units. Iterating bytes or `chars()` instead is wrong for any non-ASCII path, and wrong here means silently reading and writing a directory Claude Code never touches.
 
 ## Releasing
 

@@ -45,7 +45,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 
-use recall_paths::scope;
+use crate::scope;
 use recall_wire::PushRequest;
 
 use crate::context::{Context, Error};

@@ -21,7 +21,7 @@ use crate::ValidationError;
 /// real empty-file push against the real Node server.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PushRequest {
-    /// Which project this file belongs to. See `recall_paths::project`.
+    /// Which project this file belongs to. See `recall_hooks::project`.
     pub project_key: String,
     /// The file's path relative to the project's memory directory.
     pub file_path: String,

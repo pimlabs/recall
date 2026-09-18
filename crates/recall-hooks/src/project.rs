@@ -95,7 +95,7 @@ pub fn key(remote_url: &str, project_root: &str) -> String {
 /// than a mangled key that quietly starts a second history.
 ///
 /// ```
-/// # use recall_paths::project::explicit_key;
+/// # use recall_hooks::project::explicit_key;
 /// assert_eq!(explicit_key(" PimLabs/Recall "), Some("pimlabs/recall".to_string()));
 /// assert_eq!(explicit_key("   "), None);
 /// assert_eq!(explicit_key("global:eko"), None);

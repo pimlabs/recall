@@ -37,24 +37,34 @@ and the dependency arrows only ever point downward.
 recall            the binary: one module per command
    │              init · status · backfill · promote · hook (push/pull)
    │              serve · project
-   ├──────────────┬──────────────┐
-   ▼              ▼              │
-recall-hooks   recall-server     │   the two halves
-   │  │           │              │
-   │  └───────────┼──────────────┼────┐
-   └──────┬───────┘              │    │
-          ▼                      ▼    ▼
-     recall-wire            recall-paths
-     the frozen             where things live, what a
-     HTTP contract          project is called, what is
-                            synced under which key
+   ├──────────────┐
+   ▼              ▼
+recall-hooks   recall-server      the two halves
+   │              │
+   └──────┬───────┘
+          ▼
+     recall-wire
+     the frozen HTTP contract
 ```
+
+A crate here is a boundary that the compiler enforces, not a folder. The
+arrow that matters is the one that is *absent*: `recall-server` lists
+`recall-wire` and nothing else, so the half that faces the internet cannot
+reach the half that reads `~/.claude` — writing `use recall_hooks::…` inside
+`recall-server` is `error[E0433]`, not a review comment.
+
+That is also why there is no fifth crate. `recall-paths` used to sit beside
+`recall-wire` holding the path derivations, but its only consumers were
+`recall-hooks` and the binary — both of which already depend on
+`recall-hooks` — and `recall-server` never touched it. It stopped nothing, so
+it was a published name for no reason; it is now four modules inside
+`recall-hooks` (`claude`, `project`, `scope`, `config`). Folded in v0.2.0,
+before the name could acquire dependents.
 
 | Crate | Holds | Why it's separate |
 |---|---|---|
 | `recall-wire` | Request/response shapes and the validation both sides apply | These rules were once written twice — JavaScript and bash — and drifted. One definition is the whole point. |
-| `recall-paths` | Claude Code's memory paths, `project_key` derivation, client config | Tracks *someone else's* implementation. When the CLI changes there is one place to fix, with its own tests. |
-| `recall-hooks` | `push`, `pull`, `backfill`, the baseline, the HTTP client, the settings merge | Everything that runs inside a user's editing session, where being quiet matters more than being thorough. |
+| `recall-hooks` | `push`, `pull`, `backfill`, the baseline, the HTTP client, the settings merge — and the derivations they run on: Claude Code's memory paths, `project_key`, scopes, client config | The whole client half. The derivations track *someone else's* implementation, so when the CLI changes there is one place to fix; they live here rather than in their own crate because nothing outside this crate and the binary ever reads them. |
 | `recall-server` | SQLite store, `claude -p` merge, the axum API | Everything that runs on the host. Never depends on `recall-hooks`. |
 | `recall` | Argument parsing and one module per command — `serve` among them, so this is where the server process starts too | Thin. Each command's *failure policy* is documented beside the command it governs. Shipped as `recall-sync` through v0.1.0, because `recall-cli` and `recall` were both taken on crates.io when that preflight ran. |
 

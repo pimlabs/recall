@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::Path;
 
-use recall_paths::scope::route;
+use crate::scope::route;
 use recall_wire::PushRequest;
 
 use crate::context::{Context, Error};

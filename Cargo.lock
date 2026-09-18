@@ -878,7 +878,6 @@ dependencies = [
  "anyhow",
  "clap",
  "recall-hooks",
- "recall-paths",
  "recall-server",
  "recall-wire",
  "serde",
@@ -892,7 +891,6 @@ name = "recall-hooks"
 version = "0.2.0"
 dependencies = [
  "axum",
- "recall-paths",
  "recall-wire",
  "reqwest",
  "serde",
@@ -900,13 +898,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
-]
-
-[[package]]
-name = "recall-paths"
-version = "0.2.0"
-dependencies = [
- "thiserror",
 ]
 
 [[package]]

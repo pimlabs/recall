@@ -51,7 +51,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use recall_paths::scope::GLOBAL_DIR;
+use crate::scope::GLOBAL_DIR;
 
 use crate::atomic;
 use crate::state;

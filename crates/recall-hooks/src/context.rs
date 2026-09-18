@@ -3,7 +3,7 @@
 use std::io;
 use std::path::PathBuf;
 
-use recall_paths::Scope;
+use crate::scope::Scope;
 
 use crate::client::Client;
 use crate::state;
@@ -12,7 +12,8 @@ use crate::state;
 ///
 /// Passed in rather than discovered inside, so the logic is testable without
 /// a real home directory or a real git repository — and so path derivation
-/// stays somebody else's problem (`recall_paths`).
+/// stays out of the hooks themselves. [`crate::claude`], [`crate::project`]
+/// and [`crate::scope`] work it out; a hook is only ever handed the answer.
 #[derive(Debug)]
 pub struct Context {
     /// The directory Claude Code keeps this project's auto-memory in, on
@@ -24,7 +25,7 @@ pub struct Context {
     /// What this machine syncs, and under which keys.
     ///
     /// Always at least the project scope. A global scope, when configured,
-    /// comes first — see [`recall_paths::scope`].
+    /// comes first — see [`crate::scope`].
     pub scopes: Vec<Scope>,
     /// The label writes from this machine are stamped with.
     pub source_env: String,

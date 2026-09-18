@@ -16,7 +16,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use recall_paths::scope::route;
+use crate::scope::route;
 use recall_wire::PushRequest;
 
 use crate::atomic;
@@ -282,7 +282,7 @@ pub async fn promote(ctx: &Context, file: &Path) -> Result<PromoteOutcome, Error
 /// Only the link removal makes this necessary: a line taken away is content,
 /// and content taken away only on this disk is put back by the next pull —
 /// here, and on every other machine, which never saw the removal at all.
-async fn push_index(ctx: &Context, scope: &recall_paths::scope::Scope) -> Result<(), Error> {
+async fn push_index(ctx: &Context, scope: &crate::scope::Scope) -> Result<(), Error> {
     let body = fs::read_to_string(ctx.memory_dir.join(INDEX_FILE))?;
     let req = PushRequest {
         project_key: scope.key.clone(),

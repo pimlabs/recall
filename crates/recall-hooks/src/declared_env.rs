@@ -23,7 +23,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use recall_paths::claude;
+use crate::claude;
 
 use crate::settings;
 
@@ -192,7 +192,7 @@ impl Environment {
     }
 
     /// This environment as the lookup closure
-    /// [`ClientConfig::from_lookup`](recall_paths::ClientConfig::from_lookup)
+    /// [`ClientConfig::from_lookup`](crate::ClientConfig::from_lookup)
     /// takes, so every command resolves configuration through one code path.
     pub fn lookup(&self) -> impl Fn(&str) -> Option<String> + '_ {
         |name| self.get(name)
