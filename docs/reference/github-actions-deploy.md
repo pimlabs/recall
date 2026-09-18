@@ -66,6 +66,14 @@ ssh-keygen -t ed25519 -f "$d/recall-deploy-key" -N "" -C "github-actions-recall-
 That makes two files in `$d`: `recall-deploy-key` (private) and
 `recall-deploy-key.pub` (public).
 
+These are stages, not a script. The public half has to reach the VPS and the
+private half has to reach GitHub, both by hand, in between — so pasting the
+whole section in one go runs the check before the key is installed, and the
+delete before the secret is saved.
+
+`$d` also lives only in the shell that ran `mktemp`, so stay in that terminal,
+or note the path it printed: the directory outlives the variable.
+
 **Keep `$d` until the end of this section.** The order is: install the public
 half, *prove the key works*, paste the private half into the secret, then
 `rm -rf "$d"`. Deleting before the proof is what turns a later failure into a
