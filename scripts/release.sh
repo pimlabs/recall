@@ -23,7 +23,7 @@ REPO="pimlabs/recall"
 # The shared Homebrew tap. Being named homebrew-* is what lets Homebrew
 # resolve `pimlabs/tap/recall` with no URL and no separate `brew tap` step.
 TAP="pimlabs/homebrew-tap"
-CRATES=(recall-wire recall-paths recall-hooks recall-server recall)
+CRATES=(recall-wire recall-hooks recall-server recall)
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
@@ -164,7 +164,7 @@ for n in "${CRATES[@]}"; do
     *)   printf '    %-16s could not check (HTTP %s)\n' "$n" "$code" ;;
   esac
 done
-[ "$taken" -eq 0 ] && ok "all five names are free" \
+[ "$taken" -eq 0 ] && ok "all ${#CRATES[@]} names are free" \
   || warn "$taken already on crates.io — fine if that is you republishing, fatal if not"
 
 # --------------------------------------------------------------------------

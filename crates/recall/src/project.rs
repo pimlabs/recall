@@ -11,8 +11,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use recall_hooks::{client::Client, declared_env, Context};
-use recall_paths::{claude, project, scope, ClientConfig};
+use recall_hooks::{claude, client::Client, declared_env, project, scope, ClientConfig, Context};
 
 /// The project root, resolved the way Claude Code resolves it: the git root,
 /// falling back to the working directory.

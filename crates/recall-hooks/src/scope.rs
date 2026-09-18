@@ -8,7 +8,7 @@
 //! frozen HTTP surface and the SQLite schema are untouched.
 //!
 //! ```
-//! # use recall_paths::scope::{route, scopes, GLOBAL_DIR};
+//! # use recall_hooks::scope::{route, scopes, GLOBAL_DIR};
 //! let s = scopes("acme/app".into(), Some("global:eko".into()));
 //!
 //! // A file at the root of the memory directory belongs to the project.
@@ -102,7 +102,7 @@ pub fn scopes(project_key: String, global_key: Option<String>) -> Vec<Scope> {
 /// the expected thing.
 ///
 /// ```
-/// # use recall_paths::scope::global_key;
+/// # use recall_hooks::scope::global_key;
 /// assert_eq!(global_key("eko"), Some("global:eko".to_string()));
 /// assert_eq!(global_key("global:eko"), Some("global:eko".to_string()));
 /// assert_eq!(global_key("  "), None);

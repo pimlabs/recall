@@ -221,7 +221,7 @@ crate names are global and first-come, and a half-published set is awkward to
 back out of:
 
 ```sh
-for n in recall-wire recall-paths recall-hooks recall-server recall; do
+for n in recall-wire recall-hooks recall-server recall; do
   a=$(echo "$n" | cut -c1-2); b=$(echo "$n" | cut -c3-4)
   printf '%-16s %s\n' "$n" \
     "$(curl -s -o /dev/null -w '%{http_code}' "https://index.crates.io/$a/$b/$n")"
@@ -246,7 +246,6 @@ Then, bottom-up:
 
 ```sh
 cargo publish -p recall-wire
-cargo publish -p recall-paths
 cargo publish -p recall-hooks
 cargo publish -p recall-server
 cargo publish -p recall

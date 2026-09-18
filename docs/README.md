@@ -56,7 +56,7 @@ it against a running server on every CI run, so it cannot quietly drift.
 | [`history/memory-loading-findings.md`](history/memory-loading-findings.md) | What Claude Code actually does with memory files — the entry point, subdirectories, and why a single failed probe means nothing. |
 | [`history/phase-0-findings.md`](history/phase-0-findings.md) | What the Claude Code CLI *actually* does, verified by running it, versus what the original design assumed. Still the source of several load-bearing constraints. |
 
-These are cited from the code: `recall-paths` points at `phase-0-findings.md`
+These are cited from the code: `recall-hooks` points at `phase-0-findings.md`
 for why its path derivation looks the way it does. That is the value of not
 maintaining them — a comment can point at what was known *then*, and the
 answer stays put.

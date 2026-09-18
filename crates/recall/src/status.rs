@@ -6,8 +6,9 @@
 //! the output, not errors.
 
 use recall_hooks::declared_env::{Declared, Ignored};
-use recall_hooks::{client::Client, exit, settings, state};
-use recall_paths::{claude, config, project, scope, ClientConfig};
+use recall_hooks::{
+    claude, client::Client, config, exit, project, scope, settings, state, ClientConfig,
+};
 
 use crate::project as proj;
 
