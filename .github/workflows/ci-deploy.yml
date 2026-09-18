@@ -89,7 +89,10 @@ jobs:
           bash -n install.sh
           bash -n scripts/compat-check.sh
           bash -n scripts/api-doc-check.sh
+          bash -n scripts/trusted-ip-check.sh
+          bash -n scripts/release.sh
           bash -n deploy/backup-offbox.sh
+          bash -n scripts/backup-offbox-check.sh
 
       # The off-box backup runs against a stub rclone, so it needs no bucket
       # and no credentials. What it asserts cannot be seen from the script's
@@ -97,8 +100,6 @@ jobs:
       # look identical from here.
       - name: Off-box backup never asks rclone to delete
         run: ./scripts/backup-offbox-check.sh
-          bash -n scripts/trusted-ip-check.sh
-          bash -n scripts/release.sh
 
       # The image the deployment actually builds. This is where a crate
       # rename slipped through once: the Dockerfile has no file extension and
