@@ -174,15 +174,12 @@ pub async fn backfill(ctx: &Context) -> Result<Outcome, Error> {
         }
 
         let Some((scope, path)) = scope::route(&ctx.scopes, &rel) else {
-            // Unroutable has two causes now and they need different actions
-            // from the reader, so the one that is not "turn global sync on"
-            // says so per file rather than leaving the heading to guess.
-            let detail = scope::miscased_global_dir(&rel).map(|dir| {
-                format!(
-                    "'{dir}/' is not '{}/' — rename it and run this again",
-                    scope::GLOBAL_DIR
-                )
-            });
+            // Every cause of Unroutable needs a different action from the
+            // reader, so each file carries its own remedy. The heading used
+            // to name RECALL_GLOBAL_KEY for all of them, which is the wrong
+            // advice for a path under `machine/` and no advice at all for a
+            // directory that is merely miscased.
+            let detail = unroutable_detail(&rel);
             out.push(rel, Disposition::Unroutable, detail);
             continue;
         };
@@ -327,6 +324,26 @@ async fn ask_what_the_server_has(
 
 /// Whether this is one of `atomic::write`'s temporary files rather than a
 /// memory file.
+/// Why a path belongs to no scope, phrased as what to do about it.
+///
+/// [`scope::route`] returns only "nowhere", which is all it needs to decide;
+/// the reader needs to know which of several different situations they are
+/// in. Derived from the path rather than passed down, so a scope added later
+/// gets an answer here or none — never another scope's answer.
+fn unroutable_detail(rel: &str) -> Option<String> {
+    if let Some((found, reserved)) = scope::miscased_reserved_dir(rel) {
+        return Some(format!(
+            "'{found}/' is not '{reserved}/' — rename it and run this again"
+        ));
+    }
+    let head = rel.split('/').next()?;
+    match head {
+        scope::GLOBAL_DIR => Some("set RECALL_GLOBAL_KEY to sync this".into()),
+        scope::MACHINE_DIR => Some("set RECALL_MACHINE_KEY to sync this".into()),
+        _ => None,
+    }
+}
+
 fn is_temp(rel: &str) -> bool {
     rel.rsplit('/')
         .next()

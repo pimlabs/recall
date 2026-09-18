@@ -230,9 +230,10 @@ status` shows the key, the file count, and whether `MEMORY.md` links them.
 
 A few things worth knowing:
 
-- **`global/` is reserved.** A project topic file must not live there; with
-  global sync on it would be shared with every project, and with it off it is
-  ignored rather than swept into the current project.
+- **`global/` and `machine/` are both reserved.** A project topic file must
+  not live in either; with the scope on it would be shared beyond this
+  project, and with it off it is ignored rather than swept into the current
+  one.
 - **The name is `global`, lowercase, and Recall will not guess.** A folder
   called `Global/` or `GLOBAL/` syncs nothing — not to the global scope and,
   more to the point, not into this project's history either. On macOS the
@@ -243,7 +244,8 @@ A few things worth knowing:
   it refuses and says so — `recall status` names the folder, and `recall
   backfill` names the files. Rename it to `global/` and they sync. Only the
   folder at the top of the memory directory is reserved: `globalish/`,
-  `Global.md` and `topics/Global/` are ordinary project files.
+  `Global.md` and `topics/Global/` are ordinary project files. The same
+  applies to `machine/`.
 - **Turn it on everywhere or nowhere.** `recall pull` maintains links in
   `MEMORY.md`, and `MEMORY.md` is itself synced per project, so a machine
   with global off will carry links to files it never fetches.
@@ -254,6 +256,39 @@ A few things worth knowing:
 Nothing syncs differently if you leave `RECALL_GLOBAL_KEY` unset — though
 `recall backfill` will then name anything in `global/` as belonging to no
 scope, because with the key unset it does.
+
+## Memories about this machine: `RECALL_MACHINE_KEY`
+
+Some of what Claude records is true of the machine and nothing else: how much
+RAM it has, which container runtime is installed, which of two conflicting
+`dotnet` installs wins. The global scope is the wrong home for that — "this
+machine has 8 GB" is false on the next one, and a memory that is confidently
+wrong is worse than no memory at all.
+
+```sh
+export RECALL_MACHINE_KEY="mbp"     # a name for *this* machine
+```
+
+Anything in `<memory dir>/machine/` then syncs under `machine:mbp` and comes
+back only on a machine declaring that same key. It survives reinstalling this
+machine; it never reaches a different one.
+
+- **Leave it unset in an ephemeral cloud session.** Every session is a new
+  machine, and your laptop's facts do not describe it. Unset means `machine/`
+  is ignored — not filed under the project.
+- **Pick a name per machine, not per person.** `RECALL_GLOBAL_KEY` is you;
+  this is the box. Two machines sharing one key will share their facts, which
+  is the failure this scope exists to prevent.
+- **Already naming a machine through `RECALL_PROJECT_KEY`?** That still works,
+  and in a directory of general work with no repository it is still the right
+  answer — there is no project scope there for it to be standing in for. This
+  scope is for the case that one cannot cover: machine facts sitting beside a
+  real project's memory, in a repository, where the override would make you
+  choose between them.
+
+`recall status` shows the key and the file count on its `machine` line, and
+`recall backfill` names this variable for any file it skipped under
+`machine/`.
 
 ### Putting a note there: `recall promote`
 

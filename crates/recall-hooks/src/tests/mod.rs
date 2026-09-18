@@ -44,7 +44,7 @@ impl Fixture {
         let ctx = Context {
             memory_dir: dir.path().join("memory"),
             state_file: dir.path().join(".recall-state.json"),
-            scopes: crate::scope::scopes("acme/app".into(), global),
+            scopes: crate::scope::scopes("acme/app".into(), global, None),
             source_env: "test".into(),
             client: Client::new(&server.url, "token").unwrap(),
         };
