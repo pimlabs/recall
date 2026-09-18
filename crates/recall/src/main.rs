@@ -32,7 +32,7 @@ mod status;
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use recall_hooks::exit;
 
 /// Set at build time by the release workflow.
@@ -43,11 +43,38 @@ const COMMIT: Option<&str> = option_env!("RECALL_GIT_COMMIT");
 #[command(
     name = "recall",
     about = "Sync Claude Code's auto memory across machines and cloud sessions",
-    disable_version_flag = true
+    // clap's own `--version` is replaced rather than merely enabled. Its
+    // default prints `recall <version>` and nothing else, while `recall
+    // version` prints the commit too — two ways of asking the same question
+    // giving different answers is the failure this project keeps finding in
+    // itself. `version_line` below is the single source both go through.
+    disable_version_flag = true,
+    // `recall` alone still prints help and exits 2, which it did before this
+    // flag existed. Without this, an optional subcommand would make a bare
+    // `recall` a silent success.
+    arg_required_else_help = true
 )]
 struct Cli {
+    /// Print the version
+    #[arg(short = 'V', long = "version", action = clap::ArgAction::SetTrue)]
+    version: bool,
     #[command(subcommand)]
-    command: Cmd,
+    command: Option<Cmd>,
+}
+
+/// What every way of asking for the version prints.
+///
+/// `recall version`, `recall --version` and `recall -V` all call this, and a
+/// test asserts the three are byte-identical. The subcommand came first and
+/// cannot be dropped — it has been the CLI surface since v0.1.0 — but a tool
+/// where `--version` errors out is a tool people file bugs against, so both
+/// exist and neither is allowed to drift from the other.
+///
+/// The `recall <version>` prefix is load-bearing beyond taste:
+/// `scripts/release.sh` matches on it to confirm the binary it just built is
+/// the one being tagged.
+fn version_line() -> String {
+    format!("recall {VERSION} ({})", COMMIT.unwrap_or("unknown"))
 }
 
 #[derive(Subcommand)]
@@ -84,14 +111,30 @@ enum Cmd {
 fn main() {
     let cli = Cli::parse();
 
+    // Before the subcommand match, because there is no subcommand to match:
+    // `arg_required_else_help` only covers the no-arguments case, so
+    // `recall --version` arrives here with `command` unset.
+    if cli.version {
+        println!("{}", version_line());
+        std::process::exit(exit::OK);
+    }
+    let Some(command) = cli.command else {
+        // Unreachable while `arg_required_else_help` stands: clap prints help
+        // and exits before returning. Spelled out rather than unwrapped so
+        // that removing that attribute is a behaviour change someone reads,
+        // not a panic someone hits.
+        Cli::command().print_help().ok();
+        std::process::exit(exit::CONFIG);
+    };
+
     // Only `serve` is long-running and genuinely concurrent. The hook
     // commands each make one request and exit, so they get a
     // single-threaded runtime — `recall push` runs on every memory write in
     // a session, and spinning up a thread pool to make one HTTP call is
     // waste the user pays for repeatedly.
-    let result = match cli.command {
+    let result = match command {
         Cmd::Version => {
-            println!("recall {VERSION} ({})", COMMIT.unwrap_or("unknown"));
+            println!("{}", version_line());
             Ok(exit::OK)
         }
         Cmd::Init { path } => init::run(path.as_deref()),

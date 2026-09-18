@@ -393,6 +393,19 @@ have been compared, and half a comparison is not that. And with global sync
 on, it refreshes `MEMORY.md`'s links to your `global/` files before sending —
 after asking the server, so a run that cannot reach it changes nothing at all.
 
+## Asking the binary itself
+
+```sh
+recall --help            # or -h, or `recall help`
+recall help status       # the same as `recall status --help`
+recall --version         # or -V, or `recall version`
+```
+
+All three forms of each work and say the same thing. The version prints the
+release and the commit it was built from — `recall 0.2.0 (d85d225)` — and that
+commit is worth quoting in a bug report, because it identifies the build
+exactly where a version number alone does not.
+
 ## Check it's working
 
 ```sh

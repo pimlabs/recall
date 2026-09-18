@@ -22,6 +22,38 @@ The first build is slow — `rusqlite` compiles SQLite from C. After that it's c
 
 `cargo test -p recall-wire` is the fastest useful check: that crate holds the request/response contract both halves depend on, and its tests pin the wire format byte for byte — field order and the `null`-versus-`""` distinction included — because those were once compatibility guarantees against a second implementation and are now guarantees against the rows already in production.
 
+### The CLI surface
+
+One module per command in `crates/recall/src/`, `pub async fn run(...) ->
+anyhow::Result<i32>` returning an `exit::*` constant, a `///` line on the
+`Cmd` variant in the imperative mood, and a `//!` header on the module stating
+**how loudly that command is allowed to fail**. The failure policy lives beside
+the command it governs, not in a table somewhere.
+
+Three conventions are settled and worth not relitigating:
+
+- **`--help`, `-h` and `help` all work, and so does `help <command>` and
+  `<command> --help`.** clap gives all five; the tests assert them because
+  "clap gives it to you" stops being true the moment someone reaches for
+  `disable_help_subcommand` to tidy the command list.
+- **`--version`, `-V` and `version` all work and print the same bytes.** The
+  subcommand is the older surface and has been the CLI since v0.1.0, so it
+  cannot be dropped; the flag is what fingers type and scripts reach for, so
+  it cannot be missing. Both go through `version_line()` in `main.rs` and a
+  test pins the three together rather than each to a literal — two ways of
+  asking one question that give different answers is a bug this project has
+  had more than once.
+- **A bare `recall` prints help and exits non-zero.** It is a question, not an
+  instruction, and answering with silence and success would be wrong twice.
+
+The version line's `recall <version>` prefix is a contract, not a format
+choice: `scripts/release.sh` matches on it to confirm the binary it built is
+the one being tagged.
+
+Adding a command means adding it to `COMMANDS` in
+`crates/recall/tests/cli.rs`, which is what makes the help tests notice a
+command missing from the help.
+
 ### Where a test goes
 
 Three places, and the choice is not taste:
