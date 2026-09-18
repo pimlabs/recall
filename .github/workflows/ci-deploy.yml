@@ -133,10 +133,75 @@ jobs:
       - name: Off-box backup never asks rclone to delete
         run: ./scripts/backup-offbox-check.sh
 
+      # 124 seconds of a 177-second run — 70% of the whole thing — went into
+      # the step below, on runs that could not possibly have learned anything
+      # from it. Of the eight pull requests merged on 2026-09-18, five (#58,
+      # #61, #62, #63, #64) changed only documentation, a Homebrew formula,
+      # shell scripts and this workflow, and each paid the full 124s. So on a
+      # pull request the image is built only when the diff touches something
+      # it is built from.
+      #
+      # On a push to main it is built unconditionally, whatever the diff says.
+      # That asymmetry is the entire safety argument and is not an oversight:
+      # the list of paths below is a guess about what the image depends on,
+      # and a guess this cheap will eventually be wrong. `.dockerignore`
+      # decides what even reaches the daemon; a future Dockerfile could COPY
+      # something nobody thought to list here. When the filter turns out too
+      # narrow, the miss surfaces as a red build on main — before the deploy
+      # job, which `needs: ci`, has run — rather than as a broken image on the
+      # server. Skipping on main too would trade that for finding out from
+      # production, which is the failure this step exists to prevent.
+      #
+      # `paths:` under `on:` would have been fewer lines and the wrong tool:
+      # it skips the whole workflow, tests included, and a required check that
+      # never runs leaves the PR blocked rather than passing.
+      - name: Does this change touch the server image?
+        id: image
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "Not a pull request — the image builds unconditionally."
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # This job checks out at the default depth of 1. Deepening it to
+          # fetch-depth: 0 would pull the entire history on every run to
+          # answer one question about one commit; fetching that one commit
+          # costs a second and leaves the rest of the job as it was. The
+          # checkout of a pull request is the merge commit, so the two-dot
+          # `diff base HEAD` is exactly what the PR does to the base tree.
+          base='${{ github.event.pull_request.base.sha }}'
+          if ! git cat-file -e "$base^{commit}" 2>/dev/null \
+            && ! git fetch --no-tags --depth=1 origin "$base"; then
+            # A force-push to the base branch can leave that commit
+            # unreachable. A diff that cannot be read is not evidence of
+            # nothing: build.
+            echo "::warning::Could not reach base commit $base, so the server image is built rather than skipped."
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # --no-renames deliberately. With rename detection on, moving
+          # crates/foo.rs to docs/foo.md is reported as the single path
+          # docs/foo.md — the side of the move that matters here vanishes
+          # from the list, and the change reads as docs-only.
+          changed="$(git diff --no-renames --name-only "$base" HEAD)"
+          echo "Changed in this pull request:"
+          echo "$changed"
+
+          if printf '%s\n' "$changed" | grep -Eq '^(crates/|deploy/|Cargo\.(toml|lock)$)'; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            # One line on purpose — see the deploy job for why.
+            echo "::notice::Nothing under crates/, deploy/, Cargo.toml or Cargo.lock changed, so the server image build was skipped. It runs unconditionally on every push to main."
+          fi
+
       # The image the deployment actually builds. This is where a crate
       # rename slipped through once: the Dockerfile has no file extension and
       # was missed by the search that updated everything else.
       - name: Server image builds
+        if: steps.image.outputs.build == 'true'
         run: |
           docker build -f deploy/Dockerfile -t recall-server-ci .
 
