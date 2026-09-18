@@ -164,7 +164,7 @@ for n in "${CRATES[@]}"; do
     *)   printf '    %-16s could not check (HTTP %s)\n' "$n" "$code" ;;
   esac
 done
-[ "$taken" -eq 0 ] && ok "all five names are free" \
+[ "$taken" -eq 0 ] && ok "all ${#CRATES[@]} names are free" \
   || warn "$taken already on crates.io — fine if that is you republishing, fatal if not"
 
 # --------------------------------------------------------------------------
