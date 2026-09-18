@@ -356,9 +356,14 @@ that unless you mean to wipe stored memory.
 The server takes its own consistent snapshots automatically (every 24h
 by default, keeping the last 7) via SQLite's `VACUUM INTO` — safe to run
 against a live database. They land in `deploy/backups/` on the host,
-outside Docker entirely, so you can point any off-box backup (Time
-Machine, an external drive, cloud storage) straight at that folder.
-`GET /health`'s `last_backup_at` confirms it's actually running.
+outside Docker entirely, so any off-box backup can be pointed straight at
+that folder. `GET /health`'s `last_backup_at` confirms it's actually running.
+
+**These snapshots are still on the same disk as the database they protect.**
+They survive a bad write, a bad merge, and a container that will not start.
+They do not survive losing the machine, which for memory that only ever
+existed in an ephemeral cloud session is the case that ends in permanent
+loss. `backup-offbox.sh` below is the other half.
 
 Tune with env vars in `.env` if the defaults don't fit:
 `RECALL_BACKUP_INTERVAL_HOURS`, `RECALL_BACKUP_KEEP`. This matters more
@@ -377,6 +382,71 @@ docker run --rm -v recall_recall-data:/data -v "$(pwd)/backups":/backups:ro \
   alpine cp /backups/recall-<timestamp>.db /data/recall.db
 docker compose start recall-server
 ```
+
+## Off-box: `backup-offbox.sh`
+
+```sh
+RECALL_BACKUP_REMOTE=recall-crypt: ./deploy/backup-offbox.sh --dry-run
+RECALL_BACKUP_REMOTE=recall-crypt: ./deploy/backup-offbox.sh
+```
+
+It copies every `recall-*.db` in `deploy/backups/` to an [rclone][] remote
+and then verifies the copy. Run it from the deployment directory on the VPS,
+as a user that can read `deploy/backups/`.
+
+[rclone]: https://rclone.org/
+
+### Set up the remote, encrypted
+
+The database holds memory written about you and your work, so it does not
+leave this machine in the clear. `rclone config` twice: once for the bucket,
+once for a `crypt` remote that wraps it.
+
+```sh
+rclone config    # 1. new remote, type s3 / b2, name it e.g. recall-bucket
+rclone config    # 2. new remote, type crypt, remote = recall-bucket:recall
+                 #    — set a password, and keep it somewhere you will still
+                 #      have it when this machine is gone
+```
+
+Then `RECALL_BACKUP_REMOTE=recall-crypt:`. Filenames are encrypted too, so
+the bucket shows neither the contents nor the timestamps of your snapshots.
+
+**The crypt password is now part of your backup.** A copy you cannot decrypt
+is not a copy. Store it where it survives the loss of this VPS and of the
+laptop that configured it.
+
+### Daily, via cron
+
+```sh
+crontab -e
+```
+
+```
+17 4 * * * cd /path/to/recall/deploy && RECALL_BACKUP_REMOTE=recall-crypt: ./backup-offbox.sh
+```
+
+Set for a few minutes after the server's own snapshot so it has something new
+to copy. Cron mails you anything the job prints, and this one is quiet when it
+works — the output you get is the output worth reading.
+
+### It copies. It never deletes.
+
+`rclone sync` would be the obvious choice and is the wrong one. Sync mirrors,
+including emptiness: a bind mount that did not come up, or a path edited by
+one character, and the remote is emptied to match — in one run, reporting
+success, because an accurate mirror of an empty directory is an empty remote.
+
+So this copies only, and the remote keeps snapshots this box has already
+rotated away. Expiring them, if it ever matters, belongs to a lifecycle rule
+on the bucket — with the thing that holds the copies, not the thing that makes
+them. `scripts/backup-offbox-check.sh` asserts this against a stub rclone,
+because a run that wrongly deleted the remote would look exactly like a run
+that did not.
+
+It also refuses to treat an empty source as a clean run. Nothing to copy is
+not the same as nothing to do, and the difference is how you find out the
+directory moved before you need a restore rather than after.
 
 ## Enabling real merge (Phase 2)
 
