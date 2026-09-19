@@ -1,4 +1,4 @@
-//! Moving a note out of one project and into the global scope.
+//! Moving a note out of one project and into a scope that outlives it.
 //!
 //! The global scope shipped with the mechanism to *carry* a note into every
 //! project but no way to put one there: a user had to read their memory
@@ -7,6 +7,11 @@
 //! how such a note actually comes to exist — Claude writes something about
 //! the *user* while working in one repository (it labels these `type: user`
 //! in the file's own front matter), and the user then wants it everywhere.
+//!
+//! The machine scope arrived later and reproduced that gap exactly, which is
+//! why the destination is a parameter now rather than a constant. A note
+//! saying which JDK wins on this box is written the same way and wanted in
+//! the same shape — just somewhere narrower.
 //!
 //! So this is a move, not a copy. A note left in both scopes would be pulled
 //! twice into every future session of this project, and the two copies would
@@ -47,6 +52,39 @@ pub struct PromoteOutcome {
     pub resumed: bool,
 }
 
+/// Where a note is being promoted to.
+///
+/// Only the scopes with a directory of their own: the project scope is where
+/// notes come *from*, and promoting into it would be a demotion nobody has
+/// asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    /// Follows the user into every project they sync.
+    Global,
+    /// Stays with the machine that declared [`crate::scope::machine_key`].
+    Machine,
+}
+
+impl Target {
+    /// The reserved directory this target owns.
+    pub fn dir(self) -> &'static str {
+        match self {
+            Target::Global => crate::scope::GLOBAL_DIR,
+            Target::Machine => crate::scope::MACHINE_DIR,
+        }
+    }
+
+    /// The variable that turns this scope on, named in the refusal when it
+    /// is off — a refusal that says only "not configured" leaves the reader
+    /// to guess which of two variables it meant.
+    pub fn variable(self) -> &'static str {
+        match self {
+            Target::Global => "RECALL_GLOBAL_KEY",
+            Target::Machine => "RECALL_MACHINE_KEY",
+        }
+    }
+}
+
 /// Why a note could not be promoted.
 ///
 /// Separate from [`crate::Error`] because every variant here is a refusal
@@ -56,25 +94,52 @@ pub struct PromoteOutcome {
 /// [`Error::Sync`] so a caller formats them exactly once.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// There is no global scope on this machine, so there is nowhere to
+    /// The scope asked for is not configured here, so there is nowhere to
     /// promote to. A refusal rather than a silent no-op: the user asked for
-    /// a note to follow them everywhere, and it would not.
+    /// a note to go somewhere, and it would not.
     #[error(
-        "global sync is not configured on this machine, so there is nowhere to promote to \
-         (set RECALL_GLOBAL_KEY, then run this again)"
+        "the {scope} scope is not configured on this machine, so there is nowhere to \
+         promote to (set {variable}, then run this again)"
     )]
-    GlobalNotConfigured,
+    ScopeNotConfigured {
+        /// The scope's directory name, as the user would type it.
+        scope: &'static str,
+        /// The variable that would turn it on.
+        variable: &'static str,
+    },
     /// The path is not a file inside this project's memory directory.
     #[error("{path} is not a memory file of this project")]
     NotAMemoryFile {
         /// The path as the caller gave it.
         path: String,
     },
-    /// The note is already in the global scope, so there is nothing to do.
-    #[error("{path} is already a global memory")]
-    AlreadyGlobal {
+    /// The note is already in the scope it was asked to go to.
+    #[error("{path} is already in the {scope} scope")]
+    AlreadyThere {
         /// The offending path, relative to the memory directory.
         path: String,
+        /// The scope it is already in.
+        scope: &'static str,
+    },
+    /// The note is in one reserved directory and was asked to go to another.
+    ///
+    /// Refused rather than implemented, and the reason is one line deeper
+    /// than it looks: `MEMORY.md` lives at the memory root and belongs to the
+    /// project scope, but the index push at the end of a promotion sends it
+    /// under the *source* scope's key. That is correct only while the source
+    /// is always the project. Moving `global/x.md` to `machine/` would file
+    /// this project's index into the global scope's history, on a code path
+    /// nothing else exercises. Move the file by hand and let the next push
+    /// reconcile it.
+    #[error(
+        "{path} is in the {from} scope already; promote moves notes out of this project, \
+         not between scopes — move the file yourself and the next push will follow it"
+    )]
+    CrossScope {
+        /// The path, relative to the memory directory.
+        path: String,
+        /// The reserved directory it is currently in.
+        from: String,
     },
     /// Nothing is at that path.
     #[error("{path} does not exist")]
@@ -161,9 +226,12 @@ impl From<io::Error> for Error {
 /// local; otherwise the stale line comes back with the next pull, here and on
 /// every other machine. That push comes after the tombstone, being the one
 /// step whose failure costs nothing worse than a dead link.
-pub async fn promote(ctx: &Context, file: &Path) -> Result<PromoteOutcome, Error> {
-    let Some(global) = ctx.global() else {
-        return Err(Error::GlobalNotConfigured);
+pub async fn promote(ctx: &Context, file: &Path, target: Target) -> Result<PromoteOutcome, Error> {
+    let Some(dest) = ctx.reserved(target.dir()) else {
+        return Err(Error::ScopeNotConfigured {
+            scope: target.dir(),
+            variable: target.variable(),
+        });
     };
 
     // Lexical, like every other containment check here: the memory directory
@@ -175,12 +243,24 @@ pub async fn promote(ctx: &Context, file: &Path) -> Result<PromoteOutcome, Error
         });
     };
     let Some((scope, source_path)) = route(&ctx.scopes, &rel) else {
-        // With a global scope configured, the only path that routes nowhere
-        // is the global directory itself — a directory, not a note.
+        // Several paths route nowhere now — a reserved directory itself, one
+        // whose scope is switched off, one whose name is a miscased reserved
+        // word. None of them is a note this command can move, and the
+        // distinction is not one the caller can act on differently.
         return Err(Error::NotAMemoryFile { path: rel });
     };
-    if scope.is_global() {
-        return Err(Error::AlreadyGlobal { path: rel });
+    if let Some(from) = &scope.prefix {
+        return Err(if from == target.dir() {
+            Error::AlreadyThere {
+                path: rel,
+                scope: target.dir(),
+            }
+        } else {
+            Error::CrossScope {
+                path: rel,
+                from: from.clone(),
+            }
+        });
     }
     if rel == INDEX_FILE {
         return Err(Error::IsTheIndex);
@@ -203,7 +283,7 @@ pub async fn promote(ctx: &Context, file: &Path) -> Result<PromoteOutcome, Error
         .map_err(|_| crate::context::Error::NotUtf8 { path: rel.clone() })?;
 
     let name = rel.rsplit('/').next().unwrap_or(rel.as_str()).to_string();
-    let dest_rel = global.local_path(&name);
+    let dest_rel = dest.local_path(&name);
     let dest_abs = state::join_relative(&ctx.memory_dir, &dest_rel);
 
     let resumed = match fs::read(&dest_abs) {
@@ -223,7 +303,7 @@ pub async fn promote(ctx: &Context, file: &Path) -> Result<PromoteOutcome, Error
     };
 
     let stored = PushRequest {
-        project_key: global.key.clone(),
+        project_key: dest.key.clone(),
         file_path: name,
         content: Some(content.clone()),
         source_env: ctx.source_env.clone(),
@@ -283,9 +363,19 @@ pub async fn promote(ctx: &Context, file: &Path) -> Result<PromoteOutcome, Error
 /// and content taken away only on this disk is put back by the next pull —
 /// here, and on every other machine, which never saw the removal at all.
 async fn push_index(ctx: &Context, scope: &crate::scope::Scope) -> Result<(), Error> {
+    // `scope` is the note's source, and this is deliberately not it. MEMORY.md
+    // sits at the memory root, which belongs to the project scope, so that is
+    // the key it has to go under. The two are the same today only because the
+    // source is always the project — an invariant the type system does not
+    // hold, and which a future cross-scope promotion would break silently.
+    debug_assert!(
+        scope.prefix.is_none(),
+        "the index is pushed under the project key; the source was {:?}",
+        scope.prefix
+    );
     let body = fs::read_to_string(ctx.memory_dir.join(INDEX_FILE))?;
     let req = PushRequest {
-        project_key: scope.key.clone(),
+        project_key: ctx.project_key().to_string(),
         file_path: INDEX_FILE.to_string(),
         content: Some(body),
         source_env: ctx.source_env.clone(),

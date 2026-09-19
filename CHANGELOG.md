@@ -32,6 +32,10 @@ break will be described here in full rather than smoothed over.
   new scope is for the case it cannot cover: machine facts sitting *beside* a
   real project's memory.
 
+  `recall promote <file> --to machine` moves a note there, the same way
+  promoting has always moved one into the global scope. `--to` defaults to
+  `global`, so anything you already type keeps working.
+
   `recall pull` links these from `MEMORY.md` the way it links global ones —
   Claude Code opens what that file links and nothing else, so a scope whose
   files are never linked is memory that syncs and is never read.
