@@ -566,6 +566,40 @@ npm install -g @pimlabs/recall
 
 This is per-environment, not per-project or per-session.
 
+### The version that lands there is the version that stays there
+
+Whatever you install this way is baked into the environment and does not
+move again. That is fine until it is not: a stale client syncs perfectly
+well, because the wire format is frozen, so the only symptom is features
+quietly missing — and no error, anywhere, ever says so. This repository's own
+cloud environment ran a binary five releases old for weeks without noticing.
+
+`recall doctor` will not catch it either. It checks the environment, not the
+binary checking the environment.
+
+If a project cares — and the one place that certainly does is Recall's own
+checkout — a `SessionStart` hook can install the current binary before the
+session's other hooks use it. `.claude/hooks/session-start.sh` in this
+repository is a working example. Three things in it are load-bearing and not
+obvious:
+
+- **Install over the binary that wins `PATH`**, not wherever the package
+  manager prefers. In a cloud image `$HOME/.local/bin` may well come before
+  `$HOME/.cargo/bin`, in which case `cargo install` reports success while
+  `recall` keeps resolving to the old one. The hook passes
+  `--root "$HOME/.local"` and `--force` for exactly that reason.
+- **Check the version before building**, or a resumed or compacted session
+  pays a full rebuild for nothing. `recall version` prints the commit, which
+  is what makes the hook idempotent — a second run costs about three seconds.
+- **Assert the outcome, not the command.** `cargo install` exiting `0` says a
+  file was written somewhere; it says nothing about which `recall` the next
+  hook is about to run. The hook re-reads `recall version` afterwards and
+  says so loudly if the two disagree.
+
+It stays synchronous on purpose. `recall pull` is a `SessionStart` hook too,
+and the whole point is that it runs against the binary this installs rather
+than the one it replaces — async would turn that into a race.
+
 ## Running the server
 
 The same binary:
