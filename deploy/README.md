@@ -392,7 +392,11 @@ RECALL_BACKUP_REMOTE=recall-crypt: ./deploy/backup-offbox.sh
 
 It copies every `recall-*.db` in `deploy/backups/` to an [rclone][] remote
 and then verifies the copy. Run it from the deployment directory on the VPS,
-as a user that can read `deploy/backups/`.
+as a user that can read `deploy/backups/` — and pick that user once, because
+the rclone config and the crontab below both belong to whoever you choose.
+Note that the snapshots are written from inside the container, so they are
+owned by its uid rather than by the user running the compose stack; readable
+is what matters here, not owned.
 
 [rclone]: https://rclone.org/
 
@@ -416,19 +420,42 @@ the bucket shows neither the contents nor the timestamps of your snapshots.
 is not a copy. Store it where it survives the loss of this VPS and of the
 laptop that configured it.
 
-### Daily, via cron
+### On a schedule, via cron
 
 ```sh
 crontab -e
 ```
 
 ```
-17 4 * * * cd /path/to/recall/deploy && RECALL_BACKUP_REMOTE=recall-crypt: ./backup-offbox.sh
+17 */6 * * * cd /path/to/recall/deploy && RECALL_BACKUP_REMOTE=recall-crypt: /usr/bin/flock -n /tmp/recall-backup.lock ./backup-offbox.sh
 ```
 
-Set for a few minutes after the server's own snapshot so it has something new
-to copy. Cron mails you anything the job prints, and this one is quiet when it
-works — the output you get is the output worth reading.
+Install it as the user that owns the deployment — both halves of this are
+per-user, and splitting them is the failure that hides longest. `rclone`
+reads `~/.config/rclone/rclone.conf`, so a remote configured as one user does
+not exist for another; the job then fails every night with "didn't find
+section in config file", into a mailbox nobody reads, and you learn about it
+when you go looking for a restore.
+
+**Run it more often than the server snapshots — not once a day.** The obvious
+reading of `RECALL_BACKUP_INTERVAL_HOURS=24` is one snapshot per day, which a
+daily copy would catch every time. But the backup loop takes its first
+snapshot *before* its first sleep, so every restart writes one as well, and a
+day spent deploying can produce six or seven of them in an evening.
+`RECALL_BACKUP_KEEP` counts snapshots, not days, so those restarts push the
+older ones out within hours rather than over a week.
+
+A daily copy then loses whole generations — created and pruned between two
+runs — and nothing reports it, because copying seven files that happen to be
+seven *different* files looks exactly like copying the seven you expected.
+Every six hours is a sensible floor. The snapshots are kilobytes and the
+script only ever adds, so running it too often costs nothing, while running
+it too rarely costs a gap you cannot see from either end.
+
+`flock -n` stops a slow upload from overlapping the next run; without it two
+copies of the script can work the same files at once. Cron mails you anything
+the job prints, and this one is quiet when it works — the output you get is
+the output worth reading.
 
 ### It copies. It never deletes.
 
