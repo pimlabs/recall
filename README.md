@@ -82,10 +82,14 @@ stays on the index where it is. Thanks to him for handing the name over.
 ### Then, whichever door you came through
 
 Notes about *you* rather than the repo can follow you into every project: set
-`RECALL_GLOBAL_KEY`, then `recall promote <file>` moves one there. And where
-the `owner/repo` key derived from the git remote is wrong — a repo with no
-remote, a monorepo, a fork — `RECALL_PROJECT_KEY` declares it instead. Both
-are in [`docs/reference/install.md`](docs/reference/install.md).
+`RECALL_GLOBAL_KEY`, then `recall promote <file>` moves one there. Notes true
+of one box and wrong on the next — its RAM, which of two `dotnet` installs
+wins — belong in neither: `RECALL_MACHINE_KEY` gives them a scope that comes
+back only on that machine, and `recall promote <file> --to machine` files them
+there. And where the `owner/repo` key derived from the git remote is wrong — a
+repo with no remote, a monorepo, a fork — `RECALL_PROJECT_KEY` declares it
+instead. All three are in
+[`docs/reference/install.md`](docs/reference/install.md).
 
 To talk to the server directly, see the
 [HTTP API reference](docs/reference/api.md).
@@ -97,7 +101,8 @@ Phases 0 through 9 done. Recall is one Rust binary
 proven from a genuine claude.ai cloud session, conflicting edits semantically
 merged rather than last-write-wins, multi-project isolation verified, and a
 global scope so a note about *you* is not stuck in whichever repository Claude
-happened to learn it in.
+happened to learn it in — with a machine scope beside it, for the facts that
+describe one box and would be wrong on the next.
 
 **The Rust server runs in production as of 2026-09-14** (Phase 9), behind
 Traefik, reading the database the Node implementation wrote — no migration,
