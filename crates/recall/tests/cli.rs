@@ -880,7 +880,7 @@ fn promote_is_loud_about_missing_configuration() {
 /// Every command the CLI offers. A new one added without a line here is a
 /// command the help tests below will not notice is missing from the help.
 const COMMANDS: &[&str] = &[
-    "init", "backfill", "promote", "status", "serve", "push", "pull", "version", "help",
+    "init", "backfill", "promote", "status", "doctor", "serve", "push", "pull", "version", "help",
 ];
 
 #[test]
@@ -1053,5 +1053,106 @@ fn serve_refuses_to_start_without_a_token() {
         r.stderr.contains("RECALL_TOKEN"),
         "the message should name the variable: {:?}",
         r.stderr
+    );
+}
+
+// ---------------------------------------------------------------------------
+// doctor
+// ---------------------------------------------------------------------------
+
+/// The pair's whole point, asserted as a pair: on the same unconfigured
+/// project, `status` exits 0 and `doctor` does not. Recall shipped for
+/// months with only the first, and an environment that never synced anything
+/// was indistinguishable from one with nothing new to sync.
+#[test]
+fn doctor_exits_non_zero_where_status_exits_zero() {
+    let repo = git_repo();
+
+    let status = run(&["status"], repo.path(), &[], None);
+    let doctor = run(&["doctor"], repo.path(), &[], None);
+
+    assert_eq!(status.code, 0, "status must stay informational");
+    assert_eq!(
+        doctor.code, 1,
+        "doctor must fail an unconfigured project: {}",
+        doctor.stdout
+    );
+}
+
+/// A failure nobody can act on trains the reader to skip the output, so the
+/// fix is part of the contract rather than a nicety.
+#[test]
+fn doctor_names_what_is_missing_and_what_to_do() {
+    let repo = git_repo();
+    let r = run(&["doctor"], repo.path(), &[], None);
+
+    assert!(r.stdout.contains("RECALL_URL"), "stdout: {}", r.stdout);
+    assert!(r.stdout.contains("RECALL_TOKEN"), "stdout: {}", r.stdout);
+    assert!(
+        r.stdout.contains("recall init"),
+        "an unwired project should be told the command that wires it: {}",
+        r.stdout
+    );
+    // The one value in the whole setup that cannot be reasoned out — it is
+    // not $HOME — and it used to live only in a ROADMAP checkbox.
+    assert!(
+        r.stdout.contains("/home/user/.claude"),
+        "the remote memory dir value has to be in the output: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn doctor_json_is_parseable_and_carries_the_levels() {
+    let repo = git_repo();
+    let r = run(&["doctor", "--json"], repo.path(), &[], None);
+
+    assert_eq!(r.code, 1, "stderr: {}", r.stderr);
+
+    let parsed: serde_json::Value = serde_json::from_str(&r.stdout)
+        .unwrap_or_else(|e| panic!("--json did not emit JSON ({e}): {}", r.stdout));
+    let found = parsed.as_array().expect("doctor --json emits an array");
+
+    let url = found
+        .iter()
+        .find(|f| f["check"] == "RECALL_URL")
+        .expect("RECALL_URL is checked");
+    assert_eq!(url["level"], "fail");
+    assert!(url["fix"].is_string(), "a fail carries a fix: {url}");
+}
+
+/// Exercised through the real binary because the unit tests construct a
+/// `Report` by hand: this is the one place the collecting and the judging
+/// are proven to meet.
+#[test]
+fn doctor_passes_a_wired_project_that_can_reach_a_server() {
+    let repo = git_repo();
+    let init = run(&["init"], repo.path(), &[], None);
+    assert_eq!(init.code, 0, "stderr: {}", init.stderr);
+
+    let r = run(
+        &["doctor"],
+        repo.path(),
+        &[("RECALL_URL", DEAD_SERVER), ("RECALL_TOKEN", "t")],
+        None,
+    );
+
+    // The server is deliberately dead, so this still fails — but on the
+    // server, and no longer on the three things `init` and the environment
+    // just supplied.
+    assert!(
+        r.stdout.contains("ok   hooks"),
+        "init wired the hooks, doctor should see it: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("ok   RECALL_URL") && r.stdout.contains("ok   RECALL_TOKEN"),
+        "both variables were set: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("FAIL server"),
+        "and the dead server is what is left: {}",
+        r.stdout
     );
 }

@@ -27,6 +27,7 @@
 //! recall` is the way in.
 
 mod backfill;
+mod doctor;
 mod hook;
 mod init;
 mod project;
@@ -105,6 +106,12 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Check everything sync needs, and exit non-zero if any of it is broken
+    Doctor {
+        /// Machine-readable output, for scripts and CI
+        #[arg(long)]
+        json: bool,
+    },
     /// Run the sync server
     Serve,
     /// Hook entry point — called by PostToolUse
@@ -149,6 +156,7 @@ fn main() {
         Cmd::Serve => block_on_multi(serve::run()),
         Cmd::Promote { file, to } => block_on_current(promote::run(&file, to)),
         Cmd::Status { json } => block_on_current(status::run(json)),
+        Cmd::Doctor { json } => block_on_current(doctor::run(json)),
         Cmd::Push => block_on_current(hook::push()),
         Cmd::Pull => block_on_current(hook::pull()),
     };

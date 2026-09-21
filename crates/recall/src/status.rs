@@ -117,6 +117,13 @@ pub struct Report {
     /// Code never reads any of it, so it is worth reporting separately from
     /// "the files are here".
     pub global_linked: bool,
+    /// Whether `CLAUDE_CODE_REMOTE_MEMORY_DIR` is set.
+    ///
+    /// Unset is correct on a laptop and fatal in a remote session, where
+    /// Claude Code's auto-memory is off entirely without it — so this is
+    /// reported rather than judged here, and `recall doctor` is where the
+    /// two cases are told apart.
+    pub remote_memory_dir_set: bool,
     /// Whether `RECALL_URL` is set.
     pub url_set: bool,
     /// Whether `RECALL_TOKEN` is set.
@@ -153,7 +160,14 @@ pub async fn run(as_json: bool) -> anyhow::Result<i32> {
     Ok(exit::OK)
 }
 
-async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report {
+/// Gathers the whole report.
+///
+/// Shared with `recall doctor` rather than collected twice. Every finding
+/// doctor reports is a reading of this struct, so a question added here
+/// reaches both commands at once — and, more to the point, one added here
+/// cannot be silently missing from doctor, which is the shape of bug this
+/// crate has now shipped twice.
+pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report {
     let root = &here.root;
     let root_str = root.to_string_lossy().to_string();
     let remote = proj::remote();
@@ -203,6 +217,9 @@ async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report {
         global_linked: std::fs::read(memory_dir.join("MEMORY.md"))
             .map(|b| recall_hooks::global_index_is_linked(&b))
             .unwrap_or(false),
+        remote_memory_dir_set: claude::Env::from_lookup(here.env.lookup())
+            .remote_memory_dir
+            .is_some_and(|d| !d.is_empty()),
         url_set: !cfg.url.is_empty(),
         token_set: !cfg.token.is_empty(),
         server_ok: false,

@@ -512,6 +512,47 @@ hooks at all.
 
 `recall status --json` prints the same thing machine-readably.
 
+### When you want an answer, not a report: `recall doctor`
+
+```sh
+recall doctor
+```
+
+Same questions, read as verdicts, and **non-zero when sync is actually
+broken**:
+
+```
+  FAIL RECALL_URL                     not set anywhere
+                                      → cloud environment: the "Add/Edit cloud environment" dialog; laptop: your shell profile
+  ok   hooks                          wired in .claude/settings.json
+  warn CLAUDE_CODE_REMOTE_MEMORY_DIR  not set — correct on a laptop; in a remote or cloud
+                                        session it means Claude Code's auto-memory is off entirely
+                                      → cloud environment only, and note it is not $HOME: /home/user/.claude
+
+  2 problem(s). Recall is not syncing anything here.
+```
+
+The exit code is the reason this exists rather than the formatting. `recall
+status` prints `(unset)` and exits `0`; `recall pull` warns on stderr and
+exits `0` so a hook can never fail your session. Both are right on their own,
+and together they mean an environment that has *never* synced anything looks
+exactly like one with nothing new to sync. This repository lost a day of
+memory to that before the command existed, in its own cloud environment.
+
+`FAIL` means memory is not syncing, or is syncing somewhere you did not ask
+for. `warn` means something is not doing what it looks like it does — files
+sitting under a scope that is switched off, a server that is up but falling
+back to last-write-wins — and never changes the exit code, because a check
+that fails on taste is a check people append `|| true` to.
+
+Every finding that is not `ok` carries the thing to do about it. That is a
+rule rather than a habit: a test asserts it, because a finding a reader
+cannot act on teaches them to skip the whole report.
+
+`recall doctor --json` emits the findings as an array, each with its `level`,
+`check`, `detail` and `fix` — for a CI step or a shell prompt that should go
+red when memory stops syncing.
+
 ## Cloud environments need the binary too
 
 A claude.ai cloud session runs the hooks from the repo it cloned, but
