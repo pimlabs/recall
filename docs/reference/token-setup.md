@@ -48,8 +48,11 @@ dialog):
   `../ARCHITECTURE.md` for why that one's required, not optional, here).
   If you use the global scope, `RECALL_GLOBAL_KEY` belongs here too, with
   the same value as everywhere else — it is on or off per environment, and
-  a mixture leaves `MEMORY.md` linking files that environment never fetches
-  (see [`install.md`](install.md)).
+  a mixture leaves `MEMORY.md` linking files that environment never fetches.
+  `RECALL_MACHINE_KEY` is the one to leave out: every session here is a new
+  machine, so the facts your laptop filed under its key do not describe this
+  one, and unset means `machine/` is ignored rather than filed under the
+  project. Both scopes are in [`install.md`](install.md).
 - **Network access**: set to **Custom** and add the server's domain under
   **Allowed domains** — confirmed live (see `ROADMAP.md` Phase 1) that the
   default network policy blocks a self-hosted domain otherwise.
