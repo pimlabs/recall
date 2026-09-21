@@ -158,7 +158,7 @@ pub async fn backfill(ctx: &Context) -> Result<Outcome, Error> {
     // links are regenerated rather than synced. Refreshing first costs
     // nothing — the rewrite is byte-idempotent — and skipping it would put a
     // stale index on every other machine.
-    if ctx.global().is_some() {
+    if ctx.has_reserved_scope() {
         index::refresh(&ctx.memory_dir)?;
     }
 

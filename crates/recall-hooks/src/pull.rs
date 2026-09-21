@@ -107,7 +107,7 @@ pub async fn pull(ctx: &Context) -> Result<PullOutcome, Error> {
     }
 
     // After the writes, not before: the index lists what is now there.
-    if ctx.global().is_some() {
+    if ctx.has_reserved_scope() {
         index::refresh(&ctx.memory_dir)?;
     }
     ctx.refresh_state()?;
