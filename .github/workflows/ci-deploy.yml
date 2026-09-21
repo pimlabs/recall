@@ -125,6 +125,7 @@ jobs:
           bash -n scripts/release.sh
           bash -n deploy/backup-offbox.sh
           bash -n scripts/backup-offbox-check.sh
+          bash -n .claude/hooks/session-start.sh
 
       # The off-box backup runs against a stub rclone, so it needs no bucket
       # and no credentials. What it asserts cannot be seen from the script's
