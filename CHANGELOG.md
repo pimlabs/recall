@@ -16,6 +16,35 @@ break will be described here in full rather than smoothed over.
 
 ## Unreleased
 
+- **`recall doctor` checks everything sync needs and exits non-zero when any
+  of it is broken.** `recall status` reports; this judges, and the exit code
+  is the whole point.
+
+  The two were never redundant, they were incomplete. `status` prints
+  `(unset)` and exits `0` because it is informational. `recall pull` warns on
+  stderr and exits `0` because a hook that fails your session is worse than
+  one that does nothing. Both are right, and between them an environment that
+  has never synced anything is indistinguishable from one with nothing new to
+  sync — which is how this repository's own cloud environment ran for a day
+  with the hooks wired, the binary installed, and no `RECALL_URL` set,
+  syncing nothing and saying nothing.
+
+  `FAIL` means memory is not syncing, or is syncing somewhere you did not ask
+  for: no URL or token, an unreachable server, unwired hooks, a miscased
+  `global/`, a variable set to a value Recall refused, a settings file that is
+  not readable JSON, or a scope whose files `MEMORY.md` links none of.
+  `warn` never changes the exit code — files under a switched-off scope, a
+  server up but falling back to last-write-wins, `CLAUDE_CODE_REMOTE_MEMORY_DIR`
+  unset — because a check that fails on taste gets `|| true` appended to it.
+
+  Every finding that is not `ok` names what to do about it, including the one
+  value in the whole setup that cannot be reasoned out: the cloud
+  environment's `CLAUDE_CODE_REMOTE_MEMORY_DIR` is `/home/user/.claude`, not
+  `$HOME`. `recall doctor --json` emits the findings for a CI step.
+
+  Nothing about `recall status` changed. It still exits `0`, and its `--json`
+  shape is unchanged apart from one added field.
+
 - **`RECALL_MACHINE_KEY` adds a third scope, for memories true of one machine
   and no other.** Files under `<memory dir>/machine/` sync under
   `machine:<key>` and come back only on a machine declaring the same key. The
