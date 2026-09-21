@@ -10,6 +10,7 @@ mod backfill;
 mod behaviour;
 mod edge_cases;
 mod global_scope;
+mod machine_scope;
 mod promote;
 
 use std::fs;

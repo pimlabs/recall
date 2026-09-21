@@ -119,7 +119,7 @@ pub async fn push(ctx: &Context, triggered_path: &Path) -> Result<PushOutcome, E
         }
     }
 
-    if ctx.global().is_some() {
+    if ctx.has_reserved_scope() {
         index::refresh(&ctx.memory_dir)?;
     }
     ctx.refresh_state()?;

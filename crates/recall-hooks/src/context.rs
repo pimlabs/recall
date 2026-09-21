@@ -65,6 +65,19 @@ impl Context {
             .find(|s| s.prefix.as_deref() == Some(dir))
     }
 
+    /// Whether any reserved scope is switched on.
+    ///
+    /// The question the index gate has to ask, and the reason it is spelled
+    /// out here rather than at each call site: `MEMORY.md` is maintained for
+    /// every reserved directory at once, so asking about one of them is only
+    /// ever right while there is only one. Asking about the global scope was
+    /// correct until the machine scope arrived, and then quietly stopped
+    /// being — a machine-only setup synced its files and indexed none of
+    /// them.
+    pub fn has_reserved_scope(&self) -> bool {
+        self.scopes.iter().any(|s| s.prefix.is_some())
+    }
+
     /// Rewrites the baseline to match what is on disk right now.
     ///
     /// Called at the end of both a push and a pull. A machine that only ever
