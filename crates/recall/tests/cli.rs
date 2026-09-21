@@ -1093,12 +1093,70 @@ fn doctor_names_what_is_missing_and_what_to_do() {
         "an unwired project should be told the command that wires it: {}",
         r.stdout
     );
-    // The one value in the whole setup that cannot be reasoned out — it is
-    // not $HOME — and it used to live only in a ROADMAP checkbox.
+}
+
+/// In a remote session an unset memory dir is not a nuance: Claude Code's
+/// auto-memory is off entirely, so nothing syncs however correct the rest
+/// is. The fix has to carry the value, which is not `$HOME` and used to
+/// appear nowhere but a ROADMAP checkbox.
+#[test]
+fn doctor_fails_a_remote_session_with_no_memory_dir() {
+    let repo = git_repo();
+    let r = run(
+        &["doctor"],
+        repo.path(),
+        &[("CLAUDE_CODE_REMOTE", "true")],
+        None,
+    );
+
+    assert_eq!(r.code, 1, "stdout: {}", r.stdout);
+    assert!(
+        r.stdout.contains("FAIL CLAUDE_CODE_REMOTE_MEMORY_DIR"),
+        "stdout: {}",
+        r.stdout
+    );
     assert!(
         r.stdout.contains("/home/user/.claude"),
-        "the remote memory dir value has to be in the output: {}",
+        "the value has to be in the output: {}",
         r.stdout
+    );
+}
+
+/// The same state on a laptop is correct, and saying so every time is the
+/// noise that teaches someone to stop reading the report.
+#[test]
+fn doctor_says_nothing_about_the_memory_dir_outside_a_remote_session() {
+    let repo = git_repo();
+    let r = run(&["doctor"], repo.path(), &[], None);
+
+    assert!(
+        !r.stdout.contains("FAIL CLAUDE_CODE_REMOTE_MEMORY_DIR")
+            && !r.stdout.contains("warn CLAUDE_CODE_REMOTE_MEMORY_DIR"),
+        "stdout: {}",
+        r.stdout
+    );
+}
+
+/// Checking your connection from a directory that is not a project is an
+/// ordinary thing to do, and the first version of this exited 1 for it —
+/// because hooks are not wired there, which is true and not a problem.
+#[test]
+fn doctor_does_not_fail_on_unwired_hooks_outside_a_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = run(&["doctor", "--json"], dir.path(), &[], None);
+
+    let parsed: serde_json::Value = serde_json::from_str(&r.stdout)
+        .unwrap_or_else(|e| panic!("--json did not emit JSON ({e}): {}", r.stdout));
+    let hooks = parsed
+        .as_array()
+        .expect("doctor --json emits an array")
+        .iter()
+        .find(|f| f["check"] == "hooks")
+        .expect("hooks is checked");
+
+    assert_eq!(
+        hooks["level"], "ok",
+        "outside a repository there is nothing to wire: {hooks}"
     );
 }
 

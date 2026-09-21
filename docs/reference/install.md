@@ -524,10 +524,12 @@ broken**:
 ```
   FAIL RECALL_URL                     not set anywhere
                                       → cloud environment: the "Add/Edit cloud environment" dialog; laptop: your shell profile
+  FAIL CLAUDE_CODE_REMOTE_MEMORY_DIR  not set in a remote session, so Claude Code's
+                                        auto-memory is off entirely and there is nothing
+                                        for Recall to sync
+                                      → set it on this cloud environment, and note it is
+                                        not $HOME: /home/user/.claude
   ok   hooks                          wired in .claude/settings.json
-  warn CLAUDE_CODE_REMOTE_MEMORY_DIR  not set — correct on a laptop; in a remote or cloud
-                                        session it means Claude Code's auto-memory is off entirely
-                                      → cloud environment only, and note it is not $HOME: /home/user/.claude
 
   2 problem(s). Recall is not syncing anything here.
 ```
@@ -544,6 +546,16 @@ for. `warn` means something is not doing what it looks like it does — files
 sitting under a scope that is switched off, a server that is up but falling
 back to last-write-wins — and never changes the exit code, because a check
 that fails on taste is a check people append `|| true` to.
+
+Two checks read the environment rather than guessing at it, and both were
+wrong in *both* directions before they did. Unwired hooks are a `FAIL` inside
+a git repository and nothing at all outside one — checking your connection
+from your home directory is an ordinary thing to do, and failing for it is
+how a command teaches you to stop reading its output. An unset
+`CLAUDE_CODE_REMOTE_MEMORY_DIR` is a `FAIL` in a remote session, where Claude
+Code's auto-memory is off entirely, and goes unmentioned on a laptop, where it
+is correct. `CLAUDE_CODE_REMOTE` is what tells the two apart — the same signal
+`.claude/hooks/session-start.sh` keys off.
 
 Every finding that is not `ok` carries the thing to do about it. That is a
 rule rather than a habit: a test asserts it, because a finding a reader

@@ -76,6 +76,21 @@ pub struct Report {
     pub memory_files: usize,
     /// Whether `.claude/settings.json` carries Recall's hooks.
     pub hooks_wired: bool,
+    /// Whether the working directory is inside a git repository at all.
+    ///
+    /// Not the same question as [`Report::project_key_source`], which says
+    /// where the key came from: a repository with no remote and a plain
+    /// directory both derive one from the path. The difference matters to
+    /// `recall doctor`, because unwired hooks in a project are a problem and
+    /// unwired hooks in your home directory are just where you are standing.
+    pub in_git_repo: bool,
+    /// Whether this is a remote or cloud session, per `CLAUDE_CODE_REMOTE`.
+    ///
+    /// The same signal `.claude/hooks/session-start.sh` keys off. It decides
+    /// whether an unset `CLAUDE_CODE_REMOTE_MEMORY_DIR` is correct or fatal,
+    /// which is otherwise unanswerable from here — and being unanswerable is
+    /// how it ended up a permanent warning in both places.
+    pub remote_session: bool,
     /// Variables a settings file declares, which is where their value
     /// actually comes from — the shell's is replaced, not consulted. Absent
     /// from the JSON when there are none.
@@ -184,6 +199,15 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
         hooks_wired: std::fs::read(root.join(".claude").join("settings.json"))
             .map(|b| settings::is_wired(&b))
             .unwrap_or(false),
+        in_git_repo: proj::git_root().is_some(),
+        // Read from the process environment rather than through
+        // `here.env.lookup()`: this one describes the harness the command is
+        // running under, and a settings file claiming otherwise would be
+        // describing something it cannot know.
+        remote_session: matches!(
+            std::env::var("CLAUDE_CODE_REMOTE").ok().as_deref(),
+            Some("true") | Some("1")
+        ),
         declared_env: here.env.declared(&known_vars()),
         ignored_env: here.env.ignored(&known_vars()),
         unreadable_settings: here.env.unreadable().to_vec(),
