@@ -2,6 +2,16 @@ name: Release
 
 # Tagged releases exist for one reason: npm, Homebrew and install.sh all
 # need a fixed artifact to point at.
+#
+# The registries are published from here too, and without a stored token for
+# either of them: npm and crates.io both trust this workflow's OIDC identity
+# directly ("trusted publishing"), and hand it a credential that lives for
+# the length of the job. The jobs that publish sit behind the `release`
+# environment, whose required reviewer is the owner — so a pushed tag builds
+# and drafts everything, and nothing reaches a registry until a person
+# approves it. Publishing cannot be undone (npm: no unpublish after 72h;
+# crates.io: yank, never delete), which is why that gate is a person and not
+# a check. Setup is in docs/reference/releasing.md.
 on:
   push:
     tags: ["v*"]
@@ -15,7 +25,29 @@ permissions:
   contents: write
 
 jobs:
+  # Before four native builds, not after: npm's postinstall downloads the
+  # release named after the package's *own* version, so a tag that disagrees
+  # with npm/package.json ships a package that installs nothing — and it would
+  # otherwise be discovered after twenty minutes of runner time.
+  versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - name: The tag, Cargo.toml and npm/package.json agree
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          want="${TAG#v}"
+          cargo_v=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          npm_v=$(grep -m1 '"version"' npm/package.json | cut -d'"' -f4)
+          echo "tag $want | Cargo.toml $cargo_v | npm $npm_v"
+          [ "$cargo_v" = "$want" ] || { echo "::error::Cargo.toml says $cargo_v, the tag says $want"; exit 1; }
+          [ "$npm_v" = "$want" ]   || { echo "::error::npm/package.json says $npm_v, the tag says $want"; exit 1; }
+
   build:
+    needs: versions
     strategy:
       fail-fast: false
       matrix:
@@ -101,3 +133,149 @@ jobs:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: dist/*
           generate_release_notes: true
+
+  # ---- The registries. Each waits for the GitHub Release, because npm's
+  # postinstall and the Homebrew formula both download its archives, and each
+  # waits for the `release` environment's approval. They are separate jobs
+  # because they have nothing to do with each other: a failure in one must
+  # not stop the others, which is what left v0.2.0 with four crates
+  # unpublished. Each skips a version its registry already has, so re-running
+  # a failed job is always safe.
+
+  npm:
+    needs: publish
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      # No `registry-url`: that writes an .npmrc expecting NODE_AUTH_TOKEN,
+      # and there is deliberately no token to give it. npm finds the OIDC
+      # credential on its own.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # Trusted publishing needs npm 11.5.1 or later; do not rely on
+      # whichever npm the runner's Node happens to ship.
+      - run: npm install -g npm@latest
+      - name: npm publish
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          v="${TAG#v}"
+          if curl -sf "https://registry.npmjs.org/@pimlabs%2Frecall/$v" >/dev/null; then
+            echo "npm already has $v — nothing to do"
+            exit 0
+          fi
+          cd npm
+          # Scoped packages default to private. Provenance is attached
+          # automatically under trusted publishing.
+          npm publish --access public
+
+  crates:
+    needs: publish
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Exchanges this job's OIDC token for a crates.io token that lasts 30
+      # minutes and is revoked when the job ends.
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - name: cargo publish, bottom-up
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          v="${TAG#v}"
+          # Bottom-up: each crate must be on the index before anything that
+          # depends on it can be packaged. Same order as scripts/release.sh.
+          crates=(recall-wire recall-hooks recall-server recall)
+          for i in "${!crates[@]}"; do
+            n="${crates[$i]}"
+            if curl -sf "https://index.crates.io/${n:0:2}/${n:2:2}/$n" | grep -q "\"vers\":\"$v\""; then
+              echo "$n already at $v"
+              continue
+            fi
+            echo "::group::cargo publish -p $n"
+            cargo publish -p "$n"
+            echo "::endgroup::"
+            # The index needs a moment, or the next crate fails with
+            # "no matching package named ...".
+            [ "$i" -eq $(( ${#crates[@]} - 1 )) ] || sleep 20
+          done
+
+  homebrew:
+    needs: publish
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      # The one credential this workflow stores: a fine-grained token that
+      # can write to pimlabs/homebrew-tap and nothing else. It lives on the
+      # `release` environment, so it is only readable by a job that has
+      # already been approved. Missing is reported, not failed — the laptop
+      # path can still push the tap.
+      - name: Is the tap token configured?
+        id: token
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -n "$TAP_TOKEN" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::HOMEBREW_TAP_TOKEN is not set on the release environment, so the tap was not updated. See docs/reference/releasing.md."
+          fi
+      - name: Rewrite the formula from this release's checksums
+        if: steps.token.outputs.configured == 'true'
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          curl -fsSL "https://github.com/$REPO/releases/download/$TAG/checksums.txt" -o "$RUNNER_TEMP/checksums.txt"
+          python3 scripts/update-formula.py "${TAG#v}" "$RUNNER_TEMP/checksums.txt"
+          git --no-pager diff --stat Formula/recall.rb
+      - name: Push it to the tap
+        if: steps.token.outputs.configured == 'true'
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          ./scripts/push-tap.sh "${TAG#v}" "https://x-access-token:${TAP_TOKEN}@github.com/pimlabs/homebrew-tap.git"
+      # This repository's copy of the formula is the source the tap is
+      # generated from, so it has to follow — but a job that can push to
+      # main is a larger grant than this one needs. The rewritten file is
+      # kept as an artifact, and the step summary says a PR is owed.
+      - uses: actions/upload-artifact@v4
+        if: steps.token.outputs.configured == 'true'
+        with:
+          name: formula
+          path: Formula/recall.rb
+      - name: Say what is left
+        if: steps.token.outputs.configured == 'true'
+        run: |
+          {
+            echo "### Homebrew tap updated"
+            echo ""
+            echo "\`Formula/recall.rb\` in this repository still has the previous release's"
+            echo "checksums. The rewritten file is attached to this run as the \`formula\`"
+            echo "artifact; it lands on \`main\` through a pull request like every other change."
+          } >> "$GITHUB_STEP_SUMMARY"

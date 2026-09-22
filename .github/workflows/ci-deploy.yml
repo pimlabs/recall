@@ -129,6 +129,15 @@ jobs:
           bash -n deploy/backup-offbox.sh
           bash -n scripts/backup-offbox-check.sh
           bash -n .claude/hooks/session-start.sh
+          bash -n scripts/push-tap.sh
+          bash -n scripts/update-formula-check.sh
+
+      # The formula rewrite runs once per release, from CI or from a laptop,
+      # and a mistake in it surfaces later on someone else's machine as a
+      # checksum error. Checked here against the committed formula, which a
+      # real release wrote — no network, no release needed.
+      - name: Formula rewrite round-trips and refuses cleanly
+        run: ./scripts/update-formula-check.sh
 
       # The off-box backup runs against a stub rclone, so it needs no bucket
       # and no credentials. What it asserts cannot be seen from the script's
