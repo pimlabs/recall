@@ -51,14 +51,27 @@ Two consequences worth stating, because both have already been got wrong:
 
 ## The short version
 
-Merge a PR that bumps the version in `Cargo.toml` and `npm/package.json`,
-then push the tag:
+Merge a PR that bumps the version in `Cargo.toml` and `npm/package.json`.
+Then either, from anywhere including the GitHub mobile app:
+
+> **Actions → Cut a release → Run workflow** (on `main`)
+
+or, from a machine with a checkout:
 
 ```sh
-git tag -a v0.3.0 -m "recall 0.3.0" && git push origin v0.3.0
+git tag -a v0.3.1 -m "recall 0.3.1" && git push origin v0.3.1
 ```
 
-`.github/workflows/release.yml` does the rest, in this order:
+Both end in the same place. *Cut a release*
+(`.github/workflows/cut-release.yml`) reads the version from `main`, refuses
+if CI did not pass on that commit or if the tag already exists somewhere
+else, creates the tag, and starts the Release workflow on it. It dispatches
+Release explicitly because a tag pushed with the workflow's own token starts
+no workflow by itself, and it dispatches it *on the tag* because the
+`release` environment only admits tag refs. Run it twice and the second run
+either refuses or resumes; it never moves a tag.
+
+`.github/workflows/release.yml` then does the rest, in this order:
 
 1. **Versions agree** — the tag, `Cargo.toml` and `npm/package.json`, before
    any runner time is spent.
@@ -81,9 +94,10 @@ a failed job is always safe**.
 
 **Why an approval, not a check.** Nothing a registry accepts can be taken
 back: npm refuses to unpublish after 72 hours, and crates.io can yank a
-version but never delete it. Whoever pushes the tag — you, or an agent
+version but never delete it. Whoever cuts the tag — you, or an agent
 working for you — can build and draft everything; only a person can make it
-public.
+public. From a phone that is the whole release: *Run workflow*, then, about
+ten minutes later, *Approve* on the notification.
 
 ### One-time setup
 
