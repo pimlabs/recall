@@ -321,7 +321,8 @@ the fastest rollback you have: put the old compose file back, and the old
 hostname works again.
 
 If the hostname changed, every client's `RECALL_URL` has to change with it —
-laptops (shell profile) and every claude.ai cloud environment
+laptops (`recall connect <new-url>`, or the shell profile where one exports
+`RECALL_URL`) and every claude.ai cloud environment
 ([`../docs/reference/token-setup.md`](../docs/reference/token-setup.md)) — and
 any `.claude/settings.json` or `.claude/settings.local.json` that declares it,
 which outranks the shell profile you just updated. A client left pointing at

@@ -35,6 +35,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 clap = { version = "4", features = ["derive"] }
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 tempfile = "3"
+# `recall connect` reads the token from the terminal without echoing it.
+rpassword = "7"
 
 [profile.release]
 strip = true

@@ -16,31 +16,41 @@ needs to send this same value.
 
 ## 2. Install it on your laptop
 
-Add to your shell profile (`~/.zshrc`, `~/.bashrc`, whichever your shell
-reads):
-
 ```sh
-export RECALL_TOKEN="<the value from step 1>"
-export RECALL_URL="https://recall.yourdomain.com"
+recall connect https://recall.yourdomain.com
 ```
 
-Open a new terminal (or `source` the file) so the hooks pick it up — the
-shell is where Recall reads these unless a settings file declares them, and a
-declaration wins.
+Paste the value from step 1 at the prompt; it is not echoed. `connect`
+checks it against the server before saving anything, then writes it to
+`~/.recall/credentials.json` with mode `0600` (set `RECALL_HOME` to put it
+elsewhere). Both the URL and the token come from there, so there is nothing
+to add to a shell profile.
 
-A project may also declare them in its `.claude/settings.json`, and if it
-does, **that wins**: Claude Code replaces an inherited value with the one in
-the file. That is the right home for a value that describes the *project*
-(see [`install.md`](install.md)); for a token and a URL, which describe a
-machine, the shell profile is still the place — and committing a token to a
-settings file would publish it. `recall status` names the file behind any
-value that came from one, so the two can never quietly disagree.
+**Why not the shell profile, which is what this page used to say.** A token
+in the environment is inherited by every process started from that shell,
+including the install script of any package in any project; shell profiles
+are among the most commonly published files there are, in dotfiles
+repositories; and `export RECALL_TOKEN=…` typed once stays in shell history.
+
+**Already have it in your profile?** Run `recall connect`, then delete the
+`export RECALL_TOKEN=…` line and open a new terminal. Until you do, the
+exported value wins — anything the environment sets outranks the saved file —
+and `recall connect` says so. `recall doctor` warns about a shell token on a
+laptop; it cannot tell which file exported it, so it will not guess one.
+
+The layering, lowest first: the saved file, then your shell, then any
+`.claude/settings.json` `env` block, which Claude Code applies over the shell.
+A settings file is the right home for a value that describes the *project*
+(see [`install.md`](install.md)), never for a token — committing one would
+publish it. `recall status` names where each value came from.
 
 ## 3. Install it on a claude.ai cloud environment
 
-Cloud sessions don't read your laptop's shell profile — each environment
+Cloud sessions don't read anything from your laptop — each environment
 has its own secrets, set once and reused by every session spawned from
-it. In that environment's settings (the "Add/Edit cloud environment"
+it. Here the variables *are* the right place: they are a secret store, and
+`recall connect` refuses to run in a cloud session because the container it
+would save into is thrown away. In that environment's settings (the "Add/Edit cloud environment"
 dialog):
 
 **Environment variables** — four of them:
@@ -117,7 +127,9 @@ side (a failed `curl`).
 Not automated — this is a single shared secret, so rotating it means:
 generate a new one, update `deploy/.env` and restart the server, then
 update every environment from steps 2-3 before their next push/pull (a
-stale token just gets `401`s until updated, nothing worse). There's no
+stale token just gets `401`s until updated, nothing worse). On a laptop
+that is `recall connect <url>` again, which replaces the saved token only
+once the new one is accepted. There's no
 urgency to rotate on a schedule for a single-owner personal server; do it
 if the token leaks (e.g. committed by accident — check `git log -p` for
 `RECALL_TOKEN` if ever unsure) or when a device permanently retires.

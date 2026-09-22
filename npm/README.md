@@ -15,8 +15,7 @@ checksums. There's no Node dependency at runtime — the binary is Rust.
 Then, once per machine:
 
 ```sh
-export RECALL_URL="https://your-recall-host"
-export RECALL_TOKEN="<your token>"
+recall connect https://your-recall-host    # asks for the token, checks it, saves it
 ```
 
 And once per project you want synced:

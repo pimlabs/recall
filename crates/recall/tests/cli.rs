@@ -1216,6 +1216,255 @@ fn doctor_passes_a_wired_project_that_can_reach_a_server() {
 }
 
 // ---------------------------------------------------------------------------
+// connect / disconnect, and the credentials file the other commands read
+// ---------------------------------------------------------------------------
+
+/// A `RECALL_HOME` holding a credentials file, as `recall connect` would
+/// have left it. Written by hand rather than through `connect`, which needs
+/// a terminal the tests do not have.
+fn recall_home_with(servers: &[(&str, &str)], default: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let servers: serde_json::Map<String, serde_json::Value> = servers
+        .iter()
+        .map(|(url, token)| ((*url).to_string(), serde_json::json!({ "token": token })))
+        .collect();
+    let body = serde_json::json!({ "version": 1, "default": default, "servers": servers });
+    let path = dir.path().join("credentials.json");
+    std::fs::write(&path, body.to_string()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    dir
+}
+
+/// A file written in an ephemeral container evaporates with it, and a
+/// command that appears to succeed there is worse than one that declines.
+#[test]
+fn connect_refuses_in_a_remote_session_and_writes_nothing() {
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+
+    let r = run(
+        &["connect", "https://recall.example.com"],
+        repo.path(),
+        &[("CLAUDE_CODE_REMOTE", "true"), ("RECALL_HOME", &home_str)],
+        None,
+    );
+
+    assert_eq!(r.code, 1, "stderr: {}", r.stderr);
+    // Named, because the terminal check further on would also refuse here —
+    // and a test passing for that reason proves nothing about this one.
+    assert!(
+        r.stderr.contains("remote session"),
+        "refused for being remote: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("RECALL_TOKEN"),
+        "and says what to do instead: {}",
+        r.stderr
+    );
+    assert!(!home.path().join("credentials.json").exists());
+}
+
+/// The token is read from a terminal and nowhere else. Piped stdin is not a
+/// terminal, and must not become a quiet second way in.
+#[test]
+fn connect_without_a_terminal_refuses_and_writes_nothing() {
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+
+    let r = run(
+        &["connect", "https://recall.example.com"],
+        repo.path(),
+        &[("RECALL_HOME", &home_str)],
+        Some("s3cret\n"),
+    );
+
+    assert_eq!(r.code, 1, "stderr: {}", r.stderr);
+    assert!(r.stderr.contains("terminal"), "stderr: {}", r.stderr);
+    assert!(!home.path().join("credentials.json").exists());
+}
+
+#[test]
+fn connect_refuses_something_that_is_not_a_server_url() {
+    let repo = git_repo();
+    let r = run(&["connect", "recall.example.com"], repo.path(), &[], None);
+    assert_eq!(r.code, 1);
+    assert!(
+        r.stderr.contains("not a server URL"),
+        "stderr: {}",
+        r.stderr
+    );
+}
+
+/// A file this build cannot read is never overwritten — `connect` stops
+/// before asking for a secret.
+#[test]
+fn connect_will_not_overwrite_a_credentials_file_it_cannot_read() {
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join("credentials.json");
+    std::fs::write(&path, "{ this is not json").unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+
+    let r = run(
+        &["connect", "https://recall.example.com"],
+        repo.path(),
+        &[("RECALL_HOME", &home_str)],
+        None,
+    );
+
+    assert_eq!(r.code, 1, "stderr: {}", r.stderr);
+    assert!(
+        r.stderr.contains("Nothing was changed"),
+        "stderr: {}",
+        r.stderr
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "{ this is not json"
+    );
+}
+
+/// `recall connect` is a complete setup: with nothing in the environment,
+/// status reports both values and says where they came from.
+#[test]
+fn status_reads_the_url_and_token_that_connect_saved() {
+    let repo = git_repo();
+    let home = recall_home_with(&[(DEAD_SERVER, "t")], DEAD_SERVER);
+    let home_str = home.path().to_string_lossy().to_string();
+
+    let rep = status_json(repo.path(), &[("RECALL_HOME", &home_str)]);
+
+    assert_eq!(rep["url_set"], true, "{rep}");
+    assert_eq!(rep["token_set"], true, "{rep}");
+    assert_eq!(rep["url_source"], "credentials_file");
+    assert_eq!(rep["token_source"], "credentials_file");
+    assert_eq!(rep["credentials_exposed"], false);
+}
+
+/// Below the environment, never above it.
+#[test]
+fn an_exported_token_still_wins_over_the_saved_one() {
+    let repo = git_repo();
+    let home = recall_home_with(&[(DEAD_SERVER, "saved")], DEAD_SERVER);
+    let home_str = home.path().to_string_lossy().to_string();
+
+    let rep = status_json(
+        repo.path(),
+        &[("RECALL_HOME", &home_str), ("RECALL_TOKEN", "exported")],
+    );
+    assert_eq!(rep["token_source"], "environment", "{rep}");
+    assert_eq!(rep["url_source"], "credentials_file", "{rep}");
+}
+
+/// The migration nudge, through the real binary: a shell token on a laptop
+/// is a warning, and the warning carries the command.
+#[test]
+fn doctor_suggests_connect_for_a_shell_token_on_a_laptop() {
+    let repo = git_repo();
+    let r = run(
+        &["doctor"],
+        repo.path(),
+        &[("RECALL_URL", DEAD_SERVER), ("RECALL_TOKEN", "t")],
+        None,
+    );
+    assert!(
+        r.stdout.contains("warn token storage"),
+        "stdout: {}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("recall connect"), "stdout: {}", r.stdout);
+}
+
+/// Removing the saved copy is all `disconnect` can do, and it must not
+/// imply more: the shell still supplies a token, and the report says so
+/// without naming a profile it cannot see.
+#[test]
+fn disconnect_removes_the_saved_token_and_is_honest_about_the_shell() {
+    let repo = git_repo();
+    let home = recall_home_with(
+        &[("https://recall.example.com", "t")],
+        "https://recall.example.com",
+    );
+    let home_str = home.path().to_string_lossy().to_string();
+
+    let r = run(
+        &["disconnect"],
+        repo.path(),
+        &[("RECALL_HOME", &home_str), ("RECALL_TOKEN", "exported")],
+        None,
+    );
+
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(
+        !home.path().join("credentials.json").exists(),
+        "the last server gone, the file goes too"
+    );
+    assert!(
+        r.stdout
+            .contains("Removed the token for https://recall.example.com"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("still works on the server"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("Your shell still supplies RECALL_TOKEN")
+            && r.stdout.contains("check your shell profile"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains(".zshrc") && !r.stdout.contains(".zprofile"),
+        "no guessing: {}",
+        r.stdout
+    );
+}
+
+/// With two servers saved and neither named, there is no right guess.
+#[test]
+fn disconnect_asks_which_when_it_cannot_tell() {
+    let repo = git_repo();
+    let home = recall_home_with(
+        &[
+            ("https://a.example.com", "ta"),
+            ("https://b.example.com", "tb"),
+        ],
+        "",
+    );
+    // No default: rewrite without it.
+    let path = home.path().join("credentials.json");
+    let mut v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    v.as_object_mut().unwrap().remove("default");
+    std::fs::write(&path, v.to_string()).unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+
+    let r = run(
+        &["disconnect"],
+        repo.path(),
+        &[("RECALL_HOME", &home_str)],
+        None,
+    );
+    assert_eq!(r.code, 1);
+    assert!(
+        r.stderr.contains("recall disconnect https://a.example.com"),
+        "{}",
+        r.stderr
+    );
+    assert!(path.exists(), "nothing was removed");
+}
+
+// ---------------------------------------------------------------------------
 // push, standing in the wrong project
 // ---------------------------------------------------------------------------
 
