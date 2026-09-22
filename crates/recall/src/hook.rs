@@ -11,7 +11,7 @@
 use std::io;
 use std::path::PathBuf;
 
-use recall_hooks::{exit, is_memory_file, payload};
+use recall_hooks::{exit, foreign_memory_slug, is_memory_file, payload};
 
 use crate::project;
 
@@ -29,6 +29,20 @@ pub async fn push() -> anyhow::Result<i32> {
     // report a missing token on every unrelated file the user touches.
     let here = project::resolve();
     if !is_memory_file(&here.memory_dir(), &triggered) {
+        // Silence is right for an unrelated file and wrong for this one:
+        // memory that belongs to another project looks exactly like a
+        // successful push from here, and the next pull overwrites it.
+        if let Some(slug) = foreign_memory_slug(&here.memory_root(), &here.memory_dir(), &triggered)
+        {
+            eprintln!(
+                "recall-push: that file is memory for {slug}, not for this project \
+                 — nothing was pushed"
+            );
+            eprintln!(
+                "recall-push:   standing in {}; a git worktree has its own memory directory",
+                here.root.display()
+            );
+        }
         return Ok(exit::OK);
     }
 
