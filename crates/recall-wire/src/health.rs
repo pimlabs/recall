@@ -63,6 +63,16 @@ pub struct Health {
     /// When the database was last backed up.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub last_backup_at: String,
+    /// When a copy last reached somewhere the loss of this machine does not
+    /// reach, per the stamp `deploy/backup-offbox.sh` leaves behind.
+    ///
+    /// Reported separately from [`Health::last_backup_at`] because they
+    /// protect against different things, and only one of them survives the
+    /// disk. Empty when nothing has ever written the stamp, which is also
+    /// what "no off-box backup is configured" looks like — the two are
+    /// indistinguishable from here, and neither is an error.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub last_offbox_at: String,
     /// Whether semantic merge is working, or silently degraded.
     pub merge: MergeStatus,
 }

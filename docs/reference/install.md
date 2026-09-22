@@ -547,6 +547,18 @@ sitting under a scope that is switched off, a server that is up but falling
 back to last-write-wins — and never changes the exit code, because a check
 that fails on taste is a check people append `|| true` to.
 
+One of them is about the server rather than this machine. **`off-box backup`**
+reports when a copy last reached somewhere the loss of the server does not
+reach, read from `GET /health`. It is silent when no off-box copy has ever
+succeeded — that is what a deployment without one looks like, and it is not an
+error — and it warns, rather than fails, once the last verified copy is more
+than two days old. Two days is generous against the six-hourly cadence
+`deploy/README.md` recommends: eight runs have to fail before it speaks, and a
+false alarm here would cost the credibility of every other line.
+
+Warn rather than fail because a stopped backup is serious and is still not
+"memory is not syncing", which is what `FAIL` means here.
+
 Two checks read the environment rather than guessing at it, and both were
 wrong in *both* directions before they did. Unwired hooks are a `FAIL` inside
 a git repository and nothing at all outside one — checking your connection

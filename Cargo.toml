@@ -33,7 +33,7 @@ axum = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 clap = { version = "4", features = ["derive"] }
-time = { version = "0.3", features = ["formatting", "macros"] }
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 tempfile = "3"
 
 [profile.release]

@@ -101,5 +101,47 @@ else
 fi
 
 echo
+echo "5. The stamp /health reads"
+# The whole point of the stamp is that it means "a copy reached the remote and
+# matched" — so a run that failed the verify must not leave one behind, or a
+# stopped backup keeps reporting itself as current, which is worse than having
+# no stamp at all.
+rm -f "$WORK/backups/.last-offbox"
+run "a verified run writes it" ok \
+  env RECALL_BACKUP_REMOTE=r: RECALL_BACKUP_SRC="$WORK/backups" "$SCRIPT"
+if [ -s "$WORK/backups/.last-offbox" ]; then
+  ok "the stamp exists and is not empty"
+else
+  bad "no stamp, so GET /health can never know this ran"
+fi
+
+stamp=$(cat "$WORK/backups/.last-offbox" 2>/dev/null || true)
+if printf '%s' "$stamp" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$'; then
+  ok "in the API's timestamp shape, so the client can read it"
+else
+  bad "stamp is not the API's timestamp shape: '$stamp'"
+fi
+
+# It must not be picked up as a snapshot, or it would be uploaded and counted.
+: > "$CALLS"
+PATH="$WORK/bin:$PATH" CALLS="$CALLS" \
+  env RECALL_BACKUP_REMOTE=r: RECALL_BACKUP_SRC="$WORK/backups" "$SCRIPT" >/dev/null 2>&1 || true
+if grep -q 'last-offbox' "$CALLS"; then
+  bad "the stamp was handed to rclone — the dot prefix is not keeping it out"
+else
+  ok "the stamp is never uploaded"
+fi
+
+rm -f "$WORK/backups/.last-offbox"
+PATH="$WORK/bin:$PATH" CALLS="$CALLS" \
+  env STUB_FAIL=check RECALL_BACKUP_REMOTE=r: RECALL_BACKUP_SRC="$WORK/backups" "$SCRIPT" >/dev/null 2>&1 || true
+if [ -e "$WORK/backups/.last-offbox" ]; then
+  bad "a run that failed the verify still stamped itself as successful"
+else
+  ok "a failed verify leaves no stamp"
+fi
+rm -f "$WORK/backups/.last-offbox"
+
+echo
 printf 'passed %d, failed %d\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

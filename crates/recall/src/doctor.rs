@@ -188,6 +188,8 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
         format!("{} ({} files)", rep.memory_dir, rep.memory_files),
     ));
 
+    offbox_finding(rep, &mut out);
+
     // ---- is anything quietly going nowhere
     reserved_findings(rep, &mut out);
 
@@ -231,6 +233,68 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
     }
 
     out
+}
+
+/// How long an off-box copy may be missing before it is worth saying so.
+///
+/// Generous against the cadence `deploy/README.md` recommends — six-hourly,
+/// so eight runs would have to fail before this speaks. That asymmetry is
+/// deliberate: a false alarm here costs the credibility of every other line
+/// in the report, and a real stoppage stays true for days.
+const OFFBOX_STALE_AFTER: time::Duration = time::Duration::days(2);
+
+/// Whether a copy has recently reached somewhere the loss of the server does
+/// not reach.
+///
+/// Nothing watched this before. The server's own snapshots surface as
+/// `last_backup_at` and go stale visibly, but they sit on the disk they
+/// protect; the copy that survives losing the machine ran from cron, and a
+/// cron job that dies mails its error to a mailbox nobody reads. A transient
+/// 403 from the bucket looked exactly like a quiet night.
+///
+/// Silence when no stamp exists at all, rather than a standing complaint: a
+/// deployment with no off-box backup configured is not broken, and warning
+/// it forever is how a report teaches people to skip it.
+fn offbox_finding(rep: &Report, out: &mut Vec<Finding>) {
+    let Some(stamp) = rep.last_offbox_at.as_deref() else {
+        return;
+    };
+
+    let Some(age) = age_of(stamp) else {
+        out.push(warn(
+            "off-box backup",
+            format!("the server reported a stamp this cannot read: {stamp}"),
+            "expected the API's timestamp format, e.g. 2026-09-22T00:17:03.000Z",
+        ));
+        return;
+    };
+
+    if age > OFFBOX_STALE_AFTER {
+        out.push(warn(
+            "off-box backup",
+            format!(
+                "last verified copy was {} days ago ({stamp}) — the snapshots on                  the server are the only copies of anything newer",
+                age.whole_days()
+            ),
+            "on the server: check the cron job's mail, then run              RECALL_BACKUP_REMOTE=... ./deploy/backup-offbox.sh by hand",
+        ));
+    } else {
+        out.push(ok("off-box backup", format!("verified {stamp}")));
+    }
+}
+
+/// How long ago a timestamp in the API's format was.
+///
+/// [`None`] rather than a guess when it cannot be parsed — a report that
+/// invents an age is worse than one that admits it cannot read the value.
+fn age_of(stamp: &str) -> Option<time::Duration> {
+    let fmt = time::macros::format_description!(
+        "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+    );
+    let at = time::PrimitiveDateTime::parse(stamp, &fmt)
+        .ok()?
+        .assume_utc();
+    Some(time::OffsetDateTime::now_utc() - at)
 }
 
 /// The two reserved scopes, asked the same two questions each.
@@ -378,6 +442,9 @@ mod tests {
             merge_ready: true,
             synced_files: 4,
             last_synced_at: None,
+            // No stamp: the ordinary case for a deployment with no off-box
+            // backup, and the one that must stay silent.
+            last_offbox_at: None,
         }
     }
 
@@ -622,5 +689,85 @@ mod tests {
         assert_eq!(f.level, Level::Fail);
         assert_eq!(f.fix.as_deref(), Some("recall init"));
         assert_eq!(verdict(&found), exit::CONFIG);
+    }
+
+    // ---------------------------------------------------------------- off-box
+
+    /// The ordinary case for a deployment that has no off-box backup at all.
+    /// A standing complaint here would be the same noise this command has
+    /// already had to have removed twice.
+    #[test]
+    fn no_offbox_stamp_is_reported_as_nothing() {
+        let found = findings(&healthy());
+        assert!(find(&found, "off-box backup").is_none());
+    }
+
+    #[test]
+    fn a_recent_offbox_copy_is_fine() {
+        let mut rep = healthy();
+        rep.last_offbox_at = Some(stamp_days_ago(1));
+
+        let found = findings(&rep);
+
+        assert_eq!(find(&found, "off-box backup").unwrap().level, Level::Ok);
+        assert_eq!(verdict(&found), exit::OK);
+    }
+
+    /// The case a transient 403 from the bucket produced in production: the
+    /// copy stopped, cron kept firing, and nothing anywhere said so.
+    #[test]
+    fn an_offbox_copy_that_stopped_is_reported_with_its_age() {
+        let mut rep = healthy();
+        rep.last_offbox_at = Some(stamp_days_ago(9));
+
+        let found = findings(&rep);
+        let f = find(&found, "off-box backup").unwrap();
+
+        assert_eq!(f.level, Level::Warn);
+        assert!(
+            f.detail.contains('9'),
+            "the age has to be in it: {}",
+            f.detail
+        );
+        // A backup that stopped is serious and is still not "memory is not
+        // syncing", which is what Fail means here. Warn keeps the exit code
+        // honest.
+        assert_eq!(verdict(&found), exit::OK);
+    }
+
+    /// Six-hourly is the recommended cadence, so eight runs have to fail
+    /// before this speaks. One missed night must stay silent.
+    #[test]
+    fn a_single_missed_run_is_not_worth_reporting() {
+        let mut rep = healthy();
+        rep.last_offbox_at = Some(stamp_days_ago(1));
+
+        assert_eq!(
+            find(&findings(&rep), "off-box backup").unwrap().level,
+            Level::Ok
+        );
+    }
+
+    /// A report that invents an age is worse than one admitting it cannot
+    /// read the value.
+    #[test]
+    fn an_unreadable_stamp_says_so_rather_than_guessing() {
+        let mut rep = healthy();
+        rep.last_offbox_at = Some("yesterday-ish".into());
+
+        let found = findings(&rep);
+        let f = find(&found, "off-box backup").unwrap();
+
+        assert_eq!(f.level, Level::Warn);
+        assert!(f.detail.contains("yesterday-ish"), "{}", f.detail);
+    }
+
+    fn stamp_days_ago(days: i64) -> String {
+        let fmt = time::macros::format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+        );
+        (time::OffsetDateTime::now_utc() - time::Duration::days(days))
+            .format(&fmt)
+            .unwrap()
     }
 }

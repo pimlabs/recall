@@ -28,6 +28,10 @@ anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# For one question: how long ago the off-box backup last succeeded. A raw
+# timestamp in the report would leave the reader doing date arithmetic, which
+# is how a stale backup goes unnoticed in plain sight.
+time.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]

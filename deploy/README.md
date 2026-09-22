@@ -357,7 +357,8 @@ The server takes its own consistent snapshots automatically (every 24h
 by default, keeping the last 7) via SQLite's `VACUUM INTO` — safe to run
 against a live database. They land in `deploy/backups/` on the host,
 outside Docker entirely, so any off-box backup can be pointed straight at
-that folder. `GET /health`'s `last_backup_at` confirms it's actually running.
+that folder. `GET /health`'s `last_backup_at` confirms it's actually running,
+and `last_offbox_at` says the same for the copy that leaves this machine.
 
 **These snapshots are still on the same disk as the database they protect.**
 They survive a bad write, a bad merge, and a container that will not start.

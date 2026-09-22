@@ -202,6 +202,25 @@ pub(super) async fn handle_pull(
     }
 }
 
+/// The stamp `deploy/backup-offbox.sh` writes after a verified copy.
+///
+/// Read per request rather than cached, and on purpose: it is written by a
+/// cron job in another process, so a cached value would report a backup that
+/// stopped hours ago as current — which is the exact failure this exists to
+/// surface. A `/health` call is rare and the file is one line.
+///
+/// Any failure to read it is an empty string. A missing file is the ordinary
+/// case for a deployment with no off-box backup configured, and that is not
+/// an error to report.
+fn last_offbox_at(backup_dir: &str) -> String {
+    if backup_dir.is_empty() {
+        return String::new();
+    }
+    std::fs::read_to_string(std::path::Path::new(backup_dir).join(".last-offbox"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
 pub(super) async fn handle_health(State(state): State<Arc<AppState>>) -> Response {
     let last_sync_at = match state.store.last_sync_at() {
         Ok(v) => v,
@@ -225,6 +244,7 @@ pub(super) async fn handle_health(State(state): State<Arc<AppState>>) -> Respons
         started_at: state.started_at.clone(),
         last_sync_at,
         last_backup_at: rt.last_backup_at.clone(),
+        last_offbox_at: last_offbox_at(&state.cfg.backup_dir),
         merge: MergeStatus {
             enabled: state.cfg.merge_enabled,
             claude_cli,

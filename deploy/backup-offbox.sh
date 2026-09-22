@@ -74,4 +74,18 @@ fi
 rclone check "$SRC" "$REMOTE" --include "$PATTERN" --one-way \
   || die "copied, but the remote does not match. Do not trust this run."
 
+# Written only after the verify, so the stamp means "a copy reached the
+# remote and matched", not "the script got this far". The server reads it
+# into GET /health, which is how a stopped backup becomes something anyone
+# can see: this runs from cron, and a cron job that dies mails its error to
+# a mailbox nobody reads. Silence here used to be indistinguishable from
+# success, and that is the failure you discover when you need a restore.
+#
+# The `.` prefix keeps it out of the PATTERN glob, so it is never itself
+# uploaded and never counted as a snapshot. Seconds precision with literal
+# milliseconds: the shape has to match the timestamps the rest of the API
+# uses, and nothing here needs more than a date.
+printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" > "$SRC/.last-offbox" 2>/dev/null \
+  || printf 'backup-offbox: could not write the stamp to %s, so /health will not know this ran\n' "$SRC" >&2
+
 printf 'backup-offbox: verified %s snapshot(s) on %s\n' "$count" "$REMOTE"
