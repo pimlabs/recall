@@ -226,6 +226,9 @@ pub async fn backfill(ctx: &Context) -> Result<Outcome, Error> {
             content: Some(content),
             source_env: ctx.source_env.clone(),
             deleted: false,
+            // Backfill only sends what the server does not have, so there
+            // is nothing stored for a base to be compared with.
+            base_sha256: None,
         };
         match ctx.client.push(&req).await {
             Ok(_) => out.push(rel, Disposition::Sent, None),

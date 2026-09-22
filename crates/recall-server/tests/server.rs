@@ -79,6 +79,7 @@ impl Harness {
                     content: Some(content.into()),
                     source_env: source_env.into(),
                     deleted: false,
+                    base_sha256: None,
                 },
             )
             .await;
@@ -346,6 +347,107 @@ async fn a_real_conflict_is_merged_end_to_end() {
         .await;
     let pr: PushResponse = serde_json::from_slice(&body).unwrap();
     assert!(!pr.merged, "an unchanged re-push must skip the merge");
+}
+
+/// The distinction the base exists for. The next edit replaces what it
+/// started from — deletions included, which a merge cannot express, since it
+/// keeps every distinct fact from both versions. Only an edit made against
+/// something other than what is stored is a concurrent one, and only that is
+/// merged. A client that sends no base keeps the old behaviour.
+#[tokio::test]
+async fn only_a_concurrent_edit_is_merged() {
+    let h = harness(|_| {});
+    let bin = fake_claude(h.dir.path(), r#"{"is_error":false,"result":"MERGED"}"#);
+    let h = Harness {
+        server: Server::new(
+            Config {
+                token: TEST_TOKEN.to_string(),
+                merge_enabled: true,
+                claude_bin: bin,
+                merge_timeout: Duration::from_secs(20),
+                rate_limit_max: 1000,
+                ..Config::default()
+            },
+            h.store.clone(),
+        ),
+        ..h
+    };
+    h.server.set_claude_status(Status {
+        checked_at: now(),
+        available: true,
+        logged_in: true,
+        error: String::new(),
+    });
+
+    let push = |content: &str, base: Option<String>| {
+        let req = PushRequest {
+            project_key: "acme/app".into(),
+            file_path: "MEMORY.md".into(),
+            content: Some(content.into()),
+            base_sha256: base,
+            ..Default::default()
+        };
+        let h = &h;
+        async move {
+            let (status, body) = h.push(TEST_TOKEN, &req).await;
+            assert_eq!(status, StatusCode::OK);
+            serde_json::from_slice::<PushResponse>(&body)
+                .unwrap()
+                .merged
+        }
+    };
+    let stored = || async { h.pull("acme/app").await.0.files[0].content.clone().unwrap() };
+
+    let a = "keep
+drop this line
+";
+    assert!(!push(a, None).await, "a new file has nothing to merge with");
+
+    // The next edit, made from what is stored: it replaces it outright, and
+    // the deleted line stays deleted.
+    let b = "keep
+";
+    assert!(
+        !push(b, Some(recall_wire::content_sha256(a))).await,
+        "the next edit was merged — the deleted line would come back"
+    );
+    assert_eq!(stored().await, b);
+
+    // An edit from a version that is no longer stored: someone else wrote in
+    // between, and that is exactly what the merge is for.
+    assert!(
+        push(
+            "keep
+other
+",
+            Some(recall_wire::content_sha256(a))
+        )
+        .await,
+        "a concurrent edit was not merged"
+    );
+    assert_eq!(stored().await, "MERGED");
+
+    // No base: an older client, treated as it always was.
+    assert!(
+        push(
+            "anything
+",
+            None
+        )
+        .await,
+        "a push with no base must still merge"
+    );
+
+    // Hex is hex; a client that uppercases it is still naming the same base.
+    assert!(
+        !push(
+            "final
+",
+            Some(recall_wire::content_sha256("MERGED").to_uppercase())
+        )
+        .await
+    );
+    assert_eq!(stored().await, "final\n");
 }
 
 #[tokio::test]

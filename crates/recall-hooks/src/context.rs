@@ -84,8 +84,27 @@ impl Context {
     /// pulls still needs an accurate one, or its first local delete would go
     /// unnoticed.
     pub(crate) fn refresh_state(&self) -> Result<(), Error> {
+        self.refresh_state_with(&[])
+    }
+
+    /// The same, recording `synced` — `(path, content_sha256)` pairs for
+    /// files this run pulled or pushed — as each file's new base.
+    ///
+    /// Bases for files that are no longer on disk are dropped, so a file
+    /// deleted and later recreated starts without one rather than naming a
+    /// version it was never edited from.
+    pub(crate) fn refresh_state_with(&self, synced: &[(String, String)]) -> Result<(), Error> {
         let files = state::list_memory_files(&self.memory_dir)?;
-        state::save(&self.state_file, &files)?;
+        let mut bases = state::load(&self.state_file)
+            .ok()
+            .flatten()
+            .map(|s| s.bases)
+            .unwrap_or_default();
+        for (rel, hash) in synced {
+            bases.insert(rel.clone(), hash.clone());
+        }
+        bases.retain(|rel, _| files.binary_search(rel).is_ok());
+        state::save(&self.state_file, &files, &bases)?;
         Ok(())
     }
 }

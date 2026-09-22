@@ -107,6 +107,7 @@ impl Harness {
                 content: Some(content.into()),
                 source_env: "test".into(),
                 deleted: false,
+                base_sha256: None,
             })
             .await;
         assert_eq!(status, StatusCode::OK, "push rejected: {body:?}");
@@ -311,6 +312,7 @@ async fn a_body_past_the_limit_is_rejected_not_absorbed() {
             content: Some(huge),
             source_env: "test".into(),
             deleted: false,
+            base_sha256: None,
         })
         .await;
     assert!(
@@ -410,6 +412,7 @@ async fn tombstoning_a_file_the_server_never_had_is_accepted() {
             content: None,
             source_env: "test".into(),
             deleted: true,
+            base_sha256: None,
         })
         .await;
     assert_eq!(status, StatusCode::OK);
@@ -429,6 +432,7 @@ async fn reviving_a_tombstone_does_not_merge_against_the_dead_content() {
         content: None,
         source_env: "test".into(),
         deleted: true,
+        base_sha256: None,
     })
     .await;
 
@@ -529,6 +533,7 @@ async fn concurrent_pushes_to_one_project_all_land() {
                 content: Some(format!("content {i}")),
                 source_env: "test".into(),
                 deleted: false,
+                base_sha256: None,
             };
             let req = Request::builder()
                 .method("POST")
@@ -574,6 +579,7 @@ async fn concurrent_pushes_to_one_file_leave_a_coherent_value() {
                 content: Some(format!("writer {i}")),
                 source_env: "test".into(),
                 deleted: false,
+                base_sha256: None,
             };
             let req = Request::builder()
                 .method("POST")

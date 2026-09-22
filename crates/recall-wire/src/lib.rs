@@ -48,6 +48,44 @@ pub mod validate;
 
 pub use admin::{AdminStats, AdminTotals, ProjectStats};
 pub use health::{ClaudeCliStatus, Health, MergeError, MergeStatus};
+/// The hash a push names its base by: SHA-256 of the file's exact bytes, as
+/// lowercase hex.
+///
+/// Computed on both sides of the wire — by the client over what it last
+/// synced, by the server over what it has stored — so it has to be one
+/// function in one place.
+pub fn content_sha256(content: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(content.as_bytes());
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod hash_tests {
+    use super::content_sha256;
+
+    /// Known SHA-256 vectors, so the two sides of the wire cannot drift into
+    /// computing something else under the same name.
+    #[test]
+    fn content_sha256_is_plain_sha256_as_lowercase_hex() {
+        assert_eq!(
+            content_sha256(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            content_sha256("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    /// Exact bytes: a trailing newline is part of the content, and so part of
+    /// the hash.
+    #[test]
+    fn a_trailing_newline_changes_the_hash() {
+        assert_ne!(content_sha256("a"), content_sha256("a\n"));
+    }
+}
+
 pub use sync::{File, PushRequest, PushResponse, SyncResponse};
 pub use validate::{validate_file_path, ValidationError};
 

@@ -6,6 +6,49 @@ once the owner approves it.
 
 Order matters, because three of the four depend on the release existing.
 
+## Versioning
+
+[Semver](https://semver.org), with the rule it gives below 1.0: **the minor
+number is where breaking changes live, and everything else is a patch.** New
+commands and new behaviour included — below 1.0 a patch may add, it may not
+break. Nothing about how large or interesting a change is decides the number;
+only whether something that worked stops working.
+
+A change is **breaking** — bump the minor, `0.3.x` → `0.4.0` — if any of these
+is true:
+
+- A CLI command or flag is removed or renamed, or an existing flag now means
+  something else.
+- A field is removed or renamed in `--json` output (`recall status --json`,
+  `recall doctor --json`), or its type or meaning changes. Adding a field is
+  not breaking.
+- The HTTP API stops working between an old client and a new server, or a new
+  client and an old server: a request or response field removed or renamed, a
+  status code changed, a previously accepted request refused. Adding an
+  optional field is not breaking — neither side rejects fields it does not
+  know.
+- An environment variable is removed, or starts meaning something else.
+- An on-disk format Recall owns — the baseline, the credentials or config
+  files, the SQLite schema — changes without Recall migrating the old one
+  itself.
+- The hook commands in a committed `.claude/settings.json` stop working, so a
+  project wired by an older `recall init` has to be re-wired.
+
+Everything else is a **patch**: fixes, new commands, new optional fields, new
+variables, migrations Recall performs itself, performance, and every change to
+text output meant for people. Human-readable output is explicitly not a
+contract; `--json` is.
+
+Two consequences worth stating, because both have already been got wrong:
+
+- **0.3.0 should have been 0.2.1.** It added `recall connect`, `recall
+  doctor` and the machine scope, and broke nothing — every setup that worked
+  on 0.2.0 kept working. It went to 0.3.0 because it felt large, which is
+  not the rule.
+- **Every pull request says which it is**, in its description, with the item
+  above that makes it breaking if it is. The release number is then counted
+  from the merged PRs rather than argued about when the tag is cut.
+
 ## The short version
 
 Merge a PR that bumps the version in `Cargo.toml` and `npm/package.json`,

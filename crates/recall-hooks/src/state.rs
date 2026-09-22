@@ -5,6 +5,7 @@
 //! reconciles instead: it compares what is on disk now against what was
 //! there last time. This file is that "last time".
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -22,6 +23,16 @@ pub struct State {
     /// directory produce byte-identical files.
     #[serde(default)]
     pub files: Vec<String>,
+    /// For each file this machine has synced, the
+    /// [`content_sha256`](recall_wire::content_sha256) of the content it
+    /// last pulled or pushed — the version the next local edit starts from.
+    ///
+    /// Sent with each push as its base, so the server can tell the next edit
+    /// from a concurrent one and merge only the second. Absent for a file
+    /// never synced from here, and for every file in a baseline written
+    /// before this existed; both simply push without a base.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bases: BTreeMap<String, String>,
 }
 
 /// Reads the baseline, returning `None` when there isn't one yet.
@@ -47,9 +58,10 @@ pub fn load(path: &Path) -> io::Result<Option<State>> {
 
 /// Writes the baseline atomically, so two hooks racing on adjacent edits
 /// can't leave a truncated file behind.
-pub fn save(path: &Path, files: &[String]) -> io::Result<()> {
+pub fn save(path: &Path, files: &[String], bases: &BTreeMap<String, String>) -> io::Result<()> {
     let state = State {
         files: files.to_vec(),
+        bases: bases.clone(),
     };
     let body = serde_json::to_vec(&state).map_err(io::Error::other)?;
     atomic::write(path, ".recall-state-", ".json", &body)
@@ -122,10 +134,13 @@ mod tests {
 
         assert_eq!(load(&path).unwrap(), None, "no file yet");
 
-        save(&path, &[]).unwrap();
+        save(&path, &[], &BTreeMap::new()).unwrap();
         assert_eq!(
             load(&path).unwrap(),
-            Some(State { files: vec![] }),
+            Some(State {
+                files: vec![],
+                bases: BTreeMap::new()
+            }),
             "an empty baseline is still a baseline"
         );
     }
@@ -134,7 +149,12 @@ mod tests {
     fn round_trips_files() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join(".recall-state.json");
-        save(&path, &["MEMORY.md".into(), "topics/auth.md".into()]).unwrap();
+        save(
+            &path,
+            &["MEMORY.md".into(), "topics/auth.md".into()],
+            &BTreeMap::new(),
+        )
+        .unwrap();
 
         let got = load(&path).unwrap().unwrap();
         assert_eq!(got.files, vec!["MEMORY.md", "topics/auth.md"]);
@@ -158,8 +178,13 @@ mod tests {
     fn save_leaves_no_temp_files_behind() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".recall-state.json");
-        save(&path, &["MEMORY.md".into()]).unwrap();
-        save(&path, &["MEMORY.md".into(), "b.md".into()]).unwrap();
+        save(&path, &["MEMORY.md".into()], &BTreeMap::new()).unwrap();
+        save(
+            &path,
+            &["MEMORY.md".into(), "b.md".into()],
+            &BTreeMap::new(),
+        )
+        .unwrap();
 
         let leftovers: Vec<_> = fs::read_dir(dir.path())
             .unwrap()

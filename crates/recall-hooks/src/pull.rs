@@ -42,6 +42,7 @@ impl PullOutcome {
 pub async fn pull(ctx: &Context) -> Result<PullOutcome, Error> {
     let mut res = PullOutcome::default();
     let mut any_files = false;
+    let mut synced = Vec::new();
 
     for scope in &ctx.scopes {
         let resp = ctx
@@ -96,6 +97,9 @@ pub async fn pull(ctx: &Context) -> Result<PullOutcome, Error> {
             };
 
             atomic::write(&dest, ".recall-", ".tmp", content.as_bytes())?;
+            // What is on disk now is exactly what the server holds, so it is
+            // the base of whatever this machine edits next.
+            synced.push((rel.clone(), recall_wire::content_sha256(content)));
             res.written.push(rel);
         }
     }
@@ -110,6 +114,6 @@ pub async fn pull(ctx: &Context) -> Result<PullOutcome, Error> {
     if ctx.has_reserved_scope() {
         index::refresh(&ctx.memory_dir)?;
     }
-    ctx.refresh_state()?;
+    ctx.refresh_state_with(&synced)?;
     Ok(res)
 }

@@ -302,12 +302,25 @@ pub async fn promote(ctx: &Context, file: &Path, target: Target) -> Result<Promo
         Err(e) => return Err(e.into()),
     };
 
+    // Every base this machine holds, read before anything below changes the
+    // baseline. The index push needs its entry.
+    let bases = crate::state::load(&ctx.state_file)
+        .ok()
+        .flatten()
+        .map(|s| s.bases)
+        .unwrap_or_default();
+    let mut synced = Vec::new();
+
     let stored = PushRequest {
         project_key: dest.key.clone(),
         file_path: name,
         content: Some(content.clone()),
         source_env: ctx.source_env.clone(),
         deleted: false,
+        // A new path in another scope: nothing is stored there to compare
+        // with, or — on a resumed run — exactly this content, which is not
+        // a conflict either.
+        base_sha256: None,
     };
     ctx.client
         .push(&stored)
@@ -318,6 +331,7 @@ pub async fn promote(ctx: &Context, file: &Path, target: Target) -> Result<Promo
         })?;
 
     atomic::write(&dest_abs, ".recall-", ".tmp", content.as_bytes())?;
+    synced.push((dest_rel.clone(), recall_wire::content_sha256(&content)));
     fs::remove_file(&source_abs)?;
 
     // Local, so it cannot fail on the network the tombstone still has to
@@ -345,10 +359,11 @@ pub async fn promote(ctx: &Context, file: &Path, target: Target) -> Result<Promo
     // file changed too, and are not owed a push: every machine regenerates
     // those for itself after a pull.
     if dropped_dead_link {
-        push_index(ctx, scope).await?;
+        let sent = push_index(ctx, scope, bases.get(INDEX_FILE).cloned()).await?;
+        synced.push((INDEX_FILE.to_string(), sent));
     }
 
-    ctx.refresh_state()?;
+    ctx.refresh_state_with(&synced)?;
 
     Ok(PromoteOutcome {
         from: rel,
@@ -362,7 +377,16 @@ pub async fn promote(ctx: &Context, file: &Path, target: Target) -> Result<Promo
 /// Only the link removal makes this necessary: a line taken away is content,
 /// and content taken away only on this disk is put back by the next pull —
 /// here, and on every other machine, which never saw the removal at all.
-async fn push_index(ctx: &Context, scope: &crate::scope::Scope) -> Result<(), Error> {
+///
+/// It carries the index's base, and that is not optional here: this push
+/// exists to *remove* a line, and a push merged against the stored version
+/// keeps every line from both sides — the link would come straight back.
+/// Returns the hash of what was sent, the index's next base.
+async fn push_index(
+    ctx: &Context,
+    scope: &crate::scope::Scope,
+    base_sha256: Option<String>,
+) -> Result<String, Error> {
     // `scope` is the note's source, and this is deliberately not it. MEMORY.md
     // sits at the memory root, which belongs to the project scope, so that is
     // the key it has to go under. The two are the same today only because the
@@ -374,12 +398,14 @@ async fn push_index(ctx: &Context, scope: &crate::scope::Scope) -> Result<(), Er
         scope.prefix
     );
     let body = fs::read_to_string(ctx.memory_dir.join(INDEX_FILE))?;
+    let sent = recall_wire::content_sha256(&body);
     let req = PushRequest {
         project_key: ctx.project_key().to_string(),
         file_path: INDEX_FILE.to_string(),
         content: Some(body),
         source_env: ctx.source_env.clone(),
         deleted: false,
+        base_sha256,
     };
     ctx.client
         .push(&req)
@@ -388,5 +414,5 @@ async fn push_index(ctx: &Context, scope: &crate::scope::Scope) -> Result<(), Er
             path: INDEX_FILE.to_string(),
             source,
         })?;
-    Ok(())
+    Ok(sent)
 }
