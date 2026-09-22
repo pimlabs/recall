@@ -749,9 +749,15 @@ arriving new**, and **it has to stay cheap**.
       The design follows `doctor`'s discipline: evidence rather than verdicts,
       silence where there is nothing to say. Layered, cheapest first.
       **(1) Dead artefact references** — `PROMPT.md`, `lib.sh`,
-      `hooks/recall-pull` are each one `[ -e ]` away from certainty. Three of
-      the four files failed this, it costs nothing, and it needs no model at
-      all. **(2) Claims against current truth** — `GET /health` knows the
+      `hooks/recall-pull` are each one `[ -e ]` away, and three of the four
+      files named one. This narrows five files to three lines for free, and
+      that is all it does: it is a **candidate filter, not a verdict**. Tested
+      immediately after the four files were corrected, it fired three times
+      and every hit was a false positive — because a memory that correctly
+      records something as dead has to name the dead thing. "Not the old
+      `hooks/recall-*` scripts, and not `lib.sh`; both were deleted in the
+      Rust rewrite" is the most useful sentence in that file and trips the
+      check. **(2) Claims against current truth** — `GET /health` knows the
       hostname and commit, the running compose file knows the ingress,
       `recall doctor --json` knows where the token lives. Narrow, mechanical,
       certain. **(3) Everything else** — the local `claude` CLI, under the
@@ -771,6 +777,14 @@ arriving new**, and **it has to stay cheap**.
       hook — a model pass over every memory file at every session start would
       be slow, expensive, and would fail quietly — and incremental, checking
       only what changed since the last review.
+
+      That failure exposed a distinction the design needs and did not have:
+      **a claim about the present can go stale; a record of what changed
+      cannot.** "The server is at X" expires. "The server moved from X to Y,
+      and X now serves something else" stays true forever and is exactly what
+      stops the confusion recurring — the corrected file keeps its history
+      paragraph deliberately. A checker that pushes toward deleting those
+      makes memory worse, which is the opposite of the point.
 
       The report must name what is **still true** as well as what is not.
       The first finding above is why: the danger is not only believing a
