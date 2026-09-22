@@ -20,28 +20,28 @@
 class Recall < Formula
   desc "Sync Claude Code's auto memory across machines and cloud sessions"
   homepage "https://github.com/pimlabs/recall"
-  version "0.2.0"
+  version "0.3.0"
   license "MIT"
 
   on_macos do
     on_arm do
       url "https://github.com/pimlabs/recall/releases/download/v#{version}/recall_darwin_arm64.tar.gz"
-      sha256 "5ce2cbbd73b1277939a5e3c5e106970fa0b8f249bcfee33bb25bf3ec1e19d372"
+      sha256 "8ebf8b2d4a42b14e83c065e66abff9a7f7b5cd55badacff26d6d9eaea5a4fc68"
     end
     on_intel do
       url "https://github.com/pimlabs/recall/releases/download/v#{version}/recall_darwin_amd64.tar.gz"
-      sha256 "ceb2f998b11d92a9477d7d33d7a4711421faf11365b1cb16b2d46ba7dd2f2768"
+      sha256 "a8bd76a662cb1dbd7352ff79569ea615b526a6d454de4c0719eeb21cd459e03d"
     end
   end
 
   on_linux do
     on_arm do
       url "https://github.com/pimlabs/recall/releases/download/v#{version}/recall_linux_arm64.tar.gz"
-      sha256 "737dfcbd883f54ad891fedce5e1e7c0a4abfbd57bdcb26ebcfad8708f639fe0d"
+      sha256 "9360b76eb194aae36a276dea27823739e2f71e434f47665714e078c927d71309"
     end
     on_intel do
       url "https://github.com/pimlabs/recall/releases/download/v#{version}/recall_linux_amd64.tar.gz"
-      sha256 "a67228d52c596e31c3acfbd2c2f32af9682592e538aaf986bf56db33fb4f0b79"
+      sha256 "00224e45f3e49cb1b8c5b40052c0a07ffc1361ce740ae1d159195bbb5c43c995"
     end
   end
 
