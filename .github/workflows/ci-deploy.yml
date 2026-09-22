@@ -33,6 +33,9 @@ on:
 # group `refs/heads/main` and the first deploy is killed mid-flight. That is the
 # exact failure this block exists to make unreachable, so the condition it turns
 # on is named here instead of inferred from a ref.
+#
+# Being alone in its run's group also means nothing here stops two deploys
+# running at the same time. The `deploy` job has its own group for that.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('uncancellable-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -221,6 +224,23 @@ jobs:
     needs: ci
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
+    # One deploy at a time. The workflow-level group above keeps each push to
+    # main alone in its own run, which is what stops a deploy being cancelled —
+    # and also means nothing stops two of them running at once. On 2026-09-22
+    # #81 and #82 merged four seconds apart, both deploys rebuilt the stack on
+    # the same VPS in parallel, both reached "Recreate" in the same second, and
+    # the loser failed on a container-name conflict. Production was fine; main
+    # was red for a failure that was never about the commit it was shown on.
+    #
+    # `cancel-in-progress: false`, so a deploy that has started always
+    # finishes. The one thing this can cancel is a deploy still *waiting*: a
+    # group holds one running and one pending job, and a newer arrival
+    # replaces the pending one. That loses nothing, because the script below
+    # deploys the tip of main, not the commit that triggered the run — the
+    # newer deploy ships the older one's commit too.
+    concurrency:
+      group: ${{ github.workflow }}-deploy
+      cancel-in-progress: false
     steps:
       # Full history, because the last step counts how far behind production
       # is, and a shallow clone cannot see a commit from four days ago.
