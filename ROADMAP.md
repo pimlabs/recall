@@ -526,8 +526,14 @@ judged on the day, which the entries themselves explain.
 Two lenses were stated for everything below: **it has to be easy for someone
 arriving new**, and **it has to stay cheap**.
 
-- [ ] **The client token sits in a shell profile, in plain text, in the
-      environment.** `RECALL_TOKEN` is read through the settings/shell layers
+- [x] **The client token sits in a shell profile, in plain text, in the
+      environment.** *Built — `recall connect` / `recall disconnect`, see
+      CHANGELOG. One addition to the design below: the file also records the
+      most recently connected server as a default URL, used only when
+      `RECALL_URL` is unset anywhere, so `connect` alone is a complete setup
+      rather than half of one. Everything else is as written, including the
+      four review findings, each now pinned by a test that was mutated to
+      confirm it fails.* `RECALL_TOKEN` is read through the settings/shell layers
       and nothing else, so the only places to put it are a dotfile or a
       settings file. The exposure is not "plain text on disk" — it is three
       specific paths. Being an environment variable, it is inherited by every
@@ -789,6 +795,19 @@ arriving new**, and **it has to stay cheap**.
       The report must name what is **still true** as well as what is not.
       The first finding above is why: the danger is not only believing a
       false claim, it is discarding a true one alongside it.
+
+      **The server's merge already does part of this, on the write path.**
+      When those same files were corrected and pushed, the semantic merge
+      did not simply take the newer text: for `project_phase1_deploy.md` it
+      kept the corrected present-state description and moved the superseded
+      deployment into a `## History` section of its own — exactly the
+      claim-about-now versus record-of-change split above, arrived at
+      without being asked. Its weak point is the one-line index entry: two
+      irreconcilable versions of a `MEMORY.md` line have no room for a
+      history paragraph, and the merge wrote a `CONFLICT` marker instead,
+      which a human then resolved. So a staleness review has less to do in
+      body files that pass through a merge than in index lines, and should
+      treat a `CONFLICT` marker as a finding in its own right.
 
 ## Explicitly deferred
 

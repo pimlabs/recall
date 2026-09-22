@@ -34,6 +34,19 @@ pub fn git_root() -> Option<PathBuf> {
     git(&["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
 
+/// Whether this is a remote or cloud session, per `CLAUDE_CODE_REMOTE`.
+///
+/// Read from the process environment rather than through the settings
+/// layers: it describes the harness the command is running under, and a
+/// settings file claiming otherwise would be describing something it cannot
+/// know. The same signal `.claude/hooks/session-start.sh` keys off.
+pub fn remote_session() -> bool {
+    matches!(
+        std::env::var("CLAUDE_CODE_REMOTE").ok().as_deref(),
+        Some("true") | Some("1")
+    )
+}
+
 /// Where a command is, and what the environment says there.
 ///
 /// One type rather than three lookups because the three used to disagree:

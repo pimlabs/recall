@@ -126,17 +126,27 @@ cargo build --release -p recall
 
 The first build is slow — `rusqlite` compiles SQLite from C.
 
-## Set the environment variables
+## Connect to your server
 
-Once per machine, in your shell profile:
+Once per machine:
 
 ```sh
-export RECALL_URL="https://your-recall-host"
-export RECALL_TOKEN="<your token>"
+recall connect https://your-recall-host
 ```
 
-See `token-setup.md` for generating the token and for what a claude.ai
-cloud environment additionally needs.
+It asks for the token without echoing it, checks it against the server —
+reachable, and the token accepted — and only then saves it to
+`~/.recall/credentials.json`, readable by you only. A wrong token or an
+unreachable server saves nothing and says which it was. `recall disconnect`
+removes it again.
+
+`RECALL_URL` and `RECALL_TOKEN` still work, and **still win** over the saved
+file when set. That is where they belong in a claude.ai cloud environment or
+CI, whose variables are a secret store; `recall connect` refuses to run in a
+cloud session at all, since the container and anything saved in it is
+discarded. On a laptop, `recall doctor` suggests moving a token out of your
+shell. See `token-setup.md` for generating the token and for what a cloud
+environment needs.
 
 ## When the derived project key is wrong
 
@@ -531,7 +541,7 @@ broken**:
 
 ```
   FAIL RECALL_URL                     not set anywhere
-                                      → cloud environment: the "Add/Edit cloud environment" dialog; laptop: your shell profile
+                                      → cloud environment: the "Add/Edit cloud environment" dialog; laptop: recall connect <url>
   FAIL CLAUDE_CODE_REMOTE_MEMORY_DIR  not set in a remote session, so Claude Code's
                                         auto-memory is off entirely and there is nothing
                                         for Recall to sync

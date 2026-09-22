@@ -97,6 +97,7 @@ mod push;
 pub mod claude;
 pub mod client;
 pub mod config;
+pub mod credentials;
 pub mod declared_env;
 pub mod exit;
 pub mod path;

@@ -90,6 +90,18 @@ impl Client {
         self.send(request).await
     }
 
+    /// Asks whether the token is accepted, without reading or writing any
+    /// memory.
+    ///
+    /// `GET /health` cannot answer this — it is unauthenticated, so a wrong
+    /// token passes it — and a pull would need a project key and would
+    /// fetch a project's notes to learn one bit. `/admin/stats` is
+    /// authenticated and read-only, and the body is not kept.
+    pub async fn check_token(&self) -> Result<(), Error> {
+        let request = self.http.get(format!("{}/admin/stats", self.base_url));
+        self.send::<serde_json::Value>(request).await.map(|_| ())
+    }
+
     async fn send<T: DeserializeOwned>(
         &self,
         request: reqwest::RequestBuilder,
@@ -198,6 +210,24 @@ mod tests {
             server.pushes().is_empty(),
             "an invalid request was sent anyway"
         );
+    }
+
+    /// The distinction `recall connect` depends on: `/health` answers any
+    /// token, so only an authenticated route can say the token is wrong.
+    #[tokio::test]
+    async fn check_token_tells_a_wrong_token_from_a_right_one() {
+        let server = FakeServer::start().await;
+        server.require_token("right");
+
+        let wrong = Client::new(&server.url, "wrong").unwrap();
+        assert!(wrong.health().await.is_ok(), "health does not check tokens");
+        match wrong.check_token().await {
+            Err(Error::Status { code: 401, .. }) => {}
+            other => panic!("expected a 401, got {other:?}"),
+        }
+
+        let right = Client::new(&server.url, "right").unwrap();
+        right.check_token().await.unwrap();
     }
 
     #[tokio::test]

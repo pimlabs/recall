@@ -27,6 +27,7 @@
 //! recall` is the way in.
 
 mod backfill;
+mod connect;
 mod doctor;
 mod hook;
 mod init;
@@ -100,6 +101,16 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t = promote::Target::Global)]
         to: promote::Target,
     },
+    /// Save a server's token to ~/.recall, after checking it works
+    Connect {
+        /// The server's URL, including https://
+        url: String,
+    },
+    /// Remove a saved token
+    Disconnect {
+        /// The server; defaults to the one most recently connected
+        url: Option<String>,
+    },
     /// Show whether sync is configured and reachable, here
     Status {
         /// Machine-readable output, for scripts and CI
@@ -155,6 +166,8 @@ fn main() {
         Cmd::Backfill => block_on_current(backfill::run()),
         Cmd::Serve => block_on_multi(serve::run()),
         Cmd::Promote { file, to } => block_on_current(promote::run(&file, to)),
+        Cmd::Connect { url } => block_on_current(connect::connect(&url)),
+        Cmd::Disconnect { url } => connect::disconnect(url.as_deref()),
         Cmd::Status { json } => block_on_current(status::run(json)),
         Cmd::Doctor { json } => block_on_current(doctor::run(json)),
         Cmd::Push => block_on_current(hook::push()),

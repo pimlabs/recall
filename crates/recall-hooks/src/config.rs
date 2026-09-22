@@ -14,6 +14,21 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::claude::Env;
+use crate::credentials;
+
+/// Where a value came from, for `recall status` and `recall doctor` to say.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Source {
+    /// Nowhere.
+    #[default]
+    Unset,
+    /// The environment a hook sees: the shell, or a settings file's `env`
+    /// block over it. [`declared_env`](crate::declared_env) says which.
+    Environment,
+    /// `~/.recall/credentials.json`, written by `recall connect`.
+    CredentialsFile,
+}
 
 /// Why configuration is unusable. The messages match the ones the Go and
 /// Node implementations printed, so existing runbooks still apply.
@@ -38,6 +53,17 @@ pub struct ClientConfig {
     pub url: String,
     /// `RECALL_TOKEN`: the single bearer token. Empty when unset.
     pub token: String,
+    /// Where [`ClientConfig::url`] came from.
+    pub url_source: Source,
+    /// Where [`ClientConfig::token`] came from.
+    pub token_source: Source,
+    /// The credentials file, when the environment left something unset and
+    /// it was therefore consulted — whether or not it exists.
+    pub credentials_file: Option<std::path::PathBuf>,
+    /// Why the credentials file could not be used, when it exists and could
+    /// not. Not an error here, for the reason nothing in this type is: a
+    /// broken file must not stop `recall status` from saying so.
+    pub credentials_error: Option<String>,
     /// `RECALL_SOURCE_ENV`: the label synced files are stamped with,
     /// falling back to the hostname and then to `"unknown"`.
     pub source_env: String,
@@ -103,6 +129,9 @@ pub const VARS: &[&str] = &[
     "RECALL_PROJECT_KEY",
     "RECALL_GLOBAL_KEY",
     "RECALL_MACHINE_KEY",
+    // Where `recall connect` keeps credentials. Read only when the
+    // environment leaves the URL or the token unset.
+    credentials::HOME_VAR,
     // Not Recall's, but read here as the last fallback for `source_env`, and
     // through the same lookup as the rest. Reading it from `std::env`
     // directly — which is what this did — left one variable resolving
@@ -157,9 +186,52 @@ impl ClientConfig {
             }
         }
 
+        let mut url = var(&lookup, "RECALL_URL");
+        let mut token = var(&lookup, "RECALL_TOKEN");
+        let mut url_source = source_of(&url);
+        let mut token_source = source_of(&token);
+        let mut credentials_file = None;
+        let mut credentials_error = None;
+
+        // The credentials file sits below every environment layer, so it is
+        // only read for what the environment left unset — and not read at
+        // all when it left nothing, which keeps it off the path of every
+        // machine configured the way they all were before it existed.
+        if url.is_none() || token.is_none() {
+            if let Some(home) = credentials::home(&lookup) {
+                let path = credentials::file(&home);
+                match credentials::load(&path) {
+                    Ok(Some(saved)) => {
+                        if url.is_none() {
+                            url = saved.default.clone();
+                            url_source = source_or(&url, Source::CredentialsFile);
+                        }
+                        // After the URL, and it has to be: tokens are saved
+                        // per server, so which token is right depends on
+                        // which server was chosen — by the environment or
+                        // by the line above.
+                        if token.is_none() {
+                            token = url
+                                .as_deref()
+                                .and_then(|u| saved.token_for(u))
+                                .map(str::to_string);
+                            token_source = source_or(&token, Source::CredentialsFile);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => credentials_error = Some(e.to_string()),
+                }
+                credentials_file = Some(path);
+            }
+        }
+
         ClientConfig {
-            url: var(&lookup, "RECALL_URL").unwrap_or_default(),
-            token: var(&lookup, "RECALL_TOKEN").unwrap_or_default(),
+            url: url.unwrap_or_default(),
+            token: token.unwrap_or_default(),
+            url_source,
+            token_source,
+            credentials_file,
+            credentials_error,
             // Read eagerly, though it is the last fallback of three: it is a
             // map lookup, and threading it in is what lets `hostname` stay
             // free of `std::env` — and what lets the test below see it at
@@ -186,6 +258,18 @@ impl ClientConfig {
             return Err(ConfigError::MissingToken);
         }
         Ok(())
+    }
+}
+
+fn source_of(value: &Option<String>) -> Source {
+    source_or(value, Source::Environment)
+}
+
+fn source_or(value: &Option<String>, source: Source) -> Source {
+    if value.is_some() {
+        source
+    } else {
+        Source::Unset
     }
 }
 
@@ -394,6 +478,119 @@ mod tests {
             "config::VARS and claude::VARS together no longer describe what \
              ClientConfig reads"
         );
+    }
+
+    /// A `credentials.json` under a temporary `RECALL_HOME`, holding `servers`
+    /// and naming `default`.
+    fn saved(servers: &[(&str, &str)], default: Option<&str>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = credentials::Credentials::default();
+        for (url, token) in servers {
+            c.insert(url, token);
+        }
+        c.default = default.map(credentials::normalize_url);
+        credentials::save(&credentials::file(dir.path()), &c).unwrap();
+        dir
+    }
+
+    /// `recall connect` alone is a complete setup: the URL and the token
+    /// both come from the file when the environment has neither.
+    #[test]
+    fn the_credentials_file_supplies_what_the_environment_does_not() {
+        let home = saved(
+            &[("https://a.example.com", "ta")],
+            Some("https://a.example.com"),
+        );
+        let home_str = home.path().to_string_lossy().to_string();
+        let cfg = ClientConfig::from_lookup(env(&[("RECALL_HOME", &home_str)]));
+
+        assert_eq!(cfg.url, "https://a.example.com");
+        assert_eq!(cfg.token, "ta");
+        assert_eq!(cfg.url_source, Source::CredentialsFile);
+        assert_eq!(cfg.token_source, Source::CredentialsFile);
+        assert_eq!(cfg.require(), Ok(()));
+    }
+
+    /// Below the environment, never above it: an explicit `RECALL_TOKEN` —
+    /// which in a cloud environment or CI is the secret store doing its job
+    /// — wins.
+    #[test]
+    fn the_environment_wins_over_the_credentials_file() {
+        let home = saved(
+            &[("https://a.example.com", "from-file")],
+            Some("https://a.example.com"),
+        );
+        let home_str = home.path().to_string_lossy().to_string();
+        let cfg = ClientConfig::from_lookup(env(&[
+            ("RECALL_HOME", &home_str),
+            ("RECALL_URL", "https://a.example.com"),
+            ("RECALL_TOKEN", "from-env"),
+        ]));
+        assert_eq!(cfg.token, "from-env");
+        assert_eq!(cfg.token_source, Source::Environment);
+        assert_eq!(
+            cfg.credentials_file, None,
+            "nothing was missing, so nothing was read"
+        );
+
+        // The case that actually tests the layering: the URL is missing, so
+        // the file *is* read — and its token still must not replace the one
+        // the environment supplied.
+        let cfg = ClientConfig::from_lookup(env(&[
+            ("RECALL_HOME", &home_str),
+            ("RECALL_TOKEN", "from-env"),
+        ]));
+        assert_eq!(cfg.url_source, Source::CredentialsFile);
+        assert_eq!(cfg.token, "from-env");
+        assert_eq!(cfg.token_source, Source::Environment);
+    }
+
+    /// The ordering coupling the file introduces, pinned rather than left
+    /// to a comment. Which token is right depends on which server: here the
+    /// environment names `a` and the file's default is `b`, and handing `a`
+    /// the token for `b` would be the exact mistake per-server keys exist
+    /// to prevent.
+    #[test]
+    fn the_token_is_looked_up_for_the_url_in_effect_not_the_files_default() {
+        let home = saved(
+            &[
+                ("https://a.example.com", "ta"),
+                ("https://b.example.com", "tb"),
+            ],
+            Some("https://b.example.com"),
+        );
+        let home_str = home.path().to_string_lossy().to_string();
+
+        let cfg = ClientConfig::from_lookup(env(&[
+            ("RECALL_HOME", &home_str),
+            ("RECALL_URL", "https://A.example.com/"),
+        ]));
+        assert_eq!(cfg.url, "https://A.example.com/");
+        assert_eq!(cfg.url_source, Source::Environment);
+        assert_eq!(
+            cfg.token, "ta",
+            "normalised on read, and for the right server"
+        );
+        assert_eq!(cfg.token_source, Source::CredentialsFile);
+
+        // And a server the file has never heard of gets no token at all.
+        let cfg = ClientConfig::from_lookup(env(&[
+            ("RECALL_HOME", &home_str),
+            ("RECALL_URL", "https://c.example.com"),
+        ]));
+        assert_eq!(cfg.token, "");
+        assert_eq!(cfg.require(), Err(ConfigError::MissingToken));
+    }
+
+    /// A broken file is reported, not fatal and not silently empty.
+    #[test]
+    fn an_unreadable_credentials_file_is_recorded_rather_than_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(credentials::file(dir.path()), "{").unwrap();
+        let home_str = dir.path().to_string_lossy().to_string();
+        let cfg = ClientConfig::from_lookup(env(&[("RECALL_HOME", &home_str)]));
+        assert_eq!(cfg.token_source, Source::Unset);
+        assert!(cfg.credentials_error.is_some());
     }
 
     /// The messages are the operator-facing half of these errors: each one

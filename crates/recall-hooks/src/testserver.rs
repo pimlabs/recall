@@ -40,6 +40,10 @@ struct Inner {
     /// the two halves to be able to disagree.
     fail_pushes_with: Option<(u16, String)>,
     last_authorization: Option<String>,
+    /// When set, `/admin/stats` answers 401 to any other bearer token —
+    /// the one place the fake enforces auth, because `recall connect` has
+    /// to be able to tell a server that is up from a token that is right.
+    required_token: Option<String>,
 }
 
 pub struct FakeServer {
@@ -54,6 +58,7 @@ impl FakeServer {
         let app = Router::new()
             .route("/sync", get(pull).post(push))
             .route("/health", get(health))
+            .route("/admin/stats", get(admin_stats))
             .with_state(inner.clone());
 
         // Port 0: the OS picks a free port, so tests can run in parallel.
@@ -135,6 +140,13 @@ impl Drop for FakeServer {
 }
 
 type Shared = Arc<Mutex<Inner>>;
+
+impl FakeServer {
+    /// Makes `/admin/stats` refuse every token but `token`.
+    pub fn require_token(&self, token: &str) {
+        self.inner.lock().expect("test lock").required_token = Some(token.to_string());
+    }
+}
 
 /// Returns the configured failure, if the test asked for one, and records
 /// the credentials that arrived.
@@ -224,6 +236,19 @@ async fn push(
     };
     state.lock().expect("test lock").pushes.push(req);
     Json(response).into_response()
+}
+
+async fn admin_stats(State(state): State<Shared>, headers: HeaderMap) -> Response {
+    if let Some(failure) = intercept(&state, &headers) {
+        return failure;
+    }
+    let inner = state.lock().expect("test lock");
+    if let Some(want) = &inner.required_token {
+        if inner.last_authorization.as_deref() != Some(format!("Bearer {want}").as_str()) {
+            return (StatusCode::UNAUTHORIZED, r#"{"error":"unauthorized"}"#).into_response();
+        }
+    }
+    Json(serde_json::json!({ "projects": [], "totals": {} })).into_response()
 }
 
 async fn health(State(state): State<Shared>, headers: HeaderMap) -> Response {

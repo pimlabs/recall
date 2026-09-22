@@ -5,6 +5,7 @@
 //! server and a project that was never wired are all *findings*, reported in
 //! the output, not errors.
 
+use recall_hooks::config::Source;
 use recall_hooks::declared_env::{Declared, Ignored};
 use recall_hooks::{
     claude, client::Client, config, exit, project, scope, settings, state, ClientConfig,
@@ -143,6 +144,22 @@ pub struct Report {
     pub url_set: bool,
     /// Whether `RECALL_TOKEN` is set.
     pub token_set: bool,
+    /// Where the URL came from: the environment, or the credentials file
+    /// `recall connect` writes.
+    pub url_source: Source,
+    /// Where the token came from. When it is the environment,
+    /// `declared_env` says whether a settings file or the shell supplied it.
+    pub token_source: Source,
+    /// The credentials file, when it was consulted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credentials_file: Option<String>,
+    /// Why the credentials file could not be used, when it exists and
+    /// could not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credentials_error: Option<String>,
+    /// Whether anyone but its owner can read the credentials file.
+    /// `recall connect` never writes one like that; a copy or a restore can.
+    pub credentials_exposed: bool,
     /// Whether `GET /health` answered.
     pub server_ok: bool,
     /// Why it didn't, when it didn't.
@@ -209,10 +226,7 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
         // `here.env.lookup()`: this one describes the harness the command is
         // running under, and a settings file claiming otherwise would be
         // describing something it cannot know.
-        remote_session: matches!(
-            std::env::var("CLAUDE_CODE_REMOTE").ok().as_deref(),
-            Some("true") | Some("1")
-        ),
+        remote_session: proj::remote_session(),
         declared_env: here.env.declared(&known_vars()),
         ignored_env: here.env.ignored(&known_vars()),
         unreadable_settings: here.env.unreadable().to_vec(),
@@ -251,6 +265,17 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
             .is_some_and(|d| !d.is_empty()),
         url_set: !cfg.url.is_empty(),
         token_set: !cfg.token.is_empty(),
+        url_source: cfg.url_source,
+        token_source: cfg.token_source,
+        credentials_file: cfg
+            .credentials_file
+            .as_ref()
+            .map(|p| p.display().to_string()),
+        credentials_error: cfg.credentials_error.clone(),
+        credentials_exposed: cfg
+            .credentials_file
+            .as_deref()
+            .is_some_and(recall_hooks::credentials::readable_by_others),
         server_ok: false,
         server_error: None,
         git_commit: None,
@@ -478,22 +503,35 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
             d.found, d.reserved, d.reserved
         );
     }
+    let from_file = rep
+        .credentials_file
+        .as_deref()
+        .unwrap_or("the credentials file");
     println!(
         "RECALL_URL   : {}",
-        if cfg.url.is_empty() {
-            "(unset)"
-        } else {
-            &cfg.url
+        match rep.url_source {
+            Source::Unset => "(unset)".to_string(),
+            Source::Environment => cfg.url.clone(),
+            Source::CredentialsFile => format!("{} (from {from_file})", cfg.url),
         }
     );
     println!(
         "RECALL_TOKEN : {}",
-        if cfg.token.is_empty() {
-            "(unset)"
-        } else {
-            "set"
+        match rep.token_source {
+            Source::Unset => "(unset)".to_string(),
+            Source::Environment => match declared_in(rep, "RECALL_TOKEN") {
+                Some(file) => format!("set, by {file}"),
+                None => "set, in this shell".to_string(),
+            },
+            Source::CredentialsFile => format!("saved in {from_file}"),
         }
     );
+    if let Some(err) = &rep.credentials_error {
+        println!("credentials  : UNREADABLE — {err}");
+    }
+    if rep.credentials_exposed {
+        println!("credentials  : readable by other users — chmod 600 {from_file}");
+    }
 
     if !rep.url_set {
         return;

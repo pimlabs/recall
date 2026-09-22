@@ -16,6 +16,30 @@ break will be described here in full rather than smoothed over.
 
 ## Unreleased
 
+- **`recall connect <url>` puts the token somewhere better than a shell
+  profile.** It reads the token from the terminal without echoing it,
+  checks it against the server — `/health` for reachable, `/admin/stats` for
+  accepted — and only then writes `~/.recall/credentials.json`, mode `0600`
+  in a `0700` directory, atomically. A wrong token or a dead server saves
+  nothing. Tokens are kept per server URL, normalised so `https://x`,
+  `https://x/` and `HTTPS://X` are one server; the most recent one is also
+  the default URL, so after `connect` there is nothing to export at all.
+  `recall disconnect [url]` removes it, and says plainly that the token
+  still works on the server until it is rotated there.
+
+  Nothing about an existing setup changes. `RECALL_URL` and `RECALL_TOKEN`
+  keep working and **outrank** the file whenever they are set — right for a
+  cloud environment or CI, whose variables are a secret store — and
+  `connect` refuses to run in a cloud session, whose container is thrown
+  away. `RECALL_HOME` moves the directory, the way `CARGO_HOME` does.
+
+  `recall status` now says where the URL and token came from, and `recall
+  doctor` warns — on a laptop only — when the token comes from the
+  environment, naming the settings file if one supplied it and saying "your
+  shell" rather than guessing a profile if not. It also warns about a
+  credentials file other users can read. Doctor's advice for an unset
+  variable on a laptop is now `recall connect <url>`.
+
 - **The push hook no longer goes silent when it skips a memory file that
   belongs to another project.** `recall push` resolves the project from the
   current directory. Inside a git worktree that is a different directory and

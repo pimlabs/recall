@@ -46,7 +46,7 @@ because that is the choice everything else follows from.
 
 ### B. You have a server — [**connect a machine to it**](docs/reference/install.md)
 
-Install the binary, export two variables, and opt each project in:
+Install the binary, connect it to your server once, and opt each project in:
 
 ```sh
 npm install -g @pimlabs/recall                    # or bun, or pnpm
@@ -56,9 +56,8 @@ cargo install recall
 ```
 
 ```sh
-export RECALL_URL="https://recall.yourdomain.com"
-export RECALL_TOKEN="..."                    # docs/reference/token-setup.md
-
+recall connect https://recall.yourdomain.com # asks for the token, checks it, saves it
+                                             # to ~/.recall (docs/reference/token-setup.md)
 recall init                                  # wires .claude/settings.json
 git add .claude/settings.json && git commit  # so fresh clones get it too
 recall backfill                              # send memory that predates all this

@@ -18,6 +18,7 @@
 //! Every finding below is a reading of [`status::Report`], never a second
 //! collection. A question worth asking is worth both commands knowing about.
 
+use recall_hooks::config::Source;
 use recall_hooks::{exit, ClientConfig};
 
 use crate::project as proj;
@@ -94,7 +95,7 @@ fn fail(check: &'static str, detail: impl Into<String>, fix: impl Into<String>) 
 /// Where a variable has to be set, which differs by environment in a way
 /// that is not guessable and cost this project a day.
 const WHERE_TO_SET: &str =
-    "cloud environment: the \"Add/Edit cloud environment\" dialog; laptop: your shell profile";
+    "cloud environment: the \"Add/Edit cloud environment\" dialog; laptop: recall connect <url>";
 
 /// Reads the report into findings, most fundamental first.
 ///
@@ -106,16 +107,18 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
 
     // ---- can it reach a server at all
     if rep.url_set {
-        out.push(ok("RECALL_URL", "set"));
+        out.push(ok("RECALL_URL", source_detail(rep, rep.url_source)));
     } else {
         out.push(fail("RECALL_URL", "not set anywhere", WHERE_TO_SET));
     }
 
     if rep.token_set {
-        out.push(ok("RECALL_TOKEN", "set"));
+        out.push(ok("RECALL_TOKEN", source_detail(rep, rep.token_source)));
     } else {
         out.push(fail("RECALL_TOKEN", "not set anywhere", WHERE_TO_SET));
     }
+
+    credentials_findings(rep, &mut out);
 
     // Only asked once there is somewhere to ask. Reporting "unreachable"
     // when no URL is set would be true and useless.
@@ -235,6 +238,77 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
     out
 }
 
+/// Where a value came from, in the words a finding uses.
+fn source_detail(rep: &Report, source: Source) -> String {
+    match source {
+        Source::CredentialsFile => format!(
+            "saved in {}",
+            rep.credentials_file
+                .as_deref()
+                .unwrap_or("the credentials file")
+        ),
+        _ => "set".to_string(),
+    }
+}
+
+/// Where the token lives, which matters as much as whether it is set.
+///
+/// The warning speaks on a laptop and never in a remote session. A cloud
+/// environment's variables are a secret store and the right place for the
+/// token there; a shell profile is a dotfile that every subprocess inherits
+/// from, that gets committed to dotfiles repositories, and whose `export`
+/// line sits in shell history. The same `CLAUDE_CODE_REMOTE` signal decides
+/// the memory-dir check below.
+fn credentials_findings(rep: &Report, out: &mut Vec<Finding>) {
+    if rep.token_source == Source::Environment && !rep.remote_session {
+        // A settings file can be named because it was read. The shell
+        // cannot: by the time a process sees a variable, which profile
+        // exported it is gone, and naming a guess would send someone to
+        // edit the wrong file and believe they were done.
+        let (detail, remove_from) = match rep.declared_env.iter().find(|d| d.name == "RECALL_TOKEN")
+        {
+            Some(d) => (
+                format!("RECALL_TOKEN is set in {}, in plain text", d.file),
+                d.file.clone(),
+            ),
+            None => (
+                "RECALL_TOKEN comes from your shell, so every process started from it \
+                 inherits the token"
+                    .to_string(),
+                "your shell profile".to_string(),
+            ),
+        };
+        out.push(warn(
+            "token storage",
+            detail,
+            format!(
+                "recall connect <url> saves it to ~/.recall/credentials.json, readable by \
+                 you only; then remove RECALL_TOKEN from {remove_from}"
+            ),
+        ));
+    }
+
+    if let Some(err) = &rep.credentials_error {
+        out.push(warn(
+            "credentials file",
+            format!("{err} — so nothing in it is in effect"),
+            "move it aside and run recall connect again",
+        ));
+    }
+
+    if rep.credentials_exposed {
+        let file = rep
+            .credentials_file
+            .as_deref()
+            .unwrap_or("~/.recall/credentials.json");
+        out.push(warn(
+            "credentials file",
+            format!("{file} is readable by other users"),
+            format!("chmod 600 {file}"),
+        ));
+    }
+}
+
 /// How long an off-box copy may be missing before it is worth saying so.
 ///
 /// Generous against the cadence `deploy/README.md` recommends — six-hourly,
@@ -273,10 +347,12 @@ fn offbox_finding(rep: &Report, out: &mut Vec<Finding>) {
         out.push(warn(
             "off-box backup",
             format!(
-                "last verified copy was {} days ago ({stamp}) — the snapshots on                  the server are the only copies of anything newer",
+                "last verified copy was {} days ago ({stamp}) — the snapshots on \
+                 the server are the only copies of anything newer",
                 age.whole_days()
             ),
-            "on the server: check the cron job's mail, then run              RECALL_BACKUP_REMOTE=... ./deploy/backup-offbox.sh by hand",
+            "on the server: check the cron job's mail, then run \
+             RECALL_BACKUP_REMOTE=... ./deploy/backup-offbox.sh by hand",
         ));
     } else {
         out.push(ok("off-box backup", format!("verified {stamp}")));
@@ -436,6 +512,13 @@ mod tests {
             remote_memory_dir_set: true,
             url_set: true,
             token_set: true,
+            // Saved by `recall connect` — the setup that should raise
+            // nothing at all.
+            url_source: Source::CredentialsFile,
+            token_source: Source::CredentialsFile,
+            credentials_file: Some("/h/.recall/credentials.json".into()),
+            credentials_error: None,
+            credentials_exposed: false,
             server_ok: true,
             server_error: None,
             git_commit: Some("a1b2c3d".into()),
@@ -491,6 +574,69 @@ mod tests {
         rep.server_ok = false;
 
         assert!(find(&findings(&rep), "server").is_none());
+    }
+
+    /// A token in the environment on a laptop is the thing `recall connect`
+    /// exists to replace, so doctor says so — once, as a warning, and with
+    /// the command that fixes it.
+    #[test]
+    fn a_shell_token_on_a_laptop_is_a_warning_that_names_the_fix() {
+        let mut rep = healthy();
+        rep.token_source = Source::Environment;
+
+        let found = findings(&rep);
+        let f = find(&found, "token storage").expect("a shell token is worth a word");
+
+        assert_eq!(f.level, Level::Warn);
+        assert!(f.detail.contains("shell"), "{}", f.detail);
+        assert!(f.fix.as_deref().unwrap().contains("recall connect"));
+        assert_eq!(
+            verdict(&found),
+            exit::OK,
+            "a warning never fails the command"
+        );
+    }
+
+    /// In a cloud environment the variables *are* the secret store, and a
+    /// file written there is discarded with the container. Warning there
+    /// would be wrong on every session start.
+    #[test]
+    fn a_token_in_the_environment_of_a_remote_session_is_fine() {
+        let mut rep = healthy();
+        rep.token_source = Source::Environment;
+        rep.remote_session = true;
+
+        assert!(find(&findings(&rep), "token storage").is_none());
+    }
+
+    /// A settings file was read, so it can be named. The shell cannot, and
+    /// the finding must not pretend otherwise.
+    #[test]
+    fn a_token_from_a_settings_file_names_the_file() {
+        let mut rep = healthy();
+        rep.token_source = Source::Environment;
+        rep.declared_env = vec![recall_hooks::declared_env::Declared {
+            name: "RECALL_TOKEN".into(),
+            file: "/w/app/.claude/settings.local.json".into(),
+            shadows_shell: false,
+            empty: false,
+        }];
+
+        let found = findings(&rep);
+        let f = find(&found, "token storage").unwrap();
+        assert!(f.detail.contains("settings.local.json"), "{}", f.detail);
+        assert!(f.fix.as_deref().unwrap().contains("settings.local.json"));
+    }
+
+    #[test]
+    fn a_credentials_file_others_can_read_is_a_warning_with_the_chmod() {
+        let mut rep = healthy();
+        rep.credentials_exposed = true;
+
+        let found = findings(&rep);
+        let f = find(&found, "credentials file").unwrap();
+        assert_eq!(f.level, Level::Warn);
+        assert!(f.fix.as_deref().unwrap().starts_with("chmod 600"));
     }
 
     /// Every check must earn its exit code. A laptop with no machine scope
