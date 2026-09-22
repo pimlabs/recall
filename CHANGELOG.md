@@ -30,12 +30,21 @@ break will be described here in full rather than smoothed over.
   syncing nothing and saying nothing.
 
   `FAIL` means memory is not syncing, or is syncing somewhere you did not ask
-  for: no URL or token, an unreachable server, unwired hooks, a miscased
-  `global/`, a variable set to a value Recall refused, a settings file that is
-  not readable JSON, or a scope whose files `MEMORY.md` links none of.
-  `warn` never changes the exit code — files under a switched-off scope, a
-  server up but falling back to last-write-wins, `CLAUDE_CODE_REMOTE_MEMORY_DIR`
-  unset — because a check that fails on taste gets `|| true` appended to it.
+  for: no URL or token, an unreachable server, hooks unwired *in a project*, a
+  miscased `global/`, a variable set to a value Recall refused, a settings file
+  that is not readable JSON, a scope whose files `MEMORY.md` links none of, or
+  `CLAUDE_CODE_REMOTE_MEMORY_DIR` unset *in a remote session* — where Claude
+  Code's auto-memory is off entirely and nothing syncs however correct the rest
+  is. `warn` never changes the exit code — files under a switched-off scope, a
+  server up but falling back to last-write-wins — because a check that fails on
+  taste gets `|| true` appended to it.
+
+  Both italics above are load-bearing, and both are read from the environment
+  rather than guessed. Unwired hooks outside a git repository are not a
+  failure: checking your connection from your home directory is an ordinary
+  thing to do. An unset `CLAUDE_CODE_REMOTE_MEMORY_DIR` on a laptop is correct
+  and goes unmentioned, rather than warning forever about something that is
+  fine.
 
   Every finding that is not `ok` names what to do about it, including the one
   value in the whole setup that cannot be reasoned out: the cloud

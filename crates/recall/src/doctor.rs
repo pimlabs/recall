@@ -142,29 +142,45 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
     }
 
     // ---- can Claude Code see the memory at all
-    if rep.hooks_wired {
-        out.push(ok("hooks", "wired in .claude/settings.json"));
-    } else {
-        out.push(fail(
+    //
+    // Unwired hooks are a problem in a project and nothing at all outside
+    // one. Checking your connection from a home directory is an ordinary
+    // thing to do, and the first version of this failed for it — which is
+    // how a command teaches people to stop reading its output.
+    match (rep.hooks_wired, rep.in_git_repo) {
+        (true, _) => out.push(ok("hooks", "wired in .claude/settings.json")),
+        (false, true) => out.push(fail(
             "hooks",
             "this project's .claude/settings.json has no Recall hooks",
             "recall init",
-        ));
+        )),
+        (false, false) => out.push(ok(
+            "hooks",
+            "not in a git repository — nothing here to wire",
+        )),
     }
 
-    // Unset is right on a laptop and fatal in a remote session, and nothing
-    // here can tell which this is — so it is a warning either way, with the
-    // value spelled out, because it is the one value in the whole setup
-    // that cannot be worked out from first principles.
-    if !rep.remote_memory_dir_set {
-        out.push(warn(
+    // `CLAUDE_CODE_REMOTE` answers the question that made this a permanent
+    // warning in both directions: unset is correct on a laptop and means
+    // Claude Code's auto-memory is off entirely in a remote session, where
+    // Recall then has nothing to sync no matter what else is right.
+    match (rep.remote_session, rep.remote_memory_dir_set) {
+        (true, false) => out.push(fail(
             "CLAUDE_CODE_REMOTE_MEMORY_DIR",
-            "not set — correct on a laptop; in a remote or cloud session it means \
-             Claude Code's auto-memory is off entirely, and Recall has nothing to sync",
-            "cloud environment only, and note it is not $HOME: /home/user/.claude",
-        ));
-    } else {
-        out.push(ok("CLAUDE_CODE_REMOTE_MEMORY_DIR", "set"));
+            "not set in a remote session, so Claude Code's auto-memory is off \
+             entirely and there is nothing for Recall to sync",
+            // The one value in the whole setup that cannot be reasoned out.
+            "set it on this cloud environment, and note it is not $HOME: /home/user/.claude",
+        )),
+        (true, true) => out.push(ok("CLAUDE_CODE_REMOTE_MEMORY_DIR", "set")),
+        (false, true) => out.push(ok(
+            "CLAUDE_CODE_REMOTE_MEMORY_DIR",
+            "set, so the memory root is this rather than ~/.claude",
+        )),
+        (false, false) => out.push(ok(
+            "CLAUDE_CODE_REMOTE_MEMORY_DIR",
+            "not needed outside a remote session",
+        )),
     }
 
     out.push(ok(
@@ -338,6 +354,10 @@ mod tests {
             memory_dir: "/w/memory".into(),
             memory_files: 4,
             hooks_wired: true,
+            // A wired project on a laptop — the ordinary case, and the one
+            // where both of the checks below used to be wrong.
+            in_git_repo: true,
+            remote_session: false,
             declared_env: Vec::new(),
             ignored_env: Vec::new(),
             unreadable_settings: Vec::new(),
@@ -530,23 +550,77 @@ mod tests {
         }
     }
 
-    /// The value that cannot be worked out from first principles — it is not
-    /// `$HOME`, and in a cloud session `$HOME` is `/root` while the answer is
-    /// `/home/user/.claude`. If it is not in the output, the reader has to
-    /// find it in a ROADMAP checkbox, which is where it used to live.
+    /// In a remote session an unset memory dir is not a nuance — Claude
+    /// Code's auto-memory is off entirely, so nothing syncs however correct
+    /// the rest is. It shipped as a `Warn`, which left the one case where it
+    /// is fatal unable to change the exit code.
+    ///
+    /// The fix has to spell the value out. It is not `$HOME` — in a cloud
+    /// session `$HOME` is `/root` while the answer is `/home/user/.claude` —
+    /// and before this it appeared nowhere but a ROADMAP checkbox.
     #[test]
-    fn the_remote_memory_dir_warning_spells_out_the_value() {
+    fn an_unset_remote_memory_dir_fails_in_a_remote_session() {
         let mut rep = healthy();
+        rep.remote_session = true;
         rep.remote_memory_dir_set = false;
 
         let found = findings(&rep);
         let f = find(&found, "CLAUDE_CODE_REMOTE_MEMORY_DIR").unwrap();
 
-        assert_eq!(f.level, Level::Warn);
+        assert_eq!(f.level, Level::Fail);
         assert!(
             f.fix.as_deref().unwrap().contains("/home/user/.claude"),
             "{:?}",
             f.fix
         );
+        assert_eq!(verdict(&found), exit::CONFIG);
+    }
+
+    /// And on a laptop the same state is correct, so reporting it forever
+    /// is noise — the kind that teaches someone to stop reading the output.
+    #[test]
+    fn an_unset_remote_memory_dir_is_fine_on_a_laptop() {
+        let mut rep = healthy();
+        rep.remote_session = false;
+        rep.remote_memory_dir_set = false;
+
+        let found = findings(&rep);
+
+        assert_eq!(
+            find(&found, "CLAUDE_CODE_REMOTE_MEMORY_DIR").unwrap().level,
+            Level::Ok
+        );
+        assert_eq!(verdict(&found), exit::OK);
+    }
+
+    /// Checking your connection from a home directory is an ordinary thing
+    /// to do. The first version of this exited 1 for it, because hooks are
+    /// not wired there — true, and not a problem.
+    #[test]
+    fn unwired_hooks_outside_a_git_repository_are_not_a_failure() {
+        let mut rep = healthy();
+        rep.in_git_repo = false;
+        rep.hooks_wired = false;
+
+        let found = findings(&rep);
+
+        assert_eq!(find(&found, "hooks").unwrap().level, Level::Ok);
+        assert_eq!(verdict(&found), exit::OK);
+    }
+
+    /// The other side of it, which must keep failing: inside a repository,
+    /// unwired hooks mean this project is not syncing at all.
+    #[test]
+    fn unwired_hooks_inside_a_git_repository_still_fail() {
+        let mut rep = healthy();
+        rep.in_git_repo = true;
+        rep.hooks_wired = false;
+
+        let found = findings(&rep);
+        let f = find(&found, "hooks").unwrap();
+
+        assert_eq!(f.level, Level::Fail);
+        assert_eq!(f.fix.as_deref(), Some("recall init"));
+        assert_eq!(verdict(&found), exit::CONFIG);
     }
 }
