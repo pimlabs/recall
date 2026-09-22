@@ -20,6 +20,33 @@ pub fn is_memory_file(dir: &Path, path: &Path) -> bool {
     is_under(dir, path)
 }
 
+/// The project slug of a memory file that belongs to a *different* project
+/// under the same Claude Code root — [`None`] when `path` is this project's
+/// memory, or is not memory at all.
+///
+/// Exists because those two are not the same kind of "no". A push hook that
+/// skips an unrelated source file should say nothing; one that skips a
+/// memory file because the caller happens to be standing somewhere else
+/// should say so. The difference cost three edits to find: a git worktree
+/// has its own project root, so its slug differs even though `project_key`
+/// — derived from the git remote, which a worktree shares — is identical.
+/// The hook exited 0 without a word, and the next pull restored the server's
+/// older copy over the edit.
+pub fn foreign_memory_slug(root: &Path, mine: &Path, path: &Path) -> Option<String> {
+    if is_under(mine, path) {
+        return None;
+    }
+    let rel = relative_slash(&root.join("projects"), path)?;
+    let mut parts = rel.split('/');
+    let slug = parts.next()?;
+    // `<slug>/memory/<file>` — anything shorter is the project directory
+    // itself rather than something inside its memory.
+    if parts.next()? != "memory" || parts.next().is_none() {
+        return None;
+    }
+    Some(slug.to_string())
+}
+
 /// Reports whether `path` sits strictly inside `dir`.
 ///
 /// Compared segment-wise after a lexical clean, so `/a/memory-notes` is
@@ -116,5 +143,73 @@ mod tests {
             Path::new("/a/memory/topics/auth/tokens.md"),
         );
         assert_eq!(rel.as_deref(), Some("topics/auth/tokens.md"));
+    }
+
+    #[test]
+    fn a_memory_file_of_this_project_is_not_foreign() {
+        let root = Path::new("/h/.claude");
+        let mine = Path::new("/h/.claude/projects/-w-app/memory");
+        assert_eq!(
+            foreign_memory_slug(
+                root,
+                mine,
+                Path::new("/h/.claude/projects/-w-app/memory/a.md")
+            ),
+            None
+        );
+    }
+
+    /// The case that cost three edits: a git worktree has its own project
+    /// root, so its slug differs — while `project_key` stays identical,
+    /// because that comes from the git remote a worktree shares.
+    #[test]
+    fn memory_of_another_project_names_the_slug() {
+        let root = Path::new("/h/.claude");
+        let mine = Path::new("/h/.claude/projects/-w-app--claude-worktrees-x/memory");
+        assert_eq!(
+            foreign_memory_slug(
+                root,
+                mine,
+                Path::new("/h/.claude/projects/-w-app/memory/a.md")
+            ),
+            Some("-w-app".to_string())
+        );
+    }
+
+    /// Everything else must stay silent, or the push hook starts commenting
+    /// on every file touched in a session.
+    #[test]
+    fn an_ordinary_file_is_not_foreign_memory() {
+        let root = Path::new("/h/.claude");
+        let mine = Path::new("/h/.claude/projects/-w-app/memory");
+        for path in [
+            "/w/app/src/main.rs",
+            "/h/.claude/settings.json",
+            // Under projects/, but not inside anyone's memory.
+            "/h/.claude/projects/-w-other/notes.md",
+            // The memory directory itself, with nothing inside it named.
+            "/h/.claude/projects/-w-other/memory",
+        ] {
+            assert_eq!(
+                foreign_memory_slug(root, mine, Path::new(path)),
+                None,
+                "{path}"
+            );
+        }
+    }
+
+    /// `memory-notes` is not `memory`, the same trap `is_under` exists for.
+    #[test]
+    fn a_directory_merely_starting_with_memory_is_not_it() {
+        let root = Path::new("/h/.claude");
+        let mine = Path::new("/h/.claude/projects/-w-app/memory");
+        assert_eq!(
+            foreign_memory_slug(
+                root,
+                mine,
+                Path::new("/h/.claude/projects/-w-other/memory-notes/a.md")
+            ),
+            None
+        );
     }
 }

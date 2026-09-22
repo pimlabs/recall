@@ -111,7 +111,7 @@ pub use config::{ClientConfig, ConfigError};
 pub use context::{Context, Error};
 pub use index::is_linked as global_index_is_linked;
 pub use index::machine_is_linked as machine_index_is_linked;
-pub use path::is_memory_file;
+pub use path::{foreign_memory_slug, is_memory_file};
 pub use promote::{promote, Error as PromoteError, PromoteOutcome, Target as PromoteTarget};
 pub use pull::{pull, PullOutcome};
 pub use push::{push, PushOutcome};

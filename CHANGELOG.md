@@ -16,6 +16,24 @@ break will be described here in full rather than smoothed over.
 
 ## Unreleased
 
+- **The push hook no longer goes silent when it skips a memory file that
+  belongs to another project.** `recall push` resolves the project from the
+  current directory. Inside a git worktree that is a different directory and
+  therefore a different memory directory, even though `project_key` is
+  unchanged — it comes from the git remote, which a worktree shares. A memory
+  file edited while standing there failed the "is this mine" check and the
+  hook exited `0` without a word, after which the next `recall pull` restored
+  the server's older copy over the edit.
+
+  Found by losing three real edits to it. Skipping an unrelated source file
+  silently is right and still happens; this was never an unrelated file. The
+  hook now names the project the file actually belongs to and says nothing
+  was pushed. It still exits `0` — a hook must not be the reason a session
+  breaks.
+
+  Nothing else changes, and the fix is only a message: edit memory from the
+  main checkout and the behaviour is what it always was.
+
 - **`GET /health` reports `last_offbox_at`, and `recall doctor` watches it.**
   The server's own snapshots already surfaced as `last_backup_at` — but they
   sit on the disk they protect. The copy that survives losing the machine runs

@@ -78,6 +78,13 @@ impl Resolved {
         claude::Env::from_lookup(self.env.lookup()).memory_dir(&self.root.to_string_lossy())
     }
 
+    /// The root every project's memory lives under, which is the same for
+    /// all of them. Needed to tell "not a memory file" apart from "memory
+    /// for a project that is not this one".
+    pub fn memory_root(&self) -> PathBuf {
+        claude::Env::from_lookup(self.env.lookup()).memory_root()
+    }
+
     /// Recall's configuration, resolved through [`Resolved::env`].
     ///
     /// Built on demand rather than alongside the rest, and that is

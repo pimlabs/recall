@@ -1214,3 +1214,60 @@ fn doctor_passes_a_wired_project_that_can_reach_a_server() {
         r.stdout
     );
 }
+
+// ---------------------------------------------------------------------------
+// push, standing in the wrong project
+// ---------------------------------------------------------------------------
+
+/// The failure this was written for, reproduced through the binary: a memory
+/// file belonging to another project under the same Claude root. It happens
+/// in a git worktree, whose project root — and therefore whose memory
+/// directory — differs even though `project_key` does not, because that comes
+/// from the git remote a worktree shares.
+///
+/// Three real edits were lost to this. The hook exited 0 without a word, and
+/// the next `recall pull` restored the server's older copy over them.
+#[test]
+fn push_says_so_when_the_file_is_another_projects_memory() {
+    let repo = git_repo();
+    let foreign = repo
+        .path()
+        .join(".claude/projects/-somewhere-else/memory/note.md");
+    std::fs::create_dir_all(foreign.parent().unwrap()).unwrap();
+    std::fs::write(&foreign, "# note\n").unwrap();
+
+    let payload = format!(
+        r#"{{"tool_input":{{"file_path":"{}"}}}}"#,
+        foreign.display()
+    );
+    let r = run(&["push"], repo.path(), &[], Some(&payload));
+
+    // Still exit 0 — a hook must never be the reason a session breaks.
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(
+        r.stderr.contains("-somewhere-else"),
+        "the slug has to be named, or the reader cannot tell which project: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("nothing was pushed"),
+        "and it has to say nothing happened: {}",
+        r.stderr
+    );
+}
+
+/// The other half, which must stay silent. A push hook that comments on
+/// every unrelated file touched in a session is one nobody reads.
+#[test]
+fn push_stays_silent_about_an_ordinary_file() {
+    let repo = git_repo();
+    let source = repo.path().join("src/main.rs");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    std::fs::write(&source, "fn main() {}\n").unwrap();
+
+    let payload = format!(r#"{{"tool_input":{{"file_path":"{}"}}}}"#, source.display());
+    let r = run(&["push"], repo.path(), &[], Some(&payload));
+
+    assert_eq!(r.code, 0);
+    assert_eq!(r.stderr.trim(), "", "an ordinary edit is not worth a word");
+}
