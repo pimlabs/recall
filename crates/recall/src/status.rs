@@ -159,6 +159,11 @@ pub struct Report {
     /// When any project last synced.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_synced_at: Option<String>,
+    /// When a copy last reached somewhere the loss of the server does not
+    /// reach. [`None`] when nothing has ever written the stamp, which is
+    /// also what "no off-box backup is configured" looks like.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_offbox_at: Option<String>,
 }
 
 /// Collects the report, then prints it as text or JSON.
@@ -252,6 +257,7 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
         merge_ready: false,
         synced_files: 0,
         last_synced_at: None,
+        last_offbox_at: None,
     };
 
     if !rep.url_set {
@@ -267,6 +273,9 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
                     rep.merge_ready = health.merge.claude_cli.logged_in.unwrap_or(false);
                     if !health.last_sync_at.is_empty() {
                         rep.last_synced_at = Some(health.last_sync_at);
+                    }
+                    if !health.last_offbox_at.is_empty() {
+                        rep.last_offbox_at = Some(health.last_offbox_at);
                     }
                 }
                 Err(err) => rep.server_error = Some(err.to_string()),

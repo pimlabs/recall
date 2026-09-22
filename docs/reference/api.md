@@ -254,6 +254,7 @@ Unauthenticated. Safe to point uptime monitoring at.
   "started_at": "2026-09-03T09:00:00.000Z",
   "last_sync_at": "2026-09-03T21:49:55.191Z",
   "last_backup_at": "2026-09-03T09:00:01.412Z",
+  "last_offbox_at": "2026-09-03T04:17:02.000Z",
   "merge": {
     "enabled": true,
     "claude_cli": {
@@ -281,9 +282,20 @@ stop being merged. These are the fields that make that state visible:
 | `merge.claude_cli.logged_in` | `false` is the common one: run `claude setup-token` on the host. |
 | `merge.last_merge_error` | Non-null means a real merge was attempted and failed. |
 
+`last_backup_at` and `last_offbox_at` answer different questions and only one
+of them survives the disk. The first is the server's own snapshot, written by
+`VACUUM INTO` beside the database it protects. The second is the stamp
+`deploy/backup-offbox.sh` leaves after a copy has reached a remote *and* been
+verified against it — so a stale `last_offbox_at` beside a fresh
+`last_backup_at` is precisely the state where losing the machine loses
+everything. It is read from disk per request rather than cached, because the
+process that writes it is a cron job in another container.
+
 Fields that would be empty are **omitted rather than sent empty**:
 `last_sync_at` before anything has synced, `last_backup_at` when backups are
-off, `merge.last_merge_at` before a merge has succeeded. `last_merge_error` is
+off, `last_offbox_at` when no off-box copy has ever succeeded — which is also
+what "no off-box backup is configured" looks like, and neither is an error —
+`merge.last_merge_at` before a merge has succeeded. `last_merge_error` is
 the exception — it is `null` when there is nothing to report, because the
 difference between "no failure" and "not checked" matters there.
 

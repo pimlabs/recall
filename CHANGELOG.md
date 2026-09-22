@@ -16,6 +16,27 @@ break will be described here in full rather than smoothed over.
 
 ## Unreleased
 
+- **`GET /health` reports `last_offbox_at`, and `recall doctor` watches it.**
+  The server's own snapshots already surfaced as `last_backup_at` — but they
+  sit on the disk they protect. The copy that survives losing the machine runs
+  from cron, and nothing watched it at all.
+
+  That is not theoretical. A transient `403` from the bucket made the off-box
+  copy fail on this project's own server; the script died, cron mailed the
+  error into a mailbox nobody reads, and everything looked normal. A backup can
+  stop for days that way, and you find out when you need a restore.
+
+  `deploy/backup-offbox.sh` now writes a stamp **after** `rclone check` passes,
+  so it means "a copy reached the remote and matched" rather than "the script
+  got this far" — a failed verify deliberately leaves no stamp. The server
+  reads it per request (the writer is another process, so a cached value would
+  report a stopped backup as current) and `recall doctor` warns once it is more
+  than two days old.
+
+  Nothing to do if you have no off-box backup: with no stamp, nothing is
+  reported. Existing deployments start reporting after their next successful
+  run.
+
 - **`recall doctor` checks everything sync needs and exits non-zero when any
   of it is broken.** `recall status` reports; this judges, and the exit code
   is the whole point.
