@@ -705,6 +705,77 @@ arriving new**, and **it has to stay cheap**.
       what is the cheapest thing that removes the need to own a VPS, without
       putting anyone else's memory in your hands?
 
+- [ ] **Recall moves memory faithfully and has no idea whether any of it is
+      still true.** It is transport. Transport is invisible when it works and
+      replaceable when someone ships it natively, and its ceiling is set by
+      the quality of what it carries rather than by anything Recall does.
+
+      The evidence is this project's own memory, read on 2026-09-22 against
+      the live system. `project_phase1_deploy.md` — written 2026-08-12, synced
+      perfectly ever since, and read by Claude at every session start —
+      announces a server "live at `recall.pimlabs.id`, deployed via OrbStack +
+      Cloudflare Tunnel on the owner's Mac". Production is Traefik on a VPS,
+      answering at `recall-server.pimlabs.id`. It names `lib.sh` and
+      `hooks/recall-pull`, neither of which exists since the Rust rewrite. It
+      describes a trade-off — "only runs while this Mac is up; a VPS is the
+      fallback" — that was resolved weeks ago. Nothing in the system noticed,
+      because nothing in the system is looking.
+
+      Three findings from that review matter more than the list of errors:
+
+      **A stale wrapper buries the true parts inside it.** That same file
+      carries, in its last paragraph, `CLAUDE_CODE_REMOTE_MEMORY_DIR=
+      /home/user/.claude`, `$HOME` there is `/root`. That is the one value in
+      the whole setup that cannot be reasoned out — the one this repository
+      spent a day rediscovering, and wrote `recall doctor` and two
+      documentation fixes to surface. It was in memory the entire time. Nobody
+      read it, because the file's own heading announces a deployment that no
+      longer exists.
+
+      **Memory that says "do not redo this" gets redone anyway.**
+      `project_saas_idea_shelved.md` ends with "don't restart the
+      SaaS/multi-tenant conversation from scratch next time it comes up — this
+      reasoning already happened", followed by the three costs. Hours before
+      this entry was written, that conversation restarted from scratch and
+      re-derived the same three costs in the same order. The memory was
+      correct; it simply was not in front of anyone at the moment it applied.
+
+      **Three of the four files are mostly right.** The errors are one or two
+      claims inside a file that otherwise still holds. A tool that offers
+      "keep or discard" will discard true things, so the unit of review has to
+      be the *claim*, not the file — show the line that no longer holds, with
+      the evidence, and leave the editing to a human.
+
+      The design follows `doctor`'s discipline: evidence rather than verdicts,
+      silence where there is nothing to say. Layered, cheapest first.
+      **(1) Dead artefact references** — `PROMPT.md`, `lib.sh`,
+      `hooks/recall-pull` are each one `[ -e ]` away from certainty. Three of
+      the four files failed this, it costs nothing, and it needs no model at
+      all. **(2) Claims against current truth** — `GET /health` knows the
+      hostname and commit, the running compose file knows the ingress,
+      `recall doctor --json` knows where the token lives. Narrow, mechanical,
+      certain. **(3) Everything else** — the local `claude` CLI, under the
+      same no-API-key rule as merge, and only over files that survive the
+      first two layers.
+
+      Term matching was tried first and is the wrong primitive: it measures
+      whether a *word* still appears, not whether a *claim* still holds. Of
+      four terms tested, one was a true positive, one hit for the wrong reason
+      (the term was never in the repository), and two were missed — including
+      `recall.pimlabs.id`, which is alive and correct but now names the
+      install URL rather than the sync server.
+
+      **This runs on the client, and the crate split decides that**, not
+      preference: `recall-server` depends on `recall-wire` alone and cannot
+      read a repository or a memory directory. It is a command rather than a
+      hook — a model pass over every memory file at every session start would
+      be slow, expensive, and would fail quietly — and incremental, checking
+      only what changed since the last review.
+
+      The report must name what is **still true** as well as what is not.
+      The first finding above is why: the danger is not only believing a
+      false claim, it is discarding a true one alongside it.
+
 ## Explicitly deferred
 
 - **Multi-user / a hosted "Recall as a service for others" product.** Raised and discussed 2026-08-12, shelved: use Recall personally for a while first to get real signal before committing to this. The technical shape is already mapped out if it comes back — it needs deciding on demand, not feasibility:
