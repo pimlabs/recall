@@ -1,24 +1,92 @@
 # Cutting a release
 
-Four channels ship the same binary, and they do **not** all update
-themselves. Tagging publishes the GitHub Release; npm and crates.io each need
-a credentialed push that only the owner can make.
+Four channels ship the same binary. Tagging publishes the GitHub Release;
+npm, crates.io and the Homebrew tap are then published by the same workflow,
+once the owner approves it.
 
 Order matters, because three of the four depend on the release existing.
 
 ## The short version
 
+Merge a PR that bumps the version in `Cargo.toml` and `npm/package.json`,
+then push the tag:
+
 ```sh
-./scripts/release.sh v0.1.0 --dry-run    # every check, nothing published
-./scripts/release.sh v0.1.0
+git tag -a v0.3.0 -m "recall 0.3.0" && git push origin v0.3.0
 ```
 
-That script is this document, executable. It runs the preflight, checks the
-three version fields agree, runs the full suite plus all three real-server
-checkers, checks the crate names are still free, then walks the three
-irreversible steps — tag, `npm publish`, `cargo publish` — **asking before
-each one**. Answering anything but `y` skips that step; nothing is published
-by accident.
+`.github/workflows/release.yml` does the rest, in this order:
+
+1. **Versions agree** — the tag, `Cargo.toml` and `npm/package.json`, before
+   any runner time is spent.
+2. **Build** four targets on native runners, then **create the GitHub
+   Release** with `checksums.txt`. `install.sh` works from this moment.
+3. **Stop and wait for you.** The `npm`, `crates` and `homebrew` jobs run in
+   the `release` environment, whose required reviewer is the owner. GitHub
+   notifies you; *Review deployments → Approve* releases all three.
+4. **npm** and **crates.io** publish through *trusted publishing*: each
+   registry trusts this workflow's OIDC identity and issues a credential that
+   lasts for the job. No npm or crates.io token is stored anywhere — not in
+   the repository, not in a cloud environment, not on a laptop.
+5. **Homebrew**: the formula is rewritten from the release's own checksums
+   and pushed to `pimlabs/homebrew-tap`. The rewritten file is attached to the
+   run; it lands in this repository through a PR like every other change.
+
+The three publishing jobs are independent — one failing does not stop the
+others — and each skips a version its registry already has, so **re-running
+a failed job is always safe**.
+
+**Why an approval, not a check.** Nothing a registry accepts can be taken
+back: npm refuses to unpublish after 72 hours, and crates.io can yank a
+version but never delete it. Whoever pushes the tag — you, or an agent
+working for you — can build and draft everything; only a person can make it
+public.
+
+### One-time setup
+
+Done once per repository; nothing here needs repeating per release.
+
+1. **GitHub environment** — *Settings → Environments → New environment*,
+   named exactly `release`:
+   - **Required reviewers**: yourself.
+   - **Deployment branches and tags**: *Selected*, add the tag rule `v*`.
+   - **Create it before the first tag.** A job naming an environment that
+     does not exist makes GitHub create it — unprotected — and the publish
+     would run with no approval at all.
+2. **npm** — on npmjs.com, `@pimlabs/recall` → *Settings → Trusted
+   publishing* → GitHub Actions: organization `pimlabs`, repository `recall`,
+   workflow `release.yml`, environment `release`.
+3. **crates.io** — for **each** of `recall-wire`, `recall-hooks`,
+   `recall-server` and `recall`: the crate's *Settings → Trusted Publishing →
+   Add*, with repository owner `pimlabs`, repository `recall`, workflow
+   `release.yml`, environment `release`.
+4. **Homebrew tap** — a fine-grained personal access token with *Contents:
+   read and write* on `pimlabs/homebrew-tap` **only**, saved as the secret
+   `HOMEBREW_TAP_TOKEN` on the `release` environment (not the repository),
+   so only an approved job can read it. Without it the `homebrew` job warns
+   and skips; everything else still publishes.
+
+Once the first CI release has published cleanly, the old npm and crates.io
+tokens on any laptop can be revoked.
+
+## From a laptop instead
+
+```sh
+./scripts/release.sh v0.3.0 --dry-run    # every check, nothing published
+./scripts/release.sh v0.3.0
+```
+
+Still works, and is the fallback when CI cannot publish. It runs the
+preflight, checks the three version fields agree, runs the full suite plus
+all three real-server checkers, checks the crate names are still free, then
+walks the irreversible steps — tag, `npm publish`, `cargo publish`, the tap —
+**asking before each one**. Answering anything but `y` skips that step;
+nothing is published by accident. It needs npm and crates.io credentials on
+the machine running it.
+
+Pushing the tag from the script also starts the workflow above. Its publish
+jobs will wait for approval and then find every version already published,
+so approving or rejecting them makes no difference.
 
 **Run it again if it stops part-way.** It reads each registry before
 publishing anything, so a channel that already has this version is skipped
@@ -35,8 +103,13 @@ contains only its own directory, so commits that touch nothing under
 `crates/` change nothing that reaches the registry; the diff it prints is how
 you tell.
 
-The rest of this page is what it does and why, for when a step fails and you
-need to finish by hand.
+The formula rewrite and the tap push are `scripts/update-formula.py` and
+`scripts/push-tap.sh`, shared by the script and the workflow so the two
+cannot write different formulas. CI checks the rewrite on every PR with
+`scripts/update-formula-check.sh`.
+
+The rest of this page is what each step does and why, for when a step fails
+and you need to finish by hand.
 
 ---
 
