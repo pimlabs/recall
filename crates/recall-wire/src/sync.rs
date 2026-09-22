@@ -34,6 +34,20 @@ pub struct PushRequest {
     /// Whether this push is a delete rather than a write.
     #[serde(default, skip_serializing_if = "is_false")]
     pub deleted: bool,
+    /// [`content_sha256`](crate::content_sha256) of the version this edit
+    /// started from: the content this client last pulled or pushed for the
+    /// file. [`None`] when the client does not know — an older client, or a
+    /// file it has never synced.
+    ///
+    /// It is what lets the server tell the next edit from a concurrent one.
+    /// Without it every push that differs from what is stored went through
+    /// the semantic merge, which keeps "every distinct fact from both
+    /// versions" — so a line deleted on purpose was a fact from the stored
+    /// side and came back, and so did a resolved `CONFLICT` marker. When the
+    /// stored version is the one named here, nothing happened in between
+    /// and the push simply replaces it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_sha256: Option<String>,
 }
 
 impl PushRequest {
@@ -146,6 +160,7 @@ mod tests {
             content: Some("hello".into()),
             source_env: "laptop".into(),
             deleted: false,
+            base_sha256: None,
         };
         assert_eq!(
             serde_json::to_string(&push).unwrap(),
@@ -176,6 +191,7 @@ mod tests {
             content: Some(String::new()),
             source_env: "laptop".into(),
             deleted: false,
+            base_sha256: None,
         };
         let json = serde_json::to_string(&push).unwrap();
         assert!(

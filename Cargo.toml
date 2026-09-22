@@ -9,16 +9,16 @@ members = [
 
 # Shared across every crate so versions can't drift between the halves.
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 rust-version = "1.82"
 license = "MIT"
 repository = "https://github.com/pimlabs/recall"
 
 [workspace.dependencies]
-recall-wire = { path = "crates/recall-wire", version = "0.3.0" }
-recall-hooks = { path = "crates/recall-hooks", version = "0.3.0" }
-recall-server = { path = "crates/recall-server", version = "0.3.0" }
+recall-wire = { path = "crates/recall-wire", version = "0.3.1" }
+recall-hooks = { path = "crates/recall-hooks", version = "0.3.1" }
+recall-server = { path = "crates/recall-server", version = "0.3.1" }
 
 anyhow = "1"
 thiserror = "2"
@@ -35,6 +35,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 clap = { version = "4", features = ["derive"] }
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 tempfile = "3"
+# The content hash a push names its base by. Both halves compute it, which is
+# why it lives in recall-wire.
+sha2 = "0.10"
 # `recall connect` reads the token from the terminal without echoing it.
 rpassword = "7"
 

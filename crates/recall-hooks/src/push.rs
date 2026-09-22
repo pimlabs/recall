@@ -57,7 +57,7 @@ pub async fn push(ctx: &Context, triggered_path: &Path) -> Result<PushOutcome, E
     // read as "everything was deleted" and tombstone the project's whole
     // history on the server. `None` here means "nothing has ever synced",
     // which is why load() distinguishes it from an empty baseline.
-    if let Some(prev) = baseline {
+    if let Some(prev) = &baseline {
         for rel in &prev.files {
             if state::join_relative(&ctx.memory_dir, rel).exists() {
                 continue;
@@ -85,6 +85,7 @@ pub async fn push(ctx: &Context, triggered_path: &Path) -> Result<PushOutcome, E
         }
     }
 
+    let mut synced = Vec::new();
     if fs::metadata(triggered_path).is_ok_and(|m| !m.is_dir()) {
         let rel =
             relative_slash(&ctx.memory_dir, triggered_path).expect("containment was just checked");
@@ -101,6 +102,7 @@ pub async fn push(ctx: &Context, triggered_path: &Path) -> Result<PushOutcome, E
             let content =
                 String::from_utf8(content).map_err(|_| Error::NotUtf8 { path: rel.clone() })?;
 
+            let sent = recall_wire::content_sha256(&content);
             let req = PushRequest {
                 project_key: scope.key.clone(),
                 file_path: path,
@@ -110,11 +112,21 @@ pub async fn push(ctx: &Context, triggered_path: &Path) -> Result<PushOutcome, E
                 content: Some(content),
                 source_env: ctx.source_env.clone(),
                 deleted: false,
+                // What this edit started from. The server merges only when
+                // what it holds is something else — a concurrent edit —
+                // and otherwise lets this replace it, deletions included.
+                base_sha256: baseline.as_ref().and_then(|s| s.bases.get(&rel)).cloned(),
             };
             ctx.client.push(&req).await.map_err(|source| Error::Push {
                 path: rel.clone(),
                 source,
             })?;
+            // The base for the next edit is what was sent, not what the
+            // server stored: after a merge the two differ, the local file
+            // still lacks the other side's changes until the next pull, and
+            // naming the merged version would let the next push overwrite
+            // them.
+            synced.push((rel.clone(), sent));
             res.pushed = Some(rel);
         }
     }
@@ -122,6 +134,6 @@ pub async fn push(ctx: &Context, triggered_path: &Path) -> Result<PushOutcome, E
     if ctx.has_reserved_scope() {
         index::refresh(&ctx.memory_dir)?;
     }
-    ctx.refresh_state()?;
+    ctx.refresh_state_with(&synced)?;
     Ok(res)
 }

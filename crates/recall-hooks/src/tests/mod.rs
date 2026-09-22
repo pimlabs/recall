@@ -7,6 +7,7 @@
 //! containment, payload parsing, the settings merge) stay next to it.
 
 mod backfill;
+mod bases;
 mod behaviour;
 mod edge_cases;
 mod global_scope;

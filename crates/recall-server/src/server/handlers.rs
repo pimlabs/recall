@@ -112,7 +112,12 @@ pub(super) async fn handle_push(State(state): State<Arc<AppState>>, body: Bytes)
     // intent to discard the old content), or an unchanged re-push all skip
     // straight to a write — cheaper, and it keeps a merge from ever
     // second-guessing content that didn't actually conflict.
-    if let Some(stored) = should_merge(&state, existing.as_ref(), &incoming) {
+    if let Some(stored) = should_merge(
+        &state,
+        existing.as_ref(),
+        &incoming,
+        req.base_sha256.as_deref(),
+    ) {
         match state.merger.merge(stored, &incoming).await {
             Ok(out) => {
                 content = out;
@@ -165,11 +170,26 @@ fn should_merge<'a>(
     state: &AppState,
     existing: Option<&'a crate::store::Existing>,
     incoming: &str,
+    base_sha256: Option<&str>,
 ) -> Option<&'a str> {
     if !state.cfg.merge_enabled {
         return None;
     }
     let stored = existing.filter(|e| !e.deleted && e.content != incoming)?;
+    // The client names the version its edit started from. If that is what
+    // is stored, nothing happened in between: this is the next edit, not a
+    // concurrent one, and it replaces the stored version outright.
+    //
+    // Merging it anyway is what this used to do, and it cannot delete: the
+    // merge keeps every distinct fact from both versions, so a line removed
+    // on purpose is a fact from the stored side and comes back — and so does
+    // a CONFLICT marker someone has just resolved. A client that sends no
+    // base keeps the old behaviour.
+    if base_sha256.is_some_and(|base| {
+        base.eq_ignore_ascii_case(&recall_wire::content_sha256(&stored.content))
+    }) {
+        return None;
+    }
     // Don't even attempt it when the CLI isn't logged in: every attempt
     // would burn a subprocess and a timeout before failing to the same
     // place.

@@ -19,6 +19,7 @@ A single well-scoped change → one agent, one worktree, straight through. Sever
 - All work lands via PR from a worktree branch — never a direct push to `main`.
 - Merge **squash-only**: `merge_method: "squash"` always, never `merge` or `rebase`.
 - No `Co-Authored-By: Claude ...` (or similar AI-attribution) footer in any commit or merge-commit message.
+- Every PR description says **patch** or **breaking**, per the Versioning section of `docs/reference/releasing.md` — and names the rule there if breaking. Never bump the minor version for a change that is not breaking under that list, however large it feels; below 1.0 a patch may add features. The rule lives there, not here, so it has one wording.
 - Repo-level enforcement (set once in GitHub, not settable via API here): **Settings → General → Pull Requests** — enable only "Allow squash merging"; disable the other two. Optionally enable "Automatically delete head branches."
 
 ## Ground rules

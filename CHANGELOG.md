@@ -16,6 +16,29 @@ break will be described here in full rather than smoothed over.
 
 ## Unreleased
 
+## 0.3.1 — 2026-09-22
+
+- **Deleting something from a memory file now sticks.** Every push that
+  differed from what the server held went through the semantic merge, and
+  the merge keeps every distinct fact from both versions — so a line removed
+  on purpose was a fact from the stored side and came back. The same kept a
+  resolved `CONFLICT` marker in place however many times it was removed,
+  which is how this was found.
+
+  Pushes now carry `base_sha256`, the hash of the version the edit started
+  from: what this machine last pulled or pushed for the file. When the
+  server still holds exactly that, nothing happened in between and the push
+  replaces it. Only an edit made against something else — a concurrent edit
+  from another machine — is merged, which is what the merge was for.
+  `recall promote` benefits most: it pushes `MEMORY.md` specifically to
+  remove a link, and without a base the merge put the link back.
+
+  Compatible in both directions. The field is optional, an older server
+  ignores it, and an older client — which sends none — is merged exactly as
+  before. Upgrade the server and the client to get the fix; either alone
+  changes nothing. The client records bases in the baseline file it already
+  keeps, and a baseline from an older version loads with none.
+
 ## 0.3.0 — 2026-09-22
 
 - **`recall connect <url>` puts the token somewhere better than a shell

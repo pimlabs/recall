@@ -796,17 +796,24 @@ arriving new**, and **it has to stay cheap**.
       The first finding above is why: the danger is not only believing a
       false claim, it is discarding a true one alongside it.
 
-      **The server's merge already does part of this, on the write path.**
-      When those same files were corrected and pushed, the semantic merge
-      did not simply take the newer text: for `project_phase1_deploy.md` it
-      kept the corrected present-state description and moved the superseded
-      deployment into a `## History` section of its own — exactly the
-      claim-about-now versus record-of-change split above, arrived at
-      without being asked. Its weak point is the one-line index entry: two
-      irreconcilable versions of a `MEMORY.md` line have no room for a
-      history paragraph, and the merge wrote a `CONFLICT` marker instead,
-      which a human then resolved. So a staleness review has less to do in
-      body files that pass through a merge than in index lines, and should
+      **Correction (2026-09-22, same day): the merge was not doing part of
+      this.** An earlier version of this paragraph credited the server's
+      merge with separating present state from history, because correcting
+      `project_phase1_deploy.md` produced a tidy `## History` section. The
+      next correction to the same file showed what was really happening:
+      every push that differed from the stored version was merged — there
+      was no notion of "this is simply the next edit" — and the merge keeps
+      every distinct fact from both sides. It cannot delete. The superseded
+      text landed in a history section because it could not be dropped, and
+      a resolved `CONFLICT` marker came back on each of three pushes that
+      tried to remove it.
+
+      So the lesson points the other way. Correcting stale memory is itself
+      a write that removes claims, and until 0.3.1 the write path could not
+      remove anything. Pushes now name the version they started from
+      (`base_sha256`), and only an edit made against something other than
+      what is stored — a genuinely concurrent one — is merged. A staleness
+      review can therefore assume its corrections stick; it should still
       treat a `CONFLICT` marker as a finding in its own right.
 
 ## Explicitly deferred

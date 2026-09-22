@@ -139,6 +139,7 @@ mod tests {
             content: Some("hello".into()),
             source_env: "test".into(),
             deleted: false,
+            base_sha256: None,
         };
         let resp = client.push(&req).await.unwrap();
         assert!(resp.ok);

@@ -96,7 +96,8 @@ Stores one memory file, or tombstones one.
   "file_path": "topics/auth.md",
   "content": "# Auth\n\nTokens live in 1Password.\n",
   "source_env": "laptop",
-  "deleted": false
+  "deleted": false,
+  "base_sha256": "3f9a…"
 }
 ```
 
@@ -107,6 +108,7 @@ Stores one memory file, or tombstones one.
 | `content` | string | for a write | The file's **exact** bytes, trailing newlines included. |
 | `source_env` | string | no | A display label for the machine. Nothing keys off it. |
 | `deleted` | bool | no | `true` makes this a delete; `content` is then omitted. |
+| `base_sha256` | string | no | SHA-256, lowercase hex, of the content this edit started from — what the client last pulled or pushed for this file. Decides whether the push is merged; see below. |
 
 **`content` and `deleted` are the subtle pair.** `content: ""` is a legitimate
 empty file. A delete omits `content` entirely. A push that is neither a delete
@@ -136,8 +138,23 @@ rule before sending, so a bad path never leaves the machine.
 `merged: true` means the stored content is the result of a semantic merge
 rather than the bytes you sent. That happens only when there was genuinely
 something to reconcile — an existing, non-tombstoned row whose content differs
-from the push. A new file, a revived tombstone, or a re-push of unchanged
-content all skip straight to a write.
+from the push, **and** which is not the version the push names as its base. A
+new file, a revived tombstone, a re-push of unchanged content, and the next
+edit of the stored version all skip straight to a write.
+
+**The base is what separates the next edit from a concurrent one.** If
+`base_sha256` matches the stored content, nothing was written in between, and
+the push replaces it outright. If it does not match, another machine wrote
+since this client last saw the file, and that is what the merge is for. A push
+with no `base_sha256` is merged whenever it differs from what is stored, which
+is how every push was handled before 0.3.1 — so older clients behave as they
+always did.
+
+That distinction is not an optimisation. The merge keeps every distinct fact
+from both versions, which means it cannot express a deletion: a line removed
+on purpose is a fact from the stored side, and the merge puts it back. The same
+happened to a resolved `CONFLICT` marker, which came back on every push that
+tried to remove it.
 
 **A failed merge still returns `200`.** Every failure mode — the `claude` CLI
 missing, not logged in, timing out, returning malformed output, or returning
