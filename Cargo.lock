@@ -873,7 +873,7 @@ dependencies = [
 
 [[package]]
 name = "recall"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -890,7 +890,7 @@ dependencies = [
 
 [[package]]
 name = "recall-hooks"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "recall-wire",
@@ -904,7 +904,7 @@ dependencies = [
 
 [[package]]
 name = "recall-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -921,7 +921,7 @@ dependencies = [
 
 [[package]]
 name = "recall-wire"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",

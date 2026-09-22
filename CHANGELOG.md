@@ -16,6 +16,8 @@ break will be described here in full rather than smoothed over.
 
 ## Unreleased
 
+## 0.3.0 — 2026-09-22
+
 - **`recall connect <url>` puts the token somewhere better than a shell
   profile.** It reads the token from the terminal without echoing it,
   checks it against the server — `/health` for reachable, `/admin/stats` for
@@ -145,6 +147,8 @@ break will be described here in full rather than smoothed over.
   as the count for exactly that reason; `recall backfill` now names the
   variable that would sync a skipped file instead of always suggesting
   `RECALL_GLOBAL_KEY`.
+## 0.2.0 — 2026-09-18
+
 - **A memory directory whose global folder is spelled `Global/` no longer
   syncs into the project's history.** It used to, with global sync on or off
   — nothing under it matched the reserved `global/`, so the project scope,
