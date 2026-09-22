@@ -43,19 +43,41 @@ has its own secrets, set once and reused by every session spawned from
 it. In that environment's settings (the "Add/Edit cloud environment"
 dialog):
 
-- **Environment variables**: add `RECALL_TOKEN` and `RECALL_URL` with the
-  same values as step 2, plus `CLAUDE_CODE_REMOTE_MEMORY_DIR` (see
-  `../ARCHITECTURE.md` for why that one's required, not optional, here).
-  If you use the global scope, `RECALL_GLOBAL_KEY` belongs here too, with
-  the same value as everywhere else — it is on or off per environment, and
-  a mixture leaves `MEMORY.md` linking files that environment never fetches.
-  `RECALL_MACHINE_KEY` is the one to leave out: every session here is a new
-  machine, so the facts your laptop filed under its key do not describe this
-  one, and unset means `machine/` is ignored rather than filed under the
-  project. Both scopes are in [`install.md`](install.md).
-- **Network access**: set to **Custom** and add the server's domain under
-  **Allowed domains** — confirmed live (see `ROADMAP.md` Phase 1) that the
-  default network policy blocks a self-hosted domain otherwise.
+**Environment variables** — four of them:
+
+| Name | Value |
+|---|---|
+| `RECALL_URL` | the same as step 2 |
+| `RECALL_TOKEN` | the same as step 2 |
+| `CLAUDE_CODE_REMOTE_MEMORY_DIR` | `/home/user/.claude` |
+| `RECALL_GLOBAL_KEY` | the same as step 2, or leave it out entirely |
+
+**`/home/user/.claude` is not `$HOME`.** In a cloud session `$HOME` is
+`/root`, so anyone reasoning it out arrives at the wrong answer — and the
+wrong answer behaves exactly like leaving it unset, which is to say Claude
+Code's auto-memory never switches on and Recall has nothing to sync. Nothing
+errors. Paste the value rather than deriving it. (`../ARCHITECTURE.md` has
+why the variable is required at all; the memory path derivation prefers the
+explicit override, which is why a value that does not match `$HOME` still
+resolves.)
+
+**`RECALL_GLOBAL_KEY` must match your laptop's, or be absent.** It is on or
+off per environment, and a mixture leaves `MEMORY.md` linking files that
+environment never fetches.
+
+**`RECALL_MACHINE_KEY` is the one to leave out.** Every session here is a new
+machine, so the facts your laptop filed under its key do not describe this
+one. Unset means `machine/` is ignored rather than filed under the project.
+Both scopes are in [`install.md`](install.md).
+
+**Network access**: set to **Custom** and add the server's domain under
+**Allowed domains** — confirmed live (see `ROADMAP.md` Phase 1) that the
+default network policy blocks a self-hosted domain otherwise. Without this,
+everything above is correct and nothing reaches the server.
+
+Environment variables are read when a session's container starts, so editing
+this dialog does not reach a session already running. Start a new one to pick
+up a change.
 
 This is per-environment, not account-wide. A new cloud environment for a
 different project needs this repeated. The values are the same either way:
@@ -67,7 +89,13 @@ see [`install.md`](install.md).
 
 ## 4. Verify
 
-From any environment with the token installed:
+The short version, from any environment with the token installed, is
+`recall doctor`: it checks every variable above, says which are missing, and
+exits non-zero if sync is actually broken — including the case this page
+exists to prevent, an unset `CLAUDE_CODE_REMOTE_MEMORY_DIR` in a remote
+session. See [`install.md`](install.md).
+
+By hand:
 
 ```sh
 curl -H "Authorization: Bearer $RECALL_TOKEN" "$RECALL_URL/health"
