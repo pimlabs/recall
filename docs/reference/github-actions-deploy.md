@@ -37,6 +37,15 @@ pull-request runs by PR number, and everything else by `github.run_id` — uniqu
 per run, so a push to `main` is alone in its group with nothing in there that
 could supersede it.
 
+**Deploys also never overlap.** Two merges a few seconds apart used to start
+two deploys at once, both rebuilding the same stack; the second to reach
+"Recreate" failed on a container-name conflict and turned `main` red, although
+production ended up on the right commit. The `deploy` job now has a
+concurrency group of its own: a second deploy waits for the first. If a third
+arrives while one is waiting, the waiting one is dropped and shows as
+cancelled — nothing is lost, because the job deploys whatever is on the tip of
+`main` when it runs, not the commit that triggered it.
+
 The `deploy` job needs secrets it doesn't have by default — set these once
 under the repo's **Settings → Secrets and variables → Actions → New
 repository secret**:
