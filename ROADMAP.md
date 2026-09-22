@@ -516,6 +516,280 @@ without running it" is the whole claim those three make.
   second time behind a symlinked `TMPDIR` — a runner that cannot see a class
   of failure is a runner that will let it back in.
 
+## Designed, not yet built (2026-09-22)
+
+Everything above this line is done. These came out of a long session spent
+using Recall rather than building it, and they are written down because the
+reasoning is the expensive part — the code is not. Ordered by leverage as
+judged on the day, which the entries themselves explain.
+
+Two lenses were stated for everything below: **it has to be easy for someone
+arriving new**, and **it has to stay cheap**.
+
+- [ ] **The client token sits in a shell profile, in plain text, in the
+      environment.** `RECALL_TOKEN` is read through the settings/shell layers
+      and nothing else, so the only places to put it are a dotfile or a
+      settings file. The exposure is not "plain text on disk" — it is three
+      specific paths. Being an environment variable, it is inherited by every
+      subprocess, including the postinstall script of any package in any
+      project you touch. `~/.zshrc` is among the most-committed files in
+      existence, and dotfiles repositories are public. And `export
+      RECALL_TOKEN=…` typed once stays in `.zsh_history` forever. The blast
+      radius is total: one token, read-write across every `project_key` and
+      every scope, no expiry and no partial revoke — revoking means
+      re-provisioning every client. `install.md` already concedes the last
+      mile of this, telling you to gitignore `.claude/settings.local.json` and
+      admitting "nothing does that for you".
+
+      The design follows `cargo login`, whose shape fits: one file provider
+      that always works, a named source, and room for a keychain provider
+      later without touching callers. Cargo's *machinery* — configurable
+      provider lists, a subprocess protocol — is for many registries and many
+      organisations, and is not worth copying for one owner and one server.
+
+      `recall connect <url>` reads the token from the TTY without echoing it,
+      verifies it against `/health` **and** an authenticated call, and only
+      then writes. Verify-then-write is the same rule the off-box backup stamp
+      follows: the artefact means "this worked", not "we got this far". A
+      wrong token leaves nothing behind and you find out immediately.
+
+      Storage is `~/.recall/credentials.json`, mode `0600`, written
+      atomically — temp file in the same directory, permissions set at
+      creation rather than after, then rename, so there is no window where it
+      is readable by anyone. `~/.recall` rather than `~/.config/recall`
+      follows cargo, npm, docker, aws and kubectl; `gh` is the only common
+      tool using XDG. `RECALL_HOME` overrides it, mirroring `CARGO_HOME`, and
+      is what lets tests avoid the real home directory. The file carries a
+      `version` field, cheap now and the difference between migrating and
+      guessing later.
+
+      Keyed per server URL, following npm's per-registry `_authToken`, so
+      connecting to a second server cannot silently reuse the first one's
+      token. **It must be normalised on both write and read**: `https://x.id`,
+      `https://x.id/` and a trailing space are otherwise three keys, and the
+      resulting "no token" is indistinguishable from "wrong token".
+
+      The file sits **below** the shell in precedence, so an explicit
+      `RECALL_TOKEN` still wins. That is not a compromise — a cloud
+      environment's variables *are* a secrets store, and so is CI's. The env
+      var is right where something else holds the secret properly; the file is
+      right where the alternative is a human pasting into a dotfile. Cargo and
+      npm both work this way (`CARGO_REGISTRY_TOKEN`, `${NPM_TOKEN}`).
+
+      Four things found while reviewing the design, all of which bite if left:
+      (1) the token now depends on the URL being resolved first, a new
+      ordering coupling in `ClientConfig::from_lookup` that needs a test
+      pinning it rather than a comment; (2) URL normalisation, above;
+      (3) `recall disconnect` **cannot** see which file exported a shell
+      variable — it sees only the effective value — so its report has to say
+      "your shell supplied one, check your profile" rather than naming a file
+      it is guessing at, or it manufactures exactly the false safety it exists
+      to prevent; (4) `0600` means nothing on Windows, which is deferred
+      anyway, but the code should say so rather than imply a guarantee.
+
+      Migration is by invitation, not force. The env var keeps working
+      permanently. `recall doctor` warns when the token came from the shell
+      **and** this is not a remote session — gated on `CLAUDE_CODE_REMOTE`,
+      the signal the SessionStart hook and doctor's memory-dir check already
+      use — so it speaks once on a laptop and never in a cloud environment,
+      where the env var is correct. `recall connect` refuses outright in a
+      cloud session: the container is ephemeral, so a credentials file written
+      there evaporates, and appearing to succeed is worse than declining.
+
+      Decided: `connect` does **not** also run `init` — one command, one job,
+      and doctor already tells you to run `init`. Reading the token from stdin
+      for automation waits until something needs it, because every extra way
+      in is another way out. A `version` field is in from the start.
+
+      Deliberately not copied: `gh auth token`, a command that prints the
+      secret to stdout. `gh` has it because git's credential helper needs it;
+      Recall has no such consumer, and a command that puts a secret in
+      scrollback is a new leak path for no gain.
+
+- [ ] **Deploy builds the server image on the machine serving traffic, and CI
+      builds the same image first and throws it away.** The evidence is one
+      run: `ci · Server image builds — 2m38s`, then `deploy · Deploy over SSH
+      — 3m25s`, the second rebuilding from scratch what the first had just
+      produced. Publishing it from CI and having the VPS pull a tag is not a
+      new feature; it is stopping work already done from being discarded. It
+      also removes the Rust toolchain and the repository clone from the
+      production box entirely.
+
+      **Not before 0.3.0.** Publishing an image adds a step to the release
+      flow, and that flow has only ever been dry-run tested since the resume
+      logic was added — 0.2.0 failed partway through, twice. Adding surface to
+      a path that has never survived a real run is the wrong order.
+
+- [ ] **Setting up the off-box backup is eight manual steps and a trap.**
+      Two `rclone config` invocations, a crypt password that must be stored
+      outside the machine before anything else happens, a write-read test, a
+      first copy, and a crontab line — where the rclone config and the crontab
+      are both per-user, so doing them as different users leaves a job that
+      fails every night into a mailbox nobody reads.
+
+      `recall backup init` should walk it: ask for the provider and
+      credentials, create both remotes, generate and display the crypt
+      password with the warning that a copy you cannot decrypt is not a copy,
+      run the encrypted round-trip test, do the first copy, and install the
+      cron line for the user it is actually running as.
+
+      **The uploader stays outside the server**, and this was reconsidered and
+      rejected rather than assumed. Moving it in would put the bucket
+      credentials into `deploy/.env`, which lands directly in the server
+      container's environment — so compromising the internet-facing process
+      would compromise the backups, which is the same shape as the three
+      separations this project already enforces deliberately. It would also
+      make the backup path depend on the health of the software it backs up:
+      cron, bash and rclone keep working when the server will not start. The
+      problem is the *setup*, so the fix guides the setup and leaves the
+      runtime where it is. If a platform without cron ever matters, the answer
+      is a sidecar container with its own `env_file`, not code in the server.
+
+- [ ] **The admin surface can read but not write, and the write path is forty
+      lines of hand-written SQL.** `GET /admin` serves a page that asks for a
+      token and fetches `/admin/stats`; sqlite-web mounts the volume read-only
+      on `127.0.0.1`. Both are read-only **on purpose** — `ARCHITECTURE.md`
+      names the absence of an admin write surface as a security property, so
+      that a leaked token cannot destroy history through any route the server
+      exposes.
+
+      The cost is that removing or renaming a project key means the procedure
+      in `deploy/README.md`: back up, stop the server, hand-edit the only copy
+      of your memory with `sqlite3`, minding that the primary key is
+      `(project_key, file_path)` so a rename onto an occupied key collides.
+      Performed rarely, and always at a moment when something is already
+      wrong.
+
+      A write surface must not go on the public listener. The pattern is
+      already in this repository and already proven: bind it to `127.0.0.1`
+      the way sqlite-web is bound, reached over an SSH tunnel. Then a leaked
+      bearer token still cannot touch it, because the route is not on the
+      listener it can reach. The commands — list, rename, remove, restore —
+      would each do what the README currently asks a human to remember: take
+      the backup first, run inside a transaction, check `changes()` before
+      committing, and refuse a rename that would collide.
+
+- [ ] **Owning a VPS is the real barrier, and every other idea here saves
+      minutes.** Parked deliberately, with the shape recorded so the next
+      discussion does not restart from zero.
+
+      Keystatic was examined as a model and does not fit, for a structural
+      reason rather than a matter of taste. Keystatic Cloud is a
+      pre-configured GitHub App: it answers "which of these editors are you?"
+      against storage that already has identity and per-user access control.
+      Its free tier is priced at three users because its value is multiple
+      editors. Recall stores to one owner's SQLite on one owner's VPS; the
+      token does not prove *who* you are, it proves the request is allowed at
+      all. There is no population to distinguish — and there is no "Recall
+      Cloud" to borrow, so adopting the model means building and operating the
+      hosted half.
+
+      There is a real ladder underneath the instinct, which is about
+      distributing credentials rather than establishing identity:
+      (a) `recall connect`, above — one paste, verified, into a mode-0600 file;
+      (b) **per-device tokens issued by the server** — buys per-device
+      revocation, which does not exist today at any price, and stays single
+      owner; (c) OIDC or a hosted broker — browser login and short-lived
+      credentials, at the cost of a third party in the auth path, JWT and JWKS
+      validation inside the half of the system the crate split exists to keep
+      small, and a component that must stay online.
+
+      (c) is not a violation of the single-owner rule: one owner authenticated
+      through an external provider is still one owner, with no signup, no
+      billing and nobody else's data. But the deferred entry below notes that
+      real per-user isolation needs the auth rewritten rather than extended,
+      and (c) *is* that rewrite performed for a different reason. It is the
+      doorway, so it stays behind the same question as the entry below.
+
+      When it is picked up, the question to ask is not "OIDC or tokens". It is:
+      what is the cheapest thing that removes the need to own a VPS, without
+      putting anyone else's memory in your hands?
+
+- [ ] **Recall moves memory faithfully and has no idea whether any of it is
+      still true.** It is transport. Transport is invisible when it works and
+      replaceable when someone ships it natively, and its ceiling is set by
+      the quality of what it carries rather than by anything Recall does.
+
+      The evidence is this project's own memory, read on 2026-09-22 against
+      the live system. `project_phase1_deploy.md` — written 2026-08-12, synced
+      perfectly ever since, and read by Claude at every session start —
+      announces a server "live at `recall.pimlabs.id`, deployed via OrbStack +
+      Cloudflare Tunnel on the owner's Mac". Production is Traefik on a VPS,
+      answering at `recall-server.pimlabs.id`. It names `lib.sh` and
+      `hooks/recall-pull`, neither of which exists since the Rust rewrite. It
+      describes a trade-off — "only runs while this Mac is up; a VPS is the
+      fallback" — that was resolved weeks ago. Nothing in the system noticed,
+      because nothing in the system is looking.
+
+      Three findings from that review matter more than the list of errors:
+
+      **A stale wrapper buries the true parts inside it.** That same file
+      carries, in its last paragraph, `CLAUDE_CODE_REMOTE_MEMORY_DIR=
+      /home/user/.claude`, `$HOME` there is `/root`. That is the one value in
+      the whole setup that cannot be reasoned out — the one this repository
+      spent a day rediscovering, and wrote `recall doctor` and two
+      documentation fixes to surface. It was in memory the entire time. Nobody
+      read it, because the file's own heading announces a deployment that no
+      longer exists.
+
+      **Memory that says "do not redo this" gets redone anyway.**
+      `project_saas_idea_shelved.md` ends with "don't restart the
+      SaaS/multi-tenant conversation from scratch next time it comes up — this
+      reasoning already happened", followed by the three costs. Hours before
+      this entry was written, that conversation restarted from scratch and
+      re-derived the same three costs in the same order. The memory was
+      correct; it simply was not in front of anyone at the moment it applied.
+
+      **Three of the four files are mostly right.** The errors are one or two
+      claims inside a file that otherwise still holds. A tool that offers
+      "keep or discard" will discard true things, so the unit of review has to
+      be the *claim*, not the file — show the line that no longer holds, with
+      the evidence, and leave the editing to a human.
+
+      The design follows `doctor`'s discipline: evidence rather than verdicts,
+      silence where there is nothing to say. Layered, cheapest first.
+      **(1) Dead artefact references** — `PROMPT.md`, `lib.sh`,
+      `hooks/recall-pull` are each one `[ -e ]` away, and three of the four
+      files named one. This narrows five files to three lines for free, and
+      that is all it does: it is a **candidate filter, not a verdict**. Tested
+      immediately after the four files were corrected, it fired three times
+      and every hit was a false positive — because a memory that correctly
+      records something as dead has to name the dead thing. "Not the old
+      `hooks/recall-*` scripts, and not `lib.sh`; both were deleted in the
+      Rust rewrite" is the most useful sentence in that file and trips the
+      check. **(2) Claims against current truth** — `GET /health` knows the
+      hostname and commit, the running compose file knows the ingress,
+      `recall doctor --json` knows where the token lives. Narrow, mechanical,
+      certain. **(3) Everything else** — the local `claude` CLI, under the
+      same no-API-key rule as merge, and only over files that survive the
+      first two layers.
+
+      Term matching was tried first and is the wrong primitive: it measures
+      whether a *word* still appears, not whether a *claim* still holds. Of
+      four terms tested, one was a true positive, one hit for the wrong reason
+      (the term was never in the repository), and two were missed — including
+      `recall.pimlabs.id`, which is alive and correct but now names the
+      install URL rather than the sync server.
+
+      **This runs on the client, and the crate split decides that**, not
+      preference: `recall-server` depends on `recall-wire` alone and cannot
+      read a repository or a memory directory. It is a command rather than a
+      hook — a model pass over every memory file at every session start would
+      be slow, expensive, and would fail quietly — and incremental, checking
+      only what changed since the last review.
+
+      That failure exposed a distinction the design needs and did not have:
+      **a claim about the present can go stale; a record of what changed
+      cannot.** "The server is at X" expires. "The server moved from X to Y,
+      and X now serves something else" stays true forever and is exactly what
+      stops the confusion recurring — the corrected file keeps its history
+      paragraph deliberately. A checker that pushes toward deleting those
+      makes memory worse, which is the opposite of the point.
+
+      The report must name what is **still true** as well as what is not.
+      The first finding above is why: the danger is not only believing a
+      false claim, it is discarding a true one alongside it.
+
 ## Explicitly deferred
 
 - **Multi-user / a hosted "Recall as a service for others" product.** Raised and discussed 2026-08-12, shelved: use Recall personally for a while first to get real signal before committing to this. The technical shape is already mapped out if it comes back — it needs deciding on demand, not feasibility:
