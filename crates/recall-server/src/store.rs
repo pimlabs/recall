@@ -16,14 +16,14 @@ use rusqlite::{Connection, OptionalExtension};
 
 use crate::now;
 
-mod admin;
 mod devices;
+mod passkeys;
 
-pub use admin::{
-    AddedCredential, AdminCredential, AdminSession, NewAdminCredential, RemovedCredential,
-};
 pub use devices::{
     plain_name, Created, Decision, Inserted, NewAuthkey, NewDevice, NewEnrollment, Poll, Waiting,
+};
+pub use passkeys::{
+    AddedCredential, AdminCredential, AdminSession, NewAdminCredential, RemovedCredential,
 };
 
 /// Frozen: an already-deployed database was created with exactly this.
@@ -120,7 +120,7 @@ impl Store {
         // simply never looks at them: rolling back stays a matter of
         // starting the older image.
         conn.execute_batch(devices::SCHEMA)?;
-        conn.execute_batch(admin::SCHEMA)?;
+        conn.execute_batch(passkeys::SCHEMA)?;
         Ok(())
     }
 
@@ -303,10 +303,24 @@ impl Store {
             .context("backup path is not valid UTF-8")?
             .to_owned();
 
-        {
+        // VACUUM INTO refuses a file that is already there, so one that is
+        // there now is not this call's to delete if the vacuum fails.
+        let existed = dest.exists();
+        let vacuumed = {
             let conn = self.lock();
             conn.execute("VACUUM INTO ?1", (&dest_str,))
-                .with_context(|| format!("VACUUM INTO {dest_str}"))?;
+                .with_context(|| format!("VACUUM INTO {dest_str}"))
+        };
+        if let Err(err) = vacuumed {
+            // A vacuum that fails part way (a full disk, a file size limit)
+            // leaves the part it wrote. Left there, it is named like every
+            // good snapshot, sorts among them, and counts toward `keep`,
+            // so the prune would delete a good one to make room for it,
+            // and anyone restoring would find a file that does not open.
+            if !existed {
+                let _ = fs::remove_file(&dest);
+            }
+            return Err(err);
         }
 
         let mut snapshots: Vec<PathBuf> = fs::read_dir(dir)?
@@ -335,6 +349,12 @@ fn nullable(s: &str) -> Option<&str> {
         Some(s)
     }
 }
+
+// What `recall-server admin` does to a database. A child module so it can
+// share the one connection type and `Store::backup` without widening what
+// `Store` exposes; crate-private, because nothing but that subcommand, and
+// nothing reachable from the HTTP router, may call it.
+pub(crate) mod admin;
 
 #[cfg(test)]
 mod tests {
