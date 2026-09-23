@@ -1,52 +1,52 @@
 # Auto-deploy via GitHub Actions
 
-`.github/workflows/ci-deploy.yml` has two jobs:
+A server runs **releases**, not `main`. Since 0.4.0 the image holds the
+`recall-server` binary a GitHub Release published, checked against that
+release's `checksums.txt` (`deploy/Dockerfile`), so what production runs is
+the exact file every other channel shipped, and a version number says what
+it is.
 
-- **`ci`** — runs on every push and PR: `cargo fmt`, `clippy -D warnings`,
-  the test suite, `cargo doc` with `-D warnings`, the API-reference checker
-  (`scripts/api-doc-check.sh`, which asserts `docs/reference/api.md` against a running
-  server), a syntax check of the shipped shell scripts, and a `docker build`
-  of `deploy/Dockerfile` (build check only, nothing is pushed anywhere). No
-  secrets needed for this job.
+Two workflows are involved:
 
-  The image build is the expensive part — 124s of a 177-second run — so on a
-  **pull request** it is skipped unless the diff touches `crates/`,
-  `Cargo.toml`, `Cargo.lock` or `deploy/`. On a **push to `main`** it always
-  runs, whatever changed. If that path list ever turns out to be too narrow,
-  the asymmetry is what catches it: `main` goes red before `deploy` (which
-  `needs: ci`) can ship the broken image.
-- **`deploy`** — runs only after `ci` passes, and only for a push that's
-  actually landed on `main` (never for PRs, never for other branches). SSHes
-  into the VPS, fast-forwards its clone, and rebuilds the stack — the same
-  thing `deploy/README.md`'s "Updating" section does by hand.
+- **`.github/workflows/ci.yml`** runs on every push and PR: `cargo fmt`,
+  `clippy -D warnings`, the test suite, `cargo doc` with `-D warnings`, the
+  API-reference checker (`scripts/api-doc-check.sh`, which asserts
+  `docs/reference/api.md` against a running server), a syntax check of the
+  shipped shell scripts, and a `docker build` of `deploy/Dockerfile` both
+  ways: from source, and from a release it assembles locally, including a
+  tampered checksum that must stop the build. Nothing is pushed anywhere and
+  no secrets are needed. It deploys nothing.
 
-  **Without the secrets it skips, and says so, rather than failing.** That is
-  deliberate: a repository with no VPS wired up is a normal state, and a
-  workflow that fails on every push to `main` is one nobody reads. This job
-  did exactly that for a while — `error: missing server host` — and five PRs
-  were merged over a red build before anyone looked.
+  The image build is the expensive part, so on a **pull request** it is
+  skipped unless the diff touches `crates/`, `Cargo.toml`, `Cargo.lock` or
+  `deploy/`. On a **push to `main`** it always runs, whatever changed, and
+  `cut-release.yml` refuses to tag a commit whose `ci` job is not green.
+- **`.github/workflows/deploy.yml`** puts a release on the server. The
+  Release workflow calls it once the GitHub Release exists, so **every
+  release deploys itself**. It can also be run by hand, **Actions → Deploy
+  → Run workflow** with a version such as `0.4.0`, from anywhere including
+  the GitHub mobile app: that is how to roll back, or retry a deploy that
+  failed. It SSHes into the server, checks out the release's tag, and
+  rebuilds the stack, the same thing `deploy/README.md`'s "Updating" section
+  does by hand.
 
-Runs for a pull request supersede each other. Push again and the run for the
-commit you replaced is cancelled, because nobody is waiting on an answer about
-a commit that is no longer the branch tip — PR #64 ran four of those to
-completion before this was in place, and they queue ahead of the run you are
-actually waiting for. **Runs for a push to `main` are never cancelled**, since
-`deploy` rebuilds the stack on the VPS and interrupting that halfway leaves
-production part-built. The `concurrency` block at the top of the workflow keys
-pull-request runs by PR number, and everything else by `github.run_id` — unique
-per run, so a push to `main` is alone in its group with nothing in there that
-could supersede it.
+  **Without the secrets it skips, and says so, rather than failing.** A
+  repository with no server wired up is a normal state, and a workflow that
+  fails every time is one nobody reads. The old deploy job did exactly that
+  for a while (`error: missing server host`) and five PRs were merged over a
+  red build before anyone looked.
 
-**Deploys also never overlap.** Two merges a few seconds apart used to start
-two deploys at once, both rebuilding the same stack; the second to reach
-"Recreate" failed on a container-name conflict and turned `main` red, although
-production ended up on the right commit. The `deploy` job now has a
-concurrency group of its own: a second deploy waits for the first. If a third
-arrives while one is waiting, the waiting one is dropped and shows as
-cancelled — nothing is lost, because the job deploys whatever is on the tip of
-`main` when it runs, not the commit that triggered it.
+Runs for a pull request supersede each other: push again and the run for the
+commit you replaced is cancelled. Runs for a push to `main` never are, since
+the release is cut from a commit only once its run finished green.
 
-The `deploy` job needs secrets it doesn't have by default — set these once
+**Deploys never overlap.** Two deploys once rebuilt the same stack at the same
+time, and the second to reach "Recreate" failed on a container-name conflict.
+The deploy job has a concurrency group of its own: a second deploy waits for
+the first, and one that arrives while another is waiting replaces it, so the
+newest version asked for is the one production ends on.
+
+The deploy needs secrets it doesn't have by default — set these once
 under the repo's **Settings → Secrets and variables → Actions → New
 repository secret**:
 
@@ -67,9 +67,9 @@ that is already public:
 | `DEPLOY_HEALTH_URL` | Your server's `/health` URL, e.g. `https://recall.example.com/health` |
 
 `DEPLOY_HEALTH_URL` is independent of everything above: set it even if you
-deploy by hand and never wire up the secrets. It is what makes every push to
-`main` state, on the run's summary page, which build production is actually
-serving — see below.
+deploy by hand and never wire up the secrets. It is what makes every deploy
+state, on the run's summary page, which version production is actually
+serving; see below.
 
 ## Generating a dedicated deploy key
 
@@ -163,30 +163,22 @@ here on.
 
 ## Optional hardening: restrict what the key can do
 
-If the deploy user has broader access than "run docker compose in this one
-directory," consider forcing this specific key to only run the deploy
-command, via a `command=` prefix on its line in `authorized_keys`:
+The deploy runs a short script over SSH: fetch the release's tag, check it
+out, `docker compose up -d --build`, then ask the container for its health.
+The account it logs in as needs nothing beyond that: a dedicated user that
+owns the clone and is in the `docker` group, with no `sudo`.
+
+An earlier version of this page suggested a forced `command=` in
+`authorized_keys` that pulled `main` and rebuilt. **Remove it if you set it
+up.** A forced command replaces the script the workflow sends, so the server
+would keep building whatever that line says rather than the release being
+deployed, and the check at the end would then report the wrong version. The
+`restrict` option on its own (no port, agent or X11 forwarding, no pty) is
+still worth keeping:
 
 ```
-command="cd /home/recall-deploy/recall-rust/deploy && git -C .. pull --ff-only origin main && docker compose -f docker-compose.traefik.yml -f docker-compose.traefik.local.yml up -d --build",restrict ssh-ed25519 AAAA... github-actions-recall-deploy
+restrict ssh-ed25519 AAAA... github-actions-recall-deploy
 ```
-
-**The `-f` flags are not optional here**, and this example used to omit them
-— which is precisely the failure the next section describes: with no `-f`,
-`docker compose` acts on `docker-compose.yml`, so on a host running the
-Traefik stack it quietly builds and starts the *other* ingress alongside the
-real one. Whatever you set `DEPLOY_COMPOSE_FILES` to has to appear here too,
-or the hardening silently deploys something different from what the workflow
-deploys.
-
-Paths and filenames above are an example; use your own. `docker compose ls`
-on the VPS prints the config files the running stack was actually built
-from, which is the answer rather than a guess.
-
-With that in place, this key can't be used for an interactive shell or any
-other command even if it leaked — it can only ever run that one deploy
-step. Not required to get auto-deploy working, worth doing once things are
-confirmed working without it.
 
 ## `DEPLOY_COMPOSE_FILES` — a variable, not a secret
 
@@ -208,10 +200,12 @@ or, for the Cloudflare Tunnel stack:
 ```
 
 Include the local override if your server has one. `deploy/README.md`
-recommends keeping host-specific values — the real Traefik network name, your
-hostname — in an untracked `docker-compose.traefik.local.yml` beside the
-tracked file, precisely so `git pull --ff-only` keeps working; the deploy has
-to pass both or it will start a container without them.
+recommends keeping host-specific values (the real Traefik network name, your
+hostname) in an untracked `docker-compose.traefik.local.yml` beside the
+tracked file, precisely so moving between tags keeps working: the checkout
+leaves untracked files alone, and refuses to move over local changes to
+tracked ones. The deploy has to pass both or it will start a container
+without them.
 
 This used to be hardcoded to no `-f` at all, which acts on
 `docker-compose.yml`. On a host running the Traefik stack that quietly built
@@ -236,38 +230,34 @@ That the image contains `wget` is asserted by the `ci` job on the same image
 the deploy runs, rather than assumed. An untested assumption in this exact
 place is what produced the bug above.
 
-## Every push says what production is running
+## Every deploy says what production is running
 
-Whether or not the deploy steps ran, the last step of the job asks
-`DEPLOY_HEALTH_URL` for its `git_commit` and writes the answer to the run's
-summary:
-
-> ### Production is NOT running this push
->
-> | | commit |
-> |---|---|
-> | production | `5f35be3` — 25 commits behind |
-> | this push | `30fee03` |
+Whether or not the deploy steps ran, the last step asks the server's
+discovery document, `/.well-known/recall` beside `DEPLOY_HEALTH_URL`, which
+version it is running and whether it is a release build, and writes the
+answer to the run's summary. It waits up to a minute for the new container.
 
 This exists because the alternative is silence. When `DEPLOY_HOST` is unset
-the deploy steps skip and the job still reports success — correct for a fork,
-and invisible for a repository that does have a server. On 2026-09-18 four
-pushes landed on `main`, every run was green, and the VPS stayed on a build
-from the 14th. Nothing was broken; nothing said anything either.
+the deploy steps skip and the job still succeeds, which is correct for a
+fork and invisible for a repository that does have a server. On 2026-09-18
+four pushes landed on `main`, every run was green, and the server stayed on a
+build from the 14th.
 
-It never fails the job. Deploying by hand is a legitimate choice, and a
-workflow that goes red over a choice is a workflow that gets ignored — which
-is the same mistake, one step along. It emits a warning annotation instead.
+It fails the job only when this run deployed and production reports some
+other version afterwards. Where nothing was deployed (no secrets) it warns
+instead: deploying by hand is a legitimate choice.
 
-`/health` needs no authentication, which is why this works without the deploy
-secrets. If the variable is unset, the summary says that too, rather than
-leaving you to wonder whether it checked.
+A server older than the discovery document (before 0.4.0) answers 404 there;
+the summary then gives `/health`'s commit instead. Both need no
+authentication, which is why this works without the deploy secrets.
 
 ## Verifying it works
 
-Merge a trivial change to `main` (or re-run the workflow from the Actions
-tab) and watch the `deploy` job's log. A failure at the `git pull --ff-only`
-step usually means the VPS's clone has local changes or is checked out
-somewhere other than `DEPLOY_PATH`; a failure at the SSH connection step
-usually means the public key didn't make it into `authorized_keys`, or
-`DEPLOY_PORT`/`DEPLOY_HOST` doesn't match how you normally connect.
+Run **Actions → Deploy** with the version production should already be on,
+and watch the log. A failure at the `git checkout` step usually means the
+server's clone has local changes to tracked files, or is not at
+`DEPLOY_PATH`; a failure at the SSH connection step usually means the public
+key didn't make it into `authorized_keys`, or `DEPLOY_PORT`/`DEPLOY_HOST`
+doesn't match how you normally connect. A failure at the build step with a
+checksum error means the downloaded archive is not the one the release
+published, and the image was rightly not built.

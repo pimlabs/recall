@@ -23,7 +23,6 @@ path = "src/main.rs"
 [dependencies]
 recall-wire.workspace = true
 recall-hooks.workspace = true
-recall-server.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 anstream.workspace = true
@@ -39,4 +38,7 @@ time.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+# The integration tests start a real server in-process. A dev-dependency,
+# so the binary users install still carries no server.
+recall-server.workspace = true
 tempfile.workspace = true

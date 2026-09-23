@@ -8,7 +8,7 @@
 # a real server on a real socket. If a handler changes and the document
 # doesn't, this fails.
 #
-#   ./scripts/api-doc-check.sh target/release/recall
+#   ./scripts/api-doc-check.sh target/release/recall-server
 #
 set -u
 BIN="$1"
@@ -18,7 +18,7 @@ URL="http://127.0.0.1:$PORT"
 TOKEN="doc-check-token"
 
 RECALL_TOKEN="$TOKEN" RECALL_PORT="$PORT" RECALL_DB_PATH="$WORK/db.sqlite" \
-  RECALL_MERGE_ENABLED=false "$BIN" serve >"$WORK/server.log" 2>&1 &
+  RECALL_MERGE_ENABLED=false "$BIN" >"$WORK/server.log" 2>&1 &
 SERVER=$!
 trap 'kill $SERVER 2>/dev/null; rm -rf "$WORK"' EXIT
 
@@ -156,7 +156,7 @@ echo "Rate limiting"
 RL_PORT=8932
 RECALL_TOKEN="$TOKEN" RECALL_PORT="$RL_PORT" RECALL_DB_PATH="$WORK/rl.sqlite" \
   RECALL_MERGE_ENABLED=false RECALL_RATE_LIMIT_MAX=3 RECALL_RATE_LIMIT_WINDOW_MS=60000 \
-  "$BIN" serve >"$WORK/rl.log" 2>&1 &
+  "$BIN" >"$WORK/rl.log" 2>&1 &
 RL=$!
 for _ in $(seq 1 40); do curl -sf "http://127.0.0.1:$RL_PORT/health" >/dev/null 2>&1 && break; sleep 0.25; done
 for _ in 1 2 3; do curl -s -o /dev/null "${auth[@]}" "http://127.0.0.1:$RL_PORT/sync?project_key=a/b"; done

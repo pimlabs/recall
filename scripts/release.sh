@@ -193,15 +193,21 @@ run "cargo build --release"            cargo build --release --locked
 
 # The two that talk to a real server rather than a stand-in. Both have caught
 # bugs every unit test in the repo missed.
-run "compat-check.sh (19 checks)"      ./scripts/compat-check.sh target/release/recall
-run "api-doc-check.sh (33 checks)"     ./scripts/api-doc-check.sh target/release/recall
-run "trusted-ip-check.sh (9 checks)"   ./scripts/trusted-ip-check.sh target/release/recall
+run "compat-check.sh (19 checks)"      ./scripts/compat-check.sh target/release/recall-server
+run "api-doc-check.sh (33 checks)"     ./scripts/api-doc-check.sh target/release/recall-server
+run "trusted-ip-check.sh (9 checks)"   ./scripts/trusted-ip-check.sh target/release/recall-server
 
 built=$(./target/release/recall version)
 printf '    built: %s\n' "$built"
 case "$built" in
   "recall $VERSION"*) ok "binary reports $VERSION" ;;
   *) die "binary reports '$built', expected recall $VERSION" ;;
+esac
+built=$(./target/release/recall-server version)
+printf '    built: %s\n' "$built"
+case "$built" in
+  "recall-server $VERSION"*) ok "server binary reports $VERSION" ;;
+  *) die "server binary reports '$built', expected recall-server $VERSION" ;;
 esac
 
 # --------------------------------------------------------------------------
@@ -236,7 +242,7 @@ if $RESUMING; then
 elif confirm "create and push $TAG (this publishes a GitHub Release)"; then
   git tag -a "$TAG" -m "recall $VERSION" || die "could not create the tag"
   git push origin "$TAG" || { git tag -d "$TAG"; die "could not push the tag (local tag removed)"; }
-  ok "pushed $TAG — the release workflow is now building four targets"
+  ok "pushed $TAG — the release workflow is now building the client and the server"
   echo "    https://github.com/$REPO/actions"
 else
   warn "skipped — nothing after this point can run"
@@ -265,7 +271,8 @@ if ! curl -sfI "$release_url/checksums.txt" >/dev/null 2>&1; then
   exit 1
 fi
 
-for asset in recall_darwin_amd64 recall_darwin_arm64 recall_linux_amd64 recall_linux_arm64; do
+for asset in recall_darwin_amd64 recall_darwin_arm64 recall_linux_amd64 recall_linux_arm64 \
+             recall-server_linux_amd64 recall-server_linux_arm64; do
   if curl -sfI "$release_url/$asset.tar.gz" >/dev/null 2>&1; then
     ok "$asset.tar.gz"
   else

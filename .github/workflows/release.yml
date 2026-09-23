@@ -31,11 +31,14 @@ jobs:
   # otherwise be discovered after twenty minutes of runner time.
   versions:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.agree.outputs.version }}
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
       - name: The tag, Cargo.toml and npm/package.json agree
+        id: agree
         env:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
@@ -45,6 +48,7 @@ jobs:
           echo "tag $want | Cargo.toml $cargo_v | npm $npm_v"
           [ "$cargo_v" = "$want" ] || { echo "::error::Cargo.toml says $cargo_v, the tag says $want"; exit 1; }
           [ "$npm_v" = "$want" ]   || { echo "::error::npm/package.json says $npm_v, the tag says $want"; exit 1; }
+          echo "version=$want" >> "$GITHUB_OUTPUT"
 
   build:
     needs: versions
@@ -122,8 +126,77 @@ jobs:
           name: ${{ matrix.asset }}
           path: dist/*.tar.gz
 
+  # The server, since 0.4.0 a binary of its own. Linux only, because that is
+  # where servers run, and static against musl, so the one file runs in the
+  # Alpine image deploy/Dockerfile assembles and on any other Linux too. The
+  # client's archives above no longer contain it.
+  build-server:
+    needs: versions
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            asset: recall-server_linux_amd64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            asset: recall-server_linux_arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # rusqlite compiles SQLite's C source, so a musl build needs a C
+      # compiler that targets musl. Native runners again, so musl-gcc is
+      # that compiler for both architectures; naming it avoids the cc
+      # crate guessing a cross-compiler name that does not exist here.
+      - name: musl toolchain
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q musl-tools
+          t=$(echo "${{ matrix.target }}" | tr '-' '_')
+          echo "CC_$t=musl-gcc" >> "$GITHUB_ENV"
+
+      - name: Record the commit that was checked out
+        run: |
+          echo "RECALL_GIT_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "RECALL_BUILD_CHANNEL=release" >> "$GITHUB_ENV"
+          echo "RECALL_BUILD_CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p recall-server
+
+      # A static binary is the promise the image relies on; a dynamic one
+      # would build here and fail to start in Alpine.
+      - name: Package
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/recall-server"
+          file "$bin"
+          file "$bin" | grep -Eq 'static(-pie)? linked'
+          "$bin" version
+          mkdir -p dist
+          cp "$bin" "dist/${{ matrix.asset }}"
+          tar -czf "dist/${{ matrix.asset }}.tar.gz" -C dist "${{ matrix.asset }}"
+          rm "dist/${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/*.tar.gz
+
   publish:
-    needs: build
+    needs: [build, build-server]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -285,3 +358,15 @@ jobs:
             echo "checksums. The rewritten file is attached to this run as the \`formula\`"
             echo "artifact; it lands on \`main\` through a pull request like every other change."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # The server runs the release that was just published: its image holds
+  # the recall-server above, checked against checksums.txt. Not behind the
+  # `release` environment: a deploy can be undone by deploying the previous
+  # version (Actions → Deploy), which a registry publish cannot. Skips, and
+  # says so, where no server is configured.
+  deploy:
+    needs: [versions, publish]
+    uses: ./.github/workflows/deploy.yml
+    with:
+      version: ${{ needs.versions.outputs.version }}
+    secrets: inherit

@@ -5,7 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Recall's sync API: SQLite persistence, LLM-assisted merge, and the HTTP surface"
+description = "Recall's sync server: SQLite persistence, LLM-assisted merge, and the HTTP API"
+
+# The server binary, since 0.4.0. Named here rather than inferred for the
+# reason the client names its own: the Dockerfile, the release archives and
+# every deployment's compose file invoke it by this name.
+[[bin]]
+name = "recall-server"
+path = "src/main.rs"
 
 [dependencies]
 recall-wire.workspace = true

@@ -287,9 +287,9 @@ legacy transition. None of it assumes one owner.
 
 ## Part 4: one binary or two
 
-Today `recall` is one binary for both halves: `recall serve` runs the
-server, everything else is the client. Every laptop and cloud session
-therefore ships the server too.
+Until 0.4.0 `recall` was one binary for both halves: `recall serve` ran
+the server, everything else was the client. Every laptop and cloud session
+therefore shipped the server too.
 
 **Measured** (release profile, linux x86_64, 0.3.2): 4,507,640 bytes with
 the server, 3,108,584 without, so the server is 1.4 MB, 31% of what every
@@ -318,14 +318,28 @@ into the binary.
   gets it.
 - One version for both, so Part 1 is unaffected: `server.version` and
   `min_client` are still compared on the same numbers.
-- The client's integration tests start `recall-server` instead of
-  `recall serve`.
+- The client's integration tests start the server from the library, as a
+  dev-dependency, so the installed client still carries none of it.
 
 Removing `recall serve` from the client is a breaking change under
 [`../reference/releasing.md`](../reference/releasing.md), so it belongs in a
 minor release. It fits best alongside the move to release-built server
-images, which changes the Dockerfile anyway. Until then `recall serve` keeps
-working.
+images, which changes the Dockerfile anyway.
+
+**Done in 0.4.0**, with those images:
+
+- The client is 3.2 MB, down from 4.5 MB, and `recall serve` now only says
+  where the server went, exiting 1.
+- A release builds `recall-server` for Linux amd64 and arm64, static
+  against musl, beside the client's archives and in the same
+  `checksums.txt`.
+- `deploy/Dockerfile` installs that published binary, after checking it
+  against `checksums.txt`, instead of compiling. `RECALL_SOURCE=source`
+  still compiles from the checkout, for CI and for trying a branch.
+- A server runs releases, not `main`: each release deploys itself
+  (`.github/workflows/deploy.yml`), and any released version can be
+  deployed by hand from the Actions tab, which is also the rollback. A
+  push to `main` no longer deploys anything.
 
 ## Part 5: encrypted storage, and a worker that reads it
 

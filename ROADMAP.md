@@ -94,7 +94,9 @@ their own.
 ## Phase 5 — One Go binary — done
 
 Designed in the Go rewrite design doc (retired in Phase 7; see git history) and decided there: everything, one
-binary, `recall serve` included.
+binary, `recall serve` included. (Undone in 0.4.0, on purpose: the server is
+its own `recall-server` binary again, so a client carries no server. See
+Part 4 of `docs/design/handshake.md`.)
 
 - [x] **Client and server rewritten in Go**, sharing `internal/wire` — the
       validation rules and the tombstone/empty-file distinction that

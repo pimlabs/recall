@@ -880,7 +880,7 @@ fn promote_is_loud_about_missing_configuration() {
 /// Every command the CLI offers. A new one added without a line here is a
 /// command the help tests below will not notice is missing from the help.
 const COMMANDS: &[&str] = &[
-    "init", "backfill", "promote", "status", "doctor", "serve", "push", "pull", "version", "help",
+    "init", "backfill", "promote", "status", "doctor", "push", "pull", "version", "help",
 ];
 
 #[test]
@@ -1037,21 +1037,18 @@ fn an_unknown_subcommand_fails_with_usage() {
     );
 }
 
-/// `serve` is the one command that must refuse to start misconfigured: a
-/// server reachable from the internet with no token is not a degraded mode.
+/// `recall serve` moved to its own binary in 0.4.0. Anyone who still types
+/// it is told where it went, rather than handed clap's "unrecognized
+/// subcommand", and it fails: a deployment still starting it must not look
+/// healthy.
 #[test]
-fn serve_refuses_to_start_without_a_token() {
+fn serve_says_the_server_moved_to_recall_server() {
     let dir = tempfile::tempdir().unwrap();
-    let r = run(
-        &["serve"],
-        dir.path(),
-        &[("RECALL_DB_PATH", &dir.path().join("x.db").to_string_lossy())],
-        None,
-    );
-    assert_ne!(r.code, 0, "started with no auth");
+    let r = run(&["serve"], dir.path(), &[], None);
+    assert_eq!(r.code, 1, "stdout: {} stderr: {}", r.stdout, r.stderr);
     assert!(
-        r.stderr.contains("RECALL_TOKEN"),
-        "the message should name the variable: {:?}",
+        r.stderr.contains("recall-server"),
+        "the message should name the new binary: {:?}",
         r.stderr
     );
 }
@@ -1594,51 +1591,63 @@ fn push_stays_silent_about_an_ordinary_file() {
 // connect as one flow, against a real server
 // ---------------------------------------------------------------------------
 
-/// `recall serve` from the binary under test, on a free port, killed on drop.
+/// A real server on a free port, in this process, stopped on drop.
+///
+/// The server is its own binary since 0.4.0 and this crate no longer builds
+/// it, so it is started from the library instead: the same router and
+/// store `recall-server` runs, without a process to find.
 struct LiveServer {
-    child: std::process::Child,
     url: String,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
     _db: tempfile::TempDir,
 }
 
 impl Drop for LiveServer {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
 fn live_server(token: &str) -> LiveServer {
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
     let db = tempfile::tempdir().unwrap();
-    let child = Command::new(binary())
-        .arg("serve")
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("RECALL_TOKEN", token)
-        .env("RECALL_PORT", port.to_string())
-        .env("RECALL_DB_PATH", db.path().join("recall.db"))
-        .env("RECALL_MERGE_ENABLED", "false")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("recall serve starts");
-    let server = LiveServer {
-        child,
-        url: format!("http://127.0.0.1:{port}"),
-        _db: db,
+    let cfg = recall_server::Config {
+        token: token.to_string(),
+        db_path: db.path().join("recall.db").to_string_lossy().to_string(),
+        merge_enabled: false,
+        ..Default::default()
     };
-    for _ in 0..100 {
-        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return server;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    let store = std::sync::Arc::new(recall_server::Store::open(&cfg.db_path).expect("store opens"));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let thread = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                recall_server::Server::new(cfg, store)
+                    .serve_with_shutdown(listener, async {
+                        let _ = stopped.await;
+                    })
+                    .await
+                    .unwrap();
+            });
+    });
+    LiveServer {
+        url: format!("http://127.0.0.1:{port}"),
+        stop: Some(stop),
+        thread: Some(thread),
+        _db: db,
     }
-    panic!("recall serve did not start listening on {port}");
 }
 
 /// The whole flow with nobody at the keyboard: a saved token that still

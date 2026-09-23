@@ -59,26 +59,26 @@ Both ingresses need:
 
 - **Docker Engine with Compose v2** (`docker compose`, not the old
   `docker-compose`). Any distribution of it will do.
-- **A clone of this repository on that machine.** Neither compose file pulls
-  a published image — both build from source (`build.context` is the repo
-  root), so the source has to be there:
+- **A clone of this repository on that machine, at a release tag.** The
+  compose files and the Dockerfile come from the clone; the server binary
+  does not. The image downloads the `recall-server` that the GitHub Release
+  published and checks it against the release's `checksums.txt`, so nothing
+  is compiled on the server:
 
   ```sh
   git clone https://github.com/pimlabs/recall && cd recall
+  git checkout v0.4.0      # the release to run; see the Releases page
   ```
 
-- **Enough memory to compile.** The build stage is Rust plus SQLite's C
-  amalgamation. It is the step most likely to fail on a small instance, and
-  it fails by being killed rather than by saying why:
+  The version comes from that checkout's `Cargo.toml`. `RECALL_VERSION=0.4.0`
+  names one explicitly instead. Servers before 0.4.0 were built from source,
+  and so are those tags.
 
-  ```
-  error: could not compile `recall-server` (signal: 9, SIGKILL: kill)
-  ```
-
-  That message means the kernel killed the compiler, not that anything is
-  wrong with the build. The fix is more memory: add swap on a small instance,
-  or build the image on a bigger machine and move it over with
-  `docker save` / `docker load`.
+- **Linux on amd64 or arm64.** Those are the two server builds a release
+  publishes. Anything else can still build from source with
+  `RECALL_SOURCE=source`, which compiles Rust and SQLite's C amalgamation in
+  the image: give it memory, since a small instance fails by having the
+  compiler killed (`signal: 9, SIGKILL: kill`) rather than by saying why.
 
 The Cloudflare Tunnel option additionally needs a domain on your Cloudflare
 account (the free plan is enough). That is for a **stable** hostname —
@@ -163,9 +163,9 @@ docker compose -f docker-compose.traefik.yml up -d --build
 docker compose -f docker-compose.traefik.yml logs -f
 ```
 
-The first build takes a few minutes — that is SQLite compiling from C. Pass
-`-f` on **every** later `docker compose` command too, or Compose will read
-the default file and act on the wrong stack.
+The first build takes a minute or two, most of it installing the `claude`
+CLI. Pass `-f` on **every** later `docker compose` command too, or Compose
+will read the default file and act on the wrong stack.
 
 ## 4. Verify from outside
 
@@ -240,8 +240,9 @@ client needs re-provisioning.
 
 Then set the three placeholders — but **not** by editing
 `docker-compose.traefik.yml`. That file is tracked, so editing it leaves the
-server's clone permanently dirty and `git pull --ff-only` fails from then on,
-including the pull the auto-deploy workflow runs. Put the differences in an
+server's clone permanently dirty, and moving it to the next release's tag
+fails from then on, including the checkout the deploy workflow runs. Put the
+differences in an
 untracked override beside it instead:
 
 ```yaml
@@ -301,8 +302,8 @@ nothing says so until you go looking for one.
 docker compose -f docker-compose.traefik.yml exec recall-server \
   sh -c "ls -la /data"
 
-# from anywhere: the new URL answers, and the commit is the one you built
-curl -sf https://recall.yourdomain.com/health
+# from anywhere: the new URL answers, with the version you meant to run
+curl -sf https://recall.yourdomain.com/.well-known/recall
 ```
 
 Then a real round trip from a client, which is the only check that covers the
@@ -332,21 +333,29 @@ behind the URL it is actually using.
 
 ## Updating
 
+A server runs releases, not `main`. To move to another one, check out its tag
+and rebuild:
+
 ```sh
+git fetch --tags origin
+git checkout v0.4.1
 cd deploy
-GIT_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --build
+docker compose up -d --build
+curl -sf https://recall.yourdomain.com/.well-known/recall   # server.version
 ```
 
-`GIT_COMMIT` gets baked into the image and shows up in `GET /health` —
-useful for confirming what's actually running matches what's on `main`,
-since `main` having a fix and the running container having it are two
-different things until this is run. Plain `docker compose up -d --build`
-without it still works, `/health` just reports `"unknown"` for
-`git_commit`.
+`GET /.well-known/recall` reports the version and, for a release, the
+channel `release`. `GET /health` reports the commit the binary was built
+from. Rolling back is the same, with an older tag.
 
-This can also run automatically on every push to `main` instead of by
-hand — see `docs/reference/github-actions-deploy.md` for wiring up
-`.github/workflows/ci-deploy.yml` against this VPS.
+This can run automatically instead: every release deploys itself, and a
+chosen version can be deployed from the Actions tab (phone included). See
+[`docs/reference/github-actions-deploy.md`](../docs/reference/github-actions-deploy.md)
+for wiring `.github/workflows/deploy.yml` to this machine.
+
+To try an unreleased branch on a server, build it from the checkout:
+`RECALL_SOURCE=source GIT_COMMIT=$(git rev-parse --short HEAD) docker compose
+up -d --build`. The discovery document then says `dev`, which is the point.
 
 The SQLite file lives in the named `recall-data` volume, so it survives
 rebuilds/restarts. `docker compose down -v` would delete it — don't run

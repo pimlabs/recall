@@ -15,7 +15,8 @@ cargo test --workspace                 # what CI runs
 cargo test -p recall-hooks             # just one crate, much faster
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
-cargo build --release -p recall    # binary at target/release/recall
+cargo build --release -p recall    # the client, at target/release/recall
+cargo build --release -p recall-server   # the server, beside it
 ```
 
 The first build is slow — `rusqlite` compiles SQLite from C. After that it's cached.
@@ -105,8 +106,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps   # what CI runs
 `docs/reference/api.md` is checked the same way — not by review, but by assertion:
 
 ```sh
-cargo build --release -p recall
-./scripts/api-doc-check.sh target/release/recall
+cargo build --release -p recall-server
+./scripts/api-doc-check.sh target/release/recall-server
 ```
 
 33 checks against a real server on a real socket: every status code, error string, field order and `null`-versus-`""` claim the document makes. Change a handler without changing the doc and this fails, which is the point.
@@ -131,7 +132,7 @@ to files in someone's memory directory rather than in this repository.
 ### The rate-limit bucket is a security boundary
 
 ```sh
-./scripts/trusted-ip-check.sh target/release/recall
+./scripts/trusted-ip-check.sh target/release/recall-server
 ```
 
 Nine checks on a real socket. Rate limiting runs *before* auth so a flood of
@@ -145,7 +146,7 @@ ingress. Change any of those three and this fails.
 
 ```sh
 cargo build --release
-./scripts/compat-check.sh target/release/recall
+./scripts/compat-check.sh target/release/recall-server
 ```
 
 Nineteen checks against `fixtures/node-written.db` — a database the retired Node server actually wrote, kept because production's rows were written by it. This server opens that file, serves every row correctly (byte-exact content, no/one/two trailing newlines, an empty file, unicode, a nested path, a tombstone with its content still withheld, project isolation), and then keeps writing to it.

@@ -27,9 +27,9 @@ Both hooks live in the **project's own `.claude/settings.json`**, checked into g
 
 ## Start here
 
-Recall is a single Rust binary that is both halves: `recall serve` runs the
-server, everything else runs beside your editor. Which half you need depends
-on what you already have.
+Recall is two Rust binaries from one workspace and one version: `recall`
+runs beside your editor, and `recall-server` is the server. Which half you
+need depends on what you already have.
 
 ### A. You don't have a server yet — [**set one up**](deploy/README.md)
 

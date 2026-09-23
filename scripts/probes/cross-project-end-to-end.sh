@@ -3,13 +3,16 @@
 # project on "machine B", and does Claude Code actually read it there?
 set -uo pipefail
 BIN=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")  # the script cd's about
+# The server has been its own binary since 0.4.0; by default the one built
+# beside the client.
+SERVER_BIN="${2:-$(dirname "$BIN")/recall-server}"
 WORK=$(mktemp -d)
 PORT=8941
 URL="http://127.0.0.1:$PORT"
 TOKEN="e2e-token"
 
 RECALL_TOKEN="$TOKEN" RECALL_PORT="$PORT" RECALL_DB_PATH="$WORK/db.sqlite" \
-  RECALL_MERGE_ENABLED=false "$BIN" serve >"$WORK/server.log" 2>&1 &
+  RECALL_MERGE_ENABLED=false "$SERVER_BIN" >"$WORK/server.log" 2>&1 &
 SERVER=$!
 trap 'kill $SERVER 2>/dev/null; rm -rf "$WORK"' EXIT
 for _ in $(seq 1 40); do curl -sf "$URL/health" >/dev/null 2>&1 && break; sleep 0.25; done

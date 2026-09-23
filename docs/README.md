@@ -42,7 +42,7 @@ design, so there is no third party here.
 
 | Document | Read it when |
 |---|---|
-| [`reference/github-actions-deploy.md`](reference/github-actions-deploy.md) | Wiring CI checks on every PR and auto-deploy to a VPS on push to `main`. |
+| [`reference/github-actions-deploy.md`](reference/github-actions-deploy.md) | CI checks on every PR, and deploying each release to a server (automatically, or a chosen version by hand). |
 | [`reference/releasing.md`](reference/releasing.md) | Cutting a release across all four install channels — what the tag automates, what only the owner can push, and what to do when a build job never starts. |
 
 `reference/api.md` is the one with teeth: `scripts/api-doc-check.sh` asserts

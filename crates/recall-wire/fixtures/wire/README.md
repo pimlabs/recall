@@ -20,10 +20,11 @@ newer client keeps reading older servers.
 `discovery` exists from the version that introduced `/.well-known/recall`
 onwards; older servers answer 404 and have no file.
 
-`0.3.3/` was captured from a development build before 0.3.3 was released,
+`0.4.0/` was captured from a development build before 0.4.0 was released,
 so its values say `-dev` and its version is not a release. Its shape is the
-one 0.3.3 ships. Replace it with a capture from the release archive once
-0.3.3 is out; that is the one time a file here is rewritten.
+one 0.4.0 ships (there was no 0.3.3; the discovery document went out with
+0.4.0). Replace it with a capture from the release archive once 0.4.0 is
+out; that is the one time a file here is rewritten.
 
 ## Rules
 

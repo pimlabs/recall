@@ -3,12 +3,18 @@ name: recall
 services:
   recall-server:
     build:
-      # Context is the repo root, not deploy/: the image builds the Rust
-      # binary from crates/, then copies the entrypoint next to this file.
+      # Context is the repo root, not deploy/: the image reads the version
+      # from Cargo.toml (or builds from crates/), then copies the entrypoint
+      # next to this file.
       context: ..
       dockerfile: deploy/Dockerfile
+      # The binary comes from the GitHub Release named by RECALL_VERSION, or
+      # by this checkout's Cargo.toml when that is unset; see the Dockerfile.
+      # RECALL_SOURCE=source builds it from the checkout instead.
       args:
-        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        RECALL_SOURCE: ${RECALL_SOURCE:-release}
+        RECALL_VERSION: ${RECALL_VERSION:-}
+        GIT_COMMIT: ${GIT_COMMIT:-}
     container_name: recall-server
     restart: unless-stopped
     environment:
