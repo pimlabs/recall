@@ -75,8 +75,10 @@ does arrive through that ingress.
 `recall-server`'s own direct-TLS mode (`RECALL_TLS_CERT`/`RECALL_TLS_KEY`, or
 `RECALL_TLS_ACME_DOMAINS`) has no ingress at all, so no header is read there
 either: the client's address comes straight from the TCP connection, and the
-server refuses to start if `RECALL_TRUSTED_IP_HEADER` is set alongside it.
-See `deploy/README.md`.
+server refuses to start if `RECALL_TRUSTED_IP_HEADER` names a header alongside
+it (set empty, meaning "trust none", it is allowed). That address is only as
+good as the port publishing in front of it: see `deploy/README.md` on rootless
+Docker and IPv6.
 
 ## Protocol and client identity
 

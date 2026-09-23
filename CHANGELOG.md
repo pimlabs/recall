@@ -22,6 +22,13 @@ break will be described here in full rather than smoothed over.
   `RECALL_TLS_ACME_EMAIL` for one it gets and renews on its own from Let's
   Encrypt. Off by default; the two existing ingress-based deployments are
   unaffected. See `deploy/README.md` and `deploy/docker-compose.direct.yml`.
+  With TLS on, the server hardens its own connections the way an ingress
+  otherwise would: a cap on open connections (`RECALL_TLS_MAX_CONNECTIONS`,
+  default 512), and deadlines for the TLS handshake, request headers and
+  idle connections. `RECALL_TLS_REQUIRED=true`, which the direct compose
+  file sets, refuses to start without TLS rather than falling back to plain
+  HTTP. A certificate from files is reloaded on `SIGHUP` and every 12
+  hours.
 
 ## 0.4.0 — 2026-09-23
 

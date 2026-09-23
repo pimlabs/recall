@@ -159,8 +159,12 @@ pick this over the other two:
   - **`RECALL_TLS_CERT` + `RECALL_TLS_KEY`** point at a PEM certificate and
     key already on disk (a bind mount into the container), kept renewed by
     something else — certbot, a script, a certificate copied out of another
-    Traefik. The server never writes to these files, only reads them at
-    startup.
+    Traefik. The server never writes to these files. It reads them at
+    startup, again on `SIGHUP`, and every 12 hours regardless, swapping in
+    the new pair only if it changed and loads cleanly (a half-written or
+    mismatched pair is logged and the old certificate keeps serving). See
+    [Certificates from certbot](#certificates-from-certbot) for mounting
+    them.
   - **`RECALL_TLS_ACME_DOMAINS` + `RECALL_TLS_ACME_EMAIL`** ask the server to
     get and renew its own certificate from Let's Encrypt, over TLS-ALPN-01 —
     the challenge is answered on the same port the server already listens
@@ -168,15 +172,122 @@ pick this over the other two:
     every domain listed must already point at this machine before the first
     run, and the issued certificate is cached under `RECALL_TLS_ACME_DIR`
     (default `/data/acme`, inside the same named volume as the database, so
-    it survives rebuilds). `RECALL_TLS_ACME_STAGING=true` switches to Let's
-    Encrypt's staging directory, for testing without burning the real rate
-    limit — its certificate is not one any real client will trust.
+    it survives rebuilds; the server keeps that directory `0700` and its
+    files `0600`, since it holds the ACME account key and the certificate's
+    private key). `RECALL_TLS_ACME_STAGING=true` (or `1`/`yes`, any case)
+    switches to Let's Encrypt's staging directory, for testing without
+    burning the real rate limit — its certificate is not one any real client
+    will trust; any value that is not a yes or a no refuses to start rather
+    than silently meaning production. Wildcard domains are refused at
+    startup (TLS-ALPN-01 cannot validate them). A failed order is logged
+    with its attempt number and when the next retry is (one second,
+    doubling up to about 18 hours); a certificate already issued keeps
+    serving until it expires, so watch the log for `acme: certificate order
+    failed`.
+- **It fails closed.** `docker-compose.direct.yml` sets
+  `RECALL_TLS_REQUIRED=true`, so if its TLS variables ever arrive missing or
+  empty the server refuses to start instead of serving the bearer token over
+  plain HTTP on a published port. It also sets `RECALL_TRUSTED_IP_HEADER`
+  explicitly empty ("trust no header"), which is what TLS forces anyway;
+  naming a header there while TLS is on refuses to start.
 - **Port 443 is exposed directly to whatever can reach this machine.** The
   other two files never publish a port at all; this one has to, since there
   is no ingress to publish it for. `docker-compose.direct.yml` runs
   `recall-server` on an unprivileged internal port and maps only `443` on the
   host to it, so the process itself never needs root or a Linux capability
   to bind a privileged port.
+- **The published port has to preserve each client's address.** The rate
+  limiter keys on it, and with no ingress there is nothing else to key on.
+  Docker's normal publish (rootful Docker, iptables DNAT) preserves it.
+  Two setups do not, and in both every client lands in one shared
+  rate-limit bucket, so one abusive client locks out everyone, the owner
+  included:
+  - **Rootless Docker.** Its port forwarding makes every connection appear
+    to come from inside the container's network. Use rootful Docker for
+    this file.
+  - **IPv6 without IPv6 on the Docker network.** Docker then forwards IPv6
+    connections through its userland proxy, and every IPv6 client appears
+    as the bridge gateway. That is why `docker-compose.direct.yml` publishes
+    on `0.0.0.0` only; the cost is that IPv6-only clients cannot connect.
+    To serve IPv6 too, enable IPv6 on the compose network (and ip6tables
+    in the daemon) and add a `[::]:443:8443` publish.
+
+#### What an ingress did that this mode now does itself, and what it doesn't
+
+Behind Cloudflare Tunnel or Traefik, the ingress is what faces the internet:
+it holds the idle and half-open connections, times out slow clients, and
+only ever hands `recall-server` complete requests. With direct TLS,
+`recall-server` does that itself (`crates/recall-server/src/server/tls.rs`):
+
+- **A connection cap**, counting connections still in their TLS handshake:
+  `RECALL_TLS_MAX_CONNECTIONS`, default 512. Past it, a new connection is
+  closed as soon as it is accepted, and the refusals are logged at most once
+  a minute. The compose file sets `nofile` to 8192 so the cap, not the
+  process's file-descriptor limit, is what a flood runs into.
+- **A 10-second TLS handshake deadline**, in both modes.
+- **A 15-second deadline for an HTTP/1 request's headers**, which also
+  closes a keep-alive connection left idle that long (slowloris).
+- **A 30-second idle deadline** for a connection with no request in flight:
+  one that finishes the handshake and then sends nothing, or an HTTP/2
+  connection with no stream open. HTTP/2 connections are also pinged every
+  20 seconds and dropped if the ping goes unanswered for 10.
+- **A ceiling on a single request**: the merge timeout plus a minute, from
+  its headers to the last byte of its response, after which the idle
+  deadline applies again, so a client that stops reading its response
+  cannot hold the connection forever.
+
+What it still does not do:
+
+- **No DDoS absorption.** A flood big enough to fill the connection cap, or
+  the machine's bandwidth, takes the server off the air for its duration,
+  the owner's own clients included; an edge network like Cloudflare's
+  absorbs that before it reaches the machine. The cap keeps the process
+  alive and responsive to what it does accept, nothing more.
+- **No per-address connection limit.** One client address can use every
+  slot under the cap; the per-address rate limit applies to requests, not
+  to connections.
+- **No request filtering, bot detection or geo-blocking**, and no hiding the
+  machine's address: its IP is in DNS for anyone to find.
+
+If any of that matters for your machine, put an ingress in front and use one
+of the other two files instead.
+
+#### Certificates from certbot
+
+`RECALL_TLS_CERT`/`RECALL_TLS_KEY` need both files readable by the
+container's `node` user (uid 1000), and neither of the obvious mounts gives
+that:
+
+- `/etc/letsencrypt/live/<domain>` mounted on its own: the files there are
+  symlinks into `../../archive/`, which does not exist inside the container.
+- `/etc/letsencrypt` mounted whole: the links resolve, but certbot keeps
+  every `privkey.pem` readable by root only, so the server cannot read it.
+
+Copy them out instead, with a deploy hook that runs after every renewal.
+Save this as `/etc/letsencrypt/renewal-hooks/deploy/recall.sh` and make it
+executable:
+
+```sh
+#!/bin/sh
+# Copies the renewed certificate somewhere the recall-server container can
+# read it, with the key private to that container's user, then tells the
+# server to reload it.
+set -e
+install -d -m 0700 -o 1000 -g 1000 /srv/recall-certs
+install -m 0644 -o 1000 -g 1000 "$RENEWED_LINEAGE/fullchain.pem" /srv/recall-certs/fullchain.pem
+install -m 0600 -o 1000 -g 1000 "$RENEWED_LINEAGE/privkey.pem" /srv/recall-certs/privkey.pem
+docker kill -s HUP recall-server
+```
+
+Run it once by hand for the first copy (`sudo RENEWED_LINEAGE=/etc/letsencrypt/live/<domain>
+sh /etc/letsencrypt/renewal-hooks/deploy/recall.sh`; the `docker kill` fails
+harmlessly if the container is not up yet), then mount
+`/srv/recall-certs:/certs:ro` and set `RECALL_TLS_CERT: /certs/fullchain.pem`
+and `RECALL_TLS_KEY: /certs/privkey.pem`, as the comment in
+`docker-compose.direct.yml` shows. The server logs `tls: reloaded
+certificate` when the signal lands; without the signal it still picks the
+new files up within 12 hours. It warns at startup if the key is readable by
+anyone but its owner: keep it `0600`, owned by uid 1000.
 
 ## 2. Configure secrets
 
@@ -648,7 +759,9 @@ Two read-oriented views come up with `docker compose up -d` alongside the
 server, both for the owner's own use:
 
 - **sqlite-web** (`coleifer/sqlite-web`) mounts the `recall-data` volume
-  read-only and browses the live `recall.db` at
+  read-only (with direct TLS, just the `recall.db` file out of it, since the
+  volume also holds the ACME cache's private keys) and browses the live
+  `recall.db` at
   `http://localhost:8081` — but **only on the machine running Docker**,
   since its port is bound to `127.0.0.1` on purpose, never exposed
   through the Cloudflare tunnel. From another machine, tunnel over SSH

@@ -10,12 +10,18 @@
 # straight to the internet rather than sitting behind something else. Use
 # docker-compose.yml or docker-compose.traefik.yml instead if either of
 # those already fits this machine. See deploy/README.md's "If you are using
-# direct TLS" section for the full trade-offs.
+# direct TLS" section for the full trade-offs, including what an ingress
+# would have protected against that this file does not.
 #
 # DNS for every domain in RECALL_TLS_ACME_DOMAINS must already point at this
 # host before the first run: Let's Encrypt validates over the same
 # connection this server accepts everything else on (TLS-ALPN-01), so there
 # is no separate port 80 step and no separate ACME client to run.
+#
+# Needs a rootful Docker Engine 26 or later: rootless Docker hides every
+# client's real address from the container (see the ports: comment below),
+# and the sqlite-web service mounts a single file out of a named volume,
+# which older engines cannot do.
 
 name: recall
 
@@ -49,6 +55,12 @@ services:
       RECALL_BACKUP_DIR: /backups
       RECALL_BACKUP_INTERVAL_HOURS: "24"
       RECALL_BACKUP_KEEP: "7"
+      # This file publishes its port to the internet, so it must never come
+      # up as plain HTTP: with this set, recall-server refuses to start
+      # unless one of the two TLS modes below is fully configured, rather
+      # than serving the bearer token in clear text because a variable went
+      # missing or empty.
+      RECALL_TLS_REQUIRED: "true"
       # ACME sub-mode: the server gets and renews its own certificate. See
       # deploy/README.md for the RECALL_TLS_CERT/RECALL_TLS_KEY sub-mode
       # instead, which needs a volume mount rather than these three.
@@ -59,12 +71,30 @@ services:
       # already inside the recall-data volume below, so the issued
       # certificate survives rebuilds with no volume of its own.
       #
-      # Deliberately not set. With no ingress in front of this container,
-      # the TCP connection's own address is the only client IP that isn't
-      # the client's own choosing — recall-server refuses to start if this
-      # is set anyway. See docs/reference/api.md and
+      # Explicitly empty, never a header name. With no ingress in front of
+      # this container, the TCP connection's own address is the only client
+      # IP that isn't the client's own choosing, and recall-server refuses to
+      # start with a header named here while TLS is on. Empty means "trust
+      # no header", which is what TLS forces anyway; it is set rather than
+      # left out as a second guard, so that even a server that somehow came
+      # up without TLS would not fall back to trusting cf-connecting-ip, the
+      # plain-HTTP default. See docs/reference/api.md and
       # scripts/tls-trusted-ip-check.sh.
-      # RECALL_TRUSTED_IP_HEADER:
+      RECALL_TRUSTED_IP_HEADER: ""
+      # How many connections recall-server holds open at once, handshakes
+      # included; past it, new ones are closed on arrival. 512 is the
+      # default, far more than one owner's machines need, and well under
+      # the nofile limit below.
+      # RECALL_TLS_MAX_CONNECTIONS: "512"
+    # Every open connection is a file descriptor, and some hosts still
+    # default a container to 1024 of them. Set explicitly, comfortably above
+    # RECALL_TLS_MAX_CONNECTIONS plus what the database, backups and the
+    # claude CLI need, so the connection cap is always what bounds a flood
+    # rather than the process running out of descriptors first.
+    ulimits:
+      nofile:
+        soft: 8192
+        hard: 8192
     volumes:
       - recall-data:/data
       - ./backups:/backups
@@ -72,13 +102,49 @@ services:
       # replace the three RECALL_TLS_ACME_* lines above with:
       #   RECALL_TLS_CERT: /certs/fullchain.pem
       #   RECALL_TLS_KEY: /certs/privkey.pem
-      # and add a mount for wherever those files actually live, e.g.:
-      #   - /etc/letsencrypt/live/recall.yourdomain.com:/certs:ro
+      # and mount a directory holding copies of the two files that the
+      # container's `node` user (uid 1000) can read, e.g.:
+      #   - /srv/recall-certs:/certs:ro
+      # Not /etc/letsencrypt/live/<domain> directly: its files are symlinks
+      # into ../../archive, which dangle inside the container, and certbot
+      # keeps privkey.pem readable by root only. deploy/README.md has a
+      # certbot deploy hook that copies both out with the right owner and
+      # mode (0600 for the key) and then signals the server, which reloads
+      # the certificate on SIGHUP (and re-reads it every 12 hours anyway).
     # Published, not exposed: this file's whole point is that nothing else
     # is in front of it. Only 443 reaches the internet; RECALL_PORT above is
     # an internal detail nothing outside this compose file needs to know.
+    #
+    # IPv4 only, on purpose. The rate limiter keys on each connection's
+    # source address, so the publish has to preserve it, which Docker's
+    # iptables DNAT does. A bare "443:8443" would also listen on IPv6, and
+    # unless this compose network has IPv6 enabled, Docker forwards those
+    # connections through its userland proxy instead, so every IPv6 client
+    # arrives from the same bridge gateway address and shares one
+    # rate-limit bucket: one abusive IPv6 client locks out every other IPv6
+    # client, the owner included. The cost of binding 0.0.0.0 is that an
+    # IPv6-only client cannot connect at all. To serve IPv6 properly, give
+    # the network IPv6 (enable_ipv6: true, with ip6tables on in the daemon)
+    # and add "[::]:443:8443" alongside this line.
     ports:
-      - "443:8443"
+      - "0.0.0.0:443:8443"
+    # Answers once the server is actually serving HTTPS: in ACME mode, that
+    # is after the first certificate is issued. sqlite-web below waits on
+    # it, since it mounts a file recall-server creates on first start.
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          require('https').get({host: '127.0.0.1', port: 8443, path: '/health',
+          rejectUnauthorized: false}, r => process.exit(r.statusCode === 200 ? 0 : 1))
+          .on('error', () => process.exit(1))
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+      start_interval: 2s
 
   # Read-only DB browser for the owner's own use. Kept off the internet on
   # purpose: it has no bearer-token auth of its own, so its port is bound to
@@ -88,8 +154,29 @@ services:
     container_name: recall-sqlite-web
     restart: unless-stopped
     command: sqlite_web -H 0.0.0.0 -p 8080 -x -r /data/recall.db
+    # Only the database file, not the whole volume: /data also holds the
+    # ACME account key and certificate private key (/data/acme) and the
+    # claude CLI's login (/data/claude-config), none of which a database
+    # browser has any business reading. The other two compose files still
+    # mount the whole volume here; they have no ACME cache, but the same
+    # tightening would suit them too.
+    #
+    # Two costs of a single-file mount, both acceptable for a read-only
+    # browser: it pins the file's inode, so a database replaced by a new
+    # file (rather than written in place) needs `docker compose restart
+    # sqlite-web` to be seen; and SQLite's -journal file beside it is
+    # invisible here, which matters only while recovering from a crash
+    # mid-write.
     volumes:
-      - recall-data:/data:ro
+      - type: volume
+        source: recall-data
+        target: /data/recall.db
+        read_only: true
+        volume:
+          subpath: recall.db
+    depends_on:
+      recall-server:
+        condition: service_healthy
     ports:
       - "127.0.0.1:8081:8080"
 
