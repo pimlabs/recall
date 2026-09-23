@@ -37,5 +37,6 @@ tempfile.workspace = true
 # The end-to-end test: a real worker, client and all, against this server
 # on a real socket. Tests only, so the server binary still has no client.
 recall-worker = { workspace = true, features = ["client"] }
+reqwest.workspace = true
 # Only to drive the Router in tests without binding a real socket.
 tower = { version = "0.5", features = ["util"] }

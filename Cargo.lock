@@ -1160,6 +1160,7 @@ dependencies = [
  "getrandom 0.4.3",
  "recall-wire",
  "recall-worker",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
