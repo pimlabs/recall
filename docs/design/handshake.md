@@ -415,6 +415,30 @@ Automerge and Yjs merge without conflicts and secsync relays them end to
 end encrypted. But they need the file stored as a CRDT document, and
 Claude Code reads and writes plain Markdown.
 
+## Future idea: memory in claude.ai
+
+Parked by the owner (2026-09-23), recorded so it is not lost. Not planned.
+
+claude.ai has no documented way to write into a Project's knowledge from
+outside, but it does accept **custom connectors**: remote MCP servers,
+added under Customize → Connectors on every plan, reached from Anthropic's
+cloud, and usable from the web, Desktop and mobile apps. Recall could offer
+one:
+
+- An `/mcp` endpoint on the API server, forwarding tool calls through the
+  queue to the worker, which holds the key (Part 5).
+- Read-only tools by default: `search_memory`, `read_memory`,
+  `list_projects`. Writing from the web as a *proposal* reviewed on the
+  admin page, not a direct write.
+- MCP's authorization spec requires OAuth 2.1 with PKCE and Protected
+  Resource Metadata (RFC 9728). The OAuth sign-in would be the owner's
+  passkey on the admin page; the connector becomes one more enrolled,
+  revocable device, and every tool call lands in the audit log.
+- It needs Part 2 and Part 5 first, and an OAuth server for the owner's own
+  connector touches the same `CLAUDE.md` ground rules as Part 2.
+- Unverified: whether a custom connector can be enabled inside a claude.ai
+  Project, rather than only in a chat. Check before building.
+
 ## Open decisions
 
 1. **Encrypted storage and the worker.** Agreed by the owner (2026-09-23):
@@ -457,4 +481,5 @@ Claude Code reads and writes plain Markdown.
 - Syncthing, syncing: conflicting changes
 - Apple, iCloud data security overview; Advanced Data Protection
 - RFC 9162, Certificate Transparency 2.0; Sigstore Rekor
+- Claude Help Center, custom connectors using remote MCP; MCP specification 2025-06-18, authorization
 - Claude Code hooks reference (`additionalContext` on PostToolUse and SessionStart)
