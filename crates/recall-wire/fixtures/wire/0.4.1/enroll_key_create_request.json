@@ -1,1 +1,1 @@
-{"tag":"cloud","expires_in_days":90,"ephemeral":true}
+{"tag":"cloud","expires_in_days":90,"ephemeral":true,"max_devices":10}

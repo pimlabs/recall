@@ -16,8 +16,9 @@ use recall_server::{Config, Server, Store};
 use recall_wire::devices::{self, ENROLL_KEY_PREFIX};
 use recall_wire::signature::{self, encode_public_key, fingerprint, SigningKey, Target};
 use recall_wire::{
-    Device, DeviceList, EnrollApproved, EnrollKey, EnrollKeyCreated, EnrollKeyList, EnrollPending,
-    EnrollPollResponse, ErrorResponse, PendingEnrollment, PushResponse, SyncResponse,
+    Device, DeviceIdentity, DeviceList, EnrollApproved, EnrollKey, EnrollKeyCreated, EnrollKeyList,
+    EnrollPending, EnrollPollResponse, ErrorResponse, PendingEnrollment, PushResponse,
+    SyncResponse,
 };
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -30,7 +31,7 @@ const HOST: &str = "recall.test";
 struct Harness {
     server: Server,
     dir: TempDir,
-    _store: Arc<Store>,
+    store: Arc<Store>,
 }
 
 fn harness(tweak: impl FnOnce(&mut Config)) -> Harness {
@@ -46,20 +47,27 @@ fn harness(tweak: impl FnOnce(&mut Config)) -> Harness {
     Harness {
         server: Server::new(cfg, store.clone()),
         dir,
-        _store: store,
+        store,
     }
 }
 
-/// A machine: a key pair, and the device id once it has one.
+/// A machine: a key pair, the name it enrols as, and the device id once it
+/// has one.
 struct Machine {
     key: SigningKey,
+    name: String,
     id: String,
 }
 
 impl Machine {
     fn new(seed: u8) -> Self {
+        Self::named(seed, &format!("machine-{seed}"))
+    }
+
+    fn named(seed: u8, name: &str) -> Self {
         Self {
             key: SigningKey::from_bytes(&[seed; 32]),
+            name: name.to_string(),
             id: String::new(),
         }
     }
@@ -157,10 +165,26 @@ impl Harness {
         token: Option<&str>,
         body: Option<serde_json::Value>,
     ) -> (StatusCode, Bytes) {
+        self.call_from("", method, uri, token, body).await
+    }
+
+    /// [`Harness::call`], from the address `ip` as the rate limiter sees it,
+    /// or from the default one when `ip` is empty.
+    async fn call_from(
+        &self,
+        ip: &str,
+        method: &str,
+        uri: &str,
+        token: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, Bytes) {
         let mut req = Request::builder()
             .method(method)
             .uri(uri)
             .header("content-type", "application/json");
+        if !ip.is_empty() {
+            req = req.header("cf-connecting-ip", ip);
+        }
         if let Some(t) = token {
             req = req.header("authorization", format!("Bearer {t}"));
         }
@@ -188,7 +212,7 @@ impl Harness {
                 "POST",
                 devices::ENROLL_PATH,
                 None,
-                Some(json!({"name": "laptop", "public_key": machine.public_key(), "agent": "recall/test"})),
+                Some(json!({"name": machine.name, "public_key": machine.public_key(), "agent": "recall/test"})),
             )
             .await);
         let device: Device = ok(self
@@ -478,7 +502,7 @@ async fn the_approver_sees_what_it_is_approving_first() {
 #[tokio::test]
 async fn a_signed_push_is_recorded_under_the_devices_own_name() {
     let h = harness(|_| {});
-    let mut laptop = Machine::new(21);
+    let mut laptop = Machine::named(21, "laptop");
     h.enrol(&mut laptop, "sync").await;
 
     let s = Signing::by(&laptop);
@@ -660,7 +684,7 @@ async fn a_bad_enrolment_request_is_400_and_nothing_is_stored() {
         ),
         (
             json!({"name": "a\u{7}b", "public_key": good}),
-            "name must be at most 64 characters, with no control characters",
+            "name must be at most 64 characters, with no control, format or invisible characters",
         ),
         (json!({"public_key": good}), "invalid json body"),
     ] {
@@ -838,12 +862,27 @@ async fn signed_pushes_and_pulls_are_accepted_and_seen() {
         .await);
     assert_eq!(pulled.files[0].content.as_deref(), Some("# one\n"));
 
-    // A sync device may read the stats, which is how a client checks it
-    // can reach the server at all.
+    // A device checks the server knows it here; the stats are for admins.
     let s = Signing::by(&laptop);
+    let me: DeviceIdentity = ok(h.signed("GET", devices::DEVICES_ME_PATH, None, &s).await);
     assert_eq!(
-        h.signed("GET", "/admin/stats", None, &s).await.0,
-        StatusCode::OK
+        (me.device_id.as_str(), me.name.as_str(), me.scope.as_str()),
+        (laptop.id.as_str(), "machine-9", "sync")
+    );
+    assert!(!me.ephemeral);
+    assert_eq!(
+        error_of(
+            h.call("GET", devices::DEVICES_ME_PATH, Some(TOKEN), None)
+                .await
+        ),
+        (
+            StatusCode::NOT_FOUND,
+            "not a device: this request was authenticated with RECALL_TOKEN".into()
+        )
+    );
+    assert_eq!(
+        h.call("GET", devices::DEVICES_ME_PATH, None, None).await.0,
+        StatusCode::UNAUTHORIZED
     );
 
     let list: DeviceList = ok(h
@@ -973,24 +1012,51 @@ async fn a_sync_device_cannot_manage_devices_and_an_admin_device_can() {
     let mut laptop = Machine::new(12);
     h.enrol(&mut laptop, "sync").await;
 
+    // Every admin route, the old stats among them: nothing gets a 401, a
+    // sync device a 403, and neither reaches the handler.
+    let key = h.create_enroll_key(true).await;
     let forbidden = "forbidden: this needs RECALL_TOKEN or a device with the admin scope";
     for (method, uri, body) in [
+        ("GET", "/admin/stats".to_string(), None),
         ("GET", devices::DEVICES_PATH.to_string(), None),
+        ("GET", devices::pending_path("BCDF-GHJK"), None),
         (
             "POST",
             devices::APPROVE_PATH.to_string(),
             Some(json!({"user_code": "BCDF-GHJK"})),
         ),
-        ("GET", devices::ENROLL_KEYS_PATH.to_string(), None),
+        (
+            "POST",
+            devices::DENY_PATH.to_string(),
+            Some(json!({"user_code": "BCDF-GHJK"})),
+        ),
         ("POST", devices::revoke_device_path(&laptop.id), None),
+        ("GET", devices::ENROLL_KEYS_PATH.to_string(), None),
+        (
+            "POST",
+            devices::ENROLL_KEYS_PATH.to_string(),
+            Some(json!({"expires_in_days": 1})),
+        ),
+        ("POST", devices::revoke_enroll_key_path(&key.id), None),
     ] {
+        assert_eq!(
+            error_of(h.call(method, &uri, None, body.clone()).await),
+            (StatusCode::UNAUTHORIZED, "unauthorized".into()),
+            "no credential: {method} {uri}"
+        );
         let s = Signing::by(&laptop);
         assert_eq!(
             error_of(h.signed(method, &uri, body, &s).await),
             (StatusCode::FORBIDDEN, forbidden.to_string()),
-            "{method} {uri}"
+            "sync device: {method} {uri}"
         );
     }
+    // And nothing was done: the key is not revoked, the laptop is not.
+    let keys: EnrollKeyList = ok(h
+        .call("GET", devices::ENROLL_KEYS_PATH, Some(TOKEN), None)
+        .await);
+    assert!(keys.enroll_keys[0].revoked_at.is_none());
+    assert_eq!(keys.enroll_keys.len(), 1);
 
     // An admin device approves the next machine, with no token involved.
     let mut desktop = Machine::new(13);
@@ -1018,6 +1084,12 @@ async fn a_sync_device_cannot_manage_devices_and_an_admin_device_can() {
     let s = Signing::by(&desktop);
     let list: DeviceList = ok(h.signed("GET", devices::DEVICES_PATH, None, &s).await);
     assert_eq!(list.devices.len(), 3);
+    let s = Signing::by(&desktop);
+    assert_eq!(
+        h.signed("GET", "/admin/stats", None, &s).await.0,
+        StatusCode::OK,
+        "an admin device reads the stats"
+    );
 
     let s = Signing::by(&desktop);
     let revoked: Device = ok(h
@@ -1209,6 +1281,12 @@ async fn every_device_request_fixture_is_understood() {
                 200,
                 None,
             ),
+            (
+                "enroll_key_revoke_request.json",
+                "/v1/enroll-keys/ek_scratch/revoke",
+                404,
+                Some("no enrolment key has that id"),
+            ),
         ] {
             let Ok(body) = std::fs::read(version.join(name)) else {
                 continue;
@@ -1227,7 +1305,7 @@ async fn every_device_request_fixture_is_understood() {
             sent += 1;
         }
     }
-    assert!(sent >= 6, "found only {sent} device request fixtures");
+    assert!(sent >= 7, "found only {sent} device request fixtures");
 }
 
 /// Every push a released client has sent, signed by a device instead of
@@ -1254,4 +1332,546 @@ async fn every_released_push_is_accepted_when_signed() {
         }
     }
     assert!(sent >= 4);
+}
+
+// ---------------------------------------------------------------------------
+// what the security review found
+// ---------------------------------------------------------------------------
+
+/// A device stored directly, for tests that must not spend requests on
+/// enrolling it.
+fn stored_device(h: &Harness, machine: &mut Machine, scope: &str) {
+    let id = format!("dev_{}", machine.name);
+    let inserted = h
+        .store
+        .insert_device(
+            &recall_server::store::NewDevice {
+                id: &id,
+                name: &machine.name,
+                public_key: &machine.public_key(),
+                scope,
+                agent: "",
+                ephemeral: false,
+                enroll_key_id: None,
+                created_at: &recall_server::now(),
+            },
+            None,
+        )
+        .unwrap();
+    assert!(matches!(inserted, recall_server::store::Inserted::Done(_)));
+    machine.id = id;
+}
+
+/// M1: the nonce is recorded only once the request has proved itself. A
+/// forgery naming the device's id, or the device's own request with its
+/// body swapped, carrying nonce N, must not use N up for the real one.
+#[tokio::test]
+async fn a_refused_request_does_not_use_up_its_nonce() {
+    let h = harness(|_| {});
+    let mut laptop = Machine::new(30);
+    stored_device(&h, &mut laptop, "sync");
+    let stranger = Machine::new(31);
+
+    let forged = Signing {
+        keyid: Some(&laptop.id),
+        nonce: "N".into(),
+        ..Signing::by(&stranger)
+    };
+    assert_eq!(
+        h.signed("POST", "/sync", Some(push_body("# forged\n")), &forged)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let tampered = Signing {
+        nonce: "N".into(),
+        tamper_body: Some(push_body("# swapped\n").to_string().into_bytes()),
+        ..Signing::by(&laptop)
+    };
+    assert_eq!(
+        h.signed("POST", "/sync", Some(push_body("# real\n")), &tampered)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+
+    let genuine = Signing {
+        nonce: "N".into(),
+        ..Signing::by(&laptop)
+    };
+    assert_eq!(
+        h.signed("POST", "/sync", Some(push_body("# real\n")), &genuine)
+            .await
+            .0,
+        StatusCode::OK,
+        "the refused requests used up the genuine one's nonce"
+    );
+}
+
+/// M2: the window is sixty seconds either way, not a second more, and the
+/// nonce is remembered for as long as the window accepts its request, so
+/// the request is refused again after the window rather than accepted.
+#[tokio::test]
+async fn the_window_is_sixty_seconds_and_a_replay_after_it_is_refused() {
+    let h = harness(|_| {});
+    let mut laptop = Machine::new(32);
+    stored_device(&h, &mut laptop, "sync");
+
+    for skew in [61, 62, 63, 64, 65, -61, -62, -63, -64, -65] {
+        let s = Signing {
+            created: unix_now() + skew,
+            ..Signing::by(&laptop)
+        };
+        let (status, why) = error_of(h.signed("GET", "/sync?project_key=a", None, &s).await);
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "skew {skew}");
+        assert!(
+            why.contains("check this machine's clock"),
+            "skew {skew}: {why}"
+        );
+    }
+    let s = Signing {
+        created: unix_now() + 60,
+        ..Signing::by(&laptop)
+    };
+    assert_eq!(
+        h.signed("GET", "/sync?project_key=a", None, &s).await.0,
+        StatusCode::OK,
+        "sixty seconds ahead is inside"
+    );
+
+    let once = Signing::by(&laptop);
+    assert_eq!(
+        h.signed("GET", "/sync?project_key=a", None, &once).await.0,
+        StatusCode::OK
+    );
+    // Sixty-one seconds later, by the server's clock.
+    h.server.set_clock_offset(61);
+    let (status, why) = error_of(h.signed("GET", "/sync?project_key=a", None, &once).await);
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(why.contains("check this machine's clock"), "{why}");
+}
+
+fn big_push() -> Vec<u8> {
+    // Six MiB, over the five the server takes.
+    let content = "x".repeat(6 << 20);
+    serde_json::to_vec(&json!({"project_key": "a", "file_path": "big.md", "content": content}))
+        .unwrap()
+}
+
+/// Review finding 1: a signed request's body is read only after its
+/// headers have proved it is the device's. Before, any request with a
+/// signature header made the server read up to 5 MiB.
+#[tokio::test]
+async fn nobody_without_a_device_key_makes_the_server_read_a_body() {
+    let h = harness(|_| {});
+    let mut laptop = Machine::new(33);
+    stored_device(&h, &mut laptop, "sync");
+    let body = big_push();
+
+    // A signature header alone: refused as unauthorized, not as too large,
+    // because the body was never looked at.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/sync")
+        .header("content-length", body.len())
+        .header("signature", "x")
+        .body(Body::from(body.clone()))
+        .unwrap();
+    assert_eq!(h.send(req).await.0, StatusCode::UNAUTHORIZED);
+
+    // The device's id, a stranger's key: the same.
+    let stranger = Machine::new(34);
+    let forged = Signing {
+        keyid: Some(&laptop.id),
+        ..Signing::by(&stranger)
+    };
+    let req = signed_request("POST", "/sync", body.clone(), &forged);
+    assert_eq!(h.send(req).await.0, StatusCode::UNAUTHORIZED);
+
+    // The device itself, declaring too much: refused before it is read.
+    let mut req = signed_request("POST", "/sync", body.clone(), &Signing::by(&laptop));
+    req.headers_mut()
+        .insert("content-length", body.len().to_string().parse().unwrap());
+    let (status, _, resp) = h.send(req).await;
+    assert_eq!(
+        error_of((status, resp)),
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request body too large".into()
+        )
+    );
+    // And not declaring it: refused once the limit is reached.
+    let req = signed_request("POST", "/sync", body, &Signing::by(&laptop));
+    assert_eq!(h.send(req).await.0, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+/// Review finding 1, the other half: the routes anyone may call take 8 KiB,
+/// not 5 MiB, and say so in the usual JSON.
+#[tokio::test]
+async fn the_enrolment_routes_take_small_bodies_only() {
+    let h = harness(|_| {});
+    let padded = json!({"name": "x", "public_key": Machine::new(35).public_key(), "agent": "a".repeat(9 << 10)});
+    for (uri, declared) in [
+        (devices::ENROLL_PATH, true),
+        (devices::ENROLL_PATH, false),
+        (devices::ENROLL_POLL_PATH, true),
+    ] {
+        let body = padded.to_string();
+        let mut req = Request::builder().method("POST").uri(uri);
+        if declared {
+            req = req.header("content-length", body.len());
+        }
+        let (status, _, resp) = h.send(req.body(Body::from(body)).unwrap()).await;
+        assert_eq!(
+            error_of((status, resp)),
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request body too large".into()
+            ),
+            "{uri}, declared: {declared}"
+        );
+    }
+}
+
+/// Review finding 2: one device signing more than one address may is
+/// refused on its own, and the others carry on.
+#[tokio::test]
+async fn a_device_that_signs_too_much_is_refused_alone() {
+    // Two a minute per address: a device may have four nonces live, the
+    // two minutes one lives.
+    let h = harness(|c| c.rate_limit_max = 2);
+    let mut greedy = Machine::new(36);
+    stored_device(&h, &mut greedy, "sync");
+    let mut other = Machine::new(37);
+    stored_device(&h, &mut other, "sync");
+
+    let from = |machine: &Machine, ip: &str| {
+        let mut req = signed_request("GET", "/sync?project_key=a", vec![], &Signing::by(machine));
+        req.headers_mut()
+            .insert("cf-connecting-ip", ip.parse().unwrap());
+        req
+    };
+    // Each from its own address, so the rate limiter lets every one by.
+    for i in 0..4 {
+        assert_eq!(
+            h.send(from(&greedy, &format!("198.51.100.{i}"))).await.0,
+            StatusCode::OK
+        );
+    }
+    let (status, _, body) = h.send(from(&greedy, "198.51.100.9")).await;
+    assert_eq!(
+        error_of((status, body)),
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many signed requests from this device, try again later".into()
+        )
+    );
+    assert_eq!(
+        h.send(from(&other, "198.51.100.10")).await.0,
+        StatusCode::OK
+    );
+}
+
+/// Review finding 3: an approval can name the fingerprint the approver
+/// saw, and then approves that key or nothing. The lookup before it is
+/// never cached.
+#[tokio::test]
+async fn an_approval_can_be_bound_to_the_key_the_approver_saw() {
+    let h = harness(|_| {});
+    let laptop = Machine::named(38, "laptop");
+    let pending: EnrollPending = ok(h
+        .call(
+            "POST",
+            devices::ENROLL_PATH,
+            None,
+            Some(json!({"name": "laptop", "public_key": laptop.public_key()})),
+        )
+        .await);
+
+    let req = Request::builder()
+        .uri(devices::pending_path(&pending.user_code))
+        .header("authorization", format!("Bearer {TOKEN}"))
+        .body(Body::empty())
+        .unwrap();
+    let (status, headers, body) = h.send(req).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers.get("cache-control").unwrap(), "no-store");
+    let seen: PendingEnrollment = serde_json::from_slice(&body).unwrap();
+
+    let other = fingerprint(&Machine::new(39).key.verifying_key());
+    assert_eq!(
+        error_of(
+            h.call(
+                "POST",
+                devices::APPROVE_PATH,
+                Some(TOKEN),
+                Some(json!({"user_code": pending.user_code, "fingerprint": other})),
+            )
+            .await
+        ),
+        (
+            StatusCode::CONFLICT,
+            "that code's key does not have the fingerprint given; nothing was approved".into()
+        )
+    );
+    assert_eq!(
+        error_of(h.poll(&pending.enrollment_id).await).1,
+        "authorization_pending",
+        "a refused approval approves nothing"
+    );
+
+    let device: Device = ok(h
+        .call(
+            "POST",
+            devices::APPROVE_PATH,
+            Some(TOKEN),
+            Some(json!({"user_code": pending.user_code, "fingerprint": seen.fingerprint})),
+        )
+        .await);
+    assert_eq!(device.fingerprint, seen.fingerprint);
+}
+
+/// Review finding 4: a name cannot hide characters, two live devices
+/// cannot share one, and a device an enrolment key enrols is named by the
+/// server, not by itself.
+#[tokio::test]
+async fn names_are_plain_unique_and_not_chosen_by_key_enrolments() {
+    let h = harness(|_| {});
+    let key = Machine::new(40).public_key();
+    for name in ["lap\u{200B}top", "\u{202E}potpal", "laptop\u{FEFF}"] {
+        assert_eq!(
+            h.call(
+                "POST",
+                devices::ENROLL_PATH,
+                None,
+                Some(json!({"name": name, "public_key": key})),
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST,
+            "{name:?}"
+        );
+    }
+
+    let mut laptop = Machine::named(41, "laptop");
+    h.enrol(&mut laptop, "sync").await;
+    let clash = "a device named Laptop already exists; revoke it first, or enrol with another name";
+    assert_eq!(
+        error_of(
+            h.call(
+                "POST",
+                devices::ENROLL_PATH,
+                None,
+                Some(json!({"name": "Laptop", "public_key": key})),
+            )
+            .await
+        ),
+        (StatusCode::CONFLICT, clash.into())
+    );
+
+    // Two waiting under one name: the first approved takes it.
+    let enrol_as = |name: &'static str, seed: u8| {
+        let h = &h;
+        async move {
+            let m = Machine::new(seed);
+            let p: EnrollPending = ok(h
+                .call(
+                    "POST",
+                    devices::ENROLL_PATH,
+                    None,
+                    Some(json!({"name": name, "public_key": m.public_key()})),
+                )
+                .await);
+            p.user_code
+        }
+    };
+    let first = enrol_as("desk", 42).await;
+    let second = enrol_as("desk", 43).await;
+    let approve = |code: String| {
+        let h = &h;
+        async move {
+            h.call(
+                "POST",
+                devices::APPROVE_PATH,
+                Some(TOKEN),
+                Some(json!({"user_code": code})),
+            )
+            .await
+        }
+    };
+    let desk: Device = ok(approve(first).await);
+    assert_eq!(approve(second.clone()).await.0, StatusCode::CONFLICT);
+    // Revoked, its name is free again.
+    let _: Device = ok(h
+        .call(
+            "POST",
+            &devices::revoke_device_path(&desk.id),
+            Some(TOKEN),
+            None,
+        )
+        .await);
+    let _: Device = ok(approve(second).await);
+
+    let created = h.create_enroll_key(true).await;
+    let approved: EnrollApproved = ok(h
+        .call(
+            "POST",
+            devices::ENROLL_PATH,
+            None,
+            Some(json!({"name": "laptop", "public_key": Machine::new(44).public_key(), "enroll_key": created.key})),
+        )
+        .await);
+    assert!(
+        approved.name.starts_with("cloud-") && approved.name.len() == "cloud-".len() + 8,
+        "{}",
+        approved.name
+    );
+    assert!(approved
+        .device_id
+        .contains(&approved.name["cloud-".len()..]));
+}
+
+/// Review finding 5: nonces live in memory, so a server that has just
+/// started refuses a signature made before it did, which the process
+/// before it may already have accepted.
+#[tokio::test]
+async fn a_signature_made_before_a_restart_is_refused() {
+    let h = harness(|_| {});
+    let mut laptop = Machine::new(45);
+    stored_device(&h, &mut laptop, "sync");
+    let before = Signing::by(&laptop);
+    assert_eq!(
+        h.signed("GET", "/sync?project_key=a", None, &before)
+            .await
+            .0,
+        StatusCode::OK
+    );
+
+    // The next second, a new process on the same database.
+    while unix_now() <= before.created {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let restarted = Harness {
+        server: Server::new(
+            Config {
+                token: TOKEN.to_string(),
+                merge_enabled: false,
+                rate_limit_max: 10_000,
+                ..Config::default()
+            },
+            h.store.clone(),
+        ),
+        dir: tempfile::tempdir().unwrap(),
+        store: h.store.clone(),
+    };
+    assert_eq!(
+        error_of(
+            restarted
+                .signed("GET", "/sync?project_key=a", None, &before)
+                .await
+        ),
+        (
+            StatusCode::UNAUTHORIZED,
+            "unauthorized: signature created before this server started; sign the request again"
+                .into()
+        )
+    );
+    let after = Signing::by(&laptop);
+    assert_eq!(
+        restarted
+            .signed("GET", "/sync?project_key=a", None, &after)
+            .await
+            .0,
+        StatusCode::OK
+    );
+}
+
+/// Review finding 6: a key's devices are ephemeral unless asked, a key can
+/// be capped, and revoking a key can revoke what it enrolled.
+#[tokio::test]
+async fn enrolment_keys_are_ephemeral_by_default_capped_and_revocable_with_their_devices() {
+    let h = harness(|_| {});
+    let created: EnrollKeyCreated = ok(h
+        .call(
+            "POST",
+            devices::ENROLL_KEYS_PATH,
+            Some(TOKEN),
+            Some(json!({"tag": "ci", "expires_in_days": 7, "max_devices": 1})),
+        )
+        .await);
+    assert!(created.ephemeral, "ephemeral unless asked");
+    assert_eq!(created.max_devices, Some(1));
+
+    let mut first = Machine::new(46);
+    let approved: EnrollApproved = ok(h.enrol_with_key(&first, &created.key).await);
+    assert!(approved.ephemeral);
+    first.id = approved.device_id;
+    assert_eq!(
+        error_of(h.enrol_with_key(&Machine::new(47), &created.key).await),
+        (
+            StatusCode::FORBIDDEN,
+            "forbidden: this enrolment key already has its 1 devices; revoke one, or make another key"
+                .into()
+        )
+    );
+
+    let _: EnrollKey = ok(h
+        .call(
+            "POST",
+            &devices::revoke_enroll_key_path(&created.id),
+            Some(TOKEN),
+            Some(json!({"revoke_devices": true})),
+        )
+        .await);
+    assert_eq!(
+        error_of(
+            h.signed("GET", "/sync?project_key=a", None, &Signing::by(&first))
+                .await
+        ),
+        (
+            StatusCode::UNAUTHORIZED,
+            "unauthorized: this device has been revoked".into()
+        )
+    );
+    assert_eq!(
+        h.call(
+            "POST",
+            devices::ENROLL_KEYS_PATH,
+            Some(TOKEN),
+            Some(json!({"expires_in_days": 7, "max_devices": 0})),
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+/// Review finding 7: one address may have five enrolments waiting, so it
+/// cannot fill the queue and lock the owner's machines out.
+#[tokio::test]
+async fn one_address_cannot_hold_the_enrolment_queue() {
+    let h = harness(|_| {});
+    let enrol_from = |ip: &'static str, seed: u8| {
+        let h = &h;
+        async move {
+            h.call_from(
+                ip,
+                "POST",
+                devices::ENROLL_PATH,
+                None,
+                Some(json!({"name": format!("m{seed}"), "public_key": Machine::new(seed).public_key()})),
+            )
+            .await
+        }
+    };
+    for seed in 50..55 {
+        assert_eq!(enrol_from("203.0.113.1", seed).await.0, StatusCode::OK);
+    }
+    let (status, body) = enrol_from("203.0.113.1", 55).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        error_of((status, body)).1.contains("from this address"),
+        "the refusal says why"
+    );
+    assert_eq!(enrol_from("203.0.113.2", 56).await.0, StatusCode::OK);
 }

@@ -40,18 +40,44 @@ pub(super) async fn guard(
     }
 }
 
+/// The address a request came from, as the rate limiter keys it, for the
+/// routes that count per address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ClientIp(pub(super) String);
+
 /// For the routes anyone may call, which is enrolling and polling: the
 /// same rate limit and protocol check as everything else, and no auth,
-/// since a machine enrolling has no credential yet.
+/// since a machine enrolling has no credential yet. A body declared larger
+/// than those routes take is refused before any of it is read.
 pub(super) async fn limited(
     State(state): State<Arc<AppState>>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Response {
     if let Some(refused) = limit(&state, &req) {
         return refused;
     }
+    if declared_length(req.headers()).is_some_and(|n| n > super::ENROLL_BODY_BYTES) {
+        return too_large().into_response();
+    }
+    let ip = client_ip(&req, &state.cfg.trusted_ip_header);
+    req.extensions_mut().insert(ClientIp(ip));
     next.run(req).await
+}
+
+/// What `Content-Length` says the body will be, when it says.
+fn declared_length(headers: &HeaderMap) -> Option<usize> {
+    headers
+        .get(axum::http::header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+pub(super) fn too_large() -> Refusal {
+    Refusal::new(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
 }
 
 /// After [`guard`], on the routes that manage devices: the operator, or a
@@ -106,6 +132,12 @@ fn limit(state: &AppState, req: &Request) -> Option<Response> {
 /// The bearer token first, unchanged: a request carrying the right one is
 /// the operator's, whatever else it carries. Then a signature, if there is
 /// one. Anything else is the same bare 401 it always was.
+///
+/// A signed request's body has to be read here, since the signature's
+/// digest covers it. It is read only once the headers alone have proved
+/// the request is its device's (see `auth.rs`), and a body declared too
+/// large is refused before then, so nobody without a device key can make
+/// the server hold one.
 async fn authenticate(state: &AppState, mut req: Request) -> Result<Request, Refusal> {
     if authorized(&state.cfg.token, req.headers()) {
         req.extensions_mut().insert(Caller::Operator);
@@ -114,16 +146,15 @@ async fn authenticate(state: &AppState, mut req: Request) -> Result<Request, Ref
     if !auth::is_signed(req.headers()) {
         return Err(Refusal::new(StatusCode::UNAUTHORIZED, "unauthorized"));
     }
-    // The digest covers the body, so a signed request's body is read here,
-    // under the same bound the handlers apply, and handed on intact.
     let (parts, body) = req.into_parts();
+    let checked = auth::check_headers(state, &parts)?;
+    if declared_length(&parts.headers).is_some_and(|n| n > super::MAX_BODY_BYTES) {
+        return Err(too_large());
+    }
     let Ok(bytes) = axum::body::to_bytes(body, super::MAX_BODY_BYTES).await else {
-        return Err(Refusal::new(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "request body too large",
-        ));
+        return Err(too_large());
     };
-    let caller = auth::verify(state, &parts, &bytes)?;
+    let caller = auth::finish(state, checked, &bytes)?;
     let mut req = Request::from_parts(parts, Body::from(bytes));
     req.extensions_mut().insert(caller);
     Ok(req)

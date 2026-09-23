@@ -110,7 +110,7 @@ cargo build --release -p recall-server
 ./scripts/api-doc-check.sh target/release/recall-server
 ```
 
-60 checks against a real server on a real socket: every status code, error string, field order and `null`-versus-`""` claim the document makes. Change a handler without changing the doc and this fails, which is the point.
+68 checks against a real server on a real socket: every status code, error string, field order and `null`-versus-`""` claim the document makes. Change a handler without changing the doc and this fails, which is the point.
 
 ### Links between documents
 

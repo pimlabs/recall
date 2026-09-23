@@ -33,8 +33,9 @@
 //! [`LABEL`]; covered components that are plain strings, with no component
 //! parameters; the four derived components above; and header fields by
 //! name. Structured-field parsing follows RFC 8941 for the types those
-//! headers use. Anything else fails to parse, and a request whose headers
-//! fail to parse is treated as unsigned.
+//! headers use. Anything else fails to parse, and the server refuses a
+//! request whose signature headers do not parse with a 401 that names the
+//! header, rather than falling back to treating it as unsigned.
 //!
 //! Ed25519 is `ed25519-dalek`, which is pure Rust: the server is built
 //! static against musl and links no C crypto library.
@@ -192,20 +193,23 @@ pub fn content_digest(body: &[u8]) -> String {
 /// Only `sha-256` is read. Other algorithms may be present and are ignored,
 /// as RFC 9530 §2 allows a recipient to.
 pub fn check_content_digest(field: &str, body: &[u8]) -> Result<(), SignatureError> {
+    if sha256_of(field)?.as_slice() == Sha256::digest(body).as_slice() {
+        Ok(())
+    } else {
+        Err(SignatureError::DigestMismatch)
+    }
+}
+
+/// The `sha-256` value a `Content-Digest` carries.
+fn sha256_of(field: &str) -> Result<Vec<u8>, SignatureError> {
     let dict = sf::dictionary(field).ok_or(SignatureError::Malformed("content-digest"))?;
-    let sent = dict
-        .into_iter()
+    dict.into_iter()
         .find(|(k, _)| k == "sha-256")
         .and_then(|(_, m)| match m {
             sf::Member::Item(sf::Item::Bytes(b), _) => Some(b),
             _ => None,
         })
-        .ok_or(SignatureError::NoDigest)?;
-    if sent.as_slice() == Sha256::digest(body).as_slice() {
-        Ok(())
-    } else {
-        Err(SignatureError::DigestMismatch)
-    }
+        .ok_or(SignatureError::NoDigest)
 }
 
 // ---------------------------------------------------------------------------
@@ -590,8 +594,8 @@ pub fn sign_request(
     })
 }
 
-/// A signed request as it arrived, everything [`verify_request`] reads
-/// from it.
+/// A signed request's headers as they arrived: everything
+/// [`verify_headers`] reads.
 pub struct Received<'a> {
     /// The `Signature-Input` member labelled [`LABEL`].
     pub input: &'a SignatureInput,
@@ -602,18 +606,22 @@ pub struct Received<'a> {
     /// A header's value by lowercase name, with repeated headers joined by
     /// `", "` (RFC 9110 §5.3).
     pub field: &'a dyn Fn(&str) -> Option<String>,
-    /// The whole body.
-    pub body: &'a [u8],
 }
 
-/// Everything about a signed request that can be checked without state:
-/// the profile ([`SignatureInput::check_profile`]), the body against
-/// `Content-Digest`, and the signature against `key`, given the verifier's
-/// clock as a UNIX time.
+/// Everything about a signed request that can be checked from its headers
+/// alone, given the verifier's clock as a UNIX time: the profile
+/// ([`SignatureInput::check_profile`]), a `Content-Digest` with a sha-256
+/// value, and the signature against `key`.
+///
+/// The signature covers the `Content-Digest` header, not the body, so it
+/// can be verified before a byte of the body is read: a server need only
+/// read a body for a request its device really signed. The body must then
+/// be checked against the digest with [`check_content_digest`], or the
+/// signature proves nothing about it; [`verify_request`] does both.
 ///
 /// What needs the server's state, which key a `keyid` names and whether a
 /// nonce was already used, is the caller's.
-pub fn verify_request(
+pub fn verify_headers(
     req: &Received<'_>,
     key: &VerifyingKey,
     now: i64,
@@ -622,11 +630,25 @@ pub fn verify_request(
     req.input.check_profile(now, window)?;
     let digest = (req.field)(CONTENT_DIGEST_HEADER)
         .ok_or_else(|| SignatureError::MissingComponent(CONTENT_DIGEST_HEADER.to_string()))?;
-    check_content_digest(&digest, req.body)?;
+    sha256_of(&digest)?;
     let base = req
         .input
         .signature_base(|name| component_value(&req.target, req.field, name))?;
     verify(key, &base, req.signature)
+}
+
+/// [`verify_headers`], then the body against `Content-Digest`: the whole
+/// of what can be checked without state.
+pub fn verify_request(
+    req: &Received<'_>,
+    body: &[u8],
+    key: &VerifyingKey,
+    now: i64,
+    window: u64,
+) -> Result<(), SignatureError> {
+    verify_headers(req, key, now, window)?;
+    let digest = (req.field)(CONTENT_DIGEST_HEADER).unwrap_or_default();
+    check_content_digest(&digest, body)
 }
 
 // ---------------------------------------------------------------------------
@@ -1095,9 +1117,14 @@ mod tests {
             signature: &signature,
             target: *target,
             field: &field,
-            body,
         };
-        verify_request(&received, &test_key().verifying_key(), now, WINDOW_SECONDS)
+        verify_request(
+            &received,
+            body,
+            &test_key().verifying_key(),
+            now,
+            WINDOW_SECONDS,
+        )
     }
 
     #[test]
@@ -1171,10 +1198,15 @@ mod tests {
             signature: &sig,
             target: t,
             field: &field,
-            body,
         };
         assert_eq!(
-            verify_request(&received, &test_key().verifying_key(), NOW, WINDOW_SECONDS),
+            verify_request(
+                &received,
+                body,
+                &test_key().verifying_key(),
+                NOW,
+                WINDOW_SECONDS
+            ),
             Err(SignatureError::BadSignature)
         );
     }
@@ -1196,6 +1228,80 @@ mod tests {
             check(&signed, &t, b"", NOW - 3600),
             Err(SignatureError::Clock { .. })
         ));
+    }
+
+    /// Strict verification, not plain RFC 8032 (the review's mutation M5,
+    /// `verify_strict` to `verify`). A signature whose R is the identity, a
+    /// point of small order, satisfies the plain equation when S = k·a, so
+    /// anyone who can make one verifies without it being what a signer
+    /// produces. Plain verification accepts it; this must not.
+    #[test]
+    fn a_signature_with_a_small_order_r_is_refused() {
+        use curve25519_dalek::Scalar;
+        use ed25519_dalek::Verifier;
+        use sha2::Sha512;
+
+        let key = test_key();
+        let public = key.verifying_key();
+        let base = "\"@method\": GET";
+        let mut r = [0u8; 32];
+        r[0] = 1; // the identity point, compressed
+        let k = Scalar::from_bytes_mod_order_wide(
+            &Sha512::new()
+                .chain_update(r)
+                .chain_update(public.as_bytes())
+                .chain_update(base.as_bytes())
+                .finalize()
+                .into(),
+        );
+        let s = k * key.to_scalar();
+        let mut forged = [0u8; 64];
+        forged[..32].copy_from_slice(&r);
+        forged[32..].copy_from_slice(s.as_bytes());
+
+        assert!(
+            public
+                .verify(base.as_bytes(), &Signature::from_bytes(&forged))
+                .is_ok(),
+            "plain verification accepts it, which is the point of the test"
+        );
+        assert_eq!(
+            verify(&public, base, &forged),
+            Err(SignatureError::BadSignature)
+        );
+    }
+
+    /// A signature whose S is not reduced below the group order L is the
+    /// same equation in a second encoding, so one request would have two
+    /// valid signatures. ed25519-dalek refuses it in both its plain and
+    /// strict checks; this pins that it stays refused.
+    #[test]
+    fn a_signature_whose_s_is_not_reduced_is_refused() {
+        use curve25519_dalek::Scalar;
+
+        // L = 2^252 + 27742317777372353535851937790883648493, little-endian.
+        let l: [u8; 32] = [
+            0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9,
+            0xde, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+        ];
+        assert_eq!(Scalar::from_bytes_mod_order(l), Scalar::ZERO, "that is L");
+
+        let key = test_key();
+        let base = "\"@method\": GET";
+        let good = sign(&key, base);
+        let mut bad = good.clone();
+        let mut carry = 0u16;
+        for i in 0..32 {
+            let sum = u16::from(good[32 + i]) + u16::from(l[i]) + carry;
+            bad[32 + i] = sum as u8;
+            carry = sum >> 8;
+        }
+        assert_eq!(carry, 0, "S + L fits in 32 bytes");
+        verify(&key.verifying_key(), base, &good).unwrap();
+        assert_eq!(
+            verify(&key.verifying_key(), base, &bad),
+            Err(SignatureError::BadSignature)
+        );
     }
 
     #[test]

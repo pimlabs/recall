@@ -13,26 +13,30 @@ use std::time::Duration;
 
 use anyhow::Context;
 use axum::body::Bytes;
+use axum::extract::rejection::BytesRejection;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::Extension;
 use recall_wire::devices::{
-    self, normalize_user_code, ACCESS_DENIED, AUTHORIZATION_PENDING, CODE_TTL_SECONDS,
+    self, displayable, normalize_user_code, ACCESS_DENIED, AUTHORIZATION_PENDING, CODE_TTL_SECONDS,
     ENROLL_KEY_PREFIX, EXPIRED_TOKEN, INVALID_GRANT, MAX_ENROLL_KEY_DAYS, MAX_TAG_CHARS,
     POLL_INTERVAL_SECONDS, SCOPE_ADMIN, SCOPE_SYNC, SLOW_DOWN, USER_CODE_ALPHABET,
 };
 use recall_wire::signature::encode_public_key;
 use recall_wire::{
-    ApproveRequest, DenyRequest, DenyResponse, DeviceList, EnrollApproved, EnrollKeyCreated,
-    EnrollKeyList, EnrollKeyRequest, EnrollPending, EnrollPollRequest, EnrollPollResponse,
-    EnrollRequest, PendingEnrollment,
+    ApproveRequest, DenyRequest, DenyResponse, DeviceIdentity, DeviceList, EnrollApproved,
+    EnrollKeyCreated, EnrollKeyList, EnrollKeyRequest, EnrollKeyRevokeRequest, EnrollPending,
+    EnrollPollRequest, EnrollPollResponse, EnrollRequest, PendingEnrollment,
 };
 use serde::de::DeserializeOwned;
 use time::OffsetDateTime;
 
+use super::auth::Caller;
+use super::middleware::{too_large, ClientIp};
 use super::respond::{error, internal, json, Refusal};
 use super::AppState;
-use crate::store::{Created, Decision, NewDevice, NewEnrollKey, NewEnrollment, Poll};
+use crate::store::{Created, Decision, Inserted, NewDevice, NewEnrollKey, NewEnrollment, Poll};
 use crate::{format_timestamp, now, parse_timestamp};
 
 /// How many enrolments may wait for approval at once. An owner has a
@@ -41,15 +45,33 @@ use crate::{format_timestamp, now, parse_timestamp};
 /// row living fifteen minutes.
 const MAX_PENDING_ENROLLMENTS: usize = 1000;
 
+/// How many of those may come from one address, as the rate limiter keys
+/// it, so one address cannot take all of them and lock the owner's own
+/// machines out for fifteen minutes.
+const MAX_PENDING_PER_ADDRESS: usize = 5;
+
 /// How long an expired enrolment is kept, so a machine polling late hears
 /// `expired_token` rather than `invalid_grant`.
 pub(super) const EXPIRED_ENROLLMENT_KEPT: Duration = Duration::from_secs(60 * 60);
+
+/// What a device an enrolment key enrols is called when the key has no
+/// tag.
+const UNTAGGED: &str = "device";
 
 /// Reads a JSON body, answering with the wording `POST /sync` uses for one
 /// that does not parse.
 fn body<T: DeserializeOwned>(bytes: &Bytes) -> Result<T, Refusal> {
     serde_json::from_slice(bytes)
         .map_err(|_| Refusal::new(StatusCode::BAD_REQUEST, "invalid json body"))
+}
+
+/// A body on the routes with a small limit: one over it is refused in the
+/// usual JSON shape rather than axum's plain text.
+fn small_body(bytes: Result<Bytes, BytesRejection>) -> Result<Bytes, Refusal> {
+    bytes.map_err(|rejection| match rejection.status() {
+        StatusCode::PAYLOAD_TOO_LARGE => too_large(),
+        status => Refusal::new(status, "could not read the request body"),
+    })
 }
 
 /// A reply that carries a secret, which RFC 6749 §5.1 says no cache may
@@ -114,9 +136,22 @@ fn later(by: Duration) -> String {
     format_timestamp(OffsetDateTime::now_utc() + by)
 }
 
+fn name_taken(name: &str) -> Refusal {
+    Refusal::new(
+        StatusCode::CONFLICT,
+        format!(
+            "a device named {name} already exists; revoke it first, or enrol with another name"
+        ),
+    )
+}
+
 /// `POST /v1/devices/enroll`.
-pub(super) async fn handle_enroll(State(state): State<Arc<AppState>>, bytes: Bytes) -> Response {
-    let req: EnrollRequest = match body(&bytes) {
+pub(super) async fn handle_enroll(
+    State(state): State<Arc<AppState>>,
+    Extension(ClientIp(client_ip)): Extension<ClientIp>,
+    bytes: Result<Bytes, BytesRejection>,
+) -> Response {
+    let req: EnrollRequest = match small_body(bytes).and_then(|b| body(&b)) {
         Ok(req) => req,
         Err(refused) => return refused.into_response(),
     };
@@ -126,12 +161,19 @@ pub(super) async fn handle_enroll(State(state): State<Arc<AppState>>, bytes: Byt
     };
     // Stored as the encoder writes it, whatever whitespace it came with.
     let public_key = encode_public_key(&key);
-    let name = req.name.trim();
 
     if let Some(enroll_key) = req.enroll_key.as_deref() {
-        return enroll_with_key(&state, enroll_key, name, &public_key, &req.agent);
+        return enroll_with_key(&state, enroll_key, &public_key, &req.agent);
     }
 
+    let name = req.name.trim();
+    // Said now, so the machine can pick another name before anyone is
+    // asked to approve it; approving checks again.
+    match state.store.name_in_use(name) {
+        Ok(false) => {}
+        Ok(true) => return name_taken(name).into_response(),
+        Err(e) => return internal(e),
+    }
     let now = now();
     let expires_at = later(Duration::from_secs(CODE_TTL_SECONDS));
     let enrollment_id = match new_id("enr_", 16) {
@@ -154,8 +196,10 @@ pub(super) async fn handle_enroll(State(state): State<Arc<AppState>>, bytes: Byt
                 agent: &req.agent,
                 created_at: &now,
                 expires_at: &expires_at,
+                client_ip: &client_ip,
             },
             MAX_PENDING_ENROLLMENTS,
+            MAX_PENDING_PER_ADDRESS,
         );
         match created {
             Ok(Created::Created) => {
@@ -176,6 +220,13 @@ pub(super) async fn handle_enroll(State(state): State<Arc<AppState>>, bytes: Byt
                     "too many enrolments are waiting for approval, try again later",
                 )
             }
+            Ok(Created::AddressFull) => {
+                return error(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "too many enrolments from this address are waiting for approval; \
+                     approve or deny them, or let them expire",
+                )
+            }
             Err(e) => return internal(e),
         }
     }
@@ -184,13 +235,11 @@ pub(super) async fn handle_enroll(State(state): State<Arc<AppState>>, bytes: Byt
 
 /// An enrolment key approves at once, `sync` scope only, which is the
 /// whole of what a leaked one can give away.
-fn enroll_with_key(
-    state: &AppState,
-    enroll_key: &str,
-    name: &str,
-    public_key: &str,
-    agent: &str,
-) -> Response {
+///
+/// Nobody looks at a device enrolled this way before it exists, so it does
+/// not choose its name: it is the key's tag and the start of its id, such
+/// as `cloud-k3jz9w2q`, and cannot pass for the owner's laptop.
+fn enroll_with_key(state: &AppState, enroll_key: &str, public_key: &str, agent: &str) -> Response {
     let refused = |why: &str| {
         error(
             StatusCode::UNAUTHORIZED,
@@ -216,33 +265,67 @@ fn enroll_with_key(
         Ok(id) => id,
         Err(e) => return internal(e),
     };
-    match state.store.insert_device(&NewDevice {
-        id: &device_id,
-        name,
-        public_key,
-        scope: SCOPE_SYNC,
-        agent,
-        ephemeral: key.ephemeral,
-        enroll_key_id: Some(&key.id),
-        created_at: &now,
-    }) {
-        Ok(device) => no_store(json(
-            StatusCode::OK,
-            &EnrollApproved {
-                device_id: device.id,
-                scope: device.scope,
-                ephemeral: device.ephemeral,
+    let tag = if key.tag.is_empty() {
+        UNTAGGED
+    } else {
+        &key.tag
+    };
+    let random = &device_id["dev_".len()..];
+    // The short name first; the whole id only in the one-in-a-trillion
+    // case that the short one is taken.
+    for name in [format!("{tag}-{}", &random[..8]), format!("{tag}-{random}")] {
+        let inserted = state.store.insert_device(
+            &NewDevice {
+                id: &device_id,
+                name: &name,
+                public_key,
+                scope: SCOPE_SYNC,
+                agent,
+                ephemeral: key.ephemeral,
+                enroll_key_id: Some(&key.id),
+                created_at: &now,
             },
-        )),
-        Err(e) => internal(e),
+            key.max_devices,
+        );
+        match inserted {
+            Ok(Inserted::Done(device)) => {
+                return no_store(json(
+                    StatusCode::OK,
+                    &EnrollApproved {
+                        device_id: device.id,
+                        name: device.name,
+                        scope: device.scope,
+                        ephemeral: device.ephemeral,
+                    },
+                ))
+            }
+            Ok(Inserted::NameTaken) => continue,
+            Ok(Inserted::KeyFull) => {
+                return error(
+                    StatusCode::FORBIDDEN,
+                    &format!(
+                        "forbidden: this enrolment key already has its {} devices; \
+                         revoke one, or make another key",
+                        key.max_devices.unwrap_or(0)
+                    ),
+                )
+            }
+            Err(e) => return internal(e),
+        }
     }
+    internal(anyhow::anyhow!(
+        "could not find a free name for {device_id}"
+    ))
 }
 
 /// `POST /v1/devices/enroll/poll`: RFC 8628 §3.4 and §3.5, with each
 /// error code as the body's `error`, which is the shape every Recall error
 /// already has.
-pub(super) async fn handle_poll(State(state): State<Arc<AppState>>, bytes: Bytes) -> Response {
-    let req: EnrollPollRequest = match body(&bytes) {
+pub(super) async fn handle_poll(
+    State(state): State<Arc<AppState>>,
+    bytes: Result<Bytes, BytesRejection>,
+) -> Response {
+    let req: EnrollPollRequest = match small_body(bytes).and_then(|b| body(&b)) {
         Ok(req) => req,
         Err(refused) => return refused.into_response(),
     };
@@ -297,6 +380,11 @@ fn undecided<T>(decision: Decision<T>) -> Result<T, Refusal> {
             StatusCode::CONFLICT,
             "that code was already approved or denied",
         )),
+        Decision::KeyMismatch => Err(Refusal::new(
+            StatusCode::CONFLICT,
+            "that code's key does not have the fingerprint given; nothing was approved",
+        )),
+        Decision::NameTaken(name) => Err(name_taken(&name)),
     }
 }
 
@@ -319,7 +407,13 @@ pub(super) async fn handle_approve(State(state): State<Arc<AppState>>, bytes: By
     };
     match state
         .store
-        .approve_enrollment(&code, &device_id, &req.scope, &now())
+        .approve_enrollment(
+            &code,
+            &device_id,
+            &req.scope,
+            &now(),
+            req.fingerprint.as_deref(),
+        )
         .map(undecided)
     {
         Ok(Ok(device)) => json(StatusCode::OK, &device),
@@ -355,7 +449,8 @@ pub(super) async fn handle_deny(State(state): State<Arc<AppState>>, bytes: Bytes
 /// `GET /v1/devices/pending/{user_code}`: what approving the code would
 /// approve, so the approver can check the name and fingerprint against the
 /// machine's screen first (RFC 8628 §5.4). It is judged exactly as
-/// approving it would be, so the two never disagree.
+/// approving it would be, so the two never disagree, and like every answer
+/// about an enrolment it is kept out of caches.
 pub(super) async fn handle_pending(
     State(state): State<Arc<AppState>>,
     Path(input): Path<String>,
@@ -378,7 +473,7 @@ pub(super) async fn handle_pending(
             let expires_in = parse_timestamp(&waiting.expires_at)
                 .map(|at| (at - now).whole_seconds().max(0) as u64)
                 .unwrap_or(0);
-            json(
+            no_store(json(
                 StatusCode::OK,
                 &PendingEnrollment {
                     user_code: code,
@@ -387,10 +482,35 @@ pub(super) async fn handle_pending(
                     fingerprint,
                     expires_in,
                 },
-            )
+            ))
         }
-        Ok(Err(refused)) => refused.into_response(),
+        Ok(Err(refused)) => no_store(refused.into_response()),
         Err(e) => internal(e),
+    }
+}
+
+/// `GET /v1/devices/me`: the device that signed the request, so a client
+/// can check the server knows it, with no need of the admin scope.
+pub(super) async fn handle_me(Extension(caller): Extension<Caller>) -> Response {
+    match caller {
+        Caller::Device {
+            id,
+            name,
+            scope,
+            ephemeral,
+        } => json(
+            StatusCode::OK,
+            &DeviceIdentity {
+                device_id: id,
+                name,
+                scope,
+                ephemeral,
+            },
+        ),
+        Caller::Operator => error(
+            StatusCode::NOT_FOUND,
+            "not a device: this request was authenticated with RECALL_TOKEN",
+        ),
     }
 }
 
@@ -427,11 +547,16 @@ pub(super) async fn handle_create_enroll_key(
     if !(1..=MAX_ENROLL_KEY_DAYS).contains(&req.expires_in_days) {
         return error(StatusCode::BAD_REQUEST, "expires_in_days must be 1 to 365");
     }
-    if req.tag.chars().count() > MAX_TAG_CHARS || req.tag.chars().any(char::is_control) {
+    // The tag becomes part of the name of every device the key enrols, so
+    // it is held to the same rules as a name.
+    if !displayable(&req.tag, MAX_TAG_CHARS) {
         return error(
             StatusCode::BAD_REQUEST,
-            "tag must be at most 64 characters, with no control characters",
+            "tag must be at most 32 characters, with no control, format or invisible characters",
         );
+    }
+    if req.max_devices == Some(0) {
+        return error(StatusCode::BAD_REQUEST, "max_devices must be at least 1");
     }
     let (id, secret) = match (new_id("ek_", 10), new_id(ENROLL_KEY_PREFIX, 32)) {
         (Ok(id), Ok(secret)) => (id, secret),
@@ -443,8 +568,9 @@ pub(super) async fn handle_create_enroll_key(
     let stored = state.store.insert_enroll_key(&NewEnrollKey {
         id: &id,
         key_sha256: &recall_wire::content_sha256(&secret),
-        tag: &req.tag,
+        tag: req.tag.trim(),
         ephemeral: req.ephemeral,
+        max_devices: req.max_devices,
         created_at: &now(),
         expires_at: &expires_at,
     });
@@ -456,6 +582,7 @@ pub(super) async fn handle_create_enroll_key(
                 key: secret,
                 tag: key.tag,
                 ephemeral: key.ephemeral,
+                max_devices: key.max_devices,
                 created_at: key.created_at,
                 expires_at: key.expires_at,
             },
@@ -472,13 +599,26 @@ pub(super) async fn handle_list_enroll_keys(State(state): State<Arc<AppState>>) 
     }
 }
 
-/// `POST /v1/enroll-keys/{id}/revoke`: no new device enrols with it.
-/// Devices it already enrolled keep working; revoke those one by one.
+/// `POST /v1/enroll-keys/{id}/revoke`: no new device enrols with it. The
+/// devices it enrolled keep working unless the body asks for them to be
+/// revoked too; the body may be empty.
 pub(super) async fn handle_revoke_enroll_key(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    bytes: Bytes,
 ) -> Response {
-    match state.store.revoke_enroll_key(&id, &now()) {
+    let req: EnrollKeyRevokeRequest = if bytes.iter().all(u8::is_ascii_whitespace) {
+        EnrollKeyRevokeRequest::default()
+    } else {
+        match body(&bytes) {
+            Ok(req) => req,
+            Err(refused) => return refused.into_response(),
+        }
+    };
+    match state
+        .store
+        .revoke_enroll_key(&id, &now(), req.revoke_devices)
+    {
         Ok(Some(key)) => json(StatusCode::OK, &key),
         Ok(None) => error(StatusCode::NOT_FOUND, "no enrolment key has that id"),
         Err(e) => internal(e),
@@ -491,7 +631,7 @@ pub(super) fn capability() -> recall_wire::DevicesCapability {
         enroll_path: devices::ENROLL_PATH.to_string(),
         code_ttl_seconds: CODE_TTL_SECONDS,
         poll_interval_seconds: POLL_INTERVAL_SECONDS,
-        signature_window_seconds: recall_wire::signature::WINDOW_SECONDS,
+        signature_window_seconds: super::auth::WINDOW,
     }
 }
 

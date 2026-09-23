@@ -31,11 +31,27 @@ break will be described here in full rather than smoothed over.
   so one machine cannot write as another. Pushes with `RECALL_TOKEN` keep
   the name they send.
 - **New routes:** `POST /v1/devices/enroll`, `POST /v1/devices/enroll/poll`,
-  and, for the owner, `GET /v1/devices/pending/{user_code}` (what a code
-  would approve, name and key fingerprint, before approving it),
-  `POST /v1/devices/approve`, `POST /v1/devices/deny`,
-  `GET /v1/devices`, `POST /v1/devices/{id}/revoke`, `POST /v1/enroll-keys`,
-  `GET /v1/enroll-keys` and `POST /v1/enroll-keys/{id}/revoke`.
+  `GET /v1/devices/me` for a device to check the server knows it, and, for
+  the owner, `GET /v1/devices/pending/{user_code}` (what a code would
+  approve, name and key fingerprint, before approving it),
+  `POST /v1/devices/approve` (which can name the fingerprint it expects),
+  `POST /v1/devices/deny`, `GET /v1/devices`, `POST /v1/devices/{id}/revoke`,
+  `POST /v1/enroll-keys`, `GET /v1/enroll-keys` and
+  `POST /v1/enroll-keys/{id}/revoke`.
+- **Device names are plain and unique.** A name with control, format or
+  invisible characters (a zero-width space, a right-to-left override) is
+  refused, no two unrevoked devices share a name, and a device an
+  enrolment key enrols is named by the server after the key's tag.
+- **Enrolment keys** enrol ephemeral devices unless told otherwise, can be
+  capped with `max_devices`, and can be revoked together with every device
+  they enrolled.
+- **`GET /admin/stats` needs the `admin` scope from a device.** Nothing
+  changes for `RECALL_TOKEN`, which is all anything uses today.
+- **Signed requests are checked before their body is read**, the
+  enrolment routes take 8 KiB bodies, one address may have five
+  enrolments waiting, and a signature made before the server started is
+  refused, since the nonces that would catch its replay went with the
+  process before.
 - **`GET /.well-known/recall` lists `device-sig-v1`** after `bearer` in
   `auth.methods`, and a new `devices` capability.
 - **New setting: `RECALL_EPHEMERAL_DEVICE_TTL_HOURS`** (default 24). An

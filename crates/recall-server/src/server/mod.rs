@@ -7,9 +7,9 @@
 //! | `GET /health` | none — uptime tooling holds no secret |
 //! | `GET /admin` | none — static markup, no data |
 //! | `GET /.well-known/recall` | none — a client asks before it can authenticate |
-//! | `POST /sync`, `GET /sync`, `GET /admin/stats` | bearer token, or any device's signature |
-//! | `POST /v1/devices/enroll`, `POST /v1/devices/enroll/poll` | none, but rate limited |
-//! | the rest of `/v1/devices`, and `/v1/enroll-keys` | bearer token, or an admin device's signature |
+//! | `POST /sync`, `GET /sync`, `GET /v1/devices/me` | bearer token, or any device's signature |
+//! | `POST /v1/devices/enroll`, `POST /v1/devices/enroll/poll` | none, but rate limited, and small bodies only |
+//! | `GET /admin/stats`, the rest of `/v1/devices`, and `/v1/enroll-keys` | bearer token, or an admin device's signature |
 //! | anything else | 404 JSON |
 //!
 //! This module owns the shared state, the router, and the background jobs.
@@ -22,7 +22,9 @@
 
 use std::future::Future;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use axum::extract::DefaultBodyLimit;
@@ -49,7 +51,7 @@ mod respond;
 use auth::ReplayCache;
 use devices::{
     handle_approve, handle_create_enroll_key, handle_deny, handle_enroll, handle_list_devices,
-    handle_list_enroll_keys, handle_pending, handle_poll, handle_revoke_device,
+    handle_list_enroll_keys, handle_me, handle_pending, handle_poll, handle_revoke_device,
     handle_revoke_enroll_key,
 };
 use handlers::{
@@ -68,6 +70,11 @@ const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(10 * 60)
 /// bug or an attack, not a note.
 const MAX_BODY_BYTES: usize = 5 << 20;
 
+/// Bounds a request to the routes anyone may call. An enrolment is a name,
+/// a key and an agent, and a poll is an id; nobody who has not proved
+/// anything gets to make the server hold megabytes.
+const ENROLL_BODY_BYTES: usize = 8 << 10;
+
 struct Runtime {
     last_backup_at: String,
     last_merge_at: String,
@@ -80,6 +87,12 @@ struct AppState {
     store: Arc<Store>,
     merger: Merger,
     started_at: String,
+    /// When this process started, as a UNIX time: signatures made before
+    /// it are refused, since the nonces that would catch their replay were
+    /// in the memory of the process before.
+    started_unix: i64,
+    /// Added to the clock signatures are judged by. Zero except in tests.
+    clock_offset: AtomicI64,
     runtime: RwLock<Runtime>,
     limiter: RateLimiter,
     replay: ReplayCache,
@@ -92,6 +105,28 @@ impl AppState {
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, Runtime> {
         self.runtime.write().unwrap_or_else(PoisonError::into_inner)
     }
+
+    /// The UNIX time signatures are judged by.
+    fn now(&self) -> i64 {
+        unix_now() + self.clock_offset.load(Ordering::Relaxed)
+    }
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// How many live nonces one device may have: as many requests as one
+/// address may make while a nonce stays live, which is up to two windows,
+/// since `created` may be a window ahead of the clock.
+fn nonces_per_device(cfg: &Config) -> usize {
+    let live_ms = 2 * auth::WINDOW as u128 * 1000;
+    let window_ms = cfg.rate_limit_window.as_millis().max(1);
+    let windows = live_ms.div_ceil(window_ms);
+    (cfg.rate_limit_max as u128 * windows).min(usize::MAX as u128) as usize
 }
 
 /// The HTTP API, its background jobs, and the state they share.
@@ -104,12 +139,15 @@ impl Server {
     pub fn new(cfg: Config, store: Arc<Store>) -> Self {
         let limiter = RateLimiter::new(cfg.rate_limit_window, cfg.rate_limit_max);
         let merger = Merger::new(cfg.claude_bin.clone(), cfg.merge_timeout);
+        let replay = ReplayCache::new(auth::WINDOW, nonces_per_device(&cfg));
         Self {
             state: Arc::new(AppState {
                 cfg,
                 store,
                 merger,
                 started_at: now(),
+                started_unix: unix_now(),
+                clock_offset: AtomicI64::new(0),
                 runtime: RwLock::new(Runtime {
                     last_backup_at: String::new(),
                     last_merge_at: String::new(),
@@ -117,7 +155,7 @@ impl Server {
                     claude_status: Status::default(),
                 }),
                 limiter,
-                replay: ReplayCache::new(),
+                replay,
             }),
         }
     }
@@ -130,6 +168,7 @@ impl Server {
         // The last layer added runs first, so `guard` has put the caller
         // in place by the time `admin_only` looks for it.
         let admin = Router::new()
+            .route("/admin/stats", get(handle_admin_stats).fallback(not_found))
             .route(
                 paths::DEVICES_PATH,
                 get(handle_list_devices).fallback(not_found),
@@ -160,13 +199,16 @@ impl Server {
             .route_layer(from_fn(admin_only))
             .route_layer(from_fn_with_state(state.clone(), guard));
         // Enrolling: a machine has no credential yet, so no auth, but the
-        // same rate limit and protocol check as everything else.
+        // same rate limit and protocol check as everything else, and a
+        // body limit sized for what an enrolment is. The inner limit wins
+        // over the router-wide one below.
         let enrolment = Router::new()
             .route(paths::ENROLL_PATH, post(handle_enroll).fallback(not_found))
             .route(
                 paths::ENROLL_POLL_PATH,
                 post(handle_poll).fallback(not_found),
             )
+            .route_layer(DefaultBodyLimit::max(ENROLL_BODY_BYTES))
             .route_layer(from_fn_with_state(state.clone(), limited));
         Router::new()
             // Go's mux dispatched every method through one guarded handler
@@ -177,9 +219,9 @@ impl Server {
                 "/sync",
                 get(handle_pull).post(handle_push).fallback(not_found),
             )
-            .route("/admin/stats", get(handle_admin_stats).fallback(not_found))
-            // Registered before the layer, so only these two routes are
-            // rate limited and authenticated here.
+            .route(paths::DEVICES_ME_PATH, get(handle_me).fallback(not_found))
+            // Registered before the layer, so only these routes are rate
+            // limited and authenticated here.
             .route_layer(from_fn_with_state(state.clone(), guard))
             .merge(admin)
             .merge(enrolment)
@@ -211,6 +253,14 @@ impl Server {
     /// otherwise needs a real, logged-in CLI on the machine running them.
     pub fn set_claude_status(&self, status: Status) {
         self.state.write().claude_status = status;
+    }
+
+    /// Moves the clock device signatures are judged by, in seconds.
+    ///
+    /// Exposed so tests can reach the edges of the signature window, and
+    /// what happens after it, without waiting a minute for each.
+    pub fn set_clock_offset(&self, seconds: i64) {
+        self.state.clock_offset.store(seconds, Ordering::Relaxed);
     }
 
     /// Writes a backup now. Failure is logged, never propagated: it becomes

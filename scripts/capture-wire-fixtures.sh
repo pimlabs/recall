@@ -172,13 +172,33 @@ if curl -s "$URL/.well-known/recall" | grep -q '"devices"'; then
   keep device_pending_response.json looked
 
   fetch approve -X POST -H "$AUTH" -H "$JSON" \
-    -d "{\"user_code\":\"$(field enroll user_code)\",\"scope\":\"sync\"}" \
+    -d "{\"user_code\":\"$(field enroll user_code)\",\"scope\":\"sync\",\"fingerprint\":\"$(field looked fingerprint)\"}" \
     "$URL/v1/devices/approve"
   keep device_approve_response.json approve
 
   fetch polled -X POST -H "$JSON" -d "{\"enrollment_id\":\"$ENROLLMENT\"}" \
     "$URL/v1/devices/enroll/poll"
   keep enroll_poll_response.json polled
+
+  # The one route only a device can call, signed the way RFC 9421 says,
+  # by openssl rather than by Recall's own code: the published private half
+  # of test-key-ed25519, which the device above enrolled with.
+  if command -v openssl >/dev/null 2>&1; then
+    printf '%s\n' '-----BEGIN PRIVATE KEY-----' \
+      'MC4CAQAwBQYDK2VwBCIEIJ+DYvh6SEqVTm50DFtMDoQikTmiCqirVv9mWG9qfSnF' \
+      '-----END PRIVATE KEY-----' >"$WORK/key.pem"
+    CREATED=$(date +%s)
+    DIGEST="sha-256=:$(printf '' | openssl dgst -sha256 -binary | base64):"
+    PARAMS="(\"@method\" \"@authority\" \"@path\" \"@query\" \"content-digest\" \"recall-protocol\");created=$CREATED;keyid=\"$(field approve id)\";nonce=\"capture-$CREATED\";alg=\"ed25519\""
+    printf '"@method": GET\n"@authority": 127.0.0.1:%s\n"@path": /v1/devices/me\n"@query": ?\n"content-digest": %s\n"recall-protocol": 1\n"@signature-params": %s' \
+      "$PORT" "$DIGEST" "$PARAMS" >"$WORK/base"
+    SIG=$(openssl pkeyutl -sign -inkey "$WORK/key.pem" -rawin -in "$WORK/base" | base64 | tr -d '\n')
+    fetch me -H "Recall-Protocol: 1" -H "Content-Digest: $DIGEST" \
+      -H "Signature-Input: sig1=$PARAMS" -H "Signature: sig1=:$SIG:" "$URL/v1/devices/me"
+    keep device_me_response.json me
+  else
+    echo "skipped  $OUT/device_me_response.json (no openssl to sign with)"
+  fi
 
   fetch enroll2 -X POST -H "$JSON" \
     -d "{\"name\":\"phone\",\"public_key\":\"$KEY\",\"agent\":\"$AGENT\"}" \
@@ -187,7 +207,7 @@ if curl -s "$URL/.well-known/recall" | grep -q '"devices"'; then
     "$URL/v1/devices/deny"
   keep device_deny_response.json deny
 
-  fetch key -X POST -H "$AUTH" -H "$JSON" -d '{"tag":"cloud","expires_in_days":90,"ephemeral":true}' \
+  fetch key -X POST -H "$AUTH" -H "$JSON" -d '{"tag":"cloud","expires_in_days":90,"ephemeral":true,"max_devices":10}' \
     "$URL/v1/enroll-keys"
   keep enroll_key_create_response.json key
 
@@ -201,7 +221,8 @@ if curl -s "$URL/.well-known/recall" | grep -q '"devices"'; then
   fetch keys -H "$AUTH" "$URL/v1/enroll-keys"
   keep enroll_key_list_response.json keys
 
-  fetch key_revoked -X POST -H "$AUTH" "$URL/v1/enroll-keys/$(field key id)/revoke"
+  fetch key_revoked -X POST -H "$AUTH" -H "$JSON" -d '{"revoke_devices":false}' \
+    "$URL/v1/enroll-keys/$(field key id)/revoke"
   keep enroll_key_revoke_response.json key_revoked
   fetch device_revoked -X POST -H "$AUTH" "$URL/v1/devices/$(field approve id)/revoke"
   keep device_revoke_response.json device_revoked

@@ -44,7 +44,10 @@ pub(super) const SCHEMA: &str = "
         -- The device approving it made; NULL while it waits.
         device_id     TEXT,
         denied        INTEGER NOT NULL DEFAULT 0,
-        last_poll_at  TEXT
+        last_poll_at  TEXT,
+        -- The address it came from, as the rate limiter keys it: what caps
+        -- how many one address may have waiting.
+        client_ip     TEXT NOT NULL DEFAULT ''
     );
     CREATE INDEX IF NOT EXISTS device_enrollments_user_code
         ON device_enrollments (user_code);
@@ -55,6 +58,9 @@ pub(super) const SCHEMA: &str = "
         key_sha256  TEXT NOT NULL UNIQUE,
         tag         TEXT NOT NULL DEFAULT '',
         ephemeral   INTEGER NOT NULL DEFAULT 0,
+        -- The most unrevoked devices it may have enrolled at once; NULL for
+        -- no limit.
+        max_devices INTEGER,
         created_at  TEXT NOT NULL,
         expires_at  TEXT NOT NULL,
         revoked_at  TEXT
@@ -64,7 +70,8 @@ pub(super) const SCHEMA: &str = "
 const DEVICE_COLUMNS: &str = "id, name, scope, ephemeral, agent, public_key, enroll_key_id, \
      created_at, last_seen, revoked_at";
 
-const ENROLL_KEY_COLUMNS: &str = "id, tag, ephemeral, created_at, expires_at, revoked_at";
+const ENROLL_KEY_COLUMNS: &str =
+    "id, tag, ephemeral, max_devices, created_at, expires_at, revoked_at";
 
 fn device_from(r: &Row<'_>) -> rusqlite::Result<Device> {
     let public_key: String = r.get(5)?;
@@ -91,10 +98,26 @@ fn enroll_key_from(r: &Row<'_>) -> rusqlite::Result<EnrollKey> {
         id: r.get(0)?,
         tag: r.get(1)?,
         ephemeral: r.get::<_, i64>(2)? != 0,
-        created_at: r.get(3)?,
-        expires_at: r.get(4)?,
-        revoked_at: r.get(5)?,
+        max_devices: r.get(3)?,
+        created_at: r.get(4)?,
+        expires_at: r.get(5)?,
+        revoked_at: r.get(6)?,
     })
+}
+
+/// Whether an unrevoked device already has `name`, compared without case,
+/// so `Laptop` cannot stand beside `laptop`. A revoked device's name is
+/// free again.
+fn name_taken(conn: &Connection, name: &str) -> Result<bool> {
+    let wanted = name.to_lowercase();
+    let mut stmt = conn.prepare("SELECT name FROM devices WHERE revoked_at IS NULL")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(0)?.to_lowercase() == wanted {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn get_device(conn: &Connection, id: &str) -> Result<Option<Device>> {
@@ -155,6 +178,8 @@ pub struct NewEnrollment<'a> {
     pub created_at: &'a str,
     /// When the code stops being approvable.
     pub expires_at: &'a str,
+    /// The address it came from, as the rate limiter keys it.
+    pub client_ip: &'a str,
 }
 
 /// What storing an enrolment came to.
@@ -166,6 +191,19 @@ pub enum Created {
     CodeTaken,
     /// Too many enrolments are waiting already.
     Full,
+    /// Too many enrolments from this address are waiting already.
+    AddressFull,
+}
+
+/// What storing a device came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Inserted {
+    /// Stored. Boxed: the refusals are small, and a device is not.
+    Done(Box<Device>),
+    /// An unrevoked device already has that name.
+    NameTaken,
+    /// Its enrolment key already has as many unrevoked devices as it may.
+    KeyFull,
 }
 
 /// An enrolment key about to be stored.
@@ -179,6 +217,8 @@ pub struct NewEnrollKey<'a> {
     pub tag: &'a str,
     /// Whether it enrols ephemeral devices.
     pub ephemeral: bool,
+    /// The most unrevoked devices it may have enrolled at once.
+    pub max_devices: Option<u32>,
     /// Now.
     pub created_at: &'a str,
     /// When it stops working.
@@ -219,6 +259,11 @@ pub enum Decision<T> {
     Expired,
     /// It was approved or denied already.
     AlreadyDecided,
+    /// The approver named a key fingerprint, and the code's key has
+    /// another.
+    KeyMismatch,
+    /// An unrevoked device already has the name it asked for.
+    NameTaken(String),
 }
 
 /// The newest enrolment with `user_code`: `(enrollment_id, name,
@@ -262,8 +307,14 @@ fn pending_by_code(conn: &Connection, user_code: &str) -> Result<Option<Pending>
 
 impl Store {
     /// Stores a pending enrolment, unless its code is in use by another
-    /// one still waiting, or `max_pending` are waiting already.
-    pub fn create_enrollment(&self, e: &NewEnrollment<'_>, max_pending: usize) -> Result<Created> {
+    /// one still waiting, `max_pending` are waiting already, or
+    /// `max_per_address` from its address are.
+    pub fn create_enrollment(
+        &self,
+        e: &NewEnrollment<'_>,
+        max_pending: usize,
+        max_per_address: usize,
+    ) -> Result<Created> {
         let conn = self.lock();
         // Waiting means unexpired and undecided. Counting and inserting
         // under one lock is what makes the cap and the code's uniqueness
@@ -277,6 +328,14 @@ impl Store {
         if count as usize >= max_pending {
             return Ok(Created::Full);
         }
+        let from_here: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM device_enrollments WHERE {waiting} AND client_ip = ?2"),
+            (e.created_at, e.client_ip),
+            |r| r.get(0),
+        )?;
+        if from_here as usize >= max_per_address {
+            return Ok(Created::AddressFull);
+        }
         let taken: i64 = conn.query_row(
             &format!("SELECT COUNT(*) FROM device_enrollments WHERE {waiting} AND user_code = ?2"),
             (e.created_at, e.user_code),
@@ -287,8 +346,9 @@ impl Store {
         }
         conn.execute(
             "INSERT INTO device_enrollments
-                 (enrollment_id, user_code, name, public_key, agent, created_at, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (enrollment_id, user_code, name, public_key, agent, created_at, expires_at,
+                  client_ip)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             (
                 e.enrollment_id,
                 e.user_code,
@@ -297,6 +357,7 @@ impl Store {
                 e.agent,
                 e.created_at,
                 e.expires_at,
+                e.client_ip,
             ),
         )?;
         Ok(Created::Created)
@@ -372,13 +433,15 @@ impl Store {
     }
 
     /// Approves the enrolment waiting with `user_code`, making it device
-    /// `device_id`.
+    /// `device_id`. When `expected_fingerprint` is given, the code's key
+    /// must have exactly that fingerprint.
     pub fn approve_enrollment(
         &self,
         user_code: &str,
         device_id: &str,
         scope: &str,
         now: &str,
+        expected_fingerprint: Option<&str>,
     ) -> Result<Decision<Device>> {
         let mut conn = self.lock();
         let Some((enrollment_id, name, public_key, agent, expires_at, decided)) =
@@ -391,6 +454,19 @@ impl Store {
         }
         if expires_at.as_str() <= now {
             return Ok(Decision::Expired);
+        }
+        if let Some(expected) = expected_fingerprint {
+            let actual = parse_public_key(&public_key)
+                .map(|k| fingerprint(&k))
+                .unwrap_or_default();
+            if expected.trim() != actual {
+                return Ok(Decision::KeyMismatch);
+            }
+        }
+        // Checked under the same lock as the insert, so two approvals of
+        // two machines both called `laptop` cannot both succeed.
+        if name_taken(&conn, &name)? {
+            return Ok(Decision::NameTaken(name));
         }
         // One transaction, so a device never exists without the enrolment
         // that made it knowing, and a crash between the two leaves neither.
@@ -463,11 +539,33 @@ impl Store {
         }))
     }
 
-    /// Stores a device, and answers with it as the API shows it.
-    pub fn insert_device(&self, d: &NewDevice<'_>) -> Result<Device> {
+    /// Stores a device, unless an unrevoked one has its name or, when
+    /// `max_for_key` is given, its enrolment key already has that many
+    /// unrevoked devices. Both are checked under the lock the insert holds.
+    pub fn insert_device(&self, d: &NewDevice<'_>, max_for_key: Option<u32>) -> Result<Inserted> {
         let conn = self.lock();
+        if name_taken(&conn, d.name)? {
+            return Ok(Inserted::NameTaken);
+        }
+        if let (Some(max), Some(key)) = (max_for_key, d.enroll_key_id) {
+            let live: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM devices WHERE enroll_key_id = ?1 AND revoked_at IS NULL",
+                (key,),
+                |r| r.get(0),
+            )?;
+            if live >= i64::from(max) {
+                return Ok(Inserted::KeyFull);
+            }
+        }
         insert_device(&conn, d)?;
-        Ok(get_device(&conn, d.id)?.expect("inserted above"))
+        Ok(Inserted::Done(Box::new(
+            get_device(&conn, d.id)?.expect("inserted above"),
+        )))
+    }
+
+    /// Whether an unrevoked device already has `name`, without case.
+    pub fn name_in_use(&self, name: &str) -> Result<bool> {
+        name_taken(&self.lock(), name)
     }
 
     /// One device, revoked or not.
@@ -507,13 +605,15 @@ impl Store {
     pub fn insert_enroll_key(&self, k: &NewEnrollKey<'_>) -> Result<EnrollKey> {
         let conn = self.lock();
         conn.execute(
-            "INSERT INTO enroll_keys (id, key_sha256, tag, ephemeral, created_at, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO enroll_keys
+                 (id, key_sha256, tag, ephemeral, max_devices, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             (
                 k.id,
                 k.key_sha256,
                 k.tag,
                 k.ephemeral as i64,
+                k.max_devices,
                 k.created_at,
                 k.expires_at,
             ),
@@ -537,14 +637,27 @@ impl Store {
     }
 
     /// Revokes an enrolment key, keeping the first time if it already
-    /// was. Devices it enrolled are untouched. [`None`] when there is no
-    /// such key.
-    pub fn revoke_enroll_key(&self, id: &str, now: &str) -> Result<Option<EnrollKey>> {
-        let conn = self.lock();
-        conn.execute(
+    /// was, and with `devices` every device it enrolled too; without it
+    /// they are untouched. [`None`] when there is no such key.
+    pub fn revoke_enroll_key(
+        &self,
+        id: &str,
+        now: &str,
+        devices: bool,
+    ) -> Result<Option<EnrollKey>> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        tx.execute(
             "UPDATE enroll_keys SET revoked_at = COALESCE(revoked_at, ?1) WHERE id = ?2",
             (now, id),
         )?;
+        if devices {
+            tx.execute(
+                "UPDATE devices SET revoked_at = COALESCE(revoked_at, ?1) WHERE enroll_key_id = ?2",
+                (now, id),
+            )?;
+        }
+        tx.commit()?;
         get_enroll_key(&conn, "id", id)
     }
 
@@ -598,7 +711,7 @@ mod tests {
         format_timestamp(at(secs))
     }
 
-    fn enroll(st: &Store, id: &str, code: &str, created: i64) -> Created {
+    fn enroll_from(st: &Store, id: &str, code: &str, created: i64, ip: &str) -> Created {
         st.create_enrollment(
             &NewEnrollment {
                 enrollment_id: id,
@@ -608,10 +721,38 @@ mod tests {
                 agent: "recall/0.4.1",
                 created_at: &ts(created),
                 expires_at: &ts(created + 900),
+                client_ip: ip,
             },
             3,
+            2,
         )
         .unwrap()
+    }
+
+    fn enroll(st: &Store, id: &str, code: &str, created: i64) -> Created {
+        // Each from its own address, so only the tests about the address
+        // cap meet it.
+        enroll_from(st, id, code, created, id)
+    }
+
+    fn device<'a>(id: &'a str, name: &'a str, key: Option<&'a str>) -> NewDevice<'a> {
+        NewDevice {
+            id,
+            name,
+            public_key: KEY,
+            scope: "sync",
+            agent: "",
+            ephemeral: false,
+            enroll_key_id: key,
+            created_at: "2026-09-23T00:00:00.000Z",
+        }
+    }
+
+    fn inserted(st: &Store, d: &NewDevice<'_>) -> Device {
+        match st.insert_device(d, None).unwrap() {
+            Inserted::Done(device) => *device,
+            other => panic!("not inserted: {other:?}"),
+        }
     }
 
     #[test]
@@ -640,6 +781,24 @@ mod tests {
         assert_eq!(enroll(&st, "enr_d", "BCDF-GHJN", 3), Created::Full);
         // Once they expire they no longer count, and their codes are free.
         assert_eq!(enroll(&st, "enr_d", "BCDF-GHJK", 1000), Created::Created);
+    }
+
+    /// One address cannot hold the whole waiting list: the cap the review
+    /// asked for, keyed the way the rate limiter keys it.
+    #[test]
+    fn one_address_may_have_only_so_many_waiting() {
+        let st = Store::open_in_memory().unwrap();
+        let from = |id, code, ip| enroll_from(&st, id, code, 0, ip);
+        assert_eq!(from("enr_a", "BCDF-GHJK", "198.51.100.4"), Created::Created);
+        assert_eq!(from("enr_b", "BCDF-GHJL", "198.51.100.4"), Created::Created);
+        assert_eq!(
+            from("enr_c", "BCDF-GHJM", "198.51.100.4"),
+            Created::AddressFull
+        );
+        assert_eq!(from("enr_c", "BCDF-GHJM", "198.51.100.5"), Created::Created);
+        // A decided one no longer counts against its address.
+        st.deny_enrollment("BCDF-GHJK", &ts(1)).unwrap();
+        assert_eq!(from("enr_d", "BCDF-GHJN", "198.51.100.4"), Created::Created);
     }
 
     #[test]
@@ -671,7 +830,7 @@ mod tests {
 
         enroll(&st, "enr_b", "BCDF-GHJL", 0);
         let Decision::Done(device) = st
-            .approve_enrollment("BCDF-GHJL", "dev_1", "admin", &ts(10))
+            .approve_enrollment("BCDF-GHJL", "dev_1", "admin", &ts(10), None)
             .unwrap()
         else {
             panic!("not approved");
@@ -720,7 +879,7 @@ mod tests {
             Decision::Done("laptop".into())
         );
         assert_eq!(
-            st.approve_enrollment("BCDF-GHJK", "dev_1", "sync", &ts(2))
+            st.approve_enrollment("BCDF-GHJK", "dev_1", "sync", &ts(2), None)
                 .unwrap(),
             Decision::AlreadyDecided
         );
@@ -730,33 +889,71 @@ mod tests {
             Poll::Denied
         );
         assert_eq!(
-            st.approve_enrollment("ZZZZ-ZZZZ", "dev_1", "sync", &ts(2))
+            st.approve_enrollment("ZZZZ-ZZZZ", "dev_1", "sync", &ts(2), None)
                 .unwrap(),
             Decision::NotFound
         );
         enroll(&st, "enr_b", "BCDF-GHJL", 0);
         assert_eq!(
-            st.approve_enrollment("BCDF-GHJL", "dev_1", "sync", &ts(901))
+            st.approve_enrollment("BCDF-GHJL", "dev_1", "sync", &ts(901), None)
                 .unwrap(),
             Decision::Expired
         );
         assert!(st.devices().unwrap().is_empty(), "nothing was approved");
     }
 
+    /// An approval that names a fingerprint approves only that key.
+    #[test]
+    fn an_approval_is_bound_to_the_fingerprint_it_names() {
+        let st = Store::open_in_memory().unwrap();
+        enroll(&st, "enr_a", "BCDF-GHJK", 0);
+        let right = fingerprint(&parse_public_key(KEY).unwrap());
+        assert_eq!(
+            st.approve_enrollment("BCDF-GHJK", "dev_1", "sync", &ts(1), Some("SHA256:other"))
+                .unwrap(),
+            Decision::KeyMismatch
+        );
+        assert!(st.devices().unwrap().is_empty(), "nothing was approved");
+        assert!(matches!(
+            st.approve_enrollment("BCDF-GHJK", "dev_1", "sync", &ts(2), Some(&right))
+                .unwrap(),
+            Decision::Done(_)
+        ));
+    }
+
+    /// Two live devices may not share a name, in any case; a revoked one's
+    /// name is free again.
+    #[test]
+    fn names_are_unique_among_devices_not_revoked() {
+        let st = Store::open_in_memory().unwrap();
+        inserted(&st, &device("dev_1", "laptop", None));
+        assert_eq!(
+            st.insert_device(&device("dev_2", "Laptop", None), None)
+                .unwrap(),
+            Inserted::NameTaken
+        );
+        assert!(st.name_in_use("LAPTOP").unwrap());
+
+        enroll(&st, "enr_a", "BCDF-GHJK", 0);
+        assert_eq!(
+            st.approve_enrollment("BCDF-GHJK", "dev_2", "sync", &ts(1), None)
+                .unwrap(),
+            Decision::NameTaken("laptop".into())
+        );
+
+        st.revoke_device("dev_1", &ts(2)).unwrap();
+        assert!(!st.name_in_use("laptop").unwrap());
+        assert!(matches!(
+            st.approve_enrollment("BCDF-GHJK", "dev_2", "sync", &ts(3), None)
+                .unwrap(),
+            Decision::Done(_)
+        ));
+    }
+
     #[test]
     fn revoking_keeps_the_first_time_and_the_row() {
         let st = Store::open_in_memory().unwrap();
-        st.insert_device(&NewDevice {
-            id: "dev_1",
-            name: "laptop",
-            public_key: KEY,
-            scope: "sync",
-            agent: "",
-            ephemeral: false,
-            enroll_key_id: None,
-            created_at: &ts(0),
-        })
-        .unwrap();
+        inserted(&st, &device("dev_1", "laptop", None));
         let first = st.revoke_device("dev_1", &ts(1)).unwrap().unwrap();
         let again = st.revoke_device("dev_1", &ts(2)).unwrap().unwrap();
         assert_eq!(first.revoked_at, Some(ts(1)));
@@ -769,17 +966,14 @@ mod tests {
     fn only_idle_ephemeral_devices_and_long_expired_enrolments_are_swept() {
         let st = Store::open_in_memory().unwrap();
         for (id, ephemeral) in [("dev_kept", false), ("dev_idle", true), ("dev_busy", true)] {
-            st.insert_device(&NewDevice {
-                id,
-                name: id,
-                public_key: KEY,
-                scope: "sync",
-                agent: "",
-                ephemeral,
-                enroll_key_id: None,
-                created_at: &ts(0),
-            })
-            .unwrap();
+            inserted(
+                &st,
+                &NewDevice {
+                    ephemeral,
+                    created_at: &ts(0),
+                    ..device(id, id, None)
+                },
+            );
         }
         st.touch_device("dev_busy", &ts(5000)).unwrap();
         enroll(&st, "enr_old", "BCDF-GHJK", 0);
@@ -796,30 +990,87 @@ mod tests {
         );
     }
 
-    #[test]
-    fn enrolment_keys_are_found_by_hash_and_revoked_once() {
-        let st = Store::open_in_memory().unwrap();
+    fn key(st: &Store, max_devices: Option<u32>) {
         st.insert_enroll_key(&NewEnrollKey {
             id: "ek_1",
             key_sha256: "abc",
             tag: "cloud",
             ephemeral: true,
+            max_devices,
             created_at: &ts(0),
             expires_at: &ts(86400),
         })
         .unwrap();
-        let key = st.enroll_key_by_hash("abc").unwrap().unwrap();
-        assert_eq!((key.id.as_str(), key.ephemeral), ("ek_1", true));
+    }
+
+    #[test]
+    fn enrolment_keys_are_found_by_hash_and_revoked_once() {
+        let st = Store::open_in_memory().unwrap();
+        key(&st, None);
+        let found = st.enroll_key_by_hash("abc").unwrap().unwrap();
+        assert_eq!(
+            (found.id.as_str(), found.ephemeral, found.max_devices),
+            ("ek_1", true, None)
+        );
         assert!(st.enroll_key_by_hash("abd").unwrap().is_none());
-        let revoked = st.revoke_enroll_key("ek_1", &ts(1)).unwrap().unwrap();
+        let revoked = st
+            .revoke_enroll_key("ek_1", &ts(1), false)
+            .unwrap()
+            .unwrap();
         assert_eq!(revoked.revoked_at, Some(ts(1)));
         assert_eq!(
-            st.revoke_enroll_key("ek_1", &ts(2))
+            st.revoke_enroll_key("ek_1", &ts(2), false)
                 .unwrap()
                 .unwrap()
                 .revoked_at,
             Some(ts(1))
         );
         assert_eq!(st.enroll_keys().unwrap().len(), 1);
+    }
+
+    /// A key's device cap counts the devices it enrolled that are still
+    /// there and unrevoked, so a leaked key cannot mint them without end,
+    /// and a legitimate one frees a place each time one goes.
+    #[test]
+    fn a_key_enrols_no_more_than_its_cap() {
+        let st = Store::open_in_memory().unwrap();
+        key(&st, Some(2));
+        inserted(&st, &device("dev_1", "cloud-1", Some("ek_1")));
+        assert!(matches!(
+            st.insert_device(&device("dev_2", "cloud-2", Some("ek_1")), Some(2))
+                .unwrap(),
+            Inserted::Done(_)
+        ));
+        assert_eq!(
+            st.insert_device(&device("dev_3", "cloud-3", Some("ek_1")), Some(2))
+                .unwrap(),
+            Inserted::KeyFull
+        );
+        st.revoke_device("dev_1", &ts(1)).unwrap();
+        assert!(matches!(
+            st.insert_device(&device("dev_3", "cloud-3", Some("ek_1")), Some(2))
+                .unwrap(),
+            Inserted::Done(_)
+        ));
+    }
+
+    #[test]
+    fn revoking_a_key_can_revoke_what_it_enrolled() {
+        let st = Store::open_in_memory().unwrap();
+        key(&st, None);
+        inserted(&st, &device("dev_1", "cloud-1", Some("ek_1")));
+        inserted(&st, &device("dev_2", "laptop", None));
+        st.revoke_enroll_key("ek_1", &ts(1), true).unwrap();
+        let revoked: Vec<(String, bool)> = st
+            .devices()
+            .unwrap()
+            .into_iter()
+            .map(|d| (d.id, d.revoked_at.is_some()))
+            .collect();
+        assert!(revoked.contains(&("dev_1".into(), true)));
+        assert!(
+            revoked.contains(&("dev_2".into(), false)),
+            "only the key's own devices"
+        );
     }
 }

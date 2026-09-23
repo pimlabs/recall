@@ -1,6 +1,6 @@
 //! `GET /admin/stats` — what the owner is storing, per project.
 //!
-//! Authenticated like `/sync`, and read-only: there is no admin *write*
+//! For `RECALL_TOKEN` or an admin device, and read-only: there is no admin *write*
 //! surface for memory, deliberately. Managing devices is in [`crate::devices`],
 //! and touches no memory.
 

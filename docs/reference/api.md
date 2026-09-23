@@ -1,7 +1,7 @@
 # HTTP API
 
 Recall's server exposes six routes for memory and the deployment, and, since
-0.4.1, nine under `/v1` for devices. Two carry memory files, two are for
+0.4.1, ten under `/v1` for devices. Two carry memory files, two are for
 looking at the deployment, one says what the server is and speaks, one is a
 browser page, and the device routes enrol machines and manage them.
 
@@ -28,10 +28,11 @@ asserts what this page says about them.
 | [`GET /sync`](#get-sync) | yes | Fetch every file held for one project |
 | [`GET /health`](#get-health) | **no** | Liveness, and whether merge actually works |
 | [`GET /.well-known/recall`](#get-well-knownrecall) | **no** | Which protocol and release this server is, and what it can do |
-| [`GET /admin/stats`](#get-adminstats) | yes | What is stored, per project |
+| [`GET /admin/stats`](#get-adminstats) | admin | What is stored, per project |
 | [`GET /admin`](#get-admin) | **no** | An HTML page rendering the above |
 | [`POST /v1/devices/enroll`](#post-v1devicesenroll) | **no** | Start enrolling a machine |
 | [`POST /v1/devices/enroll/poll`](#post-v1devicesenrollpoll) | **no** | Ask whether it was approved |
+| [`GET /v1/devices/me`](#get-v1devicesme) | device | Which device signed this request |
 | [`GET /v1/devices/pending/{user_code}`](#get-v1devicespendinguser_code) | admin | What a code would approve, before approving it |
 | [`POST /v1/devices/approve`](#post-v1devicesapprove-and-post-v1devicesdeny) | admin | Approve a machine by its code |
 | [`POST /v1/devices/deny`](#post-v1devicesapprove-and-post-v1devicesdeny) | admin | Refuse one |
@@ -42,7 +43,9 @@ asserts what this page says about them.
 | [`POST /v1/enroll-keys/{id}/revoke`](#get-v1enroll-keys-and-post-v1enroll-keysidrevoke) | admin | Stop one enrolling anything more |
 
 "yes" is either credential below; "admin" is `RECALL_TOKEN` or a device
-approved with the `admin` scope.
+approved with the `admin` scope; "device" is any device's signature.
+`/admin/stats` was "yes" until 0.4.1, and still is for the token: only a
+`sync` device is refused there.
 
 ---
 
@@ -103,12 +106,29 @@ describes; the Rust implementation both halves use is
 its tests reproduce RFC 9421's own Ed25519 example (Appendix B.2.6) byte
 for byte.
 
-The server checks, in this order: the device exists and is not revoked;
-`created` is inside the window; the body matches `Content-Digest`; the
-signature verifies with the device's key; the nonce has not been seen from
-that device inside the window. It then notes the device's `last_seen`, to
-within a minute. A `sync` device may use every route but the admin ones; an
-`admin` device may use all of them.
+The server checks the headers first, in this order: the device exists and
+is not revoked; `created` is inside the window; `created` is not earlier
+than the moment the server started; `Content-Digest` has a sha-256 value;
+the signature verifies with the device's key; the nonce has not been seen
+from that device inside the window. The signature covers the
+`Content-Digest` header rather than the body, so all of that is settled
+before the body is read: the server reads a signed request's body only when
+the device's own key signed it, and refuses one whose `Content-Length` is
+over the limit before reading it. Then the body must match the digest, and
+only then is the nonce recorded, so a forged or altered request cannot use
+up a nonce the real device has yet to send. Last, the server notes the
+device's `last_seen`, to within a minute.
+
+The nonces are kept in memory, so a restart forgets them. That is why a
+signature made before the server started is refused: the process before it
+may already have accepted it. A request signed in the second or so a deploy
+takes gets that answer, and is signed again. One device may have as many
+nonces live at once as the rate limit lets one address send in two
+minutes, the longest a nonce lives; a device over it is refused alone, and
+every other device carries on.
+
+A `sync` device may use every route but the admin ones; an `admin` device
+may use all of them.
 
 **The name belongs to the key.** A push a device signed is stored with that
 device's name as its `source_env`, whatever the body's `source_env` says, so
@@ -129,12 +149,15 @@ always.
 | A `keyid` no device has | `401` | `{"error":"unauthorized: unknown device"}` |
 | A revoked device | `401` | `{"error":"unauthorized: this device has been revoked"}` |
 | `created` too far from the server's clock | `401` | `{"error":"unauthorized: signature created 75 seconds from the server's clock, more than the 60 allowed; check this machine's clock"}` |
+| `created` earlier than the server's start | `401` | `{"error":"unauthorized: signature created before this server started; sign the request again"}` |
 | The body is not what `Content-Digest` says | `401` | `{"error":"unauthorized: content-digest does not match the body"}` |
 | The signature does not verify | `401` | `{"error":"unauthorized: the signature does not verify"}` |
 | The same request a second time | `401` | `{"error":"unauthorized: this request was already received once"}` |
 | A component missing from what is covered, or a header that does not parse | `401` | `{"error":"unauthorized: …"}`, naming what is wrong |
 | A `sync` device on an admin route | `403` | `{"error":"forbidden: this needs RECALL_TOKEN or a device with the admin scope"}` |
-| Too many signed requests inside one minute to remember their nonces | `503` | `{"error":"too many signed requests at once, try again later"}` |
+| A signed body declared or found over 5 MiB | `413` | `{"error":"request body too large"}` |
+| One device signing more than its share of nonces | `429` | `{"error":"too many signed requests from this device, try again later"}` |
+| Too many signed requests from every device together to remember their nonces | `503` | `{"error":"too many signed requests at once, try again later"}` |
 | Too many requests | `429` | `{"error":"rate limit exceeded, try again later"}`, plus a `Retry-After` header |
 
 ### Rate limiting
@@ -189,7 +212,9 @@ Every non-2xx response, on every route, has the same shape:
 
 Requests larger than **5 MiB** are rejected before they are parsed — `413`,
 or `400` if the truncated body fails to parse first. Memory files are prose;
-anything that size is a bug or an attack, not a note.
+anything that size is a bug or an attack, not a note. The two enrolment
+routes, which anyone may call, take **8 KiB**, and answer anything larger
+with `413` and `{"error":"request body too large"}`.
 
 ---
 
@@ -506,7 +531,8 @@ to ask.
 
 ## `GET /admin/stats`
 
-Authenticated. What the owner is storing, per project.
+Admin: `RECALL_TOKEN`, or a device with the `admin` scope. What the owner is
+storing, per project.
 
 ```json
 {
@@ -533,8 +559,10 @@ can delete a project or edit a note, so a leaked token cannot be used to
 quietly destroy history through it. The device routes below do change
 state, but only about devices; none of them reads or writes memory.
 
-Any device may read it, `sync` scope included: it is how a client checks
-that it can reach the server and is recognised.
+Until 0.4.1 there was one credential, and it could read this. It still
+can, but a device needs the `admin` scope, since the list of every project
+is more than a machine that syncs one needs. A device checks that the
+server knows it with [`GET /v1/devices/me`](#get-v1devicesme).
 
 ## `GET /admin`
 
@@ -581,9 +609,9 @@ Unauthenticated, and rate limited like every other route.
 
 | Field | Type | Required | Notes |
 |---|---|:---:|---|
-| `name` | string | yes | What the owner sees the machine as. At most 64 characters, no control characters. |
+| `name` | string | yes | What the owner sees the machine as. At most 64 characters, and none that hide what the name says: no control or format characters (Unicode categories Cc and Cf, which include the bidirectional overrides and the zero-width characters), no line or paragraph separators, no other invisible ones. No two unrevoked devices share a name, compared without case; a revoked device's name is free again. Ignored with `enroll_key`: see below. |
 | `public_key` | string | yes | The Ed25519 public key: the raw 32 bytes, base64url, no padding. A key of small order is refused. |
-| `agent` | string | no | The client's `User-Agent`, shown in the device list. At most 256 characters. |
+| `agent` | string | no | The client's `User-Agent`, shown in the device list. At most 256 characters, under the same rules as `name`. |
 | `enroll_key` | string | no | An [enrolment key](#post-v1enroll-keys). With a valid one the device is approved at once. |
 
 ### Response: waiting for approval
@@ -593,8 +621,8 @@ enrolment id standing where the RFC has its `device_code`:
 
 ```json
 {
-  "enrollment_id": "enr_mbj7ngtlpbwploe7wcqba7bose",
-  "user_code": "KXHT-GVDV",
+  "enrollment_id": "enr_kf4cyx5cramwoe34o5ku3iyrhy",
+  "user_code": "TXLV-FNTC",
   "expires_in": 900,
   "interval": 5
 }
@@ -614,12 +642,15 @@ and the unpadded base64 of the SHA-256 of the raw 32-byte key.
 ### Response: approved with an enrolment key
 
 ```json
-{ "device_id": "dev_lvfyq25b7avgrj4zzwkxi4wnhm", "scope": "sync", "ephemeral": true }
+{ "device_id": "dev_7e3jth4xgnksqm7hyx5z5j4quq", "name": "cloud-7e3jth4x", "scope": "sync", "ephemeral": true }
 ```
 
-Always `sync` scope. `ephemeral` is the key's: an ephemeral device is
-removed once it has made no signed request for `RECALL_EPHEMERAL_DEVICE_TTL_HOURS`
-hours, 24 by default.
+Always `sync` scope. Nobody looks at a device enrolled this way before it
+exists, so it does not choose its name: the server names it after the key's
+tag and the start of its id (`device-…` for a key with no tag), and the
+`name` in the request is ignored. `ephemeral` is the key's: an ephemeral
+device is removed once it has made no signed request for
+`RECALL_EPHEMERAL_DEVICE_TTL_HOURS` hours, 24 by default.
 
 ### Status codes
 
@@ -628,7 +659,10 @@ hours, 24 by default.
 | `200` | Either response above. |
 | `400` | Bad JSON, or a field that breaks the rules above, with the rule as the error. |
 | `401` | `{"error":"unauthorized: this enrolment key is not one this server issued"}`, `…has expired` or `…has been revoked`. |
-| `429` | Rate limited. |
+| `403` | The enrolment key already has as many unrevoked devices as its `max_devices`. |
+| `409` | An unrevoked device already has the name: `{"error":"a device named laptop already exists; revoke it first, or enrol with another name"}`. |
+| `413` | A body over 8 KiB. |
+| `429` | Rate limited; or five enrolments from this address are already waiting: `{"error":"too many enrolments from this address are waiting for approval; approve or deny them, or let them expire"}`. The address is the one the rate limiter uses. |
 | `503` | A thousand enrolments are already waiting for approval: `{"error":"too many enrolments are waiting for approval, try again later"}`. |
 
 ## `POST /v1/devices/enroll/poll`
@@ -636,13 +670,13 @@ hours, 24 by default.
 Unauthenticated; the `enrollment_id` is the secret.
 
 ```json
-{ "enrollment_id": "enr_mbj7ngtlpbwploe7wcqba7bose" }
+{ "enrollment_id": "enr_kf4cyx5cramwoe34o5ku3iyrhy" }
 ```
 
 Once approved, a `200`:
 
 ```json
-{ "device_id": "dev_eerivjyffuwecbgzybcesz5hwi", "scope": "sync" }
+{ "device_id": "dev_pxu4i2r2zc27mil6ufyw5rxtke", "scope": "sync" }
 ```
 
 From then on the machine signs its requests with `keyid` set to
@@ -677,7 +711,7 @@ not matter.
 
 ```json
 {
-  "user_code": "RMVL-HDSN",
+  "user_code": "TXLV-FNTC",
   "name": "laptop",
   "agent": "recall/0.4.1 (linux-x86_64)",
   "fingerprint": "SHA256:sWwtG+rRJiY5dk/bDuTTd0WZM2vUk0BM2ksRNsWfIGI",
@@ -686,10 +720,25 @@ not matter.
 ```
 
 `user_code` comes back normalized; `expires_in` is the seconds left to
-approve it. Looking decides nothing: the machine keeps polling
+approve it. It answers only for a code still waiting: unexpired and
+undecided. Looking decides nothing: the machine keeps polling
 `authorization_pending`. The answers for a code that cannot be approved are
 the ones approving it would give, `400`, `404`, `409` and `410`, listed
-under approve below.
+under approve below, and every answer is sent with `Cache-Control:
+no-store`.
+
+## `GET /v1/devices/me`
+
+Any device's signature. The device that signed the request, as the server
+knows it: how a machine checks it is enrolled and not revoked, without the
+`admin` scope the device list needs.
+
+```json
+{ "device_id": "dev_pxu4i2r2zc27mil6ufyw5rxtke", "name": "laptop", "scope": "sync", "ephemeral": false }
+```
+
+A request with `RECALL_TOKEN` is from no device: `404` with
+`{"error":"not a device: this request was authenticated with RECALL_TOKEN"}`.
 
 ## `POST /v1/devices/approve` and `POST /v1/devices/deny`
 
@@ -697,17 +746,20 @@ Admin. The owner, holding `RECALL_TOKEN` or an admin device, approves or
 refuses the code a machine shows.
 
 ```json
-{ "user_code": "KXHT-GVDV", "scope": "sync" }
+{ "user_code": "TXLV-FNTC", "scope": "sync", "fingerprint": "SHA256:sWwtG+rRJiY5dk/bDuTTd0WZM2vUk0BM2ksRNsWfIGI" }
 ```
 
-`scope` is `sync` when left out, and may be `admin`. Deny takes only
-`user_code`.
+`scope` is `sync` when left out, and may be `admin`. `fingerprint` is
+optional: when given, it is the fingerprint the approver was shown, by the
+machine or by the lookup above, and the code is approved only if its key
+has exactly that fingerprint. That binds the approval to what the approver
+actually saw. Deny takes only `user_code`.
 
 Approve answers with the new [device](#get-v1devices); deny with what was
 refused:
 
 ```json
-{ "user_code": "HVBT-SJRK", "name": "phone", "denied": true }
+{ "user_code": "LFLQ-TTHP", "name": "phone", "denied": true }
 ```
 
 | Code | When |
@@ -716,7 +768,7 @@ refused:
 | `400` | Bad JSON, a `scope` other than `sync` or `admin`, or a `user_code` that is not eight letters of the alphabet: `{"error":"user_code must be the 8 letters the device shows, such as WDJB-MJHT"}`. |
 | `401`, `403` | See [Authentication](#authentication). |
 | `404` | `{"error":"no enrolment is waiting with that code"}` |
-| `409` | `{"error":"that code was already approved or denied"}` |
+| `409` | `{"error":"that code was already approved or denied"}`; or, with `fingerprint`, `{"error":"that code's key does not have the fingerprint given; nothing was approved"}`; or an unrevoked device already has the name the machine asked for. |
 | `410` | `{"error":"that code has expired; start the enrolment again"}` |
 
 ## `GET /v1/devices`
@@ -727,7 +779,7 @@ Admin. Every device, newest first, revoked ones included.
 {
   "devices": [
     {
-      "id": "dev_eerivjyffuwecbgzybcesz5hwi",
+      "id": "dev_pxu4i2r2zc27mil6ufyw5rxtke",
       "name": "laptop",
       "scope": "sync",
       "ephemeral": false,
@@ -772,23 +824,25 @@ devices with `sync` scope and nothing else: it cannot read or write memory
 itself.
 
 ```json
-{ "tag": "cloud", "expires_in_days": 90, "ephemeral": true }
+{ "tag": "cloud", "expires_in_days": 90, "ephemeral": true, "max_devices": 10 }
 ```
 
 | Field | Type | Required | Notes |
 |---|---|:---:|---|
-| `tag` | string | no | A label. At most 64 characters. |
+| `tag` | string | no | A label, and the start of the name of every device the key enrols. At most 32 characters, under the rules for a device name. |
 | `expires_in_days` | integer | yes | 1 to 365. There is no key that never expires. |
-| `ephemeral` | bool | no | Whether the devices it enrols are ephemeral. `false` when left out. |
+| `ephemeral` | bool | no | Whether the devices it enrols are ephemeral. `true` when left out: a key is for machines that come and go. |
+| `max_devices` | integer | no | The most unrevoked devices it may have enrolled at once, 1 or more; no limit when left out. An ephemeral device swept for being idle frees its place. |
 
 ```json
 {
-  "id": "ek_7ufpkgr3tbilqv4w",
-  "key": "recall-ek-lcabjgjwdwpb22gc2remumv3qn3lafl6fdgfvntp733zpivc5oxq",
+  "id": "ek_ecfq6bc4luadka2i",
+  "key": "recall-ek-tqvi2pktd7u6rpc7wwrq57cc5gjupt7mdqdupbcx3wijsjdmxmma",
   "tag": "cloud",
   "ephemeral": true,
-  "created_at": "2026-09-23T12:04:54.382Z",
-  "expires_at": "2026-12-22T12:04:54.382Z"
+  "max_devices": 10,
+  "created_at": "2026-09-23T12:47:29.936Z",
+  "expires_at": "2026-12-22T12:47:29.936Z"
 }
 ```
 
@@ -803,13 +857,14 @@ ones included, each as above without `key` and with `revoked_at` (`null`
 until revoked):
 
 ```json
-{ "enroll_keys": [ { "id": "ek_7ufpkgr3tbilqv4w", "tag": "cloud", "ephemeral": true, "created_at": "2026-09-23T12:04:54.382Z", "expires_at": "2026-12-22T12:04:54.382Z", "revoked_at": null } ] }
+{ "enroll_keys": [ { "id": "ek_ecfq6bc4luadka2i", "tag": "cloud", "ephemeral": true, "max_devices": 10, "created_at": "2026-09-23T12:47:29.936Z", "expires_at": "2026-12-22T12:47:29.936Z", "revoked_at": null } ] }
 ```
 
 Revoking one stops it enrolling anything more and answers with the key as it
-now stands. Devices it already enrolled keep working; revoke those one by
-one. `404` with `{"error":"no enrolment key has that id"}` for an id that
-is not there.
+now stands. Its body may be empty; with `{"revoke_devices": true}` every
+device the key enrolled is revoked too, which is what to do when a key has
+leaked. Without it they keep working. `404` with `{"error":"no enrolment
+key has that id"}` for an id that is not there.
 
 ---
 

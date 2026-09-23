@@ -13,9 +13,9 @@
 //! works: approved at once, `sync` scope only, and ephemeral if the key
 //! says so.
 //!
-//! Everything under `/v1/devices` except enrolling and polling, and
-//! everything under `/v1/enroll-keys`, needs the operator's `RECALL_TOKEN`
-//! or a device with [`SCOPE_ADMIN`].
+//! Everything under `/v1/devices` except enrolling, polling and
+//! [`DEVICES_ME_PATH`], and everything under `/v1/enroll-keys`, needs the
+//! operator's `RECALL_TOKEN` or a device with [`SCOPE_ADMIN`].
 
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +30,9 @@ pub const ENROLL_POLL_PATH: &str = "/v1/devices/enroll/poll";
 
 /// `GET`: every device.
 pub const DEVICES_PATH: &str = "/v1/devices";
+
+/// `GET`: the device that signed the request, as the server knows it.
+pub const DEVICES_ME_PATH: &str = "/v1/devices/me";
 
 /// `POST`: approve a pending enrolment by its user code.
 pub const APPROVE_PATH: &str = "/v1/devices/approve";
@@ -84,8 +87,9 @@ pub const MAX_NAME_CHARS: usize = 64;
 /// The longest `agent` accepted, in characters.
 pub const MAX_AGENT_CHARS: usize = 256;
 
-/// The longest enrolment key tag accepted, in characters.
-pub const MAX_TAG_CHARS: usize = 64;
+/// The longest enrolment key tag accepted, in characters. A device an
+/// enrolment key enrols is named after the tag, so it is kept short.
+pub const MAX_TAG_CHARS: usize = 32;
 
 /// The longest an enrolment key may live, in days.
 pub const MAX_ENROLL_KEY_DAYS: u32 = 365;
@@ -137,7 +141,9 @@ pub struct EnrollRequest {
     #[serde(default)]
     pub agent: String,
     /// An enrolment key, for a machine that cannot wait for approval. It
-    /// is approved at once, with `sync` scope.
+    /// is approved at once, with `sync` scope, and named by the server
+    /// rather than by `name`: nobody approved it, so it may not choose a
+    /// name that passes for another machine's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enroll_key: Option<String>,
 }
@@ -149,19 +155,76 @@ pub enum EnrollError {
     /// No name, or no key.
     #[error("name and public_key are required")]
     Missing,
-    /// A name too long, or with control characters in it.
-    #[error("name must be at most 64 characters, with no control characters")]
+    /// A name too long, or with a character that could hide what it says.
+    #[error("name must be at most 64 characters, with no control, format or invisible characters")]
     Name,
-    /// An agent too long, or with control characters in it.
-    #[error("agent must be at most 256 characters, with no control characters")]
+    /// An agent too long, or with a character that could hide what it says.
+    #[error(
+        "agent must be at most 256 characters, with no control, format or invisible characters"
+    )]
     Agent,
     /// Not an acceptable Ed25519 public key.
     #[error("{0}")]
     PublicKey(SignatureError),
 }
 
-fn printable(text: &str, max: usize) -> bool {
-    text.chars().count() <= max && !text.chars().any(char::is_control)
+/// Characters a name must not contain, beyond `char::is_control`'s: the
+/// ones that change how the rest of a string displays, or display as
+/// nothing at all, so `laptop` followed by a zero-width space, or a name
+/// reversed by U+202E, cannot pass for another.
+///
+/// General categories Cf (format), Zl and Zp (line and paragraph
+/// separators), as Python's `unicodedata` lists them for Unicode 14, with
+/// the Egyptian format-control block widened to what later versions
+/// added; then the invisible characters Unicode marks default-ignorable
+/// that are not Cf: the combining grapheme joiner, the Hangul fillers,
+/// the Khmer inherent vowels, the Mongolian variation selectors and the
+/// variation selectors; and the braille blank, which draws nothing.
+const HIDDEN: &[(u32, u32)] = &[
+    (0x00AD, 0x00AD),
+    (0x034F, 0x034F),
+    (0x0600, 0x0605),
+    (0x061C, 0x061C),
+    (0x06DD, 0x06DD),
+    (0x070F, 0x070F),
+    (0x0890, 0x0891),
+    (0x08E2, 0x08E2),
+    (0x115F, 0x1160),
+    (0x17B4, 0x17B5),
+    (0x180B, 0x180F),
+    (0x200B, 0x200F),
+    (0x2028, 0x202E),
+    (0x2060, 0x2064),
+    (0x2066, 0x206F),
+    (0x2800, 0x2800),
+    (0x3164, 0x3164),
+    (0xFE00, 0xFE0F),
+    (0xFEFF, 0xFEFF),
+    (0xFFA0, 0xFFA0),
+    (0xFFF9, 0xFFFB),
+    (0x110BD, 0x110BD),
+    (0x110CD, 0x110CD),
+    (0x13430, 0x1343F),
+    (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A),
+    (0xE0001, 0xE0001),
+    (0xE0020, 0xE007F),
+    (0xE0100, 0xE01EF),
+];
+
+/// Whether `c` is a control character, or one of the format and invisible
+/// characters a name may not contain: Unicode categories Cf, Zl and Zp,
+/// and the default-ignorable invisibles outside them.
+pub fn is_hidden(c: char) -> bool {
+    let cp = u32::from(c);
+    c.is_control() || HIDDEN.iter().any(|&(lo, hi)| (lo..=hi).contains(&cp))
+}
+
+/// Whether `text` is at most `max` characters, none of them
+/// [`is_hidden`]. Device names, agents and enrolment key tags are held to
+/// this, since each is shown to a person deciding what to trust.
+pub fn displayable(text: &str, max: usize) -> bool {
+    text.chars().count() <= max && !text.chars().any(is_hidden)
 }
 
 impl EnrollRequest {
@@ -171,10 +234,10 @@ impl EnrollRequest {
         if self.name.trim().is_empty() || self.public_key.is_empty() {
             return Err(EnrollError::Missing);
         }
-        if !printable(&self.name, MAX_NAME_CHARS) {
+        if !displayable(&self.name, MAX_NAME_CHARS) {
             return Err(EnrollError::Name);
         }
-        if !printable(&self.agent, MAX_AGENT_CHARS) {
+        if !displayable(&self.agent, MAX_AGENT_CHARS) {
             return Err(EnrollError::Agent);
         }
         signature::parse_public_key(&self.public_key).map_err(EnrollError::PublicKey)
@@ -202,6 +265,9 @@ pub struct EnrollPending {
 pub struct EnrollApproved {
     /// The device id, which the machine signs with as `keyid`.
     pub device_id: String,
+    /// The name the server gave it: the key's tag, a hyphen, and the start
+    /// of the device id.
+    pub name: String,
     /// Always [`SCOPE_SYNC`].
     pub scope: String,
     /// Whether the server removes this device after it has been idle for
@@ -241,6 +307,12 @@ pub struct ApproveRequest {
     /// manage others.
     #[serde(default = "default_scope")]
     pub scope: String,
+    /// The key fingerprint the approver was shown, by the machine or by
+    /// `GET /v1/devices/pending/{user_code}`. When given, the approval is
+    /// refused unless the code's key has exactly this fingerprint, which
+    /// binds the approval to what the approver actually saw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
 }
 
 /// Body of `POST /v1/devices/deny`.
@@ -313,6 +385,19 @@ pub struct Device {
     pub revoked_at: Option<String>,
 }
 
+/// `GET /v1/devices/me`: the device that signed the request.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceIdentity {
+    /// Its id, the `keyid` it signed with.
+    pub device_id: String,
+    /// Its name.
+    pub name: String,
+    /// [`SCOPE_SYNC`] or [`SCOPE_ADMIN`].
+    pub scope: String,
+    /// Whether it is removed after being idle for a while.
+    pub ephemeral: bool,
+}
+
 /// `GET /v1/devices`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceList {
@@ -329,10 +414,28 @@ pub struct EnrollKeyRequest {
     /// How many days the key can enrol devices for, 1 to 365. Required:
     /// there is no key that never expires.
     pub expires_in_days: u32,
-    /// Whether devices enrolled with it are ephemeral. `false` unless
-    /// given.
-    #[serde(default)]
+    /// Whether devices enrolled with it are ephemeral. `true` unless given:
+    /// a key is for machines that come and go.
+    #[serde(default = "default_true")]
     pub ephemeral: bool,
+    /// The most devices it may have enrolled and unrevoked at once, 1 or
+    /// more; no limit when left out. An ephemeral device swept for being
+    /// idle frees its place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_devices: Option<u32>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Body of `POST /v1/enroll-keys/{id}/revoke`, which may also be empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollKeyRevokeRequest {
+    /// Also revoke every device the key enrolled. `false` unless given:
+    /// revoking a key on its own only stops new enrolments.
+    #[serde(default)]
+    pub revoke_devices: bool,
 }
 
 /// One enrolment key, without the key itself, which is shown only once.
@@ -344,6 +447,9 @@ pub struct EnrollKey {
     pub tag: String,
     /// Whether devices enrolled with it are ephemeral.
     pub ephemeral: bool,
+    /// The most unrevoked devices it may have enrolled at once; `null` for
+    /// no limit.
+    pub max_devices: Option<u32>,
     /// When it was made.
     pub created_at: String,
     /// When it stops enrolling devices.
@@ -364,6 +470,8 @@ pub struct EnrollKeyCreated {
     pub tag: String,
     /// As in [`EnrollKey`].
     pub ephemeral: bool,
+    /// As in [`EnrollKey`].
+    pub max_devices: Option<u32>,
     /// As in [`EnrollKey`].
     pub created_at: String,
     /// As in [`EnrollKey`].
@@ -494,7 +602,46 @@ mod tests {
         assert!(serde_json::from_str::<EnrollKeyRequest>(r#"{"tag":"cloud"}"#).is_err());
         let req: EnrollKeyRequest = serde_json::from_str(r#"{"expires_in_days":90}"#).unwrap();
         assert_eq!(req.tag, "");
-        assert!(!req.ephemeral);
+        assert!(req.ephemeral, "a key's devices are ephemeral unless asked");
+        assert_eq!(req.max_devices, None);
+        let req: EnrollKeyRevokeRequest = serde_json::from_str("{}").unwrap();
+        assert!(!req.revoke_devices);
+    }
+
+    /// Each character that could make one name pass for another: a
+    /// zero-width space, a right-to-left override, an isolate, a byte order
+    /// mark, a Hangul filler, a soft hyphen, a variation selector, a tag
+    /// character, a line separator, a bell.
+    #[test]
+    fn a_name_cannot_hide_characters() {
+        for hidden in [
+            '\u{200B}',
+            '\u{202E}',
+            '\u{2066}',
+            '\u{FEFF}',
+            '\u{3164}',
+            '\u{00AD}',
+            '\u{FE0F}',
+            '\u{E0041}',
+            '\u{2028}',
+            '\u{0007}',
+        ] {
+            let name = format!("lap{hidden}top");
+            assert!(
+                !displayable(&name, MAX_NAME_CHARS),
+                "{:04X}",
+                u32::from(hidden)
+            );
+        }
+        for fine in [
+            "laptop",
+            "Pim's MacBook Air",
+            "büro-rechner",
+            "ノートPC",
+            "laptop 2",
+        ] {
+            assert!(displayable(fine, MAX_NAME_CHARS), "{fine}");
+        }
     }
 
     #[test]
