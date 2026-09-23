@@ -91,7 +91,7 @@ Signature: sig1=:…:
 |---|---|
 | `Content-Digest` | SHA-256 of the body, as a structured-field byte sequence. Always sent: a `GET` sends the digest of an empty body, the value above. |
 | Covered components | All six, in any order: `@method`, `@authority` (host and port, lowercased, without `:443` or `:80`), `@path`, `@query` (`?` and the query as sent, or `?` alone), and the `Content-Digest` and `Recall-Protocol` headers. |
-| `created` | UNIX seconds. Must be within **60 seconds** of the server's clock, either way. |
+| `created` | UNIX seconds. At most **60 seconds** behind the server's clock, and at most **5 seconds** ahead of it. |
 | `keyid` | The device id. |
 | `nonce` | A random string, 1 to 128 characters, never reused. |
 | `alg` | `"ed25519"`, or left out. |
@@ -107,8 +107,8 @@ its tests reproduce RFC 9421's own Ed25519 example (Appendix B.2.6) byte
 for byte.
 
 The server checks the headers first, in this order: the device exists and
-is not revoked; `created` is inside the window; `created` is not earlier
-than the moment the server started; `Content-Digest` has a sha-256 value;
+is not revoked; `created` is inside the window; `created` is more than 5
+seconds after the moment the server started; `Content-Digest` has a sha-256 value;
 the signature verifies with the device's key; the nonce has not been seen
 from that device inside the window. The signature covers the
 `Content-Digest` header rather than the body, so all of that is settled
@@ -120,12 +120,17 @@ up a nonce the real device has yet to send. Last, the server notes the
 device's `last_seen`, to within a minute.
 
 The nonces are kept in memory, so a restart forgets them. That is why a
-signature made before the server started is refused: the process before it
-may already have accepted it. A request signed in the second or so a deploy
-takes gets that answer, and is signed again. One device may have as many
-nonces live at once as the rate limit lets one address send in two
-minutes, the longest a nonce lives; a device over it is refused alone, and
-every other device carries on.
+signature the process before could have accepted is refused. That process
+took `created` up to 5 seconds ahead of its clock, and stopped before this
+one started, so everything dated up to 5 seconds after the server started
+is refused, the very second it started included. It is also why `created`
+may be only a few seconds ahead: the further ahead a signature may be
+dated, the longer after each start this lasts. A request signed while a
+deploy is under way, or in the first few seconds after, gets that answer,
+and is signed again a few seconds later. One device may have as many
+nonces live at once as the rate limit lets one address send in 65
+seconds, the longest a nonce lives; a device over it is refused alone,
+and every other device carries on.
 
 A `sync` device may use every route but the admin ones; an `admin` device
 may use all of them.
@@ -148,8 +153,9 @@ always.
 | Only one of `Signature-Input` and `Signature` | `401` | `{"error":"unauthorized: a signed request needs both signature-input and signature"}` |
 | A `keyid` no device has | `401` | `{"error":"unauthorized: unknown device"}` |
 | A revoked device | `401` | `{"error":"unauthorized: this device has been revoked"}` |
-| `created` too far from the server's clock | `401` | `{"error":"unauthorized: signature created 75 seconds from the server's clock, more than the 60 allowed; check this machine's clock"}` |
-| `created` earlier than the server's start | `401` | `{"error":"unauthorized: signature created before this server started; sign the request again"}` |
+| `created` too far behind the server's clock | `401` | `{"error":"unauthorized: signature created 75 seconds from the server's clock, more than the 60 allowed; check this machine's clock"}` |
+| `created` too far ahead of the server's clock | `401` | `{"error":"unauthorized: signature created 30 seconds ahead of the server's clock, more than the 5 allowed; check this machine's clock"}` |
+| `created` earlier than 5 seconds after the server's start | `401` | `{"error":"unauthorized: signature created before this server started, or too soon after; sign the request again in a few seconds"}` |
 | The body is not what `Content-Digest` says | `401` | `{"error":"unauthorized: content-digest does not match the body"}` |
 | The signature does not verify | `401` | `{"error":"unauthorized: the signature does not verify"}` |
 | The same request a second time | `401` | `{"error":"unauthorized: this request was already received once"}` |
@@ -445,7 +451,7 @@ server at all, and what the server can do.
 | `capabilities.devices.enroll_path` | Where enrolment starts, [`/v1/devices/enroll`](#post-v1devicesenroll). |
 | `capabilities.devices.code_ttl_seconds` | How long a user code can be approved: 900. |
 | `capabilities.devices.poll_interval_seconds` | How long to wait between polls: 5. |
-| `capabilities.devices.signature_window_seconds` | How far a signature's `created` may be from the server's clock, either way: 60. |
+| `capabilities.devices.signature_window_seconds` | How far a signature's `created` may be behind the server's clock: 60. Ahead of it, `created` may be only 5 seconds, whatever this says. |
 | `capabilities.limits` | `max_body_bytes`, and `rate_limit`'s `max` requests per `window_seconds`. |
 | `capabilities.merge_base` | The server reads `base_sha256` on a push. |
 | `capabilities.scopes` | The memory scopes a client may sync, each under an ordinary `project_key`. |
@@ -609,7 +615,7 @@ Unauthenticated, and rate limited like every other route.
 
 | Field | Type | Required | Notes |
 |---|---|:---:|---|
-| `name` | string | yes | What the owner sees the machine as. At most 64 characters, and none that hide what the name says: no control or format characters (Unicode categories Cc and Cf, which include the bidirectional overrides and the zero-width characters), no line or paragraph separators, no other invisible ones. No two unrevoked devices share a name, compared without case; a revoked device's name is free again. Ignored with `enroll_key`: see below. |
+| `name` | string | yes | What the owner sees the machine as. At most 64 characters, and none that hide what the name says: no control or format characters (Unicode categories Cc and Cf, which include the bidirectional overrides and the zero-width characters), no line or paragraph separators, no other invisible ones. Stored trimmed and in Unicode's composed form (NFC). No two unrevoked devices share a name, or names a person would read as one: they are compared after NFKC, without case, and by their Unicode confusable skeletons (UTS #39), so `Laptop`, `lаptop` with a Cyrillic `а`, and `1aptop` are all `laptop`, and `Straße` is `STRASSE`. A revoked device's name is free again. Ignored with `enroll_key`: see below. |
 | `public_key` | string | yes | The Ed25519 public key: the raw 32 bytes, base64url, no padding. A key of small order is refused. |
 | `agent` | string | no | The client's `User-Agent`, shown in the device list. At most 256 characters, under the same rules as `name`. |
 | `enroll_key` | string | no | An [enrolment key](#post-v1enroll-keys). With a valid one the device is approved at once. |

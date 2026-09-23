@@ -81,7 +81,8 @@ break will be described here in full rather than smoothed over.
   `POST /v1/enroll-keys/{id}/revoke`.
 - **Device names are plain and unique.** A name with control, format or
   invisible characters (a zero-width space, a right-to-left override) is
-  refused, no two unrevoked devices share a name, and a device an
+  refused, no two unrevoked devices share a name or names that read alike
+  (`Laptop`, or `lаptop` with a Cyrillic `а`, beside `laptop`), and a device an
   enrolment key enrols is named by the server after the key's tag.
 - **Enrolment keys** enrol ephemeral devices unless told otherwise, can be
   capped with `max_devices`, and can be revoked together with every device
@@ -90,9 +91,10 @@ break will be described here in full rather than smoothed over.
   changes for `RECALL_TOKEN`, which is all anything uses today.
 - **Signed requests are checked before their body is read**, the
   enrolment routes take 8 KiB bodies, one address may have five
-  enrolments waiting, and a signature made before the server started is
-  refused, since the nonces that would catch its replay went with the
-  process before.
+  enrolments waiting, and a signature dated up to five seconds after the
+  server started is refused, since the nonces that would catch its replay
+  went with the process before. A signature's `created` may be a minute
+  behind the server's clock but only five seconds ahead of it.
 - **`GET /.well-known/recall` lists `device-sig-v1`** after `bearer` in
   `auth.methods`, and a new `devices` capability.
 - **New setting: `RECALL_EPHEMERAL_DEVICE_TTL_HOURS`** (default 24). An

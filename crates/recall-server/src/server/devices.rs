@@ -36,7 +36,9 @@ use super::auth::Caller;
 use super::middleware::{too_large, ClientIp};
 use super::respond::{error, internal, json, Refusal};
 use super::AppState;
-use crate::store::{Created, Decision, Inserted, NewDevice, NewEnrollKey, NewEnrollment, Poll};
+use crate::store::{
+    plain_name, Created, Decision, Inserted, NewDevice, NewEnrollKey, NewEnrollment, Poll,
+};
 use crate::{format_timestamp, now, parse_timestamp};
 
 /// How many enrolments may wait for approval at once. An owner has a
@@ -166,7 +168,7 @@ pub(super) async fn handle_enroll(
         return enroll_with_key(&state, enroll_key, &public_key, &req.agent);
     }
 
-    let name = req.name.trim();
+    let name = &plain_name(&req.name);
     // Said now, so the machine can pick another name before anyone is
     // asked to approve it; approving checks again.
     match state.store.name_in_use(name) {
@@ -568,7 +570,7 @@ pub(super) async fn handle_create_enroll_key(
     let stored = state.store.insert_enroll_key(&NewEnrollKey {
         id: &id,
         key_sha256: &recall_wire::content_sha256(&secret),
-        tag: req.tag.trim(),
+        tag: &plain_name(&req.tag),
         ephemeral: req.ephemeral,
         max_devices: req.max_devices,
         created_at: &now(),

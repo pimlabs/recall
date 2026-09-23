@@ -496,8 +496,9 @@ pub struct DevicesCapability {
     pub code_ttl_seconds: u64,
     /// How often to poll: [`POLL_INTERVAL_SECONDS`].
     pub poll_interval_seconds: u64,
-    /// How far a signature's `created` may be from the server's clock:
-    /// [`signature::WINDOW_SECONDS`].
+    /// How far a signature's `created` may be behind the server's clock:
+    /// [`signature::WINDOW_SECONDS`]. Ahead of it, it may be only
+    /// [`signature::MAX_AHEAD_SECONDS`].
     pub signature_window_seconds: u64,
 }
 
