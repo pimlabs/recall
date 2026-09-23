@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
-use recall_wire::devices::SCOPE_ADMIN;
+use recall_wire::devices::{SCOPE_ADMIN, SCOPE_WORKER};
 use recall_wire::signature::{
     self, Received, SignatureInput, Target, LABEL, SIGNATURE_HEADER, SIGNATURE_INPUT_HEADER,
     WINDOW_SECONDS,
@@ -50,7 +50,7 @@ pub(super) enum Caller {
         /// The name it enrolled as. A push it signs is recorded under this,
         /// whatever the push says: the name belongs to the key.
         name: String,
-        /// `sync` or `admin`.
+        /// `sync`, `admin` or `worker`.
         scope: String,
         /// Whether it is removed once idle.
         ephemeral: bool,
@@ -65,6 +65,13 @@ impl Caller {
             Caller::Operator => true,
             Caller::Device { scope, .. } => scope == SCOPE_ADMIN,
         }
+    }
+
+    /// Whether this caller is a worker device: it may claim jobs and post
+    /// their results, and nothing else. Not the operator, who has no
+    /// business holding a lease.
+    pub(super) fn is_worker(&self) -> bool {
+        matches!(self, Caller::Device { scope, .. } if scope == SCOPE_WORKER)
     }
 }
 
@@ -499,5 +506,20 @@ mod tests {
         assert!(Caller::Operator.is_admin());
         assert!(device("admin").is_admin());
         assert!(!device("sync").is_admin());
+        assert!(!device("worker").is_admin());
+    }
+
+    #[test]
+    fn only_a_worker_device_is_a_worker() {
+        let device = |scope: &str| Caller::Device {
+            id: "dev_a".into(),
+            name: "worker".into(),
+            scope: scope.into(),
+            ephemeral: false,
+        };
+        assert!(device("worker").is_worker());
+        assert!(!device("admin").is_worker());
+        assert!(!device("sync").is_worker());
+        assert!(!Caller::Operator.is_worker());
     }
 }

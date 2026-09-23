@@ -7,9 +7,10 @@
 //! | `GET /health` | none — uptime tooling holds no secret |
 //! | `GET /admin` | none — static markup, no data |
 //! | `GET /.well-known/recall` | none — a client asks before it can authenticate |
-//! | `POST /sync`, `GET /sync`, `GET /v1/devices/me` | bearer token, or any device's signature |
+//! | `POST /sync`, `GET /sync`, `GET /v1/devices/me` | bearer token, or the signature of any device but a worker |
 //! | `POST /v1/devices/enroll`, `POST /v1/devices/enroll/poll` | none, but rate limited, and small bodies only |
-//! | `GET /admin/stats`, the rest of `/v1/devices`, and `/v1/enroll-keys` | bearer token, or an admin device's signature |
+//! | `GET /admin/stats`, the rest of `/v1/devices`, `/v1/enroll-keys`, `GET /v1/jobs`, `POST /v1/jobs/{id}/retry` | bearer token, or an admin device's signature |
+//! | `POST /v1/jobs/claim`, `POST /v1/jobs/{id}/result` | a worker device's signature, and nothing else |
 //! | anything else | 404 JSON |
 //!
 //! This module owns the shared state, the router, and the background jobs.
@@ -17,12 +18,12 @@
 //! own tests: `middleware.rs` (rate limiting, then the protocol check, then
 //! auth), `auth.rs` (device signatures and the replay cache),
 //! `handlers.rs` (one function per route), `devices.rs` (the device
-//! routes), `respond.rs` (the JSON shape of every reply, errors included)
+//! routes), `jobs.rs` (the merge queue's routes), `respond.rs` (the JSON shape of every reply, errors included)
 //! and `limit.rs` (the per-IP window the middleware consults).
 
 use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -34,8 +35,9 @@ use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
 use axum::Router;
 use recall_wire::devices as paths;
-use recall_wire::MergeError;
+use recall_wire::{ClaudeCliStatus, MergeError};
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use crate::merge::{Merger, Status};
@@ -44,6 +46,7 @@ use crate::{format_timestamp, now, Config, Store};
 mod auth;
 mod devices;
 mod handlers;
+mod jobs;
 mod limit;
 mod middleware;
 mod respond;
@@ -59,7 +62,7 @@ use handlers::{
     handle_push, not_found,
 };
 use limit::RateLimiter;
-use middleware::{admin_only, guard, limited};
+use middleware::{admin_only, guard, limited, not_worker};
 
 /// How often idle ephemeral devices and long-expired enrolments are swept
 /// away. Removal is at most this late, which against a TTL counted in
@@ -80,6 +83,13 @@ struct Runtime {
     last_merge_at: String,
     last_merge_error: Option<MergeError>,
     claude_status: Status,
+    /// When a worker last claimed, since this process started.
+    worker_last_claim_at: Option<String>,
+    /// The `User-Agent` of that claim.
+    worker_agent: String,
+    /// The CLI check that claim carried: what `/health` reports as
+    /// `claude_cli` while a worker is enrolled.
+    worker_cli: Option<ClaudeCliStatus>,
 }
 
 struct AppState {
@@ -96,6 +106,11 @@ struct AppState {
     runtime: RwLock<Runtime>,
     limiter: RateLimiter,
     replay: ReplayCache,
+    /// Wakes waiting claims when a job is queued.
+    jobs_ready: Notify,
+    /// Set once shutdown begins, so waiting claims answer at once rather
+    /// than holding the graceful shutdown for their whole wait.
+    closing: AtomicBool,
 }
 
 impl AppState {
@@ -153,9 +168,14 @@ impl Server {
                     last_merge_at: String::new(),
                     last_merge_error: None,
                     claude_status: Status::default(),
+                    worker_last_claim_at: None,
+                    worker_agent: String::new(),
+                    worker_cli: None,
                 }),
                 limiter,
                 replay,
+                jobs_ready: Notify::new(),
+                closing: AtomicBool::new(false),
             }),
         }
     }
@@ -220,11 +240,15 @@ impl Server {
                 get(handle_pull).post(handle_push).fallback(not_found),
             )
             .route(paths::DEVICES_ME_PATH, get(handle_me).fallback(not_found))
-            // Registered before the layer, so only these routes are rate
-            // limited and authenticated here.
+            // Registered before the layers, so only these routes are rate
+            // limited and authenticated here. The last layer added runs
+            // first: `guard` puts the caller in place, then `not_worker`
+            // keeps a worker device out of memory.
+            .route_layer(from_fn(not_worker))
             .route_layer(from_fn_with_state(state.clone(), guard))
             .merge(admin)
             .merge(enrolment)
+            .merge(jobs::routes(state.clone()))
             .route("/health", get(handle_health).fallback(not_found))
             .route(
                 recall_wire::DISCOVERY_PATH,
@@ -294,6 +318,12 @@ impl Server {
                         Ok(Err(e)) => eprintln!("device sweep failed: {e:#}"),
                         Err(_) => {}
                     }
+                    let s = state.clone();
+                    match tokio::task::spawn_blocking(move || jobs::prune(&s)).await {
+                        Ok(Ok(0)) | Err(_) => {}
+                        Ok(Ok(n)) => eprintln!("removed {n} finished merge jobs"),
+                        Ok(Err(e)) => eprintln!("job prune failed: {e:#}"),
+                    }
                     tokio::time::sleep(SWEEP_EVERY).await;
                 }
             }));
@@ -345,6 +375,14 @@ impl Server {
         F: Future<Output = ()> + Send + 'static,
     {
         let tasks = self.start_background();
+        let state = self.state.clone();
+        let shutdown = async move {
+            shutdown.await;
+            // A claim waiting for a job would otherwise hold the shutdown
+            // for up to its whole wait.
+            state.closing.store(true, Ordering::Relaxed);
+            state.jobs_ready.notify_waiters();
+        };
         let result = axum::serve(
             listener,
             self.router()

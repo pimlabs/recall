@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/recall-wire",
     "crates/recall-hooks",
+    "crates/recall-worker",
     "crates/recall-server",
     "crates/recall",
 ]
@@ -19,6 +20,9 @@ repository = "https://github.com/pimlabs/recall"
 recall-wire = { path = "crates/recall-wire", version = "0.4.0" }
 recall-hooks = { path = "crates/recall-hooks", version = "0.4.0" }
 recall-server = { path = "crates/recall-server", version = "0.4.0" }
+# Without its HTTP client by default: recall-server uses only its merge
+# code. recall-worker's own binary turns `client` back on.
+recall-worker = { path = "crates/recall-worker", version = "0.4.0", default-features = false }
 
 anyhow = "1"
 thiserror = "2"

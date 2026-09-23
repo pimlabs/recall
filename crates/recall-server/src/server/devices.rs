@@ -21,7 +21,7 @@ use axum::Extension;
 use recall_wire::devices::{
     self, displayable, normalize_user_code, ACCESS_DENIED, AUTHORIZATION_PENDING, CODE_TTL_SECONDS,
     ENROLL_KEY_PREFIX, EXPIRED_TOKEN, INVALID_GRANT, MAX_ENROLL_KEY_DAYS, MAX_TAG_CHARS,
-    POLL_INTERVAL_SECONDS, SCOPE_ADMIN, SCOPE_SYNC, SLOW_DOWN, USER_CODE_ALPHABET,
+    POLL_INTERVAL_SECONDS, SCOPE_ADMIN, SCOPE_SYNC, SCOPE_WORKER, SLOW_DOWN, USER_CODE_ALPHABET,
 };
 use recall_wire::signature::encode_public_key;
 use recall_wire::{
@@ -110,7 +110,7 @@ fn base32(bytes: &[u8]) -> String {
 }
 
 /// `prefix` and `bytes` random bytes in [`base32`].
-fn new_id(prefix: &str, bytes: usize) -> anyhow::Result<String> {
+pub(super) fn new_id(prefix: &str, bytes: usize) -> anyhow::Result<String> {
     Ok(format!("{prefix}{}", base32(&random(bytes)?)))
 }
 
@@ -394,8 +394,11 @@ pub(super) async fn handle_approve(State(state): State<Arc<AppState>>, bytes: By
         Ok(req) => req,
         Err(refused) => return refused.into_response(),
     };
-    if req.scope != SCOPE_SYNC && req.scope != SCOPE_ADMIN {
-        return error(StatusCode::BAD_REQUEST, "scope must be sync or admin");
+    if ![SCOPE_SYNC, SCOPE_ADMIN, SCOPE_WORKER].contains(&req.scope.as_str()) {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "scope must be sync, admin or worker",
+        );
     }
     let code = match user_code(&req.user_code) {
         Ok(code) => code,

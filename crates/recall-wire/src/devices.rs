@@ -66,6 +66,11 @@ pub const SCOPE_SYNC: &str = "sync";
 /// keys. It includes [`SCOPE_SYNC`].
 pub const SCOPE_ADMIN: &str = "admin";
 
+/// A device that may claim merge jobs and post their results, and nothing
+/// else: not push, not pull, not manage devices. It is how `recall-worker`
+/// is enrolled; see [`crate::jobs`]. An enrolment key never makes one.
+pub const SCOPE_WORKER: &str = "worker";
+
 /// How long a user code stays valid, in seconds: fifteen minutes, as
 /// GitHub's device flow gives.
 pub const CODE_TTL_SECONDS: u64 = 900;
@@ -304,7 +309,7 @@ pub struct ApproveRequest {
     /// hyphen.
     pub user_code: String,
     /// [`SCOPE_SYNC`] unless given; [`SCOPE_ADMIN`] to let the device
-    /// manage others.
+    /// manage others; [`SCOPE_WORKER`] for `recall-worker`.
     #[serde(default = "default_scope")]
     pub scope: String,
     /// The key fingerprint the approver was shown, by the machine or by
