@@ -2342,3 +2342,46 @@ async fn direct_tls_serves_every_route_group_the_same_way() {
     let (served, ()) = tokio::join!(serving, client);
     served.unwrap();
 }
+
+/// A device whose scope this server does not know is refused, not read as
+/// `sync`. A later version adds a `worker` scope that it keeps away from
+/// memory; after a rollback to this version the worker's row is still
+/// there, and must not be able to read or write every project.
+#[tokio::test]
+async fn a_device_with_a_scope_this_server_does_not_know_is_refused() {
+    let h = harness(|_| {});
+    let mut worker = Machine::new(40);
+    stored_device(&h, &mut worker, "sync");
+
+    // This version's schema only admits `sync` and `admin`; a later one
+    // widens it. Standing in for that database, as a rollback leaves it.
+    let db = rusqlite::Connection::open(h.dir.path().join("recall.db")).unwrap();
+    db.execute_batch("PRAGMA ignore_check_constraints = ON;")
+        .unwrap();
+    db.execute(
+        "UPDATE devices SET scope = 'worker' WHERE id = ?1",
+        [&worker.id],
+    )
+    .unwrap();
+    drop(db);
+
+    let s = Signing::by(&worker);
+    let (status, body) = h
+        .signed("GET", "/sync?project_key=acme%2Fapp", None, &s)
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert!(String::from_utf8_lossy(&body).contains("does not know the scope"));
+
+    let s = Signing::by(&worker);
+    assert_eq!(
+        h.signed("POST", "/sync", Some(push_body("# from a worker\n")), &s)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+}

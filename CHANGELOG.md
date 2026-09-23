@@ -49,6 +49,10 @@ break will be described here in full rather than smoothed over.
 - **Authkeys** enrol ephemeral devices unless told otherwise, enrol
   at most 25 unrevoked devices unless `max_devices` says otherwise, and can
   be revoked together with every device they enrolled.
+- **A device whose scope the server does not know is refused** (403),
+  rather than treated as a `sync` device. A later version adds scopes
+  that must not reach memory; if the server is ever rolled back to this
+  one, such a device can do nothing until it is revoked.
 - **`GET /admin/stats` needs the `admin` scope from a device.** Nothing
   changes for `RECALL_TOKEN`, which is all anything uses today.
 - **Signed requests are checked before their body is read**, the
