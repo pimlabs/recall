@@ -252,6 +252,27 @@ impl Harness {
         device
     }
 
+    /// Enrols as `name` by code, which is answered with a code whatever
+    /// the name, then approves the code with the operator's token,
+    /// answering with what approving it said.
+    async fn approve_as(&self, name: &str, public_key: &str) -> (StatusCode, Bytes) {
+        let pending: EnrollPending = ok(self
+            .call(
+                "POST",
+                devices::ENROLL_PATH,
+                None,
+                Some(json!({"name": name, "public_key": public_key})),
+            )
+            .await);
+        self.call(
+            "POST",
+            devices::APPROVE_PATH,
+            Some(TOKEN),
+            Some(json!({"user_code": pending.user_code})),
+        )
+        .await
+    }
+
     async fn poll(&self, enrollment_id: &str) -> (StatusCode, Bytes) {
         self.call(
             "POST",
@@ -1685,15 +1706,7 @@ async fn names_are_plain_unique_and_not_chosen_by_key_enrolments() {
     h.enrol(&mut laptop, "sync").await;
     let clash = "a device named Laptop already exists; revoke it first, or enrol with another name";
     assert_eq!(
-        error_of(
-            h.call(
-                "POST",
-                devices::ENROLL_PATH,
-                None,
-                Some(json!({"name": "Laptop", "public_key": key})),
-            )
-            .await
-        ),
+        error_of(h.approve_as("Laptop", &key).await),
         (StatusCode::CONFLICT, clash.into())
     );
 
@@ -1774,16 +1787,44 @@ async fn a_name_that_looks_like_a_devices_is_that_name() {
         let mut first = Machine::named(seed, taken);
         assert_eq!(h.enrol(&mut first, "sync").await.name, stored);
         let (status, why) = error_of(
-            h.call(
-                "POST",
-                devices::ENROLL_PATH,
-                None,
-                Some(json!({"name": lookalike, "public_key": Machine::new(seed + 1).public_key()})),
-            )
-            .await,
+            h.approve_as(lookalike, &Machine::new(seed + 1).public_key())
+                .await,
         );
         assert_eq!(status, StatusCode::CONFLICT, "{lookalike:?}: {why}");
     }
+}
+
+/// Verification finding N7: enrolling needs no credential, and answered
+/// a name already taken with a 409 naming it, so anyone could learn the
+/// owner's device names a question at a time. Enrolling now answers the
+/// same whether the name is taken or not; approving is what says.
+#[tokio::test]
+async fn enrolling_does_not_say_whether_a_name_is_taken() {
+    let h = harness(|_| {});
+    let mut laptop = Machine::named(66, "laptop");
+    h.enrol(&mut laptop, "sync").await;
+
+    let mut answers = Vec::new();
+    for (name, seed) in [("laptop", 67), ("no-such-device", 68)] {
+        let req = Request::builder()
+            .method("POST")
+            .uri(devices::ENROLL_PATH)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"name": name, "public_key": Machine::new(seed).public_key()}).to_string(),
+            ))
+            .unwrap();
+        let (status, headers, body) = h.send(req).await;
+        let pending: EnrollPending = serde_json::from_slice(&body).unwrap();
+        answers.push((
+            status,
+            headers.get("cache-control").cloned(),
+            pending.expires_in,
+            pending.interval,
+        ));
+    }
+    assert_eq!(answers[0], answers[1]);
+    assert_eq!(answers[0].0, StatusCode::OK);
 }
 
 /// Review finding 5: nonces live in memory, so a server that has just

@@ -168,14 +168,12 @@ pub(super) async fn handle_enroll(
         return enroll_with_key(&state, enroll_key, &public_key, &req.agent);
     }
 
+    // Whether the name is taken is not said here, only when the code is
+    // approved. This route needs no credential, so an answer that said it
+    // would tell anyone which names the owner's devices have, a question
+    // at a time; asked this way, each question waits for approval, and
+    // counts against its address's few waiting places.
     let name = &plain_name(&req.name);
-    // Said now, so the machine can pick another name before anyone is
-    // asked to approve it; approving checks again.
-    match state.store.name_in_use(name) {
-        Ok(false) => {}
-        Ok(true) => return name_taken(name).into_response(),
-        Err(e) => return internal(e),
-    }
     let now = now();
     let expires_at = later(Duration::from_secs(CODE_TTL_SECONDS));
     let enrollment_id = match new_id("enr_", 16) {

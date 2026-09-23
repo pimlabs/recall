@@ -653,6 +653,15 @@ The machine should show the code, and its key's fingerprint, so the owner
 can check the device list shows the same one. The fingerprint is `SHA256:`
 and the unpadded base64 of the SHA-256 of the raw 32-byte key.
 
+The answer is the same whether or not a device already has the name.
+Anyone may call this route, so an answer that said the name was taken
+would tell anyone the names of the owner's devices, one question at a
+time; asked this way, every question is an enrolment waiting for the
+owner, and counts against its address's five. The name is checked when
+the code is approved: approving one whose name is taken is a `409`, and
+the owner can deny the code, so the machine hears `access_denied` and can
+enrol again under another name.
+
 ### Response: approved with an enrolment key
 
 ```json
@@ -674,7 +683,6 @@ device is removed once it has made no signed request for
 | `400` | Bad JSON, or a field that breaks the rules above, with the rule as the error. |
 | `401` | `{"error":"unauthorized: this enrolment key is not one this server issued"}`, `…has expired` or `…has been revoked`. |
 | `403` | The enrolment key already has as many unrevoked devices as its `max_devices`. |
-| `409` | An unrevoked device already has the name: `{"error":"a device named laptop already exists; revoke it first, or enrol with another name"}`. |
 | `413` | A body over 8 KiB. |
 | `429` | Rate limited; or five enrolments from this address are already waiting: `{"error":"too many enrolments from this address are waiting for approval; approve or deny them, or let them expire"}`. The address is counted as the rate limiter counts it, an IPv6 one by its /64. |
 | `503` | A thousand enrolments are already waiting for approval: `{"error":"too many enrolments are waiting for approval, try again later"}`. |
@@ -782,7 +790,7 @@ refused:
 | `400` | Bad JSON, a `scope` other than `sync` or `admin`, or a `user_code` that is not eight letters of the alphabet: `{"error":"user_code must be the 8 letters the device shows, such as WDJB-MJHT"}`. |
 | `401`, `403` | See [Authentication](#authentication). |
 | `404` | `{"error":"no enrolment is waiting with that code"}` |
-| `409` | `{"error":"that code was already approved or denied"}`; or, with `fingerprint`, `{"error":"that code's key does not have the fingerprint given; nothing was approved"}`; or an unrevoked device already has the name the machine asked for. |
+| `409` | `{"error":"that code was already approved or denied"}`; or, with `fingerprint`, `{"error":"that code's key does not have the fingerprint given; nothing was approved"}`; or an unrevoked device already has the name the machine asked for, or one that reads as it: `{"error":"a device named laptop already exists; revoke it first, or enrol with another name"}`. Nothing is approved; deny the code, and the machine hears `access_denied`. |
 | `410` | `{"error":"that code has expired; start the enrolment again"}` |
 
 ## `GET /v1/devices`

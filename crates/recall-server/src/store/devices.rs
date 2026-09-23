@@ -593,11 +593,6 @@ impl Store {
         )))
     }
 
-    /// Whether an unrevoked device already has `name`, without case.
-    pub fn name_in_use(&self, name: &str) -> Result<bool> {
-        name_taken(&self.lock(), name)
-    }
-
     /// One device, revoked or not.
     pub fn device(&self, id: &str) -> Result<Option<Device>> {
         get_device(&self.lock(), id)
@@ -962,7 +957,6 @@ mod tests {
                 .unwrap(),
             Inserted::NameTaken
         );
-        assert!(st.name_in_use("LAPTOP").unwrap());
 
         enroll(&st, "enr_a", "BCDF-GHJK", 0);
         assert_eq!(
@@ -972,7 +966,6 @@ mod tests {
         );
 
         st.revoke_device("dev_1", &ts(2)).unwrap();
-        assert!(!st.name_in_use("laptop").unwrap());
         assert!(matches!(
             st.approve_enrollment("BCDF-GHJK", "dev_2", "sync", &ts(3), None)
                 .unwrap(),

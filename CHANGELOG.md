@@ -41,8 +41,11 @@ break will be described here in full rather than smoothed over.
 - **Device names are plain and unique.** A name with control, format or
   invisible characters (a zero-width space, a right-to-left override) is
   refused, no two unrevoked devices share a name or names that read alike
-  (`Laptop`, or `lаptop` with a Cyrillic `а`, beside `laptop`), and a device an
-  enrolment key enrols is named by the server after the key's tag.
+  (`Laptop`, or `lаptop` with a Cyrillic `а`, beside `laptop`), and a
+  device an enrolment key enrols is named by the server after the key's
+  tag. A name already taken is refused when its code is approved, not when
+  the machine enrols, so the unauthenticated enrol route says nothing about
+  which names exist.
 - **Enrolment keys** enrol ephemeral devices unless told otherwise, enrol
   at most 25 unrevoked devices unless `max_devices` says otherwise, and can
   be revoked together with every device they enrolled.

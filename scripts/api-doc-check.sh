@@ -234,13 +234,28 @@ check "a code is approved once" '409' \
      -d "{\"user_code\":\"$CODE\"}" "$URL/v1/devices/approve")"
 check "a decided code is no longer pending" '{"error":"that code was already approved or denied"}' \
   "$(curl -s "${auth[@]}" "$URL/v1/devices/pending/$CODE")"
-check "a second device named laptop, in any case, is 409" \
+approve_code() { # user_code
+  curl -s -X POST "${auth[@]}" "${json[@]}" -d "{\"user_code\":\"$1\"}" "$URL/v1/devices/approve"
+}
+deny_code() { # user_code
+  curl -s -o /dev/null -X POST "${auth[@]}" "${json[@]}" -d "{\"user_code\":\"$1\"}" "$URL/v1/devices/deny"
+}
+enroll Laptop >"$WORK/clash.json"
+check "enrolling as a name already taken answers as any enrolment does" 'enrollment_id user_code expires_in interval' \
+  "$(keys "$WORK/clash.json")"
+check "approving a second device named laptop, in any case, is 409" \
   '{"error":"a device named Laptop already exists; revoke it first, or enrol with another name"}' \
-  "$(enroll Laptop)"
-check "laptop with a Cyrillic a, or a 1 for its l, is laptop too: 409" '409 409' \
-  "$(for name in 'lаptop' 1aptop; do
-       curl -s -o /dev/null -w '%{http_code} ' -X POST "${json[@]}" \
-         -d "{\"name\":\"$name\",\"public_key\":\"$KEY\"}" "$URL/v1/devices/enroll"
+  "$(approve_code "$(field "$WORK/clash.json" user_code)")"
+deny_code "$(field "$WORK/clash.json" user_code)"
+# The Cyrillic a (U+0430) goes as a JSON escape, so this file stays ASCII.
+CYRILLIC_LAPTOP=$(printf 'l\\u%sptop' 0430)
+check "laptop with a Cyrillic a, or a 1 for its l, is laptop too: 409 on approval" '409 409' \
+  "$(for name in "$CYRILLIC_LAPTOP" 1aptop; do
+       enroll "$name" >"$WORK/lookalike.json"
+       code=$(field "$WORK/lookalike.json" user_code)
+       curl -s -o /dev/null -w '%{http_code} ' -X POST "${auth[@]}" "${json[@]}" \
+         -d "{\"user_code\":\"$code\"}" "$URL/v1/devices/approve"
+       deny_code "$code"
      done | sed 's/ $//')"
 check "who am I, with the token: not a device" \
   '404 {"error":"not a device: this request was authenticated with RECALL_TOKEN"}' \
