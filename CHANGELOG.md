@@ -60,6 +60,37 @@ break will be described here in full rather than smoothed over.
 - **Three new tables in the database**, `devices`, `device_enrollments`
   and `enroll_keys`, created on start. `memory_files` is untouched, and an
   older server ignores the new tables, so rolling back still works.
+- **Merging can move out of the server, into `recall-worker`.** A new
+  binary and a second compose service with no port at all: an enrolled
+  device with a new `worker` scope, which claims conflicting pushes from
+  a queue, merges them with its own `claude` CLI, and posts the result
+  back. The `claude` login then lives on the worker's volume, not in the
+  container the internet reaches. Nothing changes until you approve the
+  worker's code with `"scope": "worker"`; see "The merge worker" in
+  `deploy/README.md`. Without an approved worker the server merges inline
+  exactly as before.
+- **With a worker, a conflicting push is answered at once.** It is stored
+  as sent, `merged: false`, with a new `merge_job` field naming the queued
+  job, and the merged file arrives with the next pull. A merge is written
+  only if the file has not changed since; otherwise it is merged again
+  with the newer version. `merge_job` is omitted when no job was queued, so
+  a server without a worker answers byte for byte as before.
+- **New routes:** `POST /v1/jobs/claim` and `POST /v1/jobs/{id}/result` for
+  the worker (a worker device only, not even `RECALL_TOKEN`), and
+  `GET /v1/jobs` and `POST /v1/jobs/{id}/retry` for the owner. A worker
+  device can use nothing else: it cannot pull or push memory, and an
+  enrolment key never makes one.
+- **`/health`'s `merge` gains `worker` and `queue`** while a worker is
+  enrolled, and `claude_cli` is then the worker's CLI. Discovery lists a
+  new `merge_queue` capability.
+- **`POST /v1/devices/approve` accepts `"scope": "worker"`**, and its
+  refusal of an unknown scope now says `scope must be sync, admin or
+  worker`.
+- **Two database changes, both made on start:** a `jobs` table, and the
+  `devices` table rebuilt so its scope may be `worker`, keeping every row.
+  An older server ignores `jobs` and reads a worker as an ordinary device.
+- **Releases publish `recall-worker`** for Linux amd64 and arm64, static,
+  beside `recall-server`, in the same `checksums.txt`, and on crates.io.
 
 ## 0.4.0 — 2026-09-23
 
