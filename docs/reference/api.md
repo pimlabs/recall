@@ -1,9 +1,11 @@
 # HTTP API
 
-Recall's server exposes six routes for memory and the deployment, and, since
-0.4.1, ten under `/v1` for devices. Two carry memory files, two are for
-looking at the deployment, one says what the server is and speaks, one is a
-browser page, and the device routes enrol machines and manage them.
+Recall's server exposes six routes for memory and the deployment, ten under
+`/v1` for devices, and, since 0.4.1, three more under `/v1` for the audit
+log. Two carry memory files, two are for looking at the deployment, one says
+what the server is and speaks, one is a browser page, the device routes
+enrol machines and manage them, and the audit routes read the Merkle tree
+kept over every authenticated action.
 
 This is a **frozen** surface: field names, field order, and the difference
 between `null` and `""` are compatibility guarantees, not style. The shape was
@@ -41,6 +43,9 @@ asserts what this page says about them.
 | [`POST /v1/enroll-keys`](#post-v1enroll-keys) | admin | Make an enrolment key, for cloud sessions |
 | [`GET /v1/enroll-keys`](#get-v1enroll-keys-and-post-v1enroll-keysidrevoke) | admin | Every enrolment key |
 | [`POST /v1/enroll-keys/{id}/revoke`](#get-v1enroll-keys-and-post-v1enroll-keysidrevoke) | admin | Stop one enrolling anything more |
+| [`GET /v1/audit/checkpoint`](#get-v1auditcheckpoint) | yes | The audit tree's size and root |
+| [`GET /v1/audit/entries`](#get-v1auditentries) | yes | Leaves `start` to `end - 1` |
+| [`GET /v1/audit/consistency`](#get-v1auditconsistency) | yes | The proof that `second` extends `first` |
 
 "yes" is either credential below; "admin" is `RECALL_TOKEN` or a device
 approved with the `admin` scope; "device" is any device's signature.
@@ -375,6 +380,17 @@ kept apart in the type, not by convention.
 An unknown `project_key` is not an error: it returns an empty `files` array.
 That is what a machine syncing a project for the first time sees.
 
+Since 0.4.1, the response also carries, from the [audit log](#audit):
+
+```
+Recall-Audit-Checkpoint: 1042 CsUYapGGPo4dkMgIAUqom/Xajj7h2fB2MPA3j2jxq2I=
+```
+
+`<tree_size> <root_hash>`, the same two fields [`GET
+/v1/audit/checkpoint`](#get-v1auditcheckpoint) answers with, so every pull
+leaves the client a checkpoint to verify future reads against without
+another request.
+
 ### Status codes
 
 | Code | When |
@@ -414,6 +430,7 @@ server at all, and what the server can do.
   "min_client": "0.1.0",
   "auth": { "methods": ["bearer", "device-sig-v1"] },
   "capabilities": {
+    "audit": { "leaf_version": 1, "max_page": 1000 },
     "devices": {
       "enroll_path": "/v1/devices/enroll",
       "code_ttl_seconds": 900,
@@ -441,6 +458,9 @@ server at all, and what the server can do.
 | `min_client` | The oldest client version the server accepts. Every client released so far is accepted. |
 | `auth.methods` | How a client may authenticate. `bearer` is the `RECALL_TOKEN` above; `device-sig-v1`, from 0.4.1, is a [device signature](#device-signatures). New methods are appended; none is removed within a protocol version. |
 | `capabilities` | What the server can do, by name. Each is an object, so it can carry parameters later. |
+| `capabilities.audit` | From 0.4.1: the server keeps an audit log. |
+| `capabilities.audit.leaf_version` | The leaf format this server writes, `v` in every leaf: 1. |
+| `capabilities.audit.max_page` | The most entries one page of [`GET /v1/audit/entries`](#get-v1auditentries) holds: 1000. |
 | `capabilities.devices` | From 0.4.1: the server enrols devices and accepts their signatures. |
 | `capabilities.devices.enroll_path` | Where enrolment starts, [`/v1/devices/enroll`](#post-v1devicesenroll). |
 | `capabilities.devices.code_ttl_seconds` | How long a user code can be approved: 900. |
@@ -865,6 +885,122 @@ now stands. Its body may be empty; with `{"revoke_devices": true}` every
 device the key enrolled is revoked too, which is what to do when a key has
 leaked. Without it they keep working. `404` with `{"error":"no enrolment
 key has that id"}` for an id that is not there.
+
+---
+
+## Audit
+
+Since 0.4.1. Every authenticated push, pull and delete, and every change to
+a device or enrolment key, appends one **leaf** to an append-only Merkle
+tree — RFC 9162 §2.1 exactly, SHA-256, the same tree Certificate
+Transparency and Sigstore Rekor use. A leaf hashes as `SHA-256(0x00 ||
+leaf)`, an inner node as `SHA-256(0x01 || left || right)`, and the tree
+splits at the largest power of two below its size. The leaf and the state
+change it records commit in one transaction, so the log can never show an
+action that did not happen, or miss one that did. Unauthenticated routes,
+refused requests, and the audit routes themselves append nothing — reading
+the log does not grow it.
+
+**The leaf, version 1.** Shown indented; stored and hashed as one compact
+line, exactly as written — a verifier hashes the bytes it was given, never
+a re-serialization:
+
+```json
+{"v":1,"seq":1001,"at":"2026-10-02T09:14:05.402Z","action":"push",
+ "actor":{"kind":"device","id":"dev_eerivjyffuwecbgzybcesz5hwi","name":"laptop","agent":"recall/0.4.5 (macos-aarch64)"},
+ "subject":{"project_key":"acme/app","file_path":"topics/auth.md","deleted":false,
+            "stored_sha256":"4b1f…","base_sha256":"9f2c…","merge_job":null},
+ "request":{"body_sha256":"47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+            "signature_base":"\"@method\": POST\n\"@authority\": recall-server.pimlabs.id\n…","signature":"…"}}
+```
+
+| Field | Meaning |
+|---|---|
+| `v` | The leaf format, `1`. |
+| `seq` | Its index in the tree, from 0. |
+| `at` | When it was appended. |
+| `action` | `push`, `delete`, `pull`, `approve`, `deny`, `revoke`, `sweep`, `enroll_key_create`, `enroll_key_revoke`, or `start`. |
+| `actor.kind` | `device` (a signed request), `operator` (`RECALL_TOKEN`), or `server` (a sweep, or `start`, which the server appends once at boot naming the version it started as). |
+| `subject` | What changed, and the hash of what is now stored — never the content. Its fields vary by `action`: a file's `project_key`/`file_path`/`deleted`/`stored_sha256`/`base_sha256` for `push` and `delete`; `project_key` alone for `pull`; a device's own `device_id`/`name`/`scope`/`public_key`/`fingerprint` for `approve`, so a signature it made still checks after the device row is gone; `device_id`/`name` for `revoke` and `sweep`; `user_code`/`name` for `deny`; an enrolment key's `enroll_key_id`/`tag`/`ephemeral`/`max_devices` for `enroll_key_create` and `enroll_key_id`/`revoke_devices` for `enroll_key_revoke`; `version` for `start`. |
+| `request` | For a signed request: the SHA-256 of its body as `Content-Digest` carried it, standard base64; the exact RFC 9421 §2.5 signature base the device's signature verified against; and the signature, standard base64. `null` for the operator or the server, which sign nothing. |
+
+`merge_job` is always `null` in 0.4.1 — reserved for the merge queue.
+
+## `GET /v1/audit/checkpoint`
+
+```json
+{ "tree_size": 1042, "root_hash": "CsUYapGGPo4dkMgIAUqom/Xajj7h2fB2MPA3j2jxq2I=" }
+```
+
+`root_hash` is standard base64, as in a [C2SP
+tlog-checkpoint](https://github.com/C2SP/C2SP/blob/main/tlog-checkpoint.md)
+— unlike `base_sha256` and every other file hash on this API, which stay
+lowercase hex.
+
+## `GET /v1/audit/entries`
+
+```
+GET /v1/audit/entries?start=1000&end=1002
+```
+
+```json
+{
+  "start": 1000,
+  "end": 1002,
+  "tree_size": 1042,
+  "entries": [
+    "{\"v\":1,\"seq\":1000,\"at\":\"2026-10-02T09:14:03.118Z\",\"action\":\"pull\",…}",
+    "{\"v\":1,\"seq\":1001,\"at\":\"2026-10-02T09:14:05.402Z\",\"action\":\"push\",…}"
+  ]
+}
+```
+
+Leaves `start` to `end - 1`, each the exact string that was hashed and
+stored. `end` beyond `tree_size`, `end` before `start`, or a page over
+1,000 entries, is `400`.
+
+## `GET /v1/audit/consistency`
+
+```
+GET /v1/audit/consistency?first=900&second=1042
+```
+
+```json
+{ "first": 900, "second": 1042, "proof": ["t8Qm…=", "Hc0v…="] }
+```
+
+The RFC 9162 §2.1.4 proof that the tree at `second` extends the tree at
+`first`: given a root once trusted for `first` (a checkpoint saved from an
+earlier pull), this proves the log has only grown since, never been
+rewritten. `first` below 1 or above `second`, or `second` past the log's
+current size, is `400`.
+
+### Status codes
+
+| Code | When |
+|:---:|---|
+| `200` | Including an empty `entries` array for `start == end`. |
+| `400` | A bad range on `entries` or `consistency`. |
+| `401` | Bad or missing credentials. |
+| `429` | Rate limited. |
+
+### Verifying offline
+
+`GET /v1/audit/entries` can page through every leaf the log holds into a
+file, one per line, after a first line holding a checkpoint. Given that
+export, `scripts/audit-verify.py` recomputes the tree with nothing but
+`hashlib` and checks:
+
+1. `seq` runs from 0 without gaps.
+2. The root recomputed over every leaf matches the checkpoint on the export's
+   first line.
+3. A signed leaf's `signature` verifies against `signature_base` with the
+   public key its own `approve` leaf carries — the log verifies itself, with
+   no need of the live `devices` table, even for a device since swept away.
+
+It exits non-zero on a changed byte, a removed leaf, two swapped leaves, or
+a signature that does not verify, and is meant to be run by the owner
+against a log exported this way, not as part of any automated pipeline.
 
 ---
 

@@ -22,10 +22,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use recall_wire::{
-    AdminStats, ApproveRequest, DenyRequest, DenyResponse, Device, DeviceIdentity, DeviceList,
-    Discovery, EnrollApproved, EnrollKey, EnrollKeyCreated, EnrollKeyList, EnrollKeyRequest,
-    EnrollKeyRevokeRequest, EnrollPending, EnrollPollRequest, EnrollPollResponse, EnrollRequest,
-    ErrorResponse, Health, PendingEnrollment, PushRequest, PushResponse, SyncResponse,
+    AdminStats, ApproveRequest, AuditCheckpoint, AuditConsistencyResponse, AuditEntriesResponse,
+    DenyRequest, DenyResponse, Device, DeviceIdentity, DeviceList, Discovery, EnrollApproved,
+    EnrollKey, EnrollKeyCreated, EnrollKeyList, EnrollKeyRequest, EnrollKeyRevokeRequest,
+    EnrollPending, EnrollPollRequest, EnrollPollResponse, EnrollRequest, ErrorResponse, Health,
+    PendingEnrollment, PushRequest, PushResponse, SyncResponse,
 };
 use serde_json::Value;
 
@@ -107,6 +108,17 @@ fn round_trip(kind: &str, bytes: &[u8]) -> Result<Value, String> {
         "enroll_key_create_response" => go::<EnrollKeyCreated>(bytes),
         "enroll_key_list_response" => go::<EnrollKeyList>(bytes),
         "enroll_key_revoke_response" => go::<EnrollKey>(bytes),
+        "audit_checkpoint_response" => go::<AuditCheckpoint>(bytes),
+        "audit_entries_response" => go::<AuditEntriesResponse>(bytes),
+        "audit_consistency_response" => go::<AuditConsistencyResponse>(bytes),
+        // A leaf's own shape lives in recall_server::audit::leaf, not this
+        // crate — it varies by `action`, and no consumer here re-serializes
+        // it (see that module's docs). What golden.rs can still pin is that
+        // it is valid JSON, and that every key present in the oldest
+        // capture is still present: parsing to a generic `Value` and
+        // serializing it back does that, the same way it would for a typed
+        // shape.
+        "audit_leaf_push" | "audit_leaf_approve" => go::<Value>(bytes),
         other => Err(format!("no type is known for the fixture kind {other:?}")),
     }
 }
@@ -201,6 +213,11 @@ fn every_kind_has_a_fixture() {
         "enroll_key_create_response",
         "enroll_key_list_response",
         "enroll_key_revoke_response",
+        "audit_checkpoint_response",
+        "audit_entries_response",
+        "audit_consistency_response",
+        "audit_leaf_push",
+        "audit_leaf_approve",
     ] {
         assert!(
             all.iter().any(|(_, k, _)| k == kind),

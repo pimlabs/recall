@@ -18,6 +18,8 @@ newer client keeps reading older servers.
 | `enroll_response_pending`, `enroll_response_approved`, `enroll_poll_response`, `enroll_poll_error`, `device_pending_response`, `device_approve_response`, `device_me_response`, `device_deny_response`, `device_list_response`, `device_revoke_response`, `enroll_key_create_response`, `enroll_key_list_response`, `enroll_key_revoke_response` | The same script: one enrolment followed through, each response a real one from the step before |
 | `push_request`, `push_request_delete` | Written from recall-wire's `PushRequest` at that tag: its field order and its skip rules |
 | `enroll_request`, `enroll_request_with_key`, `enroll_poll_request`, `device_approve_request`, `device_deny_request`, `enroll_key_create_request`, `enroll_key_revoke_request` | Written the same way, from recall-wire's `devices` types |
+| `audit_checkpoint_response`, `audit_entries_response`, `audit_consistency_response` | Written from recall-wire's `audit` types |
+| `audit_leaf_push`, `audit_leaf_approve` | A leaf exactly as `recall_server::audit::leaf::encode` writes one, for the `push` and `approve` actions — hand-built rather than captured, since a leaf's shape lives in `recall-server`, not this crate; see `docs/design/part5-plan.md`'s "PR 1: audit" for the field-by-field meaning |
 
 `discovery` exists from the version that introduced `/.well-known/recall`
 onwards; older servers answer 404 and have no file. The device kinds exist
@@ -39,7 +41,9 @@ out; that is the one time a file here is rewritten.
 holding only what 0.4.1 adds or changes (the device kinds, and `discovery`,
 which gained `device-sig-v1` and the `devices` capability). Being
 unreleased, it was captured again as the device shapes changed during
-review; replace it once more from the release archive when 0.4.1 is out.
+review, and again for the audit routes and `discovery`'s `audit`
+capability (part of the same unreleased version); replace it once more
+from the release archive when 0.4.1 is out.
 
 ## Rules
 

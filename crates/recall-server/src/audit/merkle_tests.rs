@@ -210,6 +210,40 @@ fn the_frontier_matches_recomputation_at_every_size() {
     assert_eq!(Frontier::rebuild(&hashes).root(), frontier.root());
 }
 
+/// The append-only property itself: a tree whose leaf 2 was rewritten
+/// after a checkpoint was taken at size 4 can extend to any size it likes,
+/// but no proof built from its own (tampered) leaves ever verifies against
+/// the checkpoint's root — the only way to satisfy [`verify_consistency`]
+/// is to have actually kept every leaf the checkpoint was taken over.
+#[test]
+fn a_rewritten_leaf_breaks_consistency_with_an_earlier_checkpoint() {
+    let hashes: Vec<Hash> = (0u32..8).map(|i| hash_leaf(&i.to_be_bytes())).collect();
+    let honest_root_at_4 = root(&hashes[..4]);
+
+    // The same tree, but leaf 2 was rewritten after that checkpoint.
+    let mut tampered = hashes.clone();
+    tampered[2] = hash_leaf(b"not what was there before");
+    let tampered_root_at_8 = root(&tampered);
+
+    let forged_proof = consistency(4, 8, &tampered);
+    assert!(
+        !verify_consistency(4, &honest_root_at_4, 8, &tampered_root_at_8, &forged_proof),
+        "a rewrite must not produce a tree that extends the honest checkpoint"
+    );
+
+    // The honest continuation — nothing before size 4 touched — still
+    // verifies, which is what confirms the failure above is about the
+    // rewrite and not some unrelated bug.
+    let honest_proof = consistency(4, 8, &hashes);
+    assert!(verify_consistency(
+        4,
+        &honest_root_at_4,
+        8,
+        &root(&hashes),
+        &honest_proof
+    ));
+}
+
 /// Every consistency proof between sizes up to 64 verifies, over an
 /// arbitrary (not the 8-item KAT) run of leaves, so the property is checked
 /// well past the vectors' own size.
