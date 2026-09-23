@@ -283,6 +283,63 @@ check "a sixth enrolment waiting from one address is 429" '429' \
   "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${json[@]}" \
      -d "{\"name\":\"waiting-6\",\"public_key\":\"$KEY\"}" "$URL/v1/devices/enroll")"
 
+echo "The admin page and passkey sign-in"
+curl -s -D "$WORK/page.headers" -o /dev/null "$URL/admin"
+header() { # file, name
+  tr -d '\r' <"$1" | awk -v h="$(printf '%s' "$2" | tr 'A-Z' 'a-z'):" 'tolower($1)==h{$1=""; sub(/^ /,""); print}'
+}
+check "the page's CSP allows no inline code by default and no eval" 'True' \
+  "$(header "$WORK/page.headers" content-security-policy | python3 -c '
+import sys; c=sys.stdin.read()
+print("unsafe" not in c and "default-src '"'"'none'"'"'" in c and "script-src '"'"'sha256-" in c and "frame-ancestors '"'"'none'"'"'" in c)')"
+check "the page cannot be framed" 'DENY' "$(header "$WORK/page.headers" x-frame-options)"
+check "the page sends no referrer" 'no-referrer' "$(header "$WORK/page.headers" referrer-policy)"
+curl -s "$URL/admin/session" >"$WORK/session.json"
+check "the session status needs no token" 'passkeys bootstrapped session' "$(keys "$WORK/session.json")"
+check "without RECALL_PUBLIC_URL passkeys are off, and it says why" 'False True None' \
+  "$(python3 -c '
+import json,sys; d=json.load(open(sys.argv[1]))
+print(d["passkeys"]["enabled"], "RECALL_PUBLIC_URL is not set" in d["passkeys"]["reason"], d["session"])' "$WORK/session.json")"
+check "signing in with passkeys off is 503" '503' \
+  "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$URL/admin/login/start")"
+check "the bootstrap needs the token" '401 {"error":"unauthorized"}' \
+  "$(curl -s -o "$WORK/b.json" -w '%{http_code}' -X POST "$URL/admin/bootstrap/register") $(cat "$WORK/b.json")"
+check "the bootstrap with passkeys off is 503" '503' \
+  "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${auth[@]}" "$URL/admin/bootstrap/register")"
+check "managing passkeys needs a session, not the token" \
+  '401 {"error":"unauthorized: this needs an admin session; sign in with a passkey"}' \
+  "$(curl -s -o "$WORK/p.json" -w '%{http_code}' "${auth[@]}" "$URL/admin/passkeys") $(cat "$WORK/p.json")"
+FAKE="__Host-recall_admin=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+check "a session cookie the server did not issue is 401 on the device routes" \
+  '{"error":"unauthorized: the admin session has ended; sign in again"}' \
+  "$(curl -s -H "Cookie: $FAKE" "$URL/v1/devices")"
+check "a session cookie is not a credential on /sync" '{"error":"unauthorized"}' \
+  "$(curl -s -H "Cookie: $FAKE" -H 'X-Recall-CSRF: x' "$URL/sync?project_key=a/b")"
+
+PK_PORT=8933
+PK_URL="http://localhost:$PK_PORT"
+RECALL_TOKEN="$TOKEN" RECALL_PORT="$PK_PORT" RECALL_DB_PATH="$WORK/pk.sqlite" \
+  RECALL_MERGE_ENABLED=false RECALL_PUBLIC_URL="$PK_URL" "$BIN" >"$WORK/pk.log" 2>&1 &
+PK=$!
+for _ in $(seq 1 40); do curl -sf "$PK_URL/health" >/dev/null 2>&1 && break; sleep 0.25; done
+check "with RECALL_PUBLIC_URL passkeys are on, bound to its origin" "True $PK_URL False" \
+  "$(curl -s "$PK_URL/admin/session" | python3 -c '
+import json,sys; d=json.load(sys.stdin); print(d["passkeys"]["enabled"], d["passkeys"]["origin"], d["bootstrapped"])')"
+check "signing in before any passkey exists is 409" '409' \
+  "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$PK_URL/admin/login/start")"
+curl -s -D "$WORK/boot.headers" -X POST "${auth[@]}" "$PK_URL/admin/bootstrap/register" >"$WORK/boot.json"
+check "the bootstrap answers with a ceremony and a discoverable-credential challenge" \
+  'ceremony_id options localhost required' \
+  "$(python3 -c '
+import json,sys; d=json.load(open(sys.argv[1])); pk=d["options"]["publicKey"]
+print(" ".join(d.keys()), pk["rp"]["id"], pk["authenticatorSelection"]["residentKey"])' "$WORK/boot.json")"
+check "a challenge is never cached" 'no-store' "$(header "$WORK/boot.headers" cache-control)"
+check "finishing a ceremony that does not exist is 400" \
+  '{"error":"this ceremony has expired or was already used; start again"}' \
+  "$(curl -s -X POST "${json[@]}" -d '{"ceremony_id":"cer_nope","credential":{"id":"x","rawId":"eA","type":"public-key","response":{"authenticatorData":"eA","clientDataJSON":"eA","signature":"eA","userHandle":null}}}' \
+     "$PK_URL/admin/login/finish")"
+kill $PK 2>/dev/null
+
 echo "Rate limiting"
 RL_PORT=8932
 RECALL_TOKEN="$TOKEN" RECALL_PORT="$RL_PORT" RECALL_DB_PATH="$WORK/rl.sqlite" \
