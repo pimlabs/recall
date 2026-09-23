@@ -16,6 +16,12 @@ break will be described here in full rather than smoothed over.
 
 ## Unreleased
 
+- **winget publishing, set up but not live yet.** Every release can now
+  keep a `PimLabs.Recall` package in `microsoft/winget-pkgs` current, once
+  that package exists. The first version needs a one-time manual
+  submission, so `winget install PimLabs.Recall` does not work yet. See the
+  winget section of `docs/reference/releasing.md` for that submission;
+  `docs/reference/install.md` lists the channel once it is accepted.
 - **`deploy/backup-offbox.sh init` sets up the off-box backup.** It asks for
   a provider (S3-compatible, Cloudflare R2, Backblaze B2 through S3, or an
   existing remote you already configured) and its credentials, creates the

@@ -159,7 +159,15 @@ canonicalized path, an environment variable) rather than on anything either
 side controls.
 
 Windows client support ships x64 and arm64 binaries; the server remains
-Linux-only, and winget and code signing are not done yet.
+Linux-only, and code signing is not done yet.
+
+**winget** (`winget install PimLabs.Recall`) is set up but not yet live —
+every release now builds a manifest and, once the package exists in
+`microsoft/winget-pkgs`, opens the pull request that keeps it current, but
+that first version still needs a one-time manual submission before `winget
+install` finds anything. See `docs/reference/releasing.md`'s winget section.
+This line will move up to the table above once that first submission is
+accepted.
 
 ### cargo
 

@@ -66,6 +66,7 @@ answer stays put.
 | Document | What it proposes |
 |---|---|
 | [`design/handshake.md`](design/handshake.md) | Version discovery (`/.well-known/recall`), server identity for release-based deploys, per-device keys in place of the one shared token, a passkey admin page, splitting out `recall-server`, and encrypted storage with a worker that merges and evaluates memory. Not built. |
+| [`design/part5-plan.md`](design/part5-plan.md) | How Part 5 of the above gets built: seven pull requests in order, with their wire contracts, storage, key management, the worker, tests and the owner's open decisions. Not built. |
 
 A proposal is neither kept true nor a record yet. When one is built, the
 reference docs become the authority for what shipped and the proposal moves

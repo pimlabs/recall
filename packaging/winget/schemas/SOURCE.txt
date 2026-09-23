@@ -1,0 +1,42 @@
+Vendored winget manifest JSON schemas, schema version 1.28.0.
+
+Source: https://github.com/microsoft/winget-cli
+Path:   schemas/JSON/manifests/v1.28.0/
+Commit: 9f3476831b8026797ca454841b96202a2c99a07b (master, fetched 2026-09-23)
+  manifest.version.1.28.0.json
+  manifest.installer.1.28.0.json
+  manifest.defaultLocale.1.28.0.json
+
+v1.28.0 was the newest released schema folder under schemas/JSON/manifests/
+at that commit (the "latest" folder there is 1.30.0, still in development).
+The files are unmodified copies of what that commit served; re-fetch from
+the same path to refresh them for a newer schema version, and update this
+file's commit and version together with packaging/winget/generate_manifest.py's
+SCHEMA_VERSION constant.
+
+License: MIT (microsoft/winget-cli's own LICENSE, reproduced below), same
+license as the rest of that repository.
+
+---
+
+MIT License
+
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to
+deal in the Software without restriction, including without limitation the
+rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+sell copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+IN THE SOFTWARE.
