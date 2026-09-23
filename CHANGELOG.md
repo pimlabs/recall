@@ -96,8 +96,9 @@ break will be described here in full rather than smoothed over.
   `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`.
 - **Two more tables**, `admin_credentials` and `admin_sessions`, created on
   start. An older server ignores them.
-- **The server binary is about 4.5 MiB larger**: it now carries OpenSSL,
-  built in, which the passkey verification needs. The client does not.
+- **The server binary is about 5 MiB larger** (3.0 MB to 8.3 MB, static
+  x86_64 musl): it now carries OpenSSL, built in, and webauthn-rs, which
+  the passkey verification needs. The client does not.
   Building the server from source needs perl and make as well as a C
   compiler, and Rust 1.88.
 

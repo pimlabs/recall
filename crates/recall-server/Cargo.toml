@@ -48,11 +48,12 @@ webauthn-rs = { version = "=0.5.5", features = ["conditional-ui"], optional = tr
 # The trade-off, stated once: this is where OpenSSL enters the codebase.
 # webauthn-rs-core verifies signatures and attestation with it and cannot be
 # built without it. `vendored` compiles it from source into the binary, so
-# the server stays one static musl file with no system OpenSSL to find or
-# keep patched separately, at the cost of about 4.5 MiB, a slower clean
-# build, and perl and make in the build environment. It is named here, as a
-# direct dependency, so that feature unification vendors the copy
-# webauthn-rs-core uses too. Only the server has it: the client stays on
+# the server stays one static musl file with no system OpenSSL to find. The
+# cost: about 5 MiB with webauthn-rs, a slower clean build, perl and make
+# in the build environment, and an OpenSSL fix reaching a server only in a
+# new recall-server release, not from the host's package updates. It is
+# named here, as a direct dependency, so that feature unification vendors
+# the copy webauthn-rs-core uses too. Only the server has it: the client stays on
 # rustls, and `cargo tree -p recall -e normal | grep -i openssl` prints
 # nothing.
 openssl = { version = "0.10", features = ["vendored"], optional = true }
