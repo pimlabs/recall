@@ -9,6 +9,10 @@ RUN apk add --no-cache musl-dev
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+# Built from whatever `main` holds, not from a release, and the discovery
+# document says so. The context has no .git, which on its own would read as
+# a crates.io release build, so this is set rather than inferred.
+ENV RECALL_BUILD_CHANNEL=dev
 RUN cargo build --release --locked -p recall
 
 # ...then assemble a runtime that still has Node in it.

@@ -40,6 +40,10 @@ struct Inner {
     /// the two halves to be able to disagree.
     fail_pushes_with: Option<(u16, String)>,
     last_authorization: Option<String>,
+    /// The `User-Agent` and protocol header of the last request, so a test
+    /// can see what the client says about itself.
+    last_user_agent: Option<String>,
+    last_protocol: Option<String>,
     /// When set, `/admin/stats` answers 401 to any other bearer token —
     /// the one place the fake enforces auth, because `recall connect` has
     /// to be able to tell a server that is up from a token that is right.
@@ -124,6 +128,12 @@ impl FakeServer {
         self.inner.lock().expect("test lock").fail_pushes_with = Some((code, body.to_string()));
     }
 
+    /// The `User-Agent` and `Recall-Protocol` of the last request.
+    pub fn last_identity(&self) -> (Option<String>, Option<String>) {
+        let inner = self.inner.lock().expect("test lock");
+        (inner.last_user_agent.clone(), inner.last_protocol.clone())
+    }
+
     pub fn last_authorization(&self) -> Option<String> {
         self.inner
             .lock()
@@ -154,6 +164,14 @@ fn intercept(state: &Shared, headers: &HeaderMap) -> Option<Response> {
     let mut inner = state.lock().expect("test lock");
     inner.last_authorization = headers
         .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    inner.last_user_agent = headers
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    inner.last_protocol = headers
+        .get(recall_wire::PROTOCOL_HEADER)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
     inner.fail_with.clone().map(|(code, body)| {

@@ -11,10 +11,12 @@ use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use recall_wire::discovery::{self, Auth, Build, Protocol, ServerInfo};
 use recall_wire::{
     AdminStats, ClaudeCliStatus, Health, MergeError, MergeStatus, PushRequest, PushResponse,
     SyncResponse,
 };
+use recall_wire::{Discovery, PROTOCOL};
 
 use super::respond::{error, internal, json};
 use super::AppState;
@@ -274,6 +276,63 @@ pub(super) async fn handle_health(State(state): State<Arc<AppState>>) -> Respons
     };
     drop(rt);
     json(StatusCode::OK, &body)
+}
+
+/// The oldest client this server accepts. Every client released so far
+/// speaks protocol 1 and is served; this is where that changes when a
+/// breaking release stops serving an old one.
+const MIN_CLIENT: &str = "0.1.0";
+
+/// `GET /.well-known/recall`: what this server is and what it speaks.
+///
+/// Unauthenticated and unlimited, like `/health`: it holds nothing a client
+/// could not learn by trying, and a client needs it before it knows whether
+/// it can authenticate at all.
+pub(super) async fn handle_discovery(State(state): State<Arc<AppState>>) -> Response {
+    // The commit the container was started with, when the deploy set one;
+    // otherwise whatever the build itself recorded.
+    let revision = Some(state.cfg.git_commit.clone())
+        .filter(|c| !c.is_empty() && c != "unknown")
+        .or_else(|| discovery::revision().map(str::to_string));
+    let channel = discovery::channel();
+    let mut capabilities = std::collections::BTreeMap::new();
+    capabilities.insert("merge_base".to_string(), serde_json::json!({}));
+    capabilities.insert(
+        "scopes".to_string(),
+        serde_json::json!({ "kinds": ["project", "global", "machine"] }),
+    );
+    capabilities.insert(
+        "limits".to_string(),
+        serde_json::json!({
+            "max_body_bytes": super::MAX_BODY_BYTES,
+            "rate_limit": {
+                "max": state.cfg.rate_limit_max,
+                "window_seconds": state.cfg.rate_limit_window.as_secs(),
+            },
+        }),
+    );
+    json(
+        StatusCode::OK,
+        &Discovery {
+            protocol: Protocol {
+                current: PROTOCOL,
+                supported: vec![PROTOCOL],
+            },
+            server: ServerInfo {
+                version: discovery::version_for(channel, revision.as_deref()),
+                build: Build {
+                    channel: channel.to_string(),
+                    revision,
+                    created: discovery::created().map(str::to_string),
+                },
+            },
+            min_client: MIN_CLIENT.to_string(),
+            auth: Auth {
+                methods: vec![discovery::AUTH_BEARER.to_string()],
+            },
+            capabilities,
+        },
+    )
 }
 
 /// Static markup only: the page holds no data, it asks the viewer for a

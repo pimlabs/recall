@@ -43,10 +43,33 @@ pub(super) async fn guard(
         }
         return resp;
     }
+    if let Some(asked) = unsupported_protocol(req.headers()) {
+        return error(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "this server speaks Recall protocol {}, and the request asked for {asked}. \
+                 Upgrade whichever side is older; GET {} says what this server supports",
+                recall_wire::PROTOCOL,
+                recall_wire::DISCOVERY_PATH
+            ),
+        );
+    }
     if !authorized(&state.cfg.token, req.headers()) {
         return error(StatusCode::UNAUTHORIZED, "unauthorized");
     }
     next.run(req).await
+}
+
+/// The protocol a request asked for, when it is one this server does not
+/// speak. A request that names none is protocol 1: every client before the
+/// header existed spoke it.
+fn unsupported_protocol(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(recall_wire::PROTOCOL_HEADER)?;
+    let text = value.to_str().unwrap_or("").trim();
+    match text.parse::<u32>() {
+        Ok(recall_wire::PROTOCOL) => None,
+        _ => Some(text.to_string()),
+    }
 }
 
 fn authorized(token: &str, headers: &HeaderMap) -> bool {

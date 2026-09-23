@@ -2,7 +2,11 @@
 
 use std::time::Duration;
 
-use recall_wire::{Health, PushRequest, PushResponse, SyncResponse, ValidationError};
+use recall_wire::{
+    discovery, Discovery, Health, PushRequest, PushResponse, SyncResponse, ValidationError,
+    DISCOVERY_PATH, PROTOCOL, PROTOCOL_HEADER,
+};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::de::DeserializeOwned;
 
 /// A generous but bounded timeout. The server may be running a semantic
@@ -44,11 +48,24 @@ pub struct Client {
 impl Client {
     /// Builds a client for one server. Trailing slashes on `base_url` are
     /// trimmed, so a URL pasted with one does not produce `//sync`.
+    ///
+    /// Every request says which protocol it speaks and which build sent it,
+    /// so a server can refuse a protocol it does not speak by name and the
+    /// operator can see which versions are still out there.
     pub fn new(base_url: &str, token: &str) -> Result<Self, Error> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static(PROTOCOL_HEADER),
+            HeaderValue::from(PROTOCOL),
+        );
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             token: token.to_string(),
-            http: reqwest::Client::builder().timeout(TIMEOUT).build()?,
+            http: reqwest::Client::builder()
+                .timeout(TIMEOUT)
+                .user_agent(discovery::user_agent())
+                .default_headers(headers)
+                .build()?,
         })
     }
 
@@ -90,6 +107,18 @@ impl Client {
         self.send(request).await
     }
 
+    /// Reads the discovery document: what the server is and what it
+    /// speaks. [`None`] from a server older than the document, which
+    /// answers 404 and speaks protocol 1.
+    pub async fn discover(&self) -> Result<Option<Discovery>, Error> {
+        let request = self.http.get(format!("{}{DISCOVERY_PATH}", self.base_url));
+        match self.send(request).await {
+            Ok(doc) => Ok(Some(doc)),
+            Err(Error::Status { code: 404, .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Asks whether the token is accepted, without reading or writing any
     /// memory.
     ///
@@ -127,6 +156,29 @@ impl Client {
 mod tests {
     use super::*;
     use crate::testserver::FakeServer;
+
+    /// Every request names the protocol and the build that sent it.
+    #[tokio::test]
+    async fn every_request_says_which_protocol_and_build_sent_it() {
+        let server = FakeServer::start().await;
+        let client = Client::new(&server.url, "token").unwrap();
+        client.pull("acme/app").await.unwrap();
+        let (agent, protocol) = server.last_identity();
+        assert_eq!(protocol.as_deref(), Some("1"));
+        assert!(
+            agent.as_deref().is_some_and(|a| a.starts_with("recall/")),
+            "{agent:?}"
+        );
+    }
+
+    /// A server from before the discovery document answers 404, which is
+    /// an answer: it speaks protocol 1 and says nothing more.
+    #[tokio::test]
+    async fn a_server_without_discovery_is_not_an_error() {
+        let server = FakeServer::start().await;
+        let client = Client::new(&server.url, "token").unwrap();
+        assert_eq!(client.discover().await.unwrap(), None);
+    }
 
     #[tokio::test]
     async fn pushes_and_pulls_against_a_real_server() {

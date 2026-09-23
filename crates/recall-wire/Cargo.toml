@@ -9,8 +9,9 @@ description = "The request/response contract shared by Recall's client and serve
 
 [dependencies]
 serde.workspace = true
+# The discovery document's capabilities are open-ended objects, kept as
+# JSON values so a key this build does not know still reads.
+serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 
-[dev-dependencies]
-serde_json.workspace = true

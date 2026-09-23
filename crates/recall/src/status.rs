@@ -198,6 +198,21 @@ pub struct Report {
     /// The commit the server was built from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git_commit: Option<String>,
+    /// The server's version, from `GET /.well-known/recall`. [`None`] from a
+    /// server older than that document.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_version: Option<String>,
+    /// `release` or `dev`: whether the server is a release build.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_channel: Option<String>,
+    /// The protocol versions the server speaks. Empty when it did not say.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub server_protocols: Vec<u32>,
+    /// The oldest client version the server accepts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_client: Option<String>,
+    /// This client's version, as it reports itself to the server.
+    pub client_version: String,
     /// Whether the server can actually merge, or is silently falling back to
     /// last-write-wins.
     pub merge_ready: bool,
@@ -313,6 +328,11 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
         server_ok: false,
         server_error: None,
         git_commit: None,
+        server_version: None,
+        server_channel: None,
+        server_protocols: Vec::new(),
+        min_client: None,
+        client_version: recall_wire::discovery::version(),
         merge_ready: false,
         synced_files: 0,
         last_synced_at: None,
@@ -338,6 +358,16 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
                     }
                 }
                 Err(err) => rep.server_error = Some(err.to_string()),
+            }
+            // Asked only of a server that answered: an unreachable one has
+            // already been reported, and a second error would say nothing new.
+            if rep.server_ok {
+                if let Ok(Some(doc)) = client.discover().await {
+                    rep.server_version = Some(doc.server.version);
+                    rep.server_channel = Some(doc.server.build.channel);
+                    rep.server_protocols = doc.protocol.supported;
+                    rep.min_client = Some(doc.min_client);
+                }
             }
             if rep.token_set {
                 if let Ok(resp) = client.pull(&rep.project_key).await {
@@ -653,10 +683,16 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
         return;
     }
 
-    field!(
-        "server       : reachable (git_commit {})",
-        rep.git_commit.as_deref().unwrap_or("unknown")
-    );
+    match (&rep.server_version, &rep.server_channel) {
+        (Some(version), Some(channel)) => {
+            field!("server       : reachable ({version}, {channel} build)")
+        }
+        _ => field!(
+            "server       : reachable (git_commit {})",
+            rep.git_commit.as_deref().unwrap_or("unknown")
+        ),
+    }
+    field!("client       : {}", rep.client_version);
     field!(
         "merge        : {}",
         if rep.merge_ready {

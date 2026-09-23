@@ -121,9 +121,22 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
                 "check RECALL_URL. A cloud environment also needs the domain under \
                  Allowed domains",
             )),
+            (None, _) if rep.server_version.is_some() => out.push(ok(
+                "server",
+                format!(
+                    "answered, {}{}",
+                    rep.server_version.as_deref().unwrap_or_default(),
+                    if rep.server_channel.as_deref() == Some("dev") {
+                        " (not a release build)"
+                    } else {
+                        ""
+                    }
+                ),
+            )),
             (None, Some(commit)) => out.push(ok("server", format!("answered, commit {commit}"))),
             (None, None) => out.push(ok("server", "answered")),
         }
+        version_findings(rep, &mut out);
     }
 
     if rep.server_ok && !rep.merge_ready {
@@ -222,6 +235,38 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
     }
 
     out
+}
+
+/// Whether this client and the server can talk at all, from the server's
+/// discovery document. Silent against a server too old to publish one:
+/// such a server speaks protocol 1, which is what this client speaks.
+fn version_findings(rep: &Report, out: &mut Vec<Finding>) {
+    if !rep.server_protocols.is_empty() && !rep.server_protocols.contains(&recall_wire::PROTOCOL) {
+        out.push(fail(
+            "version",
+            format!(
+                "the server speaks protocol {:?} and this client speaks {}",
+                rep.server_protocols,
+                recall_wire::PROTOCOL
+            ),
+            "upgrade whichever side is older",
+        ));
+    }
+    let too_old = rep.min_client.as_deref().and_then(|min| {
+        let min_v = recall_wire::discovery::Version::parse(min)?;
+        let mine = recall_wire::discovery::Version::parse(&rep.client_version)?;
+        (mine < min_v).then(|| min.to_string())
+    });
+    if let Some(min) = too_old {
+        out.push(fail(
+            "version",
+            format!(
+                "this client is {} and the server needs at least {min}",
+                rep.client_version
+            ),
+            "upgrade recall: brew upgrade recall, or npm install -g @pimlabs/recall",
+        ));
+    }
 }
 
 /// Where a value came from, in the words a finding uses.
@@ -483,6 +528,7 @@ const SECTIONS: &[(&str, &[&str])] = &[
             "RECALL_URL",
             "RECALL_TOKEN",
             "server",
+            "version",
             "merge",
             "token storage",
             "credentials file",
@@ -643,6 +689,11 @@ mod tests {
             server_ok: true,
             server_error: None,
             git_commit: Some("a1b2c3d".into()),
+            server_version: Some("0.3.2".into()),
+            server_channel: Some("release".into()),
+            server_protocols: vec![1],
+            min_client: Some("0.1.0".into()),
+            client_version: "0.3.3".into(),
             merge_ready: true,
             synced_files: 4,
             last_synced_at: None,
@@ -688,6 +739,64 @@ mod tests {
 
     /// With no URL there is nothing to be unreachable, and saying so anyway
     /// buries the finding that explains it.
+    #[test]
+    fn a_client_older_than_the_server_accepts_fails_and_says_to_upgrade() {
+        let mut r = healthy();
+        r.min_client = Some("0.4.0".into());
+        let found = findings(&r);
+        let v = found
+            .iter()
+            .find(|f| f.check == "version")
+            .expect("a version finding");
+        assert_eq!(v.level, Level::Fail);
+        assert!(
+            v.detail.contains("0.3.3") && v.detail.contains("0.4.0"),
+            "{}",
+            v.detail
+        );
+    }
+
+    #[test]
+    fn a_protocol_the_client_does_not_speak_fails() {
+        let mut r = healthy();
+        r.server_protocols = vec![2];
+        let found = findings(&r);
+        assert!(found
+            .iter()
+            .any(|f| f.check == "version" && f.level == Level::Fail));
+    }
+
+    /// A server too old to publish a discovery document says nothing about
+    /// versions, and that is not a problem: it speaks protocol 1.
+    #[test]
+    fn a_server_without_discovery_raises_no_version_finding() {
+        let mut r = healthy();
+        r.server_version = None;
+        r.server_channel = None;
+        r.server_protocols = Vec::new();
+        r.min_client = None;
+        let found = findings(&r);
+        assert!(!found.iter().any(|f| f.check == "version"));
+        let server = found.iter().find(|f| f.check == "server").unwrap();
+        assert!(server.detail.contains("a1b2c3d"), "{}", server.detail);
+    }
+
+    #[test]
+    fn a_dev_server_is_named_as_one() {
+        let mut r = healthy();
+        r.server_version = Some("0.3.3-dev+ge100cfd".into());
+        r.server_channel = Some("dev".into());
+        let server = findings(&r)
+            .into_iter()
+            .find(|f| f.check == "server")
+            .unwrap();
+        assert!(
+            server.detail.contains("not a release build"),
+            "{}",
+            server.detail
+        );
+    }
+
     #[test]
     fn the_server_is_not_reported_on_when_there_is_no_url() {
         let mut rep = healthy();
