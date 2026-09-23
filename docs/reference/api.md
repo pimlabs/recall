@@ -1,9 +1,11 @@
 # HTTP API
 
 Recall's server exposes six routes for memory and the deployment, and, since
-0.4.1, ten under `/v1` for devices. Two carry memory files, two are for
-looking at the deployment, one says what the server is and speaks, one is a
-browser page, and the device routes enrol machines and manage them.
+0.4.1, ten under `/v1` for devices, and four for the merge queue. Two carry
+memory files, two are for looking at the deployment, one says what the
+server is and speaks, one is a browser page, the device routes enrol
+machines and manage them, and the job routes are how a worker merges
+conflicts away from the process that faces the internet.
 
 This is a **frozen** surface: field names, field order, and the difference
 between `null` and `""` are compatibility guarantees, not style. The shape was
@@ -20,7 +22,9 @@ error wording, field order, and the `null`-versus-`""` distinction. If a
 handler changes and this document doesn't, that script fails. The one
 exception is signed requests, which take a signing client rather than
 `curl`: [`crates/recall-server/tests/devices.rs`](../../crates/recall-server/tests/devices.rs)
-asserts what this page says about them.
+and, for the job routes a worker signs,
+[`crates/recall-server/tests/jobs.rs`](../../crates/recall-server/tests/jobs.rs)
+assert what this page says about them.
 
 | Route | Auth | Purpose |
 |---|:---:|---|
@@ -41,9 +45,16 @@ asserts what this page says about them.
 | [`POST /v1/enroll-keys`](#post-v1enroll-keys) | admin | Make an enrolment key, for cloud sessions |
 | [`GET /v1/enroll-keys`](#get-v1enroll-keys-and-post-v1enroll-keysidrevoke) | admin | Every enrolment key |
 | [`POST /v1/enroll-keys/{id}/revoke`](#get-v1enroll-keys-and-post-v1enroll-keysidrevoke) | admin | Stop one enrolling anything more |
+| [`POST /v1/jobs/claim`](#post-v1jobsclaim) | worker | Wait for a merge job, and lease it |
+| [`POST /v1/jobs/{id}/result`](#post-v1jobsidresult) | worker | Hand back a merge, or the error it met |
+| [`GET /v1/jobs`](#get-v1jobs-and-post-v1jobsidretry) | admin | Jobs, newest first, without file content |
+| [`POST /v1/jobs/{id}/retry`](#get-v1jobs-and-post-v1jobsidretry) | admin | Queue a failed job again |
 
-"yes" is either credential below; "admin" is `RECALL_TOKEN` or a device
-approved with the `admin` scope; "device" is any device's signature.
+"yes" is either credential below, except that a `worker` device may not
+use them; "admin" is `RECALL_TOKEN` or a device approved with the `admin`
+scope; "device" is any device's signature but a worker's; "worker" is a
+device approved with the `worker` scope, and nothing else, not even the
+token.
 `/admin/stats` was "yes" until 0.4.1, and still is for the token: only a
 `sync` device is refused there.
 
@@ -127,8 +138,11 @@ nonces live at once as the rate limit lets one address send in two
 minutes, the longest a nonce lives; a device over it is refused alone, and
 every other device carries on.
 
-A `sync` device may use every route but the admin ones; an `admin` device
-may use all of them.
+A `sync` device may use every route but the admin ones and the job routes;
+an `admin` device may use all of those but the job routes. A `worker`
+device may use the two job routes it drains the queue with and nothing
+else: it cannot pull or push memory, look itself up at `/v1/devices/me`, or
+reach an admin route.
 
 **The name belongs to the key.** A push a device signed is stored with that
 device's name as its `source_env`, whatever the body's `source_env` says, so
@@ -155,6 +169,8 @@ always.
 | The same request a second time | `401` | `{"error":"unauthorized: this request was already received once"}` |
 | A component missing from what is covered, or a header that does not parse | `401` | `{"error":"unauthorized: …"}`, naming what is wrong |
 | A `sync` device on an admin route | `403` | `{"error":"forbidden: this needs RECALL_TOKEN or a device with the admin scope"}` |
+| A `worker` device on `/sync` or `/v1/devices/me` | `403` | `{"error":"forbidden: a worker device may only claim jobs and post their results"}` |
+| Anyone but a `worker` device on a job route a worker uses | `403` | `{"error":"forbidden: this needs a device with the worker scope"}` |
 | A signed body declared or found over 5 MiB | `413` | `{"error":"request body too large"}` |
 | One device signing more than its share of nonces | `429` | `{"error":"too many signed requests from this device, try again later"}` |
 | Too many signed requests from every device together to remember their nonces | `503` | `{"error":"too many signed requests at once, try again later"}` |
@@ -269,6 +285,25 @@ rule before sending, so a bad path never leaves the machine.
 }
 ```
 
+On a server with a [worker](#jobs) enrolled, a push that needs merging is
+stored as sent and answered at once, with the job that will merge it:
+
+```json
+{
+  "ok": true,
+  "project_key": "acme/app",
+  "file_path": "topics/auth.md",
+  "deleted": false,
+  "merged": false,
+  "updated_at": "2026-10-02T09:14:02.991Z",
+  "merge_job": "job_3m5k7q2x9w4r8t6y"
+}
+```
+
+`merge_job` is there only when a job was queued, and is omitted otherwise,
+so a server without a worker answers exactly as before the queue existed.
+The merged file arrives with a later pull.
+
 `merged: true` means the stored content is the result of a semantic merge
 rather than the bytes you sent. That happens only when there was genuinely
 something to reconcile — an existing, non-tombstoned row whose content differs
@@ -290,6 +325,16 @@ on purpose is a fact from the stored side, and the merge puts it back. The same
 happened to a resolved `CONFLICT` marker, which came back on every push that
 tried to remove it.
 
+**Where the merge runs.** With no worker enrolled, the server runs it
+inline with the `claude` CLI before answering, as it always has. With an
+unrevoked `worker` device enrolled, it never does: the push is stored,
+last-write-wins, a `merge` job is queued holding both versions, and the
+answer carries `merged: false` and the job's id, which is exactly what a
+merge that degraded to last-write-wins looks like. No push waits on a
+worker, whether or not it is running. `RECALL_MERGE_ENABLED=false` turns
+both off. A full queue (1,000 jobs waiting or held) stores the push without
+a job, and says so in `merge.last_merge_error`.
+
 **A failed merge still returns `200`.** Every failure mode — the `claude` CLI
 missing, not logged in, timing out, returning malformed output, or returning
 an empty result — degrades to last-write-wins rather than rejecting the sync,
@@ -302,7 +347,7 @@ way a degraded merge is visible, which is why the field exists.
 
 | Code | When |
 |:---:|---|
-| `200` | Stored. Check `merged` to see whether a merge happened. |
+| `200` | Stored. Check `merged` to see whether a merge happened, and `merge_job` for one queued. |
 | `400` | Bad JSON, a missing required field, or a rejected `file_path`. |
 | `401` | Bad or missing credentials; see [Authentication](#authentication). |
 | `413` | Body over 5 MiB (`400` if it fails to parse first). |
@@ -425,6 +470,7 @@ server at all, and what the server can do.
       "rate_limit": { "max": 60, "window_seconds": 60 }
     },
     "merge_base": {},
+    "merge_queue": {},
     "scopes": { "kinds": ["project", "global", "machine"] }
   }
 }
@@ -448,6 +494,7 @@ server at all, and what the server can do.
 | `capabilities.devices.signature_window_seconds` | How far a signature's `created` may be from the server's clock, either way: 60. |
 | `capabilities.limits` | `max_body_bytes`, and `rate_limit`'s `max` requests per `window_seconds`. |
 | `capabilities.merge_base` | The server reads `base_sha256` on a push. |
+| `capabilities.merge_queue` | The server can queue a stale push for a [worker](#jobs), and has the job routes. Listed whether or not a worker is enrolled now. |
 | `capabilities.scopes` | The memory scopes a client may sync, each under an ordinary `project_key`. |
 
 The rules that keep this readable by clients that do not exist yet:
@@ -482,7 +529,9 @@ Unauthenticated. Safe to point uptime monitoring at.
       "error": ""
     },
     "last_merge_at": "2026-09-03T21:49:55.101Z",
-    "last_merge_error": null
+    "last_merge_error": null,
+    "worker": { "last_claim_at": "2026-10-02T09:14:03.118Z", "agent": "recall-worker/0.4.2 (linux-x86_64)" },
+    "queue": { "queued": 0, "leased": 1, "failed": 0, "oldest_queued_at": null }
   }
 }
 ```
@@ -498,7 +547,14 @@ stop being merged. These are the fields that make that state visible:
 | `merge.enabled` | `false` means merging is switched off entirely (`RECALL_MERGE_ENABLED`). |
 | `merge.claude_cli.available` | `false` means the binary isn't on the server's `PATH`. |
 | `merge.claude_cli.logged_in` | `false` is the common one: run `claude setup-token` on the host. |
-| `merge.last_merge_error` | Non-null means a real merge was attempted and failed. |
+| `merge.last_merge_error` | Non-null means a real merge was attempted and failed. With a worker, it is set when a job runs out of attempts or its result could not be applied, or when the queue is full. |
+| `merge.worker` | Present while a `worker` device is enrolled. `last_claim_at` is when it last asked for a job since the server started, `null` before it has; `agent` is its `User-Agent`. A worker that has stopped shows here as a `last_claim_at` that no longer moves. |
+| `merge.queue` | Present while a worker is enrolled: jobs `queued`, `leased` and `failed`, and `oldest_queued_at`, `null` when nothing waits. An old `oldest_queued_at` means merges are waiting on a worker that is not taking them. |
+
+With a worker enrolled, `merge.claude_cli` is the worker's own check of its
+CLI, sent with each claim, rather than the server's: the merge runs there.
+Until the worker's first claim it reads as unknown (`available` and
+`logged_in` `null`).
 
 `last_backup_at` and `last_offbox_at` answer different questions and only one
 of them survives the disk. The first is the server's own snapshot, written by
@@ -586,7 +642,9 @@ for anyone, enrols with an [enrolment key](#post-v1enroll-keys) instead
 and is approved at once.
 
 A device has a **scope**: `sync` may use every route except the admin ones;
-`admin` may also approve, list and revoke devices and enrolment keys. The
+`admin` may also approve, list and revoke devices and enrolment keys;
+`worker` may claim merge jobs and post their results and nothing else (see
+[Jobs](#jobs)). The
 operator's `RECALL_TOKEN` can do everything an `admin` device can, which is
 how the first device is approved.
 
@@ -749,7 +807,7 @@ refuses the code a machine shows.
 { "user_code": "TXLV-FNTC", "scope": "sync", "fingerprint": "SHA256:sWwtG+rRJiY5dk/bDuTTd0WZM2vUk0BM2ksRNsWfIGI" }
 ```
 
-`scope` is `sync` when left out, and may be `admin`. `fingerprint` is
+`scope` is `sync` when left out, and may be `admin` or `worker`. `fingerprint` is
 optional: when given, it is the fingerprint the approver was shown, by the
 machine or by the lookup above, and the code is approved only if its key
 has exactly that fingerprint. That binds the approval to what the approver
@@ -765,7 +823,7 @@ refused:
 | Code | When |
 |:---:|---|
 | `200` | Approved, or denied. |
-| `400` | Bad JSON, a `scope` other than `sync` or `admin`, or a `user_code` that is not eight letters of the alphabet: `{"error":"user_code must be the 8 letters the device shows, such as WDJB-MJHT"}`. |
+| `400` | Bad JSON, a `scope` other than `sync`, `admin` or `worker` (`{"error":"scope must be sync, admin or worker"}`), or a `user_code` that is not eight letters of the alphabet: `{"error":"user_code must be the 8 letters the device shows, such as WDJB-MJHT"}`. |
 | `401`, `403` | See [Authentication](#authentication). |
 | `404` | `{"error":"no enrolment is waiting with that code"}` |
 | `409` | `{"error":"that code was already approved or denied"}`; or, with `fingerprint`, `{"error":"that code's key does not have the fingerprint given; nothing was approved"}`; or an unrevoked device already has the name the machine asked for. |
@@ -865,6 +923,158 @@ now stands. Its body may be empty; with `{"revoke_devices": true}` every
 device the key enrolled is revoked too, which is what to do when a key has
 leaked. Without it they keep working. `404` with `{"error":"no enrolment
 key has that id"}` for an id that is not there.
+
+---
+
+## Jobs
+
+From 0.4.2 a server can hand its semantic merges to **`recall-worker`**, a
+separate process with no inbound port, instead of running them in the
+process that faces the internet. The worker is an enrolled device approved
+with the `worker` scope; it long-polls for jobs, merges each with the
+`claude` CLI it runs next to, and posts the result back. See
+[`deploy/README.md`](../../deploy/README.md#the-merge-worker) for running
+one.
+
+A **job** holds one conflict: the version a push displaced (`stored`) and
+the version it stored (`incoming`). Its `state` is `queued`, `leased` (a
+worker holds it), `done` or `failed`. A claim **leases** a job for the
+`lease_seconds` it asks for, under a `lease_id`; a result counts only under
+the job's current, unexpired `lease_id`. A lease that runs out puts the job
+back in the queue, so a job a crashed worker took is released, and the old
+holder's late result gets `409`: a fencing token, so a worker that stalled
+cannot overwrite the one that took over.
+
+**Applying a merge is a compare-and-swap.** The result is written only if
+the file still has the hash of `incoming`, and is then attributed to the
+worker's device name. If another push landed while the job ran, the push
+stands, and the merged content becomes the `stored` side of a follow-up job
+against the newer version (`applied: false`, `follow_up`). After three
+follow-ups the chase stops: the newest push stands, and the unapplied
+result is kept in the failed job, where a retry picks it up again. A file
+deleted while its job ran stays deleted.
+
+**Retries.** A result carrying an `error`, or a lease that runs out, puts
+the job back in the queue after 1, then 5, then 30 minutes; after its
+fourth attempt it is `failed`, and `merge.last_merge_error` in
+[`GET /health`](#get-health) says why. Nothing waits on any of it: pushes
+keep landing as last-write-wins while jobs wait, and a worker that comes
+back drains the queue through the same compare-and-swap. Finished jobs are
+removed after 30 days; failed ones stay until retried.
+
+## `POST /v1/jobs/claim`
+
+Worker only. Waits up to `wait_seconds` for a queued job of one of `kinds`
+and leases it, waking as soon as a push queues one.
+
+```json
+{
+  "kinds": ["merge"],
+  "wait_seconds": 25,
+  "lease_seconds": 120,
+  "claude_cli": { "checked_at": "2026-10-02T09:13:40.002Z", "available": true, "logged_in": true, "error": "" }
+}
+```
+
+| Field | Notes |
+|---|---|
+| `kinds` | Required. `merge` is the only kind so far. Empty is allowed: the claim then waits and answers with no job, which is how a worker whose CLI cannot merge stays visible without taking jobs it would fail. |
+| `wait_seconds` | 0 to 30; 0 when left out. |
+| `lease_seconds` | 30 to 600; 120 when left out. |
+| `claude_cli` | Optional. The worker's own check of its CLI, which `/health` then reports. |
+
+```json
+{
+  "job": {
+    "id": "job_3m5k7q2x9w4r8t6y",
+    "kind": "merge",
+    "lease_id": "lse_q8w2e4r6t8y0u2i4o6p8a0s2d4",
+    "lease_expires_at": "2026-10-02T09:16:03.118Z",
+    "attempt": 1,
+    "merge": {
+      "project_key": "acme/app",
+      "file_path": "topics/auth.md",
+      "stored": { "sha256": "9f2c…", "content": "# Auth\n- tokens live in 1Password\n", "source_env": "laptop", "updated_at": "2026-10-02T09:10:11.020Z" },
+      "incoming": { "sha256": "4b1f…", "content": "# Auth\n- rotate them monthly\n", "source_env": "cloud", "updated_at": "2026-10-02T09:14:02.991Z" }
+    }
+  }
+}
+```
+
+`{"job": null}` when nothing arrived within `wait_seconds`. `attempt`
+counts from 1. `sha256` is the lowercase hex SHA-256 of `content`, as
+`base_sha256` is.
+
+| Code | When |
+|:---:|---|
+| `200` | A job, or `null`. |
+| `400` | Bad JSON, `{"error":"wait_seconds must be 0 to 30"}` or `{"error":"lease_seconds must be 30 to 600"}`. |
+| `401`, `403` | See [Authentication](#authentication). The operator's token is a `403` here. |
+
+## `POST /v1/jobs/{id}/result`
+
+Worker only. Hands back a merge, or the error the worker met, under the
+lease the job was claimed with. Exactly one of `merge` and `error`:
+
+```json
+{ "lease_id": "lse_q8w2e4r6t8y0u2i4o6p8a0s2d4", "merge": { "content": "# Auth\n- tokens live in 1Password\n- rotate them monthly\n" } }
+```
+
+```json
+{ "lease_id": "lse_q8w2e4r6t8y0u2i4o6p8a0s2d4", "error": "claude merge timed out after 45s" }
+```
+
+```json
+{ "id": "job_3m5k7q2x9w4r8t6y", "state": "done", "applied": true, "follow_up": null }
+```
+
+`applied` is whether the merged content was written to the file. An error
+answers with the job back in `queued`, or `failed` if that was its last
+attempt. **Posting the same result again is safe**: under the lease that
+settled the job, it changes nothing and gets the same answer, so a worker
+whose first answer was lost can simply send it again.
+
+| Code | When |
+|:---:|---|
+| `200` | Recorded. `applied: false` with a `follow_up` job id when the file changed while the job ran. |
+| `400` | Bad JSON; `{"error":"a result carries exactly one of merge and error"}`. |
+| `401`, `403` | See [Authentication](#authentication). |
+| `404` | `{"error":"no job has that id"}` |
+| `409` | `{"error":"this lease has ended; the job was handed out again"}`: the lease is not the job's current one, or has run out. Nothing was changed. |
+
+## `GET /v1/jobs` and `POST /v1/jobs/{id}/retry`
+
+Admin. The listing is newest first, at most 200, optionally one `?state=`,
+and never carries file content:
+
+```json
+{
+  "jobs": [
+    {
+      "id": "job_3m5k7q2x9w4r8t6y",
+      "kind": "merge",
+      "state": "done",
+      "project_key": "acme/app",
+      "file_path": "topics/auth.md",
+      "attempt": 1,
+      "created_at": "2026-10-02T09:14:02.992Z",
+      "updated_at": "2026-10-02T09:14:07.310Z",
+      "error": null,
+      "follow_up": null
+    }
+  ]
+}
+```
+
+`error` is the last error the job met, or why its result was not applied;
+`follow_up` the job its result was queued into. A `state` other than the
+four is `400`: `{"error":"state must be queued, leased, done or failed"}`.
+
+Retry queues a failed job again with its attempts counted afresh, and
+answers with the job as listed. A job that failed because the file kept
+changing is queued as a merge of its kept result with the file as it is
+now. `404` with `{"error":"no job has that id"}`; `409` for a job that has
+not failed, such as `{"error":"only a failed job can be retried; this one is leased"}`.
 
 ---
 
