@@ -384,8 +384,14 @@ server is the only copy left once the session ends — losing the
 database here isn't just downtime, it's permanent data loss for that
 content.
 
+The backup each `recall-server admin` change takes first goes to
+`deploy/backups/admin/` instead, where this rotation never reaches it; see
+[Renaming, removing or restoring a project](#renaming-removing-or-restoring-a-project).
+
 **To restore:** stop the server, copy a `deploy/backups/recall-*.db`
-file over the live one in the `recall-data` volume, restart.
+file over the live one in the `recall-data` volume, restart. That replaces
+everything; to put back one project, `recall-server admin restore` copies a
+single key's rows out of a backup while the server keeps running.
 
 ```sh
 docker compose stop recall-server
@@ -584,68 +590,222 @@ merge quality specifically. Tune with env vars in `.env` if needed:
 `RECALL_MERGE_ENABLED` (set `false` to skip even attempting it),
 `RECALL_MERGE_TIMEOUT_MS` (default 45s per merge call).
 
-## Removing a project that was stored under the wrong key
+## Renaming, removing or restoring a project
 
-Recall has **no admin write surface for memory**, deliberately: `GET /admin/stats` is
-read-only, sqlite-web mounts the volume read-only, and nothing in the HTTP API
-can delete a project. A leaked token cannot be used to quietly destroy your
-history through any route the server exposes.
+A project stored under a key you did not want stays there until you move it.
+It happens: a repository with no git remote syncs under a `local:<path>` key
+derived from its checkout path, so the same project on a second machine lands
+under a second key. Setting `RECALL_PROJECT_KEY` fixes it going forward, but
+the rows already written keep the old key.
 
-The cost of that choice is that a project stored under a key you did not want
-stays there. It happens: a repository with no git remote syncs under a
-`local:<path>` key derived from its checkout path, so the same project on a
-second machine lands under a second key. Setting `RECALL_PROJECT_KEY` fixes it
-going forward, but the rows already written keep the old key.
+Nothing breaks if you leave them. They are a few kilobytes of prose that
+nothing reads, so clean up only if you want to.
 
-Nothing breaks if you leave them — they are a few kilobytes of prose that
-nothing reads. Clean up only if you want to.
+Recall has **no HTTP route that deletes or moves a project**, deliberately:
+`GET /admin/stats` is read-only, sqlite-web mounts the volume read-only, and a
+leaked token cannot destroy your history through anything the server exposes.
+The write path is `recall-server admin`, a subcommand you run inside the
+server's container. It opens no listener of any kind, so no token is involved
+and the only way to reach it is a shell on this machine.
 
-### Look before you delete
+Run it as `node`, the user the server runs as. `docker exec` runs as root
+unless told otherwise, and the commands refuse to change the database as
+anyone but its owner: a root-owned journal left behind by a crash is a file
+the server cannot open. Both compose files name the container
+`recall-server`, so this works from any directory, whichever file you
+deployed with:
 
 ```sh
-docker compose exec recall-server sh -c \
-  "sqlite3 /data/recall.db \
-   'SELECT project_key, count(*), sum(deleted) FROM memory_files GROUP BY 1 ORDER BY 1;'"
+alias recall-admin='docker exec -it -u node recall-server recall-server admin'
+recall-admin help
 ```
 
-`sqlite3` is not in the image; if that fails, do it from the host against the
-volume, or read it through sqlite-web, which is exactly what it is for.
-
-### Then delete, from a backup you just took
+### Look first
 
 ```sh
-# 1. A backup you can actually restore from. Do not skip this.
-docker compose exec recall-server sh -c \
-  "cp /data/recall.db /backups/before-cleanup-$(date +%Y%m%d-%H%M%S).db"
+recall-admin list                          # every key: files, tombstones, last update
+recall-admin list local:-Users-me-thing    # one key's files
+```
 
-# 2. Stop the server. SQLite tolerates concurrent writers; you should not
-#    rely on that while hand-editing the only copy of your memory.
+### Then change it
+
+```sh
+recall-admin rename local:-Users-me-thing me/thing --dry-run   # exactly what would move
+recall-admin rename local:-Users-me-thing me/thing             # type both keys to confirm
+recall-admin remove local:-Users-me-thing
+```
+
+Every change does what this section used to ask you to remember:
+
+- **Keys are named exactly.** A prefix, a pattern or a different case is
+  refused, and the refusal names the keys it resembles. You confirm by typing
+  each key back, a rename's new key as well as its old one, since a typo
+  there strands the project where no machine asks for it; `--yes` skips the
+  typing for a script and prints the keys it confirmed instead. A key holding
+  a character that prints as nothing (a zero-width space, a bidi mark) is
+  printed escaped, and refused as a rename's new key.
+- **It shows exactly what will change**, row by row, before asking.
+  `--dry-run` stops there: the database is opened read-only and no backup is
+  taken. `remove` also warns how many of the key's files hold content that no
+  other key has, which after the remove exists only in the backup.
+- **It takes a backup first** and prints its path,
+  `backups/admin/recall-<timestamp>.db`, after reading it back to check it
+  holds the rows it showed you. The server's rotation never prunes that
+  directory, and `backup-offbox.sh` copies it with everything else; delete
+  them yourself once you are sure. With nowhere to write one
+  (`RECALL_BACKUP_DIR` unset, or the write fails), nothing is changed, and a
+  backup cut short is deleted rather than left looking like a good one.
+- **It runs in one transaction.** It reads the rows again inside it and stops
+  if anything differs from what it showed you (a push landed meanwhile), and
+  it commits only if SQLite's `changes()` is exactly the number of rows it
+  named. Anything else rolls back. A change stopped this way before it began
+  deletes the backup it took, so retrying does not pile them up.
+- **It runs with the server up, and checks afterwards.** Like the server, it
+  waits up to 5 seconds for a write in flight, and if the lock never comes,
+  it rolls back and says so. What a lock cannot stop is a push that was
+  already being merged: the server reads the file, merges for up to
+  `RECALL_MERGE_TIMEOUT_MS` holding no lock, and writes after, so a push that
+  read before the change committed lands after it, putting a row back under
+  the old key or a merge of the old version over a restored one. So after
+  committing, the command waits out that window (the timeout plus a second:
+  46 seconds with the default) and checks. If something came back, it names
+  the paths and what to run, and exits with status 3: the change was made,
+  but needs a look. Interrupting the wait is safe; it only skips the check.
+  Stopping the server first avoids the question altogether.
+
+**A rename only moves rows onto a key that holds none**, even if no path
+overlaps. The primary key is `(project_key, file_path)`, so a rename onto an
+occupied key would collide, and folding two projects' notes together has no
+single right answer for the files both have. See
+[Folding one key into another](#folding-one-key-into-another).
+
+Whichever you do, a machine still configured for the old key writes to it
+again on its next push. Change that machine first.
+
+**To undo a rename, rename it back**: `recall-admin rename me/thing
+local:-Users-me-thing`. `restore` cannot do it, because it puts a key's rows
+back under that same key; it has no way to map one key onto another. Rename
+back before any machine pushes to the new key, or those rows move back too;
+and if something has written to the old key since, the rename back is
+refused, since that key is occupied again.
+
+### Folding one key into another
+
+Say `local:-Users-me-thing` should have been `me/thing`, and `me/thing`
+already holds notes. **Do not** point the old machine at `me/thing` and let
+it push, then remove the old key. That loses notes: the first pull of the
+machine's next session writes `me/thing`'s version of every file both keys
+have over the machine's own copy before anything is pushed, and backfill
+skips a file whose content differs, so the old versions never reach the
+server. Removing the old key then deletes the only other copy.
+
+Instead, keep everything and reconcile by hand:
+
+1. On the machine that writes the old key, with no Claude Code session open
+   in that project, copy its memory directory aside. `recall status` prints
+   where it is.
+
+   ```sh
+   cp -a <memory directory> ~/recall-fold-copy
+   ```
+
+2. Set `RECALL_PROJECT_KEY=me/thing` on that machine.
+3. Rename the old key to an archive key rather than removing it, so the
+   server keeps it under a name no machine uses:
+
+   ```sh
+   recall-admin rename local:-Users-me-thing local:-Users-me-thing.archived-2026-09-23
+   ```
+
+4. Start a session there. Its pull brings `me/thing`'s files. Compare them
+   with the copy from step 1, and bring across by hand whatever the copy has
+   that they lack; your edits push as usual.
+5. Once you are sure, `recall-admin remove` the archive key, which takes a
+   backup of it first, or keep it. It costs a few kilobytes.
+
+The rename refusal and `remove`'s warning both point here.
+
+### Restoring one project from a backup
+
+"To restore" under [Backups](#backups) replaces the whole database. To put
+back one key, from a server snapshot or from a backup an admin command took:
+
+```sh
+recall-admin list --backup /backups/recall-<timestamp>.db             # what it holds
+recall-admin list --backup /backups/recall-<timestamp>.db me/thing    # one key's files
+recall-admin restore /backups/recall-<timestamp>.db me/thing --dry-run
+recall-admin restore /backups/recall-<timestamp>.db me/thing
+```
+
+Paths are the container's, where `deploy/backups/` is `/backups`. A restore
+copies the backup's rows for that key exactly: content, source, timestamp and
+tombstone flag. It adds what the live database lacks and leaves alone what
+the backup does not have; it never removes a row. A live row that differs
+from the backup's is **not** overwritten without `--overwrite`: the command
+lists each one with what would change (content size, timestamp, tombstone,
+source) and refuses.
+
+One kind of overwrite needs more than that. Where the backup has a file as
+deleted (a tombstone) and it is live now, restoring the tombstone deletes the
+file, and not only on the server: every machine removes it at its next pull.
+The file may well have been written again on purpose since the backup, so
+`--overwrite` skips these and lists them as `skipped`; add
+`--restore-deletions` as well to delete them. A machine that edits a
+restored file before it next pulls pushes its own version over the restored
+one.
+
+### Last resort: by hand, with `sqlite3`
+
+For when the commands cannot run at all: an image older than they are, or a
+server that will not start. Every step here is one they take for you, so read
+this as the checklist they follow as much as a procedure.
+
+```sh
+# 1. Stop the server, so nothing writes while you edit by hand.
 docker compose stop recall-server
 
-# 3. Delete, naming the key exactly as the query above printed it.
-docker compose run --rm -v recall_recall-data:/data alpine sh -c \
-  "apk add --no-cache sqlite >/dev/null && \
-   sqlite3 /data/recall.db \"DELETE FROM memory_files WHERE project_key = 'local:-Users-me-thing';\""
+# 2. A backup you can actually restore from. Do not skip this. With the
+#    server stopped, a plain copy of the file is consistent.
+docker run --rm -v recall_recall-data:/data -v "$(pwd)/backups":/backups alpine \
+  cp /data/recall.db "/backups/before-cleanup-$(date +%Y%m%d-%H%M%S).db"
 
-docker compose start recall-server
+# 3. Open the database. sqlite3 is not in the server image.
+docker run --rm -it -v recall_recall-data:/data alpine sh -c \
+  "apk add --no-cache sqlite >/dev/null && sqlite3 /data/recall.db"
 ```
 
-Check the result with the same `GROUP BY` query, and confirm the server is
-healthy again with `curl -sf https://your-host/health`.
-
-### Renaming rather than deleting
-
-If the point is to move a project's history to a new key rather than discard
-it, `UPDATE` instead — and mind the primary key, which is
-`(project_key, file_path)`, so a rename onto a key that already holds the same
-paths will collide:
+Look before you change anything, and name the key exactly as this prints it:
 
 ```sql
-UPDATE memory_files SET project_key = 'me/thing'
-WHERE project_key = 'local:-Users-me-thing';
+SELECT project_key, count(*), sum(deleted) FROM memory_files GROUP BY 1 ORDER BY 1;
 ```
 
-Run it inside a transaction, and check `SELECT changes();` before committing.
+Then change it inside a transaction, and check `changes()` before committing.
+To remove:
+
+```sql
+BEGIN;
+DELETE FROM memory_files WHERE project_key = 'local:-Users-me-thing';
+SELECT changes();  -- must be the count above; if it is not, ROLLBACK;
+COMMIT;
+```
+
+To rename, mind the primary key, `(project_key, file_path)`: a rename onto a
+key that already holds the same paths collides, so check that the new key
+holds nothing first.
+
+```sql
+BEGIN;
+SELECT count(*) FROM memory_files WHERE project_key = 'me/thing';  -- must be 0
+UPDATE memory_files SET project_key = 'me/thing'
+WHERE project_key = 'local:-Users-me-thing';
+SELECT changes();  -- must be the count above; if it is not, ROLLBACK;
+COMMIT;
+```
+
+Then `docker compose start recall-server`, which also hands the files back to
+the user it runs as, and confirm it is healthy with
+`curl -sf https://your-host/health`.
 
 ## Monitoring / inspecting the database
 
