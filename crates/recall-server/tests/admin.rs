@@ -20,7 +20,7 @@ use passkey_types::webauthn::{CredentialCreationOptions, CredentialRequestOption
 use passkey_types::Passkey;
 use recall_server::{Config, Server, Store};
 use recall_wire::signature::{encode_public_key, fingerprint, SigningKey};
-use recall_wire::{Device, DeviceList, AuthkeyCreated, EnrollPending, PendingEnrollment};
+use recall_wire::{AuthkeyCreated, Device, DeviceList, EnrollPending, PendingEnrollment};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tower::ServiceExt;
