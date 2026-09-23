@@ -74,3 +74,10 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 panic = "abort"
+
+# The curve arithmetic under every Ed25519 signature, built for speed
+# rather than size. At "z" the server spent about 3 ms of CPU verifying each
+# signed request, on the path of every push hook; at 3 it spends about
+# 0.3 ms, for under 5 KB more in the client and 1.5 KB in the server.
+[profile.release.package.curve25519-dalek]
+opt-level = 3
