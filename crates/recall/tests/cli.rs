@@ -93,6 +93,11 @@ fn run(args: &[&str], cwd: &Path, env: &[(&str, &str)], stdin: Option<&str>) -> 
 /// both spellings agree there and CI stayed green while seven tests could not
 /// pass on the machine this project is developed on.
 ///
+/// Windows has the same shape of problem for a different reason:
+/// `canonicalize()` always returns the verbatim `\\?\C:\...` form, which
+/// `git rev-parse --show-toplevel` never produces — [`strip_verbatim_prefix`]
+/// is this platform's half of what resolving symlinks is on macOS.
+///
 /// `home_elsewhere()` deliberately stays a plain `TempDir`: `HOME` is read
 /// from the environment verbatim and never goes through git, so the files
 /// under it really are reported with the unresolved spelling.
@@ -126,7 +131,40 @@ fn git_repo() -> Repo {
     // Resolved once, here, rather than at each assertion: rebuilding an
     // expected path a second way is how a test ends up asserting nothing.
     let path = std::fs::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
+    let path = strip_verbatim_prefix(path);
     Repo { _dir: dir, path }
+}
+
+/// `\\?\C:\...` back to `C:\...`, the "dunce" trick, inlined rather than
+/// taken as a dependency for four lines.
+///
+/// `canonicalize()` on Windows always returns the verbatim form — there is
+/// no flag to opt out — but the binary under test never produces one: `git
+/// rev-parse --show-toplevel` doesn't emit it, and nothing downstream adds
+/// it. Left unstripped, every expected path built from this helper carries
+/// a prefix the real output never has, and — the sharper edge — `Path::join`
+/// on a verbatim path does not treat `/` as a separator at all, so a
+/// `.join("a/b/c")` (several of these tests join a single string containing
+/// its own separators) becomes one bizarre component instead of three.
+/// A no-op on every other platform.
+#[cfg(windows)]
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    match path.to_str() {
+        Some(s) => match s.strip_prefix(r"\\?\") {
+            // `\\?\UNC\server\share\...` is verbatim for a UNC path, and
+            // stripping only the `\\?\` would leave `UNC\...`, not a share
+            // path (`\\server\share\...`) — a temp directory is never one,
+            // so this is unreached in practice, but wrong is wrong.
+            Some(rest) if !rest.starts_with(r"UNC\") => PathBuf::from(rest),
+            _ => path,
+        },
+        None => path,
+    }
+}
+
+#[cfg(not(windows))]
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    path
 }
 
 /// The guard for the above, and it is filesystem-independent on purpose: it
@@ -134,6 +172,13 @@ fn git_repo() -> Repo {
 /// build their expectations from. On Linux both answers are the unresolved
 /// path and this passes trivially; on macOS they differ unless `git_repo()`
 /// resolves, which is exactly the bug.
+///
+/// On Windows a second, legitimate difference joins the comparison: git
+/// always prints `/`-separated paths, and `project::root()` in the binary
+/// turns those into `\` before doing anything else with them — see
+/// `project.rs::git_toplevel`. `git_says` gets the identical transform here,
+/// so this stays a guard on the *fixture* rather than growing a second copy
+/// of what the binary does and silently passing if the two drifted apart.
 #[test]
 fn the_repo_helper_agrees_with_git_about_where_the_repo_is() {
     let repo = git_repo();
@@ -144,6 +189,7 @@ fn the_repo_helper_agrees_with_git_about_where_the_repo_is() {
         .unwrap();
     assert!(out.status.success(), "git rev-parse failed in the fixture");
     let git_says = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let git_says = native_separators(git_says);
     assert_eq!(
         repo.path().display().to_string(),
         git_says,
@@ -151,6 +197,20 @@ fn the_repo_helper_agrees_with_git_about_where_the_repo_is() {
          reports another, so every assertion naming a path is comparing two \
          different strings"
     );
+}
+
+/// What `project::root()` does to git's output before anything else touches
+/// it — duplicated here rather than imported, because `recall` has no
+/// library target for an integration test to link against; see the module
+/// doc.
+#[cfg(windows)]
+fn native_separators(path: String) -> String {
+    path.replace('/', "\\")
+}
+
+#[cfg(not(windows))]
+fn native_separators(path: String) -> String {
+    path
 }
 
 /// An address nothing is listening on, so the client's failure path runs

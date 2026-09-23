@@ -149,6 +149,15 @@ or your own session shows Claude Code not picking them up, this is the first
 thing to check: compare `recall status`'s `memory dir` against the real
 directory under `~/.claude/projects/` on that machine.
 
+The same caveat covers a second case: Windows can address one directory by
+two different strings, an 8.3 "short name" (`C:\Users\RUNNER~1\code\recall`)
+and the long form (`C:\Users\runneradmin\code\recall`) — they name the same
+place on disk, but `slug()` has no way to know that and produces a different
+dash-separated string from each. Which one Claude Code sees, and which one
+Recall does, both depend on where the path came from (`git rev-parse`, a
+canonicalized path, an environment variable) rather than on anything either
+side controls.
+
 Windows client support ships x64 and arm64 binaries; the server remains
 Linux-only, and winget and code signing are not done yet.
 
