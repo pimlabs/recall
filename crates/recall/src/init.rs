@@ -67,19 +67,18 @@ fn warn_about_unset_variables(root: &Path) {
 
     println!();
     if cfg.url.is_empty() {
-        println!("  ! RECALL_URL is not set — not in this shell, nor in any settings file");
+        println!("  ! No server yet — RECALL_URL is not set, and ~/.recall names none");
     }
     if cfg.token.is_empty() {
-        println!("  ! RECALL_TOKEN is not set — not in this shell, nor in any settings file");
+        println!("  ! No token yet — RECALL_TOKEN is not set, and ~/.recall holds none");
     }
     println!(
         "
-  Add these to your shell profile (~/.zshrc, ~/.bashrc) before sync works:
+  On this machine, connect it once — it asks for the token and checks it:
 
-    export RECALL_URL=\"https://your-recall-host\"
-    export RECALL_TOKEN=\"<your token>\"
+    recall connect https://your-recall-host
 
-  See docs/reference/token-setup.md for generating the token, and for the extra
-  variables a claude.ai cloud environment needs."
+  A claude.ai cloud environment sets RECALL_URL and RECALL_TOKEN in its own
+  variables instead; docs/reference/token-setup.md has the values it needs."
     );
 }

@@ -380,6 +380,12 @@ where
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// This machine's hostname, best-effort — what `recall connect` turns into
+/// the name it suggests. [`None`] when nothing answers.
+pub fn this_hostname() -> Option<String> {
+    hostname(std::env::var("HOSTNAME").ok())
+}
+
 /// Best-effort hostname. `std` has no portable API for it and this is a
 /// display label, not an identity — nothing keys off it — so it is not worth
 /// a dependency. `hostname(1)` is what actually agrees with `gethostname` on

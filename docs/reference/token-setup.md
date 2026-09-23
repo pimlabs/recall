@@ -16,13 +16,19 @@ needs to send this same value.
 
 ## 2. Install it on your laptop
 
+From inside a project you want synced:
+
 ```sh
 recall connect https://recall.yourdomain.com
 ```
 
 Paste the value from step 1 at the prompt; it is not echoed. `connect`
-checks it against the server before saving anything, then writes two files
-(set `RECALL_HOME` to put them elsewhere):
+checks it against the server before saving anything — a mistyped paste is
+asked for again — then asks for a name for this machine, suggesting one
+from the hostname. After saving it offers to wire the project you are in
+and send its existing memory; answer no to either and `recall init` /
+`recall backfill` do the same later. It writes two files (set `RECALL_HOME`
+to put them elsewhere):
 
 ```text
 ~/.recall/config.toml        0644  the server, and this machine's name
@@ -43,9 +49,11 @@ are among the most commonly published files there are, in dotfiles
 repositories; and `export RECALL_TOKEN=…` typed once stays in shell history.
 
 **Already have it in your profile?** Run `recall connect`, then delete the
-`export RECALL_TOKEN=…` line and open a new terminal. Until you do, the
-exported value wins — anything the environment sets outranks the saved file —
-and `recall connect` says so. `recall doctor` warns about a shell token on a
+`export RECALL_…` lines and open a new terminal. Until you do, the exported
+values win — anything the environment sets outranks the saved files — and
+`recall connect` names each one that is still set, including
+`RECALL_SOURCE_ENV` and `RECALL_MACHINE_KEY`, which the machine name
+replaces. `recall doctor` warns about a shell token on a
 laptop; it cannot tell which file exported it, so it will not guess one.
 
 The layering, lowest first: the saved file, then your shell, then any
@@ -138,8 +146,8 @@ Not automated — this is a single shared secret, so rotating it means:
 generate a new one, update `deploy/.env` and restart the server, then
 update every environment from steps 2-3 before their next push/pull (a
 stale token just gets `401`s until updated, nothing worse). On a laptop
-that is `recall connect <url>` again, which replaces the saved token only
-once the new one is accepted. There's no
+that is `recall connect` again: it finds the saved token rejected, asks for
+the new one, and replaces it only once that is accepted. There's no
 urgency to rotate on a schedule for a single-owner personal server; do it
 if the token leaks (e.g. committed by accident — check `git log -p` for
 `RECALL_TOKEN` if ever unsure) or when a device permanently retires.

@@ -128,18 +128,35 @@ The first build is slow — `rusqlite` compiles SQLite from C.
 
 ## Connect to your server
 
-Once per machine:
+Once per machine, from inside a project you want synced:
 
 ```sh
 recall connect https://your-recall-host
 ```
 
-It asks for the token without echoing it, checks it against the server —
-reachable, and the token accepted — and only then saves it: the token to
-`~/.recall/credentials.toml`, readable by you only, and the server to
-`~/.recall/config.toml`. A wrong token or an
-unreachable server saves nothing and says which it was. `recall disconnect`
-removes it again.
+One question at a time, each skipped when there is nothing to ask:
+
+1. **The token**, read without echoing it and checked against the server —
+   reachable, and the token accepted. A saved token that still works is
+   kept without asking.
+2. **This machine's name**, suggested from what is already saved, then
+   `RECALL_MACHINE_KEY`, then the hostname. It labels what this machine
+   syncs and names its machine scope (below).
+3. **Save**: the token to `~/.recall/credentials.toml`, readable by you
+   only; the server and the name to `~/.recall/config.toml`.
+4. **This project**: wire its hooks, as `recall init` does, if they are not
+   already — and if it has memory from before Recall, send it, as
+   `recall backfill` does.
+
+A wrong token or an unreachable server saves nothing and says which it was.
+Run it again any time — to rename the machine, after rotating the token, or
+from a second project; with the server saved, `recall connect` alone is
+enough. `recall disconnect` removes the token again.
+
+Without a terminal it asks nothing: `--name <name>` sets the name and `--yes`
+takes the default for every question. It still needs a saved token that
+works, since a token is only ever read from a terminal — automation that
+holds the secret sets `RECALL_TOKEN` instead.
 
 `RECALL_URL` and `RECALL_TOKEN` still work, and **still win** over the saved
 file when set. That is where they belong in a claude.ai cloud environment or
