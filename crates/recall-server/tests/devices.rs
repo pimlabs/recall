@@ -2041,3 +2041,59 @@ async fn one_address_cannot_hold_the_enrolment_queue() {
     );
     assert_eq!(enrol_from("203.0.113.2", 56).await.0, StatusCode::OK);
 }
+
+/// Verification finding N4: one IPv6 /64 could fill the whole enrolment
+/// queue, and dodge the rate limit, by sending from a new address in it
+/// each time. Every address in a /64 now counts as one.
+#[tokio::test]
+async fn an_ipv6_client_is_one_address_for_its_whole_64() {
+    let h = harness(|_| {});
+    let enrol_from = |ip: String, seed: u8| {
+        let h = &h;
+        async move {
+            h.call_from(
+                &ip,
+                "POST",
+                devices::ENROLL_PATH,
+                None,
+                Some(json!({"name": format!("v6-{seed}"), "public_key": Machine::new(seed).public_key()})),
+            )
+            .await
+            .0
+        }
+    };
+    for n in 0..5u8 {
+        assert_eq!(
+            enrol_from(format!("2001:db8:0:1::{n:x}"), 70 + n).await,
+            StatusCode::OK
+        );
+    }
+    assert_eq!(
+        enrol_from("2001:db8:0:1:ffff:ffff:ffff:ffff".into(), 75).await,
+        StatusCode::TOO_MANY_REQUESTS,
+        "another address in the same /64"
+    );
+    assert_eq!(
+        enrol_from("2001:db8:0:2::1".into(), 76).await,
+        StatusCode::OK,
+        "the next /64 is another client"
+    );
+
+    // The rate limit, the same way; and an IPv4 address written as IPv6
+    // is that IPv4 address.
+    let h = harness(|c| c.rate_limit_max = 2);
+    let pull = |ip: &'static str| {
+        let h = &h;
+        async move {
+            h.call_from(ip, "GET", "/sync?project_key=a", Some(TOKEN), None)
+                .await
+                .0
+        }
+    };
+    assert_eq!(pull("2001:db8:0:9::1").await, StatusCode::OK);
+    assert_eq!(pull("2001:db8:0:9::2").await, StatusCode::OK);
+    assert_eq!(pull("2001:db8:0:9::3").await, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(pull("198.51.100.20").await, StatusCode::OK);
+    assert_eq!(pull("::ffff:198.51.100.20").await, StatusCode::OK);
+    assert_eq!(pull("198.51.100.20").await, StatusCode::TOO_MANY_REQUESTS);
+}

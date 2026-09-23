@@ -191,6 +191,12 @@ can choose, and choosing your own bucket defeats the limit. It is trustworthy
 only because the container has no published port, so every request really
 does arrive through that ingress.
 
+An IPv6 address is counted as its /64, the least a provider gives one
+subscriber: every address in it is one client's to send from, so counting
+each alone would hand one machine as many buckets as it liked. An IPv4
+address written as IPv6 (`::ffff:198.51.100.4`) is counted as the IPv4
+address. The cap on enrolments waiting from one address counts the same way.
+
 ## Protocol and client identity
 
 Every request the `recall` client sends names the protocol it speaks and the
@@ -670,7 +676,7 @@ device is removed once it has made no signed request for
 | `403` | The enrolment key already has as many unrevoked devices as its `max_devices`. |
 | `409` | An unrevoked device already has the name: `{"error":"a device named laptop already exists; revoke it first, or enrol with another name"}`. |
 | `413` | A body over 8 KiB. |
-| `429` | Rate limited; or five enrolments from this address are already waiting: `{"error":"too many enrolments from this address are waiting for approval; approve or deny them, or let them expire"}`. The address is the one the rate limiter uses. |
+| `429` | Rate limited; or five enrolments from this address are already waiting: `{"error":"too many enrolments from this address are waiting for approval; approve or deny them, or let them expire"}`. The address is counted as the rate limiter counts it, an IPv6 one by its /64. |
 | `503` | A thousand enrolments are already waiting for approval: `{"error":"too many enrolments are waiting for approval, try again later"}`. |
 
 ## `POST /v1/devices/enroll/poll`

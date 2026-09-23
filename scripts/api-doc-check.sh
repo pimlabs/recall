@@ -288,6 +288,13 @@ for n in 1 2 3 4 5; do enroll "waiting-$n" >/dev/null; done
 check "a sixth enrolment waiting from one address is 429" '429' \
   "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${json[@]}" \
      -d "{\"name\":\"waiting-6\",\"public_key\":\"$KEY\"}" "$URL/v1/devices/enroll")"
+v6_enroll() { # address, name
+  curl -s -o /dev/null -w '%{http_code}' -X POST "${json[@]}" -H "cf-connecting-ip: $1" \
+    -d "{\"name\":\"$2\",\"public_key\":\"$KEY\"}" "$URL/v1/devices/enroll"
+}
+for n in 1 2 3 4 5; do v6_enroll "2001:db8:5:5::$n" "v6-$n" >/dev/null; done
+check "every IPv6 address in one /64 is one address: the sixth waiting is 429" '429 200' \
+  "$(v6_enroll 2001:db8:5:5:ffff:ffff:ffff:ffff v6-6) $(v6_enroll 2001:db8:5:6::1 v6-7)"
 
 echo "Rate limiting"
 RL_PORT=8932
