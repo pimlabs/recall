@@ -14,7 +14,13 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
-## Unreleased
+## 0.4.1 — 2026-09-23
+
+0.4.0 was tagged but never published: its release build stopped at a
+packaging check before anything reached a registry or a server. Everything
+listed under 0.4.0 below ships for the first time in this release, together
+with what is listed here.
+
 
 - **`recall connect` enrols this machine as a device** when the server
   supports it (this release's server does). It makes an Ed25519 key pair,
@@ -171,7 +177,7 @@ break will be described here in full rather than smoothed over.
   HTTP. A certificate from files is reloaded on `SIGHUP` and every 12
   hours.
 
-## 0.4.0 — 2026-09-23
+## 0.4.0 — 2026-09-23 (tagged, never published; shipped in 0.4.1)
 
 - **Breaking: the server is its own binary, `recall-server`.** `recall serve`
   is gone from the client; typing it now says where the server went and
