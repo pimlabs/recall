@@ -260,6 +260,48 @@ legacy transition. None of it assumes one owner.
 - **Everything that is not code:** other people's data, a privacy policy,
   and the questions `CLAUDE.md` names.
 
+## Part 4: one binary or two
+
+Today `recall` is one binary for both halves: `recall serve` runs the
+server, everything else is the client. Every laptop and cloud session
+therefore ships the server too.
+
+**Measured** (release profile, linux x86_64, 0.3.2): 4,507,640 bytes with
+the server, 3,108,584 without, so the server is 1.4 MB, 31% of what every
+client downloads. It is also about 15 crates the client never runs:
+`axum`, `rusqlite` and `libsqlite3-sys`, which compiles SQLite's C source
+into the binary.
+
+**What comparable tools do:**
+
+- **Atuin**, the closest analogue (self-hostable sync server plus a CLI on
+  every machine), moved its server into its own `atuin-server` binary in
+  18.12 ("Move atuin-server to its own binary", #3112).
+- **Tailscale** ships `tailscale` (CLI) and `tailscaled` (daemon)
+  separately. It links them into one binary only behind the
+  `ts_include_cli` build tag, "for space savings reasons" on small devices.
+- **Syncthing** and **Vault** are single binaries, but there the same
+  process plays both roles: every Syncthing node is a peer, and the Vault
+  CLI is itself a client of `vault server`. Recall's client never serves.
+
+**Proposal:** two binaries from the same workspace and the same version.
+
+- `recall`: the client, without `recall-server` in its dependency tree.
+  This is what npm, Homebrew, curl and `cargo install recall` deliver.
+- `recall-server`: a `[[bin]]` in the existing `recall-server` crate. The
+  release builds it for the server image, and `cargo install recall-server`
+  gets it.
+- One version for both, so Part 1 is unaffected: `server.version` and
+  `min_client` are still compared on the same numbers.
+- The client's integration tests start `recall-server` instead of
+  `recall serve`.
+
+Removing `recall serve` from the client is a breaking change under
+[`../reference/releasing.md`](../reference/releasing.md), so it belongs in a
+minor release. It fits best alongside the move to release-built server
+images, which changes the Dockerfile anyway. Until then `recall serve` keeps
+working.
+
 ## Open decisions
 
 1. **End-to-end encryption.** Atuin encrypts history on the client, so its
@@ -271,7 +313,8 @@ legacy transition. None of it assumes one owner.
    token with enrolled devices. That wording changes only with the owner's
    explicit agreement.
 3. **Order of work.** Part 1 does not depend on Part 2 and ships first:
-   discovery, version headers, golden fixtures, release-built server images.
+   discovery, version headers, golden fixtures, release-built server images,
+   and with those the split into two binaries (Part 4).
 
 ## References
 
@@ -291,4 +334,5 @@ legacy transition. None of it assumes one owner.
 - Claude Code docs, authentication (credential storage, `claude setup-token`)
 - Tailscale auth keys (`tailscale_tailnet_key`)
 - Syncthing, understanding device IDs
-- Atuin, sync and encryption
+- Atuin, sync and encryption; CHANGELOG 18.12 (#3112, server moved to its own binary)
+- Tailscale `cmd/tailscaled` (`ts_include_cli` combined build)
