@@ -18,10 +18,7 @@ use recall_hooks::{
 /// The project root, resolved the way Claude Code resolves it: the git root,
 /// falling back to the working directory.
 pub fn root() -> PathBuf {
-    if let Some(root) = git(&["rev-parse", "--show-toplevel"]) {
-        return PathBuf::from(root);
-    }
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    git_toplevel().unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
 /// The `origin` remote, or an empty string outside a repository — which
@@ -33,7 +30,35 @@ pub fn remote() -> String {
 /// The git root, or [`None`] if the working directory isn't in a
 /// repository. Distinct from [`root`], which always answers.
 pub fn git_root() -> Option<PathBuf> {
-    git(&["rev-parse", "--show-toplevel"]).map(PathBuf::from)
+    git_toplevel()
+}
+
+/// `git rev-parse --show-toplevel`, with its separators made native.
+///
+/// Git prints `/`-separated paths unconditionally, on every platform
+/// including Windows — a stable property of git's own output, not an
+/// artifact of this checkout. Everything downstream of [`root`]/[`git_root`]
+/// either joins onto it with [`Path::join`](std::path::Path::join), prints
+/// it with `display()`, or compares it against a canonicalized path, and all
+/// three expect `\` on Windows: left as `/`, a join like
+/// `.claude/settings.json` (a single string containing its own separators)
+/// does not split into components at all when the base is later
+/// canonicalized to a verbatim (`\\?\`) path, and every other join produces
+/// the mixed `C:/Users/...\.claude\...` that `recall status` used to print.
+/// The project-slug rule this feeds is unaffected either way: `slug()` maps
+/// `:`, `/` and `\` to one dash each, see `claude.rs`.
+fn git_toplevel() -> Option<PathBuf> {
+    git(&["rev-parse", "--show-toplevel"]).map(|s| PathBuf::from(native_separators(s)))
+}
+
+#[cfg(windows)]
+fn native_separators(path: String) -> String {
+    path.replace('/', "\\")
+}
+
+#[cfg(not(windows))]
+fn native_separators(path: String) -> String {
+    path
 }
 
 /// Whether this is a remote or cloud session, per `CLAUDE_CODE_REMOTE`.

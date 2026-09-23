@@ -21,7 +21,11 @@ pub struct Env {
     pub remote_memory_dir: Option<String>,
     /// `CLAUDE_CONFIG_DIR`.
     pub config_dir: Option<String>,
-    /// `$HOME`.
+    /// `$HOME`, or `%USERPROFILE%` where that is unset — Windows has no
+    /// `HOME` by default. **Not verified against a real Windows Claude Code
+    /// install**: it is a reasonable guess (Node's `os.homedir()` falls back
+    /// to `USERPROFILE` the same way), not a confirmed fact about what the
+    /// CLI itself resolves. See docs/reference/install.md's Windows section.
     pub home: Option<String>,
 }
 
@@ -31,10 +35,15 @@ pub struct Env {
 /// reporting which of them a settings file declares — cannot drift from what
 /// [`Env::from_lookup`] actually consults. The
 /// `reads_exactly_the_variables_it_publishes` test holds the two together.
-pub const VARS: &[&str] = &["CLAUDE_CODE_REMOTE_MEMORY_DIR", "CLAUDE_CONFIG_DIR", "HOME"];
+pub const VARS: &[&str] = &[
+    "CLAUDE_CODE_REMOTE_MEMORY_DIR",
+    "CLAUDE_CONFIG_DIR",
+    "HOME",
+    "USERPROFILE",
+];
 
 impl Env {
-    /// Reads the three variables through a caller-supplied lookup.
+    /// Reads the four variables through a caller-supplied lookup.
     pub fn from_lookup<F>(lookup: F) -> Self
     where
         F: Fn(&str) -> Option<String>,
@@ -42,11 +51,15 @@ impl Env {
         Env {
             remote_memory_dir: lookup("CLAUDE_CODE_REMOTE_MEMORY_DIR"),
             config_dir: lookup("CLAUDE_CONFIG_DIR"),
-            home: lookup("HOME"),
+            // An empty HOME reads as unset before USERPROFILE gets a turn,
+            // matching how every other value here treats "set but empty".
+            home: lookup("HOME")
+                .filter(|v| !v.is_empty())
+                .or_else(|| lookup("USERPROFILE")),
         }
     }
 
-    /// Reads the three variables from the real process environment.
+    /// Reads the four variables from the real process environment.
     pub fn from_process_env() -> Self {
         Self::from_lookup(|key| std::env::var(key).ok())
     }
@@ -278,6 +291,37 @@ mod tests {
         assert_eq!(slug("🚀"), "--", "one char, but two UTF-16 units");
     }
 
+    /// **Not verified against a real Windows Claude Code install** — see the
+    /// module doc and docs/reference/install.md's Windows section. This pins
+    /// down what *is* known rather than leaving the assumption implicit:
+    /// `git rev-parse --show-toplevel` prints forward slashes even on
+    /// Windows (`project::root` uses it unchanged), and `slug` maps `:` and
+    /// either slash character to one dash each, so a drive-letter path
+    /// slugs the same way whichever separator it happens to use. What is
+    /// genuinely unknown is whether Claude Code's own Node process computes
+    /// the *same string* from the same directory — a lowercased drive
+    /// letter, for one, would slug differently and point at a different
+    /// memory directory.
+    #[test]
+    fn slugs_a_windows_style_path_the_same_regardless_of_separator() {
+        for (input, why) in [
+            (
+                "C:/Users/eko/code/recall",
+                "forward slashes, what git prints",
+            ),
+            (
+                r"C:\Users\eko\code\recall",
+                "backslashes, what Node's path APIs print",
+            ),
+        ] {
+            assert_eq!(
+                slug(input),
+                "C--Users-eko-code-recall",
+                "{why}: slug({input:?})"
+            );
+        }
+    }
+
     #[test]
     fn memory_root_follows_the_cli_precedence() {
         for (env, want, why) in [
@@ -356,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_its_three_variables_through_the_lookup() {
+    fn reads_its_four_variables_through_the_lookup() {
         let env = Env::from_lookup(|key| match key {
             "CLAUDE_CODE_REMOTE_MEMORY_DIR" => Some("/data/claude".into()),
             "HOME" => Some("/home/u".into()),
@@ -369,6 +413,40 @@ mod tests {
                 config_dir: None,
                 home: Some("/home/u".into()),
             }
+        );
+    }
+
+    /// Windows has no `HOME` by default, so `USERPROFILE` has to stand in —
+    /// see the module doc for how much of this is actually verified.
+    #[test]
+    fn home_falls_back_to_userprofile_when_home_is_unset_or_empty() {
+        let env = Env::from_lookup(|key| match key {
+            "USERPROFILE" => Some(r"C:\Users\eko".into()),
+            _ => None,
+        });
+        assert_eq!(env.home.as_deref(), Some(r"C:\Users\eko"), "HOME unset");
+
+        let env = Env::from_lookup(|key| match key {
+            "HOME" => Some(String::new()),
+            "USERPROFILE" => Some(r"C:\Users\eko".into()),
+            _ => None,
+        });
+        assert_eq!(
+            env.home.as_deref(),
+            Some(r"C:\Users\eko"),
+            "HOME declared empty reads as unset, same as everywhere else"
+        );
+
+        let env = Env::from_lookup(|key| match key {
+            "HOME" => Some("/home/eko".into()),
+            "USERPROFILE" => Some(r"C:\Users\eko".into()),
+            _ => None,
+        });
+        assert_eq!(
+            env.home.as_deref(),
+            Some("/home/eko"),
+            "HOME wins when both are set — this is the ordinary Unix case, \
+             USERPROFILE is only a fallback"
         );
     }
 }

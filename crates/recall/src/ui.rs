@@ -149,10 +149,20 @@ fn value_tone(value: &str) -> Option<Tone> {
 /// The long form is what `--json` carries and what a script should use; a
 /// person reading a report does not need `/Users/someone/` repeated on every
 /// line to know which home directory is meant.
+///
+/// Reads the real process environment rather than going through
+/// [`recall_hooks::claude::Env`] — this is cosmetic, not a value anything
+/// else depends on, so it is not worth threading the settings-layered lookup
+/// through for. `USERPROFILE` is the fallback on Windows, which has no `HOME`
+/// by default; not verified against a real Windows machine.
 pub fn tilde(text: &str) -> String {
-    match std::env::var("HOME") {
-        Ok(home) if home.len() > 1 => text.replace(&home, "~"),
-        _ => text.to_string(),
+    let home = std::env::var("HOME")
+        .ok()
+        .filter(|h| h.len() > 1)
+        .or_else(|| std::env::var("USERPROFILE").ok().filter(|h| h.len() > 1));
+    match home {
+        Some(home) => text.replace(&home, "~"),
+        None => text.to_string(),
     }
 }
 

@@ -279,6 +279,13 @@ for asset in recall_darwin_amd64 recall_darwin_arm64 recall_linux_amd64 recall_l
     die "$asset.tar.gz is missing from the release"
   fi
 done
+for asset in recall_windows_amd64 recall_windows_arm64; do
+  if curl -sfI "$release_url/$asset.zip" >/dev/null 2>&1; then
+    ok "$asset.zip"
+  else
+    die "$asset.zip is missing from the release"
+  fi
+done
 
 # --------------------------------------------------------------------------
 step "7/9  npm"

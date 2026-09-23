@@ -28,7 +28,8 @@
   "homepage": "https://github.com/pimlabs/recall",
   "os": [
     "darwin",
-    "linux"
+    "linux",
+    "win32"
   ],
   "cpu": [
     "x64",
