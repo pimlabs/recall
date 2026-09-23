@@ -40,7 +40,8 @@ break will be described here in full rather than smoothed over.
   `POST /v1/enroll-keys/{id}/revoke`.
 - **Device names are plain and unique.** A name with control, format or
   invisible characters (a zero-width space, a right-to-left override) is
-  refused, no two unrevoked devices share a name, and a device an
+  refused, no two unrevoked devices share a name or names that read alike
+  (`Laptop`, or `lаptop` with a Cyrillic `а`, beside `laptop`), and a device an
   enrolment key enrols is named by the server after the key's tag.
 - **Enrolment keys** enrol ephemeral devices unless told otherwise, can be
   capped with `max_devices`, and can be revoked together with every device

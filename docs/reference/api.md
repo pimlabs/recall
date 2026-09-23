@@ -615,7 +615,7 @@ Unauthenticated, and rate limited like every other route.
 
 | Field | Type | Required | Notes |
 |---|---|:---:|---|
-| `name` | string | yes | What the owner sees the machine as. At most 64 characters, and none that hide what the name says: no control or format characters (Unicode categories Cc and Cf, which include the bidirectional overrides and the zero-width characters), no line or paragraph separators, no other invisible ones. No two unrevoked devices share a name, compared without case; a revoked device's name is free again. Ignored with `enroll_key`: see below. |
+| `name` | string | yes | What the owner sees the machine as. At most 64 characters, and none that hide what the name says: no control or format characters (Unicode categories Cc and Cf, which include the bidirectional overrides and the zero-width characters), no line or paragraph separators, no other invisible ones. Stored trimmed and in Unicode's composed form (NFC). No two unrevoked devices share a name, or names a person would read as one: they are compared after NFKC, without case, and by their Unicode confusable skeletons (UTS #39), so `Laptop`, `lаptop` with a Cyrillic `а`, and `1aptop` are all `laptop`, and `Straße` is `STRASSE`. A revoked device's name is free again. Ignored with `enroll_key`: see below. |
 | `public_key` | string | yes | The Ed25519 public key: the raw 32 bytes, base64url, no padding. A key of small order is refused. |
 | `agent` | string | no | The client's `User-Agent`, shown in the device list. At most 256 characters, under the same rules as `name`. |
 | `enroll_key` | string | no | An [enrolment key](#post-v1enroll-keys). With a valid one the device is approved at once. |

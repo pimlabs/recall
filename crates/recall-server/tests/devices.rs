@@ -1759,6 +1759,33 @@ async fn names_are_plain_unique_and_not_chosen_by_key_enrolments() {
         .contains(&approved.name["cloud-".len()..]));
 }
 
+/// Verification finding N2: a name that reads as a device's name is that
+/// name, whether it differs in script (a Cyrillic `а`), in normal form
+/// (`é` as one character or two) or by case folding (`ß` and `SS`). And a
+/// name is stored composed, however it was sent.
+#[tokio::test]
+async fn a_name_that_looks_like_a_devices_is_that_name() {
+    let h = harness(|_| {});
+    for (seed, taken, stored, lookalike) in [
+        (60, "laptop", "laptop", "l\u{0430}ptop"),
+        (62, "cafe\u{0301}", "caf\u{00E9}", "caf\u{00E9}"),
+        (64, "STRASSE", "STRASSE", "Stra\u{00DF}e"),
+    ] {
+        let mut first = Machine::named(seed, taken);
+        assert_eq!(h.enrol(&mut first, "sync").await.name, stored);
+        let (status, why) = error_of(
+            h.call(
+                "POST",
+                devices::ENROLL_PATH,
+                None,
+                Some(json!({"name": lookalike, "public_key": Machine::new(seed + 1).public_key()})),
+            )
+            .await,
+        );
+        assert_eq!(status, StatusCode::CONFLICT, "{lookalike:?}: {why}");
+    }
+}
+
 /// Review finding 5: nonces live in memory, so a server that has just
 /// started refuses a signature made before it did, which the process
 /// before it may already have accepted.

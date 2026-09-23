@@ -11,6 +11,7 @@ use recall_wire::signature::{fingerprint, parse_public_key};
 use recall_wire::{Device, EnrollKey};
 use rusqlite::{Connection, OptionalExtension, Row};
 use time::OffsetDateTime;
+use unicode_normalization::UnicodeNormalization;
 
 use super::Store;
 use crate::{format_timestamp, parse_timestamp};
@@ -105,15 +106,44 @@ fn enroll_key_from(r: &Row<'_>) -> rusqlite::Result<EnrollKey> {
     })
 }
 
-/// Whether an unrevoked device already has `name`, compared without case,
-/// so `Laptop` cannot stand beside `laptop`. A revoked device's name is
-/// free again.
+/// A device name, or an enrolment key's tag, as it is stored: trimmed, and
+/// in Unicode's composed form (NFC), so the same letters typed as one
+/// character or as a letter and its accent are stored alike.
+pub fn plain_name(name: &str) -> String {
+    name.trim().nfc().collect()
+}
+
+/// What a name is compared by: two keys, and two names are the same name
+/// when either key is.
+///
+/// Both begin with NFKC, so a name typed decomposed, or with a ligature or
+/// a full-width letter, is the name typed plainly. Then each takes the
+/// name in one case and reduces it to its confusable skeleton (UTS #39),
+/// which maps every character to the one it can be mistaken for, so
+/// `lаptop` with a Cyrillic `а`, or `1aptop`, is `laptop`. It takes two
+/// because a pair can look alike in one case and not the other: Cyrillic
+/// `к` does not look like `k`, but `К` looks like `K`; and lowercasing
+/// keeps `ß` apart from `ss`, where uppercasing makes it `SS`, so
+/// `Straße` is `STRASSE`.
+fn name_keys(name: &str) -> [String; 2] {
+    let plain: String = name.trim().nfkc().collect();
+    let skeleton = |s: String| unicode_security::skeleton(&s).collect::<String>();
+    [
+        skeleton(plain.to_lowercase()),
+        skeleton(plain.to_uppercase()),
+    ]
+}
+
+/// Whether an unrevoked device already has `name`, or one a person would
+/// read as it (see [`name_keys`]), so neither `Laptop` nor `lаptop` can
+/// stand beside `laptop`. A revoked device's name is free again.
 fn name_taken(conn: &Connection, name: &str) -> Result<bool> {
-    let wanted = name.to_lowercase();
+    let [lower, upper] = name_keys(name);
     let mut stmt = conn.prepare("SELECT name FROM devices WHERE revoked_at IS NULL")?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
-        if row.get::<_, String>(0)?.to_lowercase() == wanted {
+        let [their_lower, their_upper] = name_keys(&row.get::<_, String>(0)?);
+        if lower == their_lower || upper == their_upper {
             return Ok(true);
         }
     }
@@ -948,6 +978,52 @@ mod tests {
                 .unwrap(),
             Decision::Done(_)
         ));
+    }
+
+    /// Verification finding N2: names a person reads as one name are one
+    /// name, whatever characters spell them, in either order.
+    #[test]
+    fn names_that_look_alike_are_one_name() {
+        for (a, b) in [
+            // A Cyrillic а.
+            ("laptop", "l\u{0430}ptop"),
+            // é as one character, and as e and a combining accent.
+            ("caf\u{00E9}", "cafe\u{0301}"),
+            ("STRASSE", "Stra\u{00DF}e"),
+            ("laptop", "LAPTOP"),
+            ("laptop", "1aptop"),
+            // A Cyrillic К, which looks like K only as a capital.
+            ("Kiosk", "\u{041A}iosk"),
+            // A ligature, and full-width letters.
+            ("file", "\u{FB01}le"),
+            ("desk", "\u{FF44}\u{FF45}\u{FF53}\u{FF4B}"),
+        ] {
+            for (taken, wanted) in [(a, b), (b, a)] {
+                let st = Store::open_in_memory().unwrap();
+                inserted(&st, &device("dev_1", taken, None));
+                assert_eq!(
+                    st.insert_device(&device("dev_2", wanted, None), None)
+                        .unwrap(),
+                    Inserted::NameTaken,
+                    "{wanted:?} beside {taken:?}"
+                );
+            }
+        }
+
+        // Names that merely share letters are still two names.
+        let st = Store::open_in_memory().unwrap();
+        for (i, name) in ["laptop", "laptops", "lapdog", "desk", "desk-2"]
+            .into_iter()
+            .enumerate()
+        {
+            inserted(&st, &device(&format!("dev_{i}"), name, None));
+        }
+    }
+
+    #[test]
+    fn a_name_is_stored_composed_and_trimmed() {
+        assert_eq!(plain_name("  cafe\u{0301} "), "caf\u{00E9}");
+        assert_eq!(plain_name("laptop"), "laptop");
     }
 
     #[test]
