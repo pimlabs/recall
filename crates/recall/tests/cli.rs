@@ -14,6 +14,17 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+/// The PostToolUse payload Claude Code sends for an edit to `file`.
+///
+/// Built as JSON rather than spliced into a string: a Windows path is full
+/// of backslashes, which a hand-assembled string leaves as invalid escapes.
+/// The hook then reads a malformed payload and stays silent, so a test
+/// expecting silence passes for the wrong reason and one expecting a
+/// message fails without saying why.
+fn hook_payload(file: &Path) -> String {
+    serde_json::json!({ "tool_input": { "file_path": file } }).to_string()
+}
+
 fn binary() -> PathBuf {
     // Cargo builds integration-test binaries next to the crate's own.
     let mut path = std::env::current_exe().expect("test binary path");
@@ -260,10 +271,7 @@ fn pull_exits_zero_when_nothing_is_configured() {
 #[test]
 fn push_is_a_silent_no_op_for_a_file_that_is_not_memory() {
     let repo = git_repo();
-    let payload = format!(
-        r#"{{"tool_input":{{"file_path":"{}/src/main.rs"}}}}"#,
-        repo.path().to_string_lossy()
-    );
+    let payload = hook_payload(&repo.path().join("src/main.rs"));
     let r = run(&["push"], repo.path(), &[], Some(&payload));
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
     assert!(r.stderr.is_empty(), "expected silence, got {:?}", r.stderr);
@@ -348,10 +356,7 @@ fn push_does_not_fork_hostname_before_deciding_a_file_is_not_its_business() {
     );
     std::fs::remove_file(&marker).unwrap();
 
-    let payload = format!(
-        r#"{{"tool_input":{{"file_path":"{}/src/main.rs"}}}}"#,
-        repo.path().to_string_lossy()
-    );
+    let payload = hook_payload(&repo.path().join("src/main.rs"));
     let r = run(&["push"], repo.path(), &[("PATH", &path)], Some(&payload));
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
     assert!(
@@ -1634,10 +1639,7 @@ fn push_says_so_when_the_file_is_another_projects_memory() {
     std::fs::create_dir_all(foreign.parent().unwrap()).unwrap();
     std::fs::write(&foreign, "# note\n").unwrap();
 
-    let payload = format!(
-        r#"{{"tool_input":{{"file_path":"{}"}}}}"#,
-        foreign.display()
-    );
+    let payload = hook_payload(&foreign);
     let r = run(&["push"], repo.path(), &[], Some(&payload));
 
     // Still exit 0 — a hook must never be the reason a session breaks.
@@ -1663,7 +1665,7 @@ fn push_stays_silent_about_an_ordinary_file() {
     std::fs::create_dir_all(source.parent().unwrap()).unwrap();
     std::fs::write(&source, "fn main() {}\n").unwrap();
 
-    let payload = format!(r#"{{"tool_input":{{"file_path":"{}"}}}}"#, source.display());
+    let payload = hook_payload(&source);
     let r = run(&["push"], repo.path(), &[], Some(&payload));
 
     assert_eq!(r.code, 0);
