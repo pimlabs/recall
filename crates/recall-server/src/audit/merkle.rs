@@ -182,10 +182,10 @@ fn subproof(m: u64, leaves: &[Hash], b: bool) -> Vec<Hash> {
 /// `first`, with only appends between them (RFC 9162 §2.1.4's verification
 /// algorithm).
 ///
-/// This mirrors [`subproof`]'s own recursion exactly — the same `m <= k` /
+/// This mirrors `subproof`'s own recursion exactly — the same `m <= k` /
 /// `m > k` decisions, made from `first` and `second` alone, in the same
 /// order — rather than a separately-derived folding algorithm: since
-/// [`subproof`] appends each level's sibling *after* recursing, walking the
+/// `subproof` appends each level's sibling *after* recursing, walking the
 /// proof forward while making the identical recursive calls consumes it in
 /// exactly the order it was produced. A verifier that is structurally the
 /// mirror image of the generator is correct because the generator is,

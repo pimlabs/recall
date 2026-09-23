@@ -986,10 +986,14 @@ current size, is `400`.
 
 ### Verifying offline
 
-`GET /v1/audit/entries` can page through every leaf the log holds into a
-file, one per line, after a first line holding a checkpoint. Given that
-export, `scripts/audit-verify.py` recomputes the tree with nothing but
-`hashlib` and checks:
+`GET /v1/audit/checkpoint` and `GET /v1/audit/entries` are all that is
+needed to write an export: a first line holding the checkpoint, then every
+leaf `entries` returns, one per line, in `seq` order. (A CLI command that
+pages through this for you — `recall audit export` — is client work, not
+this release's; today an owner builds the file with `curl` and the two
+routes above, or a short script.) Given such a file,
+`scripts/audit-verify.py` recomputes the tree with nothing but `hashlib`
+and checks:
 
 1. `seq` runs from 0 without gaps.
 2. The root recomputed over every leaf matches the checkpoint on the export's

@@ -57,9 +57,12 @@ check "discovery needs no token" "200" \
 check "discovery's top-level keys" 'protocol server min_client auth capabilities' \
   "$(curl -s "$URL/.well-known/recall" | python3 -c '
 import json,sys; print(" ".join(json.load(sys.stdin).keys()))')"
-check "discovery's capabilities" 'devices limits merge_base scopes' \
+check "discovery's capabilities" 'audit devices limits merge_base scopes' \
   "$(curl -s "$URL/.well-known/recall" | python3 -c '
 import json,sys; print(" ".join(json.load(sys.stdin)["capabilities"].keys()))')"
+check "the audit capability" '{"leaf_version": 1, "max_page": 1000}' \
+  "$(curl -s "$URL/.well-known/recall" | python3 -c '
+import json,sys; print(json.dumps(json.load(sys.stdin)["capabilities"]["audit"]))')"
 check "discovery's auth methods" 'bearer device-sig-v1' \
   "$(curl -s "$URL/.well-known/recall" | python3 -c '
 import json,sys; print(" ".join(json.load(sys.stdin)["auth"]["methods"]))')"
@@ -130,6 +133,16 @@ check "file field order" 'file_path content source_env updated_at deleted' \
   "$(python3 -c '
 import json,sys
 print(" ".join(json.load(open(sys.argv[1]))["files"][0].keys()))' "$WORK/pull.json")"
+check "a pull carries a checkpoint header" 'True' \
+  "$(curl -s -D - -o /dev/null "${auth[@]}" "$URL/sync?project_key=acme/app" \
+     | tr -d '\r' | python3 -c '
+import re,sys
+for line in sys.stdin:
+    if line.lower().startswith("recall-audit-checkpoint:"):
+        print(bool(re.fullmatch(r"[0-9]+ \S+", line.split(":",1)[1].strip())))
+        break
+else:
+    print(False)')"
 
 echo "GET /health"
 curl -s "$URL/health" >"$WORK/health.json"
@@ -282,6 +295,43 @@ for n in 1 2 3 4 5; do enroll "waiting-$n" >/dev/null; done
 check "a sixth enrolment waiting from one address is 429" '429' \
   "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${json[@]}" \
      -d "{\"name\":\"waiting-6\",\"public_key\":\"$KEY\"}" "$URL/v1/devices/enroll")"
+
+echo "Audit"
+check "the checkpoint needs a credential" '401' \
+  "$(curl -s -o /dev/null -w '%{http_code}' "$URL/v1/audit/checkpoint")"
+curl -s "${auth[@]}" "$URL/v1/audit/checkpoint" >"$WORK/checkpoint.json"
+check "checkpoint field order" 'tree_size root_hash' \
+  "$(keys "$WORK/checkpoint.json")"
+SIZE=$(field "$WORK/checkpoint.json" tree_size)
+check "the tree has grown past the actions above" 'True' \
+  "$(python3 -c 'import sys; print(int(sys.argv[1]) > 5)' "$SIZE")"
+
+curl -s "${auth[@]}" "$URL/v1/audit/entries?start=0&end=$SIZE" >"$WORK/entries.json"
+check "entries field order" 'start end tree_size entries' \
+  "$(keys "$WORK/entries.json")"
+check "entries count matches the range asked for" 'True' \
+  "$(python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(len(d["entries"]) == d["end"] - d["start"])' "$WORK/entries.json")"
+check "the first entry is a v1 leaf with a seq and an action" 'True' \
+  "$(python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+leaf=json.loads(d["entries"][0])
+print(leaf["v"] == 1 and leaf["seq"] == 0 and "action" in leaf)' "$WORK/entries.json")"
+check "end past the tree size is 400" '400' \
+  "$(curl -s -o /dev/null -w '%{http_code}' "${auth[@]}" "$URL/v1/audit/entries?start=0&end=$((SIZE + 1))")"
+check "end before start is 400" '400' \
+  "$(curl -s -o /dev/null -w '%{http_code}' "${auth[@]}" "$URL/v1/audit/entries?start=2&end=1")"
+
+curl -s "${auth[@]}" "$URL/v1/audit/consistency?first=1&second=$SIZE" >"$WORK/consistency.json"
+check "consistency field order" 'first second proof' \
+  "$(keys "$WORK/consistency.json")"
+check "first below 1 is 400" '400' \
+  "$(curl -s -o /dev/null -w '%{http_code}' "${auth[@]}" "$URL/v1/audit/consistency?first=0&second=$SIZE")"
+check "second past the tree size is 400" '400' \
+  "$(curl -s -o /dev/null -w '%{http_code}' "${auth[@]}" "$URL/v1/audit/consistency?first=1&second=$((SIZE + 1))")"
 
 echo "Rate limiting"
 RL_PORT=8932

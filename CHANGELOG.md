@@ -60,6 +60,31 @@ break will be described here in full rather than smoothed over.
 - **Three new tables in the database**, `devices`, `device_enrollments`
   and `enroll_keys`, created on start. `memory_files` is untouched, and an
   older server ignores the new tables, so rolling back still works.
+- **The server keeps an audit log**: a Merkle tree (RFC 9162) over every
+  authenticated push, pull, delete, and change to a device or enrolment
+  key, so the server, or anyone with its database, cannot quietly remove
+  or rewrite history a device has already checkpointed. Each leaf records
+  who acted, what changed, and a content hash — never the content itself —
+  and a device's is signed, so an action can be attributed even after the
+  device that made it is later revoked or swept.
+- **New routes:** `GET /v1/audit/checkpoint` (the tree's size and root),
+  `GET /v1/audit/entries` (leaves `start` to `end - 1`, 1,000 at a time)
+  and `GET /v1/audit/consistency` (the proof that one size extends
+  another), any credential. `GET /sync` answers now carry a
+  `Recall-Audit-Checkpoint` header, so every pull leaves the client a
+  checkpoint to verify later reads against without another request.
+- **`GET /.well-known/recall` lists an `audit` capability**, `{
+  "leaf_version": 1, "max_page": 1000 }`.
+- **`scripts/audit-verify.py`** checks an exported log offline, with
+  nothing but Python's standard library for the tree itself: page through
+  `GET /v1/audit/checkpoint` and `/entries` into a file (one checkpoint
+  line, then one leaf per line) and run
+  `python3 scripts/audit-verify.py that-file`. A CLI command that does
+  the paging itself is client work, not this release's. See "Audit" in
+  `docs/reference/api.md`.
+- **A new table, `audit_log`**, created on start; `UPDATE` and `DELETE`
+  against it are refused at the database level. An older server ignores
+  it, so rolling back still works.
 
 ## 0.4.0 — 2026-09-23
 
