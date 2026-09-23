@@ -11,6 +11,7 @@ use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use axum::Extension;
 use recall_wire::discovery::{self, Auth, Build, Protocol, ServerInfo};
 use recall_wire::{
     AdminStats, ClaudeCliStatus, Health, MergeError, MergeStatus, PushRequest, PushResponse,
@@ -18,6 +19,7 @@ use recall_wire::{
 };
 use recall_wire::{Discovery, PROTOCOL};
 
+use super::auth::Caller;
 use super::respond::{error, internal, json};
 use super::AppState;
 use crate::now;
@@ -34,8 +36,12 @@ const ADMIN_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; script-s
 const REQUIRED_FIELDS_MSG: &str =
     "project_key, file_path, and content (string) are required, unless deleted is true";
 
-pub(super) async fn handle_push(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
-    let req: PushRequest = match serde_json::from_slice(&body) {
+pub(super) async fn handle_push(
+    State(state): State<Arc<AppState>>,
+    caller: Option<Extension<Caller>>,
+    body: Bytes,
+) -> Response {
+    let mut req: PushRequest = match serde_json::from_slice(&body) {
         Ok(req) => req,
         Err(_) => {
             // Go's json.Unmarshal tolerates absent fields and reports them
@@ -68,6 +74,14 @@ pub(super) async fn handle_push(State(state): State<Arc<AppState>>, body: Bytes)
             StatusCode::BAD_REQUEST,
             "file_path must be relative, no traversal",
         );
+    }
+
+    // The name belongs to the key. A push a device signed is recorded under
+    // the name that device enrolled as, whatever the body claims, so one
+    // machine cannot write as another. A bearer push has no key to go by
+    // and keeps the label it sent, exactly as before devices existed.
+    if let Some(Extension(Caller::Device { name, .. })) = caller {
+        req.source_env = name;
     }
 
     let updated_at = now();
@@ -296,6 +310,10 @@ pub(super) async fn handle_discovery(State(state): State<Arc<AppState>>) -> Resp
         .or_else(|| discovery::revision().map(str::to_string));
     let channel = discovery::channel();
     let mut capabilities = std::collections::BTreeMap::new();
+    capabilities.insert(
+        discovery::CAPABILITY_DEVICES.to_string(),
+        serde_json::to_value(super::devices::capability()).unwrap_or_default(),
+    );
     capabilities.insert("merge_base".to_string(), serde_json::json!({}));
     capabilities.insert(
         "scopes".to_string(),
@@ -327,8 +345,13 @@ pub(super) async fn handle_discovery(State(state): State<Arc<AppState>>) -> Resp
                 },
             },
             min_client: MIN_CLIENT.to_string(),
+            // Appended, never reordered or removed within a protocol: a
+            // client reading this list may be older than any entry in it.
             auth: Auth {
-                methods: vec![discovery::AUTH_BEARER.to_string()],
+                methods: vec![
+                    discovery::AUTH_BEARER.to_string(),
+                    discovery::AUTH_DEVICE_SIG.to_string(),
+                ],
             },
             capabilities,
         },

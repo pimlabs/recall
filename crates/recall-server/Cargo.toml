@@ -19,11 +19,15 @@ recall-wire.workspace = true
 
 anyhow.workspace = true
 axum.workspace = true
+base64.workspace = true
+getrandom.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true
+unicode-normalization.workspace = true
+unicode-security.workspace = true
 # io-util is needed to stream the merge prompt into the CLI's stdin.
 tokio = { workspace = true, features = ["io-util"] }
 

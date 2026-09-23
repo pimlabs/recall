@@ -1,32 +1,104 @@
 //! What every authenticated request passes through before it reaches a
-//! handler: the rate limiter first, then the bearer check.
+//! handler: the rate limiter first, then the protocol check, then auth.
 //!
 //! The order is the point, and so is the fact that exactly one header may
 //! decide a client's rate-limit bucket — both are asserted by the tests
 //! below and by `scripts/trusted-ip-check.sh` against a real socket.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
+use axum::body::Body;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 
-use super::respond::error;
+use super::auth::{self, Caller};
+use super::respond::{error, Refusal};
 use super::AppState;
 
 /// Rate limiting runs *before* auth, so a flood of invalid tokens is
 /// limited too rather than escaping the limiter by never reaching the auth
 /// check.
+///
+/// Either credential is accepted: the operator's `RECALL_TOKEN`, exactly as
+/// before devices existed, or a device's signature. Whichever it was is
+/// left in the request's extensions as a [`Caller`], for the routes that
+/// care.
 pub(super) async fn guard(
     State(state): State<Arc<AppState>>,
     req: Request,
     next: Next,
 ) -> Response {
+    if let Some(refused) = limit(&state, &req) {
+        return refused;
+    }
+    match authenticate(&state, req).await {
+        Ok(req) => next.run(req).await,
+        Err(refused) => refused.into_response(),
+    }
+}
+
+/// The address a request came from, as the rate limiter keys it, for the
+/// routes that count per address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ClientIp(pub(super) String);
+
+/// For the routes anyone may call, which is enrolling and polling: the
+/// same rate limit and protocol check as everything else, and no auth,
+/// since a machine enrolling has no credential yet. A body declared larger
+/// than those routes take is refused before any of it is read.
+pub(super) async fn limited(
+    State(state): State<Arc<AppState>>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    if let Some(refused) = limit(&state, &req) {
+        return refused;
+    }
+    if declared_length(req.headers()).is_some_and(|n| n > super::ENROLL_BODY_BYTES) {
+        return too_large().into_response();
+    }
+    let ip = client_ip(&req, &state.cfg.trusted_ip_header);
+    req.extensions_mut().insert(ClientIp(ip));
+    next.run(req).await
+}
+
+/// What `Content-Length` says the body will be, when it says.
+fn declared_length(headers: &HeaderMap) -> Option<usize> {
+    headers
+        .get(axum::http::header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+pub(super) fn too_large() -> Refusal {
+    Refusal::new(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
+}
+
+/// After [`guard`], on the routes that manage devices: the operator, or a
+/// device approved with the admin scope. A `sync` device has proved who it
+/// is, so this is a 403, not a 401.
+pub(super) async fn admin_only(req: Request, next: Next) -> Response {
+    match req.extensions().get::<Caller>() {
+        Some(caller) if caller.is_admin() => next.run(req).await,
+        _ => error(
+            StatusCode::FORBIDDEN,
+            "forbidden: this needs RECALL_TOKEN or a device with the admin scope",
+        ),
+    }
+}
+
+/// The rate limit, then the protocol check. [`None`] when the request may
+/// go on.
+fn limit(state: &AppState, req: &Request) -> Option<Response> {
     if state
         .limiter
-        .limited(&client_ip(&req, &state.cfg.trusted_ip_header))
+        .limited(&client_ip(req, &state.cfg.trusted_ip_header))
     {
         let mut resp = error(
             StatusCode::TOO_MANY_REQUESTS,
@@ -41,10 +113,10 @@ pub(super) async fn guard(
         {
             resp.headers_mut().insert("retry-after", v);
         }
-        return resp;
+        return Some(resp);
     }
     if let Some(asked) = unsupported_protocol(req.headers()) {
-        return error(
+        return Some(error(
             StatusCode::BAD_REQUEST,
             &format!(
                 "this server speaks Recall protocol {}, and the request asked for {asked}. \
@@ -52,12 +124,40 @@ pub(super) async fn guard(
                 recall_wire::PROTOCOL,
                 recall_wire::DISCOVERY_PATH
             ),
-        );
+        ));
     }
-    if !authorized(&state.cfg.token, req.headers()) {
-        return error(StatusCode::UNAUTHORIZED, "unauthorized");
+    None
+}
+
+/// The bearer token first, unchanged: a request carrying the right one is
+/// the operator's, whatever else it carries. Then a signature, if there is
+/// one. Anything else is the same bare 401 it always was.
+///
+/// A signed request's body has to be read here, since the signature's
+/// digest covers it. It is read only once the headers alone have proved
+/// the request is its device's (see `auth.rs`), and a body declared too
+/// large is refused before then, so nobody without a device key can make
+/// the server hold one.
+async fn authenticate(state: &AppState, mut req: Request) -> Result<Request, Refusal> {
+    if authorized(&state.cfg.token, req.headers()) {
+        req.extensions_mut().insert(Caller::Operator);
+        return Ok(req);
     }
-    next.run(req).await
+    if !auth::is_signed(req.headers()) {
+        return Err(Refusal::new(StatusCode::UNAUTHORIZED, "unauthorized"));
+    }
+    let (parts, body) = req.into_parts();
+    let checked = auth::check_headers(state, &parts)?;
+    if declared_length(&parts.headers).is_some_and(|n| n > super::MAX_BODY_BYTES) {
+        return Err(too_large());
+    }
+    let Ok(bytes) = axum::body::to_bytes(body, super::MAX_BODY_BYTES).await else {
+        return Err(too_large());
+    };
+    let caller = auth::finish(state, checked, &bytes)?;
+    let mut req = Request::from_parts(parts, Body::from(bytes));
+    req.extensions_mut().insert(caller);
+    Ok(req)
 }
 
 /// The protocol a request asked for, when it is one this server does not
@@ -110,16 +210,42 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// using `expose` rather than `ports`, so the origin has no published port
 /// to be addressed directly. If that ever changes, this setting is wrong and
 /// the limiter is decorative.
+///
+/// The answer is a bucket rather than an address: see [`bucket`].
 fn client_ip(req: &Request, trusted_header: &str) -> String {
     if !trusted_header.is_empty() {
         if let Some(ip) = header_str(req.headers(), trusted_header) {
-            return ip.to_string();
+            return bucket(ip);
         }
     }
     req.extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(addr)| addr.ip().to_string())
+        .map(|ConnectInfo(addr)| bucket(&addr.ip().to_string()))
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// What one client is counted as, for the rate limit and for the cap on
+/// enrolments waiting from one address.
+///
+/// An IPv6 address counts as its /64. That is the least a provider hands
+/// one subscriber, and every address in it is theirs to send from, so
+/// counting each address alone would give one machine eighteen quintillion
+/// buckets, enough to take every waiting enrolment and never meet the rate
+/// limit. An IPv4 address sent as IPv6 (`::ffff:198.51.100.4`) counts as
+/// the IPv4 address it is. Anything that is not an address is counted as
+/// it came.
+fn bucket(ip: &str) -> String {
+    match ip.parse::<IpAddr>() {
+        Ok(IpAddr::V4(v4)) => v4.to_string(),
+        Ok(IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let s = v6.segments();
+                format!("{}/64", Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+            }
+        },
+        Err(_) => ip.to_string(),
+    }
 }
 
 fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -192,6 +318,37 @@ mod tests {
             ),
             "127.0.0.1"
         );
+    }
+
+    /// Verification finding N4: every address in an IPv6 /64 is one
+    /// client's, so they are one bucket; an IPv4 address written as IPv6
+    /// is that IPv4 address.
+    #[test]
+    fn an_ipv6_client_is_counted_by_its_64() {
+        for (ip, want) in [
+            ("2001:db8:1:2::1", "2001:db8:1:2::/64"),
+            ("2001:db8:1:2:ffff:ffff:ffff:ffff", "2001:db8:1:2::/64"),
+            ("2001:DB8:1:2:0:0:0:9", "2001:db8:1:2::/64"),
+            ("2001:db8:1:3::1", "2001:db8:1:3::/64"),
+            ("::ffff:198.51.100.4", "198.51.100.4"),
+            ("198.51.100.4", "198.51.100.4"),
+            ("not an address", "not an address"),
+        ] {
+            assert_eq!(bucket(ip), want, "{ip}");
+        }
+        assert_eq!(
+            client_ip(
+                &request_with(vec![("x-real-ip", "2001:db8::abcd")]),
+                "x-real-ip"
+            ),
+            "2001:db8::/64"
+        );
+        let mut req = request_with(vec![]);
+        req.extensions_mut().insert(ConnectInfo(SocketAddr::from((
+            [0x2001, 0xdb8, 0, 7, 1, 2, 3, 4],
+            1234,
+        ))));
+        assert_eq!(client_ip(&req, ""), "2001:db8:0:7::/64");
     }
 
     /// The reason this is configurable at all.

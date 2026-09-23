@@ -684,8 +684,23 @@ async fn discovery_needs_no_token_and_describes_the_server() {
         doc.server.version
     );
     assert!(recall_wire::discovery::Version::parse(&doc.min_client).is_some());
-    assert_eq!(doc.auth.methods, vec!["bearer".to_string()]);
+    // Nothing is removed within a protocol version: bearer stays, where it
+    // was, and device signatures are added after it.
+    assert_eq!(
+        doc.auth.methods,
+        vec!["bearer".to_string(), "device-sig-v1".to_string()]
+    );
     assert!(doc.can("merge_base") && doc.can("scopes") && doc.can("limits"));
+    let devices = doc.devices().expect("the devices capability");
+    assert_eq!(devices.enroll_path, recall_wire::devices::ENROLL_PATH);
+    assert_eq!(
+        (
+            devices.code_ttl_seconds,
+            devices.poll_interval_seconds,
+            devices.signature_window_seconds
+        ),
+        (900, 5, 60)
+    );
 }
 
 /// A client that names a protocol this server does not speak is told so,

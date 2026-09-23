@@ -16,6 +16,59 @@ break will be described here in full rather than smoothed over.
 
 ## Unreleased
 
+- **The server enrols devices.** A machine can now be enrolled with a key
+  pair of its own and sign its requests (RFC 9421, Ed25519) instead of
+  sending `RECALL_TOKEN`: it asks `POST /v1/devices/enroll` for a short
+  code, the owner approves the code, and the machine is a device that can
+  be listed and revoked on its own. Cloud sessions can enrol with an
+  expiring authkey instead of a code. This release is the server
+  half; the client does not enrol yet, so nothing changes for a machine
+  until it does. See "Devices" in `docs/reference/api.md`.
+- **`RECALL_TOKEN` works exactly as before**, on every route, and is how
+  the first device is approved. Nothing that worked stops working.
+- **A device's pushes carry its own name.** A push a device signed is
+  stored with that device's name as `source_env`, whatever the push says,
+  so one machine cannot write as another. Pushes with `RECALL_TOKEN` keep
+  the name they send.
+- **New routes:** `POST /v1/devices/enroll`, `POST /v1/devices/enroll/poll`,
+  `GET /v1/devices/me` for a device to check the server knows it, and, for
+  the owner, `GET /v1/devices/pending/{user_code}` (what a code would
+  approve, name and key fingerprint, before approving it),
+  `POST /v1/devices/approve` (which can name the fingerprint it expects),
+  `POST /v1/devices/deny`, `GET /v1/devices`, `POST /v1/devices/{id}/revoke`,
+  `POST /v1/authkeys`, `GET /v1/authkeys` and
+  `POST /v1/authkeys/{id}/revoke`.
+- **Device names are plain and unique.** A name with control, format or
+  invisible characters (a zero-width space, a right-to-left override) is
+  refused, no two unrevoked devices share a name or names that read alike
+  (`Laptop`, or `lаptop` with a Cyrillic `а`, beside `laptop`), and a
+  device an authkey enrols is named by the server after the key's
+  tag. A name already taken is refused when its code is approved, not when
+  the machine enrols, so the unauthenticated enrol route says nothing about
+  which names exist.
+- **Authkeys** enrol ephemeral devices unless told otherwise, enrol
+  at most 25 unrevoked devices unless `max_devices` says otherwise, and can
+  be revoked together with every device they enrolled.
+- **`GET /admin/stats` needs the `admin` scope from a device.** Nothing
+  changes for `RECALL_TOKEN`, which is all anything uses today.
+- **Signed requests are checked before their body is read**, the
+  enrolment routes take 8 KiB bodies, one address may have five
+  enrolments waiting, and a signature dated up to five seconds after the
+  server started is refused, since the nonces that would catch its replay
+  went with the process before. A signature's `created` may be a minute
+  behind the server's clock but only five seconds ahead of it.
+- **The rate limit counts an IPv6 client by its /64**, on every route,
+  `/sync` included, rather than address by address, so one machine
+  cannot give itself a fresh bucket per request. An IPv4 address written
+  as IPv6 counts as the IPv4 address. Clients on IPv4 see no change.
+- **`GET /.well-known/recall` lists `device-sig-v1`** after `bearer` in
+  `auth.methods`, and a new `devices` capability.
+- **New setting: `RECALL_EPHEMERAL_DEVICE_TTL_HOURS`** (default 24). An
+  ephemeral device, one a cloud session enrolled with an ephemeral
+  authkey, is removed after that long without a signed request.
+- **Three new tables in the database**, `devices`, `device_enrollments`
+  and `authkeys`, created on start. `memory_files` is untouched, and an
+  older server ignores the new tables, so rolling back still works.
 - **`recall-server admin`: rename, remove or restore a project from the
   server's host.** `list` shows every project key with its files, tombstones
   and last update (or one key's files, or what a backup holds, with
