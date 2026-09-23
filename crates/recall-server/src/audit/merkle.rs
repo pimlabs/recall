@@ -135,8 +135,7 @@ pub fn verify_inclusion(
             Some(hash_children(&sibling, &right))
         }
     }
-    index < size
-        && recompute(index, size, leaf_hash, proof).as_ref() == Some(want_root)
+    index < size && recompute(index, size, leaf_hash, proof).as_ref() == Some(want_root)
 }
 
 /// The consistency proof between tree sizes `first` and `second` (RFC 9162
@@ -296,13 +295,11 @@ impl Frontier {
     /// everything smaller than it.
     pub fn root(&self) -> Hash {
         let mut acc: Option<Hash> = None;
-        for level in &self.levels {
-            if let Some(h) = level {
-                acc = Some(match acc {
-                    None => *h,
-                    Some(prev) => hash_children(h, &prev),
-                });
-            }
+        for h in self.levels.iter().flatten() {
+            acc = Some(match acc {
+                None => *h,
+                Some(prev) => hash_children(h, &prev),
+            });
         }
         acc.unwrap_or_else(empty_root)
     }

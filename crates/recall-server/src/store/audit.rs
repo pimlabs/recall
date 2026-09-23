@@ -101,7 +101,7 @@ impl Store {
     /// leaves neither the state change nor a leaf behind.
     pub fn audited<T>(
         &self,
-        write: impl FnOnce(&rusqlite::Transaction) -> rusqlite::Result<Outcome<T>>,
+        write: impl FnOnce(&rusqlite::Transaction) -> Result<Outcome<T>>,
         build_leaf: impl FnOnce(u64, &T) -> Vec<u8>,
     ) -> Result<T> {
         let mut state = self.lock();
@@ -197,7 +197,9 @@ impl Store {
     /// integration tests that exercise `scripts/audit-verify.py` read.
     pub fn audit_export(&self) -> Result<Vec<Vec<u8>>> {
         let state = self.lock();
-        let mut stmt = state.conn.prepare("SELECT leaf FROM audit_log ORDER BY seq")?;
+        let mut stmt = state
+            .conn
+            .prepare("SELECT leaf FROM audit_log ORDER BY seq")?;
         let rows = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
         let mut out = Vec::new();
         for row in rows {
@@ -258,12 +260,16 @@ mod tests {
                     "INSERT INTO memory_files (project_key, file_path, content, source_env, updated_at) VALUES ('a','b','c','d','e')",
                     [],
                 )?;
-                Err(rusqlite::Error::ExecuteReturnedResults)
+                Err(anyhow::Error::from(rusqlite::Error::ExecuteReturnedResults))
             },
             |seq, ()| push_leaf(seq),
         );
         assert!(result.is_err());
-        assert_eq!(st.audit_checkpoint().0, 0, "no leaf from a rolled-back write");
+        assert_eq!(
+            st.audit_checkpoint().0,
+            0,
+            "no leaf from a rolled-back write"
+        );
         assert!(st.get("a", "b").unwrap().is_none(), "no row either");
     }
 
@@ -292,7 +298,10 @@ mod tests {
         }
         let (size, root) = st.audit_checkpoint();
         assert_eq!(size, 5);
-        let leaves: Vec<Hash> = (0..5).map(push_leaf).map(|l| merkle::hash_leaf(&l)).collect();
+        let leaves: Vec<Hash> = (0..5)
+            .map(push_leaf)
+            .map(|l| merkle::hash_leaf(&l))
+            .collect();
         assert_eq!(root, merkle::root(&leaves));
     }
 
@@ -318,7 +327,10 @@ mod tests {
             let _ = i;
         }
         let proof = st.audit_consistency(3, 8).unwrap().unwrap();
-        let leaves: Vec<Hash> = (0..8).map(push_leaf).map(|l| merkle::hash_leaf(&l)).collect();
+        let leaves: Vec<Hash> = (0..8)
+            .map(push_leaf)
+            .map(|l| merkle::hash_leaf(&l))
+            .collect();
         assert_eq!(proof, merkle::consistency(3, 8, &leaves));
 
         assert_eq!(

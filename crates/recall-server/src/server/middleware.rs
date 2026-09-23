@@ -154,9 +154,10 @@ async fn authenticate(state: &AppState, mut req: Request) -> Result<Request, Ref
     let Ok(bytes) = axum::body::to_bytes(body, super::MAX_BODY_BYTES).await else {
         return Err(too_large());
     };
-    let caller = auth::finish(state, checked, &bytes)?;
+    let (caller, signed) = auth::finish(state, checked, &bytes)?;
     let mut req = Request::from_parts(parts, Body::from(bytes));
     req.extensions_mut().insert(caller);
+    req.extensions_mut().insert(signed);
     Ok(req)
 }
 

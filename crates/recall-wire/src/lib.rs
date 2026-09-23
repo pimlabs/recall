@@ -45,6 +45,7 @@
 #![deny(missing_docs)]
 
 pub mod admin;
+pub mod audit;
 pub mod devices;
 pub mod discovery;
 pub mod health;
@@ -53,6 +54,7 @@ pub mod sync;
 pub mod validate;
 
 pub use admin::{AdminStats, AdminTotals, ProjectStats};
+pub use audit::{AuditCapability, AuditCheckpoint, AuditConsistencyResponse, AuditEntriesResponse};
 pub use devices::{
     ApproveRequest, DenyRequest, DenyResponse, Device, DeviceIdentity, DeviceList,
     DevicesCapability, EnrollApproved, EnrollKey, EnrollKeyCreated, EnrollKeyList,

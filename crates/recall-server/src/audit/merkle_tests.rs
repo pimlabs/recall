@@ -276,7 +276,10 @@ fn swapping_the_leaf_and_node_prefixes_breaks_the_vectors() {
     // Leaves hashed with the node prefix, nodes with the leaf prefix: the
     // opposite of `hash_leaf`/`hash_children`.
     fn root_swapped(leaves: &[&[u8]]) -> Hash {
-        let hashes: Vec<Hash> = leaves.iter().map(|l| hash_leaf_with_prefix(l, 0x01)).collect();
+        let hashes: Vec<Hash> = leaves
+            .iter()
+            .map(|l| hash_leaf_with_prefix(l, 0x01))
+            .collect();
         fn go(leaves: &[Hash]) -> Hash {
             match leaves.len() {
                 0 => {
@@ -305,12 +308,19 @@ fn splitting_at_half_instead_of_the_largest_power_of_two_breaks_the_vectors() {
             1 => leaves[0],
             n => {
                 let k = n / 2; // wrong: RFC 9162 wants the largest power of two below n
-                hash_children(&root_half_split(&leaves[..k]), &root_half_split(&leaves[k..]))
+                hash_children(
+                    &root_half_split(&leaves[..k]),
+                    &root_half_split(&leaves[k..]),
+                )
             }
         }
     }
     let hashes: Vec<Hash> = LEAVES.iter().map(|l| hash_leaf(l)).collect();
     // Size 8 is itself a power of two, where n/2 and the real split point
     // agree; size 7 is where they diverge.
-    assert_ne!(root_half_split(&hashes[..7]), roots()[7], "the split bug must be caught");
+    assert_ne!(
+        root_half_split(&hashes[..7]),
+        roots()[7],
+        "the split bug must be caught"
+    );
 }

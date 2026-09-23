@@ -202,6 +202,60 @@ impl Store {
         Ok(())
     }
 
+    /// [`Store::upsert`], with its leaf appended in the same transaction.
+    pub fn upsert_audited(
+        &self,
+        project_key: &str,
+        file_path: &str,
+        content: &str,
+        source_env: &str,
+        updated_at: &str,
+        build_leaf: impl FnOnce(u64) -> Vec<u8>,
+    ) -> Result<()> {
+        self.audited(
+            |tx| {
+                tx.execute(
+                    "INSERT INTO memory_files (project_key, file_path, content, source_env, updated_at, deleted)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 0)
+                     ON CONFLICT(project_key, file_path) DO UPDATE SET
+                         content = excluded.content,
+                         source_env = excluded.source_env,
+                         updated_at = excluded.updated_at,
+                         deleted = 0",
+                    (project_key, file_path, content, nullable(source_env), updated_at),
+                )?;
+                Ok(Outcome::Commit(()))
+            },
+            |seq, ()| build_leaf(seq),
+        )
+    }
+
+    /// [`Store::tombstone`], with its leaf appended in the same transaction.
+    pub fn tombstone_audited(
+        &self,
+        project_key: &str,
+        file_path: &str,
+        source_env: &str,
+        updated_at: &str,
+        build_leaf: impl FnOnce(u64) -> Vec<u8>,
+    ) -> Result<()> {
+        self.audited(
+            |tx| {
+                tx.execute(
+                    "INSERT INTO memory_files (project_key, file_path, content, source_env, updated_at, deleted)
+                     VALUES (?1, ?2, '', ?3, ?4, 1)
+                     ON CONFLICT(project_key, file_path) DO UPDATE SET
+                         source_env = excluded.source_env,
+                         updated_at = excluded.updated_at,
+                         deleted = 1",
+                    (project_key, file_path, nullable(source_env), updated_at),
+                )?;
+                Ok(Outcome::Commit(()))
+            },
+            |seq, ()| build_leaf(seq),
+        )
+    }
+
     /// Marks a file deleted while deliberately leaving its content in
     /// place: a mistaken delete stays recoverable at the database level,
     /// even though nothing in the app surfaces an undo yet. [`Store::list`]

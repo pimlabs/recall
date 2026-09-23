@@ -9,19 +9,20 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use recall_wire::discovery::{self, Auth, Build, Protocol, ServerInfo};
+use recall_wire::{content_sha256, Discovery, PROTOCOL};
 use recall_wire::{
     AdminStats, ClaudeCliStatus, Health, MergeError, MergeStatus, PushRequest, PushResponse,
     SyncResponse,
 };
-use recall_wire::{Discovery, PROTOCOL};
 
-use super::auth::Caller;
+use super::auth::{Caller, SignedRequestInfo};
 use super::respond::{error, internal, json};
 use super::AppState;
+use crate::audit::leaf;
 use crate::now;
 
 /// The admin page is embedded so the binary stays self-contained — there is
@@ -39,6 +40,7 @@ const REQUIRED_FIELDS_MSG: &str =
 pub(super) async fn handle_push(
     State(state): State<Arc<AppState>>,
     caller: Option<Extension<Caller>>,
+    signed: Option<Extension<SignedRequestInfo>>,
     body: Bytes,
 ) -> Response {
     let mut req: PushRequest = match serde_json::from_slice(&body) {
@@ -80,19 +82,44 @@ pub(super) async fn handle_push(
     // the name that device enrolled as, whatever the body claims, so one
     // machine cannot write as another. A bearer push has no key to go by
     // and keeps the label it sent, exactly as before devices existed.
-    if let Some(Extension(Caller::Device { name, .. })) = caller {
-        req.source_env = name;
+    if let Some(Extension(Caller::Device { name, .. })) = &caller {
+        req.source_env.clone_from(name);
     }
+    let caller_ref = caller.as_ref().map(|Extension(c)| c);
+    let signed_ref = signed.as_ref().map(|Extension(s)| s);
+    let actor = super::audit::actor_for(caller_ref);
+    let request = super::audit::signed_request_for(signed_ref);
 
     let updated_at = now();
 
     if req.deleted {
-        if let Err(e) = state.store.tombstone(
+        let stored_sha256 = content_sha256("");
+        let base_sha256 = req.base_sha256.clone();
+        let at = updated_at.clone();
+        let (leaf_project_key, leaf_file_path) = (req.project_key.clone(), req.file_path.clone());
+        let result = state.store.tombstone_audited(
             &req.project_key,
             &req.file_path,
             &req.source_env,
             &updated_at,
-        ) {
+            move |seq| {
+                leaf::encode(
+                    seq,
+                    &at,
+                    leaf::action::DELETE,
+                    &actor,
+                    leaf::subject_file(
+                        &leaf_project_key,
+                        &leaf_file_path,
+                        true,
+                        &stored_sha256,
+                        base_sha256.as_deref(),
+                    ),
+                    request.as_ref(),
+                )
+            },
+        );
+        if let Err(e) = result {
             return internal(e);
         }
         return json(
@@ -158,13 +185,34 @@ pub(super) async fn handle_push(
         }
     }
 
-    if let Err(e) = state.store.upsert(
+    let stored_sha256 = content_sha256(&content);
+    let base_sha256 = req.base_sha256.clone();
+    let at = updated_at.clone();
+    let (leaf_project_key, leaf_file_path) = (req.project_key.clone(), req.file_path.clone());
+    let result = state.store.upsert_audited(
         &req.project_key,
         &req.file_path,
         &content,
         &req.source_env,
         &updated_at,
-    ) {
+        move |seq| {
+            leaf::encode(
+                seq,
+                &at,
+                leaf::action::PUSH,
+                &actor,
+                leaf::subject_file(
+                    &leaf_project_key,
+                    &leaf_file_path,
+                    false,
+                    &stored_sha256,
+                    base_sha256.as_deref(),
+                ),
+                request.as_ref(),
+            )
+        },
+    );
+    if let Err(e) = result {
         return internal(e);
     }
     json(
@@ -218,6 +266,8 @@ fn should_merge<'a>(
 
 pub(super) async fn handle_pull(
     State(state): State<Arc<AppState>>,
+    caller: Option<Extension<Caller>>,
+    signed: Option<Extension<SignedRequestInfo>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let Some(project_key) = params.get("project_key").filter(|k| !k.is_empty()) else {
@@ -226,16 +276,52 @@ pub(super) async fn handle_pull(
             "project_key query param is required",
         );
     };
-    match state.store.list(project_key) {
-        Ok(files) => json(
-            StatusCode::OK,
-            &SyncResponse {
-                project_key: project_key.clone(),
-                files,
-            },
-        ),
-        Err(e) => internal(e),
+    let files = match state.store.list(project_key) {
+        Ok(files) => files,
+        Err(e) => return internal(e),
+    };
+
+    // A pull gets a leaf too — the design's own call, so a witness of the
+    // log (a checkpoint saved from an earlier pull) has something to check
+    // reads against, not only writes.
+    let caller_ref = caller.as_ref().map(|Extension(c)| c);
+    let signed_ref = signed.as_ref().map(|Extension(s)| s);
+    let actor = super::audit::actor_for(caller_ref);
+    let request = super::audit::signed_request_for(signed_ref);
+    let at = now();
+    let pk = project_key.clone();
+    if let Err(e) = state.store.audit_append(move |seq| {
+        leaf::encode(
+            seq,
+            &at,
+            leaf::action::PULL,
+            &actor,
+            leaf::subject_pull(&pk),
+            request.as_ref(),
+        )
+    }) {
+        return internal(e);
     }
+
+    let mut resp = json(
+        StatusCode::OK,
+        &SyncResponse {
+            project_key: project_key.clone(),
+            files,
+        },
+    );
+    // So every pull leaves the client a checkpoint without another
+    // request — see docs/design/part5-plan.md's "Who witnesses".
+    let (tree_size, root) = state.store.audit_checkpoint();
+    let checkpoint = recall_wire::AuditCheckpoint {
+        tree_size,
+        root_hash: super::audit::base64_hash(&root),
+    };
+    if let Ok(value) = HeaderValue::from_str(&checkpoint.to_header_value()) {
+        resp.headers_mut()
+            .insert(recall_wire::audit::CHECKPOINT_HEADER, value);
+    }
+    resp
 }
 
 /// The stamp `deploy/backup-offbox.sh` writes after a verified copy.
@@ -315,6 +401,14 @@ pub(super) async fn handle_discovery(State(state): State<Arc<AppState>>) -> Resp
         serde_json::to_value(super::devices::capability()).unwrap_or_default(),
     );
     capabilities.insert("merge_base".to_string(), serde_json::json!({}));
+    capabilities.insert(
+        "audit".to_string(),
+        serde_json::to_value(recall_wire::AuditCapability {
+            leaf_version: recall_wire::audit::LEAF_VERSION,
+            max_page: recall_wire::audit::MAX_PAGE,
+        })
+        .unwrap_or_default(),
+    );
     capabilities.insert(
         "scopes".to_string(),
         serde_json::json!({ "kinds": ["project", "global", "machine"] }),

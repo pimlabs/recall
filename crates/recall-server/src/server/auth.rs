@@ -20,6 +20,8 @@ use std::time::Duration;
 
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use recall_wire::devices::SCOPE_ADMIN;
 use recall_wire::signature::{
     self, Received, SignatureInput, Target, LABEL, SIGNATURE_HEADER, SIGNATURE_INPUT_HEADER,
@@ -54,7 +56,23 @@ pub(super) enum Caller {
         scope: String,
         /// Whether it is removed once idle.
         ephemeral: bool,
+        /// The `agent` it enrolled with, for an audit leaf's `actor.agent`.
+        agent: String,
     },
+}
+
+/// What a signed request's audit leaf records under `request`: enough for
+/// an offline verifier to check the signature against nothing but the log
+/// itself. The auth middleware inserts one alongside [`Caller::Device`],
+/// for a handler that goes on to append a leaf to read back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SignedRequestInfo {
+    /// `Content-Digest`'s sha-256 value, standard base64.
+    pub(super) body_sha256: String,
+    /// The exact signature base the device's signature verified against.
+    pub(super) signature_base: String,
+    /// The signature itself, standard base64.
+    pub(super) signature: String,
 }
 
 impl Caller {
@@ -92,6 +110,10 @@ pub(super) struct Checked {
     digest: String,
     nonce: String,
     created: i64,
+    /// The base that verified, kept for the audit leaf `finish` builds
+    /// [`SignedRequestInfo`] from.
+    signature_base: String,
+    signature: Vec<u8>,
 }
 
 fn rejected(why: &dyn std::fmt::Display) -> Refusal {
@@ -154,7 +176,8 @@ pub(super) fn check_headers(state: &AppState, parts: &Parts) -> Result<Checked, 
         field: &field,
     };
     let now = state.now();
-    signature::verify_headers(&received, &key, now, WINDOW).map_err(|e| rejected(&e))?;
+    let signature_base = signature::verify_headers_and_base(&received, &key, now, WINDOW)
+        .map_err(|e| rejected(&e))?;
 
     // check_profile has made sure both are there.
     let (nonce, created) = (input.nonce().unwrap_or(""), input.created().unwrap_or(0));
@@ -175,6 +198,8 @@ pub(super) fn check_headers(state: &AppState, parts: &Parts) -> Result<Checked, 
         digest: field(signature::CONTENT_DIGEST_HEADER).unwrap_or_default(),
         nonce: nonce.to_string(),
         created,
+        signature_base,
+        signature: sig,
         device,
     })
 }
@@ -182,12 +207,21 @@ pub(super) fn check_headers(state: &AppState, parts: &Parts) -> Result<Checked, 
 /// The rest, once the body has been read: it matches the digest the
 /// signature covered, and only then is the nonce recorded, so a forged or
 /// altered request cannot use up a nonce the real device has yet to send.
-pub(super) fn finish(state: &AppState, checked: Checked, body: &[u8]) -> Result<Caller, Refusal> {
+///
+/// Answers both who sent it and, since it was a signed request, what its
+/// audit leaf should record about the signature itself.
+pub(super) fn finish(
+    state: &AppState,
+    checked: Checked,
+    body: &[u8],
+) -> Result<(Caller, SignedRequestInfo), Refusal> {
     let Checked {
         device,
         digest,
         nonce,
         created,
+        signature_base,
+        signature,
     } = checked;
     signature::check_content_digest(&digest, body).map_err(|e| rejected(&e))?;
 
@@ -228,12 +262,21 @@ pub(super) fn finish(state: &AppState, checked: Checked, body: &[u8]) -> Result<
             eprintln!("recording last_seen for {}: {e:#}", device.id);
         }
     }
-    Ok(Caller::Device {
-        id: device.id,
-        name: device.name,
-        scope: device.scope,
-        ephemeral: device.ephemeral,
-    })
+    let info = SignedRequestInfo {
+        body_sha256: signature::content_digest_base64(&digest).unwrap_or_default(),
+        signature_base,
+        signature: BASE64_STANDARD.encode(&signature),
+    };
+    Ok((
+        Caller::Device {
+            id: device.id,
+            name: device.name,
+            scope: device.scope,
+            ephemeral: device.ephemeral,
+            agent: device.agent,
+        },
+        info,
+    ))
 }
 
 /// A header's value, with repeated instances joined by `", "` as RFC 9110
@@ -495,6 +538,7 @@ mod tests {
             name: "laptop".into(),
             scope: scope.into(),
             ephemeral: false,
+            agent: String::new(),
         };
         assert!(Caller::Operator.is_admin());
         assert!(device("admin").is_admin());

@@ -41,6 +41,7 @@ use tokio::task::JoinHandle;
 use crate::merge::{Merger, Status};
 use crate::{format_timestamp, now, Config, Store};
 
+mod audit;
 mod auth;
 mod devices;
 mod handlers;
@@ -48,6 +49,7 @@ mod limit;
 mod middleware;
 mod respond;
 
+use audit::{handle_checkpoint, handle_consistency, handle_entries};
 use auth::ReplayCache;
 use devices::{
     handle_approve, handle_create_enroll_key, handle_deny, handle_enroll, handle_list_devices,
@@ -136,10 +138,19 @@ pub struct Server {
 
 impl Server {
     /// Builds a server around an already-open store.
+    ///
+    /// Records a `start` leaf in the audit log: the server's own doing, so
+    /// its actor is [`crate::audit::leaf::Actor::Server`], and its subject
+    /// is the version that started. Best-effort — a store the audit table
+    /// somehow cannot be written to still serves sync, the same way a
+    /// failed backup does not take the server down.
     pub fn new(cfg: Config, store: Arc<Store>) -> Self {
         let limiter = RateLimiter::new(cfg.rate_limit_window, cfg.rate_limit_max);
         let merger = Merger::new(cfg.claude_bin.clone(), cfg.merge_timeout);
         let replay = ReplayCache::new(auth::WINDOW, nonces_per_device(&cfg));
+        if let Err(e) = record_start(&store) {
+            eprintln!("recording server start in the audit log: {e:#}");
+        }
         Self {
             state: Arc::new(AppState {
                 cfg,
@@ -220,6 +231,18 @@ impl Server {
                 get(handle_pull).post(handle_push).fallback(not_found),
             )
             .route(paths::DEVICES_ME_PATH, get(handle_me).fallback(not_found))
+            .route(
+                recall_wire::audit::CHECKPOINT_PATH,
+                get(handle_checkpoint).fallback(not_found),
+            )
+            .route(
+                recall_wire::audit::ENTRIES_PATH,
+                get(handle_entries).fallback(not_found),
+            )
+            .route(
+                recall_wire::audit::CONSISTENCY_PATH,
+                get(handle_consistency).fallback(not_found),
+            )
             // Registered before the layer, so only these routes are rate
             // limited and authenticated here.
             .route_layer(from_fn_with_state(state.clone(), guard))
@@ -359,9 +382,26 @@ impl Server {
     }
 }
 
+/// Appends the `start` leaf [`Server::new`] records.
+fn record_start(store: &Store) -> Result<()> {
+    let version = recall_wire::discovery::version();
+    let at = now();
+    store.audit_append(move |seq| {
+        crate::audit::leaf::encode(
+            seq,
+            &at,
+            crate::audit::leaf::action::START,
+            &crate::audit::leaf::Actor::Server,
+            crate::audit::leaf::subject_start(&version),
+            None,
+        )
+    })?;
+    Ok(())
+}
+
 fn sweep_devices(state: &AppState) -> Result<(usize, usize)> {
     let now = time::OffsetDateTime::now_utc();
-    state.store.sweep_devices(
+    state.store.sweep_devices_audited(
         &format_timestamp(now - state.cfg.ephemeral_device_ttl),
         &format_timestamp(now - devices::EXPIRED_ENROLLMENT_KEPT),
     )

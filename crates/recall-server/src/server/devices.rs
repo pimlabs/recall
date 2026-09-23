@@ -32,10 +32,12 @@ use recall_wire::{
 use serde::de::DeserializeOwned;
 use time::OffsetDateTime;
 
-use super::auth::Caller;
+use super::audit::{actor_for, signed_request_for};
+use super::auth::{Caller, SignedRequestInfo};
 use super::middleware::{too_large, ClientIp};
 use super::respond::{error, internal, json, Refusal};
 use super::AppState;
+use crate::audit::leaf;
 use crate::store::{Created, Decision, Inserted, NewDevice, NewEnrollKey, NewEnrollment, Poll};
 use crate::{format_timestamp, now, parse_timestamp};
 
@@ -389,7 +391,12 @@ fn undecided<T>(decision: Decision<T>) -> Result<T, Refusal> {
 }
 
 /// `POST /v1/devices/approve`.
-pub(super) async fn handle_approve(State(state): State<Arc<AppState>>, bytes: Bytes) -> Response {
+pub(super) async fn handle_approve(
+    State(state): State<Arc<AppState>>,
+    caller: Option<Extension<Caller>>,
+    signed: Option<Extension<SignedRequestInfo>>,
+    bytes: Bytes,
+) -> Response {
     let req: ApproveRequest = match body(&bytes) {
         Ok(req) => req,
         Err(refused) => return refused.into_response(),
@@ -405,14 +412,33 @@ pub(super) async fn handle_approve(State(state): State<Arc<AppState>>, bytes: By
         Ok(id) => id,
         Err(e) => return internal(e),
     };
+    let actor = actor_for(caller.as_ref().map(|Extension(c)| c));
+    let request = signed_request_for(signed.as_ref().map(|Extension(s)| s));
+    let at = now();
     match state
         .store
-        .approve_enrollment(
+        .approve_enrollment_audited(
             &code,
             &device_id,
             &req.scope,
-            &now(),
+            &at,
             req.fingerprint.as_deref(),
+            |seq, device| {
+                leaf::encode(
+                    seq,
+                    &at,
+                    leaf::action::APPROVE,
+                    &actor,
+                    leaf::subject_device(
+                        &device.id,
+                        &device.name,
+                        &device.scope,
+                        &device.public_key,
+                        &device.fingerprint,
+                    ),
+                    request.as_ref(),
+                )
+            },
         )
         .map(undecided)
     {
@@ -423,7 +449,12 @@ pub(super) async fn handle_approve(State(state): State<Arc<AppState>>, bytes: By
 }
 
 /// `POST /v1/devices/deny`.
-pub(super) async fn handle_deny(State(state): State<Arc<AppState>>, bytes: Bytes) -> Response {
+pub(super) async fn handle_deny(
+    State(state): State<Arc<AppState>>,
+    caller: Option<Extension<Caller>>,
+    signed: Option<Extension<SignedRequestInfo>>,
+    bytes: Bytes,
+) -> Response {
     let req: DenyRequest = match body(&bytes) {
         Ok(req) => req,
         Err(refused) => return refused.into_response(),
@@ -432,7 +463,24 @@ pub(super) async fn handle_deny(State(state): State<Arc<AppState>>, bytes: Bytes
         Ok(code) => code,
         Err(refused) => return refused.into_response(),
     };
-    match state.store.deny_enrollment(&code, &now()).map(undecided) {
+    let actor = actor_for(caller.as_ref().map(|Extension(c)| c));
+    let request = signed_request_for(signed.as_ref().map(|Extension(s)| s));
+    let at = now();
+    let leaf_code = code.clone();
+    match state
+        .store
+        .deny_enrollment_audited(&code, &at, |seq, name| {
+            leaf::encode(
+                seq,
+                &at,
+                leaf::action::DENY,
+                &actor,
+                leaf::subject_denied(&leaf_code, name),
+                request.as_ref(),
+            )
+        })
+        .map(undecided)
+    {
         Ok(Ok(name)) => json(
             StatusCode::OK,
             &DenyResponse {
@@ -498,6 +546,7 @@ pub(super) async fn handle_me(Extension(caller): Extension<Caller>) -> Response 
             name,
             scope,
             ephemeral,
+            ..
         } => json(
             StatusCode::OK,
             &DeviceIdentity {
@@ -526,9 +575,23 @@ pub(super) async fn handle_list_devices(State(state): State<Arc<AppState>>) -> R
 /// first time stands.
 pub(super) async fn handle_revoke_device(
     State(state): State<Arc<AppState>>,
+    caller: Option<Extension<Caller>>,
+    signed: Option<Extension<SignedRequestInfo>>,
     Path(id): Path<String>,
 ) -> Response {
-    match state.store.revoke_device(&id, &now()) {
+    let actor = actor_for(caller.as_ref().map(|Extension(c)| c));
+    let request = signed_request_for(signed.as_ref().map(|Extension(s)| s));
+    let at = now();
+    match state.store.revoke_device_audited(&id, &at, |seq, device| {
+        leaf::encode(
+            seq,
+            &at,
+            leaf::action::REVOKE,
+            &actor,
+            leaf::subject_device_id(&device.id, &device.name),
+            request.as_ref(),
+        )
+    }) {
         Ok(Some(device)) => json(StatusCode::OK, &device),
         Ok(None) => error(StatusCode::NOT_FOUND, "no device has that id"),
         Err(e) => internal(e),
@@ -538,6 +601,8 @@ pub(super) async fn handle_revoke_device(
 /// `POST /v1/enroll-keys`.
 pub(super) async fn handle_create_enroll_key(
     State(state): State<Arc<AppState>>,
+    caller: Option<Extension<Caller>>,
+    signed: Option<Extension<SignedRequestInfo>>,
     bytes: Bytes,
 ) -> Response {
     let req: EnrollKeyRequest = match body(&bytes) {
@@ -565,15 +630,30 @@ pub(super) async fn handle_create_enroll_key(
     let expires_at = later(Duration::from_secs(
         u64::from(req.expires_in_days) * 24 * 60 * 60,
     ));
-    let stored = state.store.insert_enroll_key(&NewEnrollKey {
-        id: &id,
-        key_sha256: &recall_wire::content_sha256(&secret),
-        tag: req.tag.trim(),
-        ephemeral: req.ephemeral,
-        max_devices: req.max_devices,
-        created_at: &now(),
-        expires_at: &expires_at,
-    });
+    let actor = actor_for(caller.as_ref().map(|Extension(c)| c));
+    let request = signed_request_for(signed.as_ref().map(|Extension(s)| s));
+    let at = now();
+    let stored = state.store.insert_enroll_key_audited(
+        &NewEnrollKey {
+            id: &id,
+            key_sha256: &recall_wire::content_sha256(&secret),
+            tag: req.tag.trim(),
+            ephemeral: req.ephemeral,
+            max_devices: req.max_devices,
+            created_at: &at,
+            expires_at: &expires_at,
+        },
+        |seq, key| {
+            leaf::encode(
+                seq,
+                &at,
+                leaf::action::ENROLL_KEY_CREATE,
+                &actor,
+                leaf::subject_enroll_key(&key.id, &key.tag, key.ephemeral, key.max_devices),
+                request.as_ref(),
+            )
+        },
+    );
     match stored {
         Ok(key) => no_store(json(
             StatusCode::OK,
@@ -604,6 +684,8 @@ pub(super) async fn handle_list_enroll_keys(State(state): State<Arc<AppState>>) 
 /// revoked too; the body may be empty.
 pub(super) async fn handle_revoke_enroll_key(
     State(state): State<Arc<AppState>>,
+    caller: Option<Extension<Caller>>,
+    signed: Option<Extension<SignedRequestInfo>>,
     Path(id): Path<String>,
     bytes: Bytes,
 ) -> Response {
@@ -615,10 +697,22 @@ pub(super) async fn handle_revoke_enroll_key(
             Err(refused) => return refused.into_response(),
         }
     };
+    let actor = actor_for(caller.as_ref().map(|Extension(c)| c));
+    let request = signed_request_for(signed.as_ref().map(|Extension(s)| s));
+    let at = now();
+    let revoke_devices = req.revoke_devices;
     match state
         .store
-        .revoke_enroll_key(&id, &now(), req.revoke_devices)
-    {
+        .revoke_enroll_key_audited(&id, &at, revoke_devices, |seq, key| {
+            leaf::encode(
+                seq,
+                &at,
+                leaf::action::ENROLL_KEY_REVOKE,
+                &actor,
+                leaf::subject_enroll_key_revoke(&key.id, revoke_devices),
+                request.as_ref(),
+            )
+        }) {
         Ok(Some(key)) => json(StatusCode::OK, &key),
         Ok(None) => error(StatusCode::NOT_FOUND, "no enrolment key has that id"),
         Err(e) => internal(e),

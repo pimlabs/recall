@@ -627,6 +627,20 @@ pub fn verify_headers(
     now: i64,
     window: u64,
 ) -> Result<(), SignatureError> {
+    verify_headers_and_base(req, key, now, window).map(|_base| ())
+}
+
+/// [`verify_headers`], but also hands back the exact signature base that
+/// verified: RFC 9421 §2.5's bytes, ASCII, one covered component per line.
+/// An audit leaf keeps this alongside the signature itself, so the leaf
+/// alone — no live request, no replay of `@method`/`@path`/`@query` — is
+/// enough to check that the device really signed it.
+pub fn verify_headers_and_base(
+    req: &Received<'_>,
+    key: &VerifyingKey,
+    now: i64,
+    window: u64,
+) -> Result<String, SignatureError> {
     req.input.check_profile(now, window)?;
     let digest = (req.field)(CONTENT_DIGEST_HEADER)
         .ok_or_else(|| SignatureError::MissingComponent(CONTENT_DIGEST_HEADER.to_string()))?;
@@ -634,7 +648,15 @@ pub fn verify_headers(
     let base = req
         .input
         .signature_base(|name| component_value(&req.target, req.field, name))?;
-    verify(key, &base, req.signature)
+    verify(key, &base, req.signature)?;
+    Ok(base)
+}
+
+/// The `sha-256` value a `Content-Digest` header carries, re-encoded as
+/// standard base64 rather than the structured-field byte sequence it
+/// arrived in — what an audit leaf's `request.body_sha256` records.
+pub fn content_digest_base64(field: &str) -> Result<String, SignatureError> {
+    Ok(STANDARD.encode(sha256_of(field)?))
 }
 
 /// [`verify_headers`], then the body against `Content-Digest`: the whole

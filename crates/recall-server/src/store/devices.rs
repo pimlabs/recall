@@ -493,6 +493,75 @@ impl Store {
         Ok(Decision::Done(device))
     }
 
+    /// [`Store::approve_enrollment`], with its `approve` leaf appended in
+    /// the same transaction as the device it creates — `build_leaf` is
+    /// called only once that device is real, so it can carry the device's
+    /// own public key: the leaf that lets a signature of this device's be
+    /// checked after the row itself is gone.
+    ///
+    /// A refusal (`NotFound`, `Expired`, `KeyMismatch`, `NameTaken`, or
+    /// `AlreadyDecided`) rolls back and appends nothing, the same as
+    /// calling the plain method and never getting to `Done`.
+    pub fn approve_enrollment_audited(
+        &self,
+        user_code: &str,
+        device_id: &str,
+        scope: &str,
+        now: &str,
+        expected_fingerprint: Option<&str>,
+        build_leaf: impl FnOnce(u64, &Device) -> Vec<u8>,
+    ) -> Result<Decision<Device>> {
+        self.audited(
+            |tx| {
+                let Some((enrollment_id, name, public_key, agent, expires_at, decided)) =
+                    pending_by_code(tx, user_code)?
+                else {
+                    return Ok(super::Outcome::Refuse(Decision::NotFound));
+                };
+                if decided {
+                    return Ok(super::Outcome::Refuse(Decision::AlreadyDecided));
+                }
+                if expires_at.as_str() <= now {
+                    return Ok(super::Outcome::Refuse(Decision::Expired));
+                }
+                if let Some(expected) = expected_fingerprint {
+                    let actual = parse_public_key(&public_key)
+                        .map(|k| fingerprint(&k))
+                        .unwrap_or_default();
+                    if expected.trim() != actual {
+                        return Ok(super::Outcome::Refuse(Decision::KeyMismatch));
+                    }
+                }
+                if name_taken(tx, &name)? {
+                    return Ok(super::Outcome::Refuse(Decision::NameTaken(name)));
+                }
+                insert_device(
+                    tx,
+                    &NewDevice {
+                        id: device_id,
+                        name: &name,
+                        public_key: &public_key,
+                        scope,
+                        agent: &agent,
+                        ephemeral: false,
+                        enroll_key_id: None,
+                        created_at: now,
+                    },
+                )?;
+                tx.execute(
+                    "UPDATE device_enrollments SET device_id = ?1 WHERE enrollment_id = ?2",
+                    (device_id, &enrollment_id),
+                )?;
+                let device = get_device(tx, device_id)?.expect("inserted above");
+                Ok(super::Outcome::Commit(Decision::Done(device)))
+            },
+            |seq, decision| match decision {
+                Decision::Done(device) => build_leaf(seq, device),
+                _ => unreachable!("build_leaf runs only when write committed"),
+            },
+        )
+    }
+
     /// Denies the enrolment waiting with `user_code`, answering with the
     /// name it asked for.
     pub fn deny_enrollment(&self, user_code: &str, now: &str) -> Result<Decision<String>> {
@@ -513,6 +582,40 @@ impl Store {
             (&enrollment_id,),
         )?;
         Ok(Decision::Done(name))
+    }
+
+    /// [`Store::deny_enrollment`], with its `deny` leaf appended in the
+    /// same transaction.
+    pub fn deny_enrollment_audited(
+        &self,
+        user_code: &str,
+        now: &str,
+        build_leaf: impl FnOnce(u64, &str) -> Vec<u8>,
+    ) -> Result<Decision<String>> {
+        self.audited(
+            |tx| {
+                let Some((enrollment_id, name, _, _, expires_at, decided)) =
+                    pending_by_code(tx, user_code)?
+                else {
+                    return Ok(super::Outcome::Refuse(Decision::NotFound));
+                };
+                if decided {
+                    return Ok(super::Outcome::Refuse(Decision::AlreadyDecided));
+                }
+                if expires_at.as_str() <= now {
+                    return Ok(super::Outcome::Refuse(Decision::Expired));
+                }
+                tx.execute(
+                    "UPDATE device_enrollments SET denied = 1 WHERE enrollment_id = ?1",
+                    (&enrollment_id,),
+                )?;
+                Ok(super::Outcome::Commit(Decision::Done(name)))
+            },
+            |seq, decision| match decision {
+                Decision::Done(name) => build_leaf(seq, name),
+                _ => unreachable!("build_leaf runs only when write committed"),
+            },
+        )
     }
 
     /// What the enrolment waiting with `user_code` asked for, judged the
@@ -594,6 +697,42 @@ impl Store {
         get_device(&conn, id)
     }
 
+    /// [`Store::revoke_device`], with a `revoke` leaf appended when this
+    /// call is what actually revoked it. Revoking one already revoked, or
+    /// one that does not exist, changes nothing and appends nothing —
+    /// there is no new fact for a leaf to record.
+    pub fn revoke_device_audited(
+        &self,
+        id: &str,
+        now: &str,
+        build_leaf: impl FnOnce(u64, &Device) -> Vec<u8>,
+    ) -> Result<Option<Device>> {
+        self.audited(
+            |tx| {
+                let Some(before) = get_device(tx, id)? else {
+                    return Ok(super::Outcome::Refuse(None));
+                };
+                if before.revoked_at.is_some() {
+                    return Ok(super::Outcome::Refuse(Some(before)));
+                }
+                tx.execute(
+                    "UPDATE devices SET revoked_at = ?1 WHERE id = ?2",
+                    (now, id),
+                )?;
+                let after = get_device(tx, id)?.expect("just updated");
+                Ok(super::Outcome::Commit(Some(after)))
+            },
+            |seq, device| {
+                build_leaf(
+                    seq,
+                    device
+                        .as_ref()
+                        .expect("build_leaf runs only on a real revoke"),
+                )
+            },
+        )
+    }
+
     /// Records that a device was just seen.
     pub fn touch_device(&self, id: &str, now: &str) -> Result<()> {
         self.lock()
@@ -619,6 +758,36 @@ impl Store {
             ),
         )?;
         Ok(get_enroll_key(&conn, "id", k.id)?.expect("inserted above"))
+    }
+
+    /// [`Store::insert_enroll_key`], with its `enroll_key_create` leaf
+    /// appended in the same transaction.
+    pub fn insert_enroll_key_audited(
+        &self,
+        k: &NewEnrollKey<'_>,
+        build_leaf: impl FnOnce(u64, &EnrollKey) -> Vec<u8>,
+    ) -> Result<EnrollKey> {
+        self.audited(
+            |tx| {
+                tx.execute(
+                    "INSERT INTO enroll_keys
+                         (id, key_sha256, tag, ephemeral, max_devices, created_at, expires_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    (
+                        k.id,
+                        k.key_sha256,
+                        k.tag,
+                        k.ephemeral as i64,
+                        k.max_devices,
+                        k.created_at,
+                        k.expires_at,
+                    ),
+                )?;
+                let key = get_enroll_key(tx, "id", k.id)?.expect("inserted above");
+                Ok(super::Outcome::Commit(key))
+            },
+            |seq, key| build_leaf(seq, key),
+        )
     }
 
     /// The enrolment key whose SHA-256 is `key_sha256`, in any state.
@@ -661,9 +830,49 @@ impl Store {
         get_enroll_key(&conn, "id", id)
     }
 
+    /// [`Store::revoke_enroll_key`], with one `enroll_key_revoke` leaf
+    /// appended when this call is what revoked it — not one more per
+    /// cascaded device revoke, which `revoke_devices` names as part of the
+    /// one decision this leaf records.
+    pub fn revoke_enroll_key_audited(
+        &self,
+        id: &str,
+        now: &str,
+        devices: bool,
+        build_leaf: impl FnOnce(u64, &EnrollKey) -> Vec<u8>,
+    ) -> Result<Option<EnrollKey>> {
+        self.audited(
+            |tx| {
+                let Some(before) = get_enroll_key(tx, "id", id)? else {
+                    return Ok(super::Outcome::Refuse(None));
+                };
+                if before.revoked_at.is_some() {
+                    return Ok(super::Outcome::Refuse(Some(before)));
+                }
+                tx.execute(
+                    "UPDATE enroll_keys SET revoked_at = ?1 WHERE id = ?2",
+                    (now, id),
+                )?;
+                if devices {
+                    tx.execute(
+                        "UPDATE devices SET revoked_at = COALESCE(revoked_at, ?1) WHERE enroll_key_id = ?2",
+                        (now, id),
+                    )?;
+                }
+                let after = get_enroll_key(tx, "id", id)?.expect("just updated");
+                Ok(super::Outcome::Commit(Some(after)))
+            },
+            |seq, key| build_leaf(seq, key.as_ref().expect("build_leaf runs only on a real revoke")),
+        )
+    }
+
     /// Removes ephemeral devices last seen (or, never seen, created)
     /// before `idle_before`, and enrolments that expired before
     /// `expired_before`. Answers how many of each went.
+    ///
+    /// Appends no audit leaf — see [`Store::sweep_devices_audited`], which
+    /// the server actually calls; this plain version stays for what tests
+    /// here already assert about the counts and rows.
     pub fn sweep_devices(&self, idle_before: &str, expired_before: &str) -> Result<(usize, usize)> {
         let conn = self.lock();
         let devices = conn.execute(
@@ -675,6 +884,72 @@ impl Store {
             (expired_before,),
         )?;
         Ok((devices, enrollments))
+    }
+
+    /// [`Store::sweep_devices`], with a `sweep` leaf appended for each
+    /// device actually removed — one per device, atomic with its own
+    /// deletion, since two devices going idle apart are two separate
+    /// changes, not one. Enrolments carry no leaf: an unclaimed pending
+    /// code is not a device or an enrolment key, the two kinds of row the
+    /// design calls out.
+    pub fn sweep_devices_audited(
+        &self,
+        idle_before: &str,
+        expired_before: &str,
+    ) -> Result<(usize, usize)> {
+        let idle: Vec<(String, String)> = {
+            let conn = self.lock();
+            let mut stmt = conn.prepare(
+                "SELECT id, name FROM devices \
+                 WHERE ephemeral = 1 AND COALESCE(last_seen, created_at) < ?1",
+            )?;
+            let rows = stmt.query_map((idle_before,), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+
+        let mut removed = 0usize;
+        for (id, name) in idle {
+            let (id_for_write, idle_before_owned) = (id.clone(), idle_before.to_string());
+            let removed_this = self.audited(
+                move |tx| {
+                    // Re-checked at delete time, under the transaction,
+                    // rather than trusted from the SELECT above: a device
+                    // touched or revoked in between no longer matches, and
+                    // the leaf must not claim it was swept when it wasn't.
+                    let n = tx.execute(
+                        "DELETE FROM devices WHERE id = ?1 AND ephemeral = 1 \
+                         AND COALESCE(last_seen, created_at) < ?2",
+                        (&id_for_write, &idle_before_owned),
+                    )?;
+                    Ok(if n > 0 {
+                        super::Outcome::Commit(true)
+                    } else {
+                        super::Outcome::Refuse(false)
+                    })
+                },
+                |seq, _| {
+                    crate::audit::leaf::encode(
+                        seq,
+                        &crate::now(),
+                        crate::audit::leaf::action::SWEEP,
+                        &crate::audit::leaf::Actor::Server,
+                        crate::audit::leaf::subject_device_id(&id, &name),
+                        None,
+                    )
+                },
+            )?;
+            if removed_this {
+                removed += 1;
+            }
+        }
+
+        let enrollments = self.lock().execute(
+            "DELETE FROM device_enrollments WHERE expires_at < ?1",
+            (expired_before,),
+        )?;
+        Ok((removed, enrollments))
     }
 }
 
