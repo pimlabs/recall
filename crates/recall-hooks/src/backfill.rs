@@ -258,8 +258,8 @@ pub async fn backfill(ctx: &Context) -> Result<Outcome, Error> {
 fn write_baseline(ctx: &Context, out: &mut Outcome) {
     if out.stopped.is_some() {
         out.baseline = Some(
-            "the run stopped early, so the delete baseline was left as it was — \
-             finish the run to write one"
+            "the run stopped early, so the delete baseline was left as it was. \
+             Finish the run to write one"
                 .to_string(),
         );
         return;
@@ -287,10 +287,9 @@ fn classify(err: &crate::client::Error) -> Refusal {
             Refusal::ThisFile(format!("the server refused it ({code}: {body})"))
         }
         crate::client::Error::Status { code, .. } if *code == 429 => Refusal::TheRun(
-            "the server's rate limit was reached — it allows 60 requests a minute per \
-             address by default, and that budget is shared with the hooks in your \
-             session. What was sent is on the server; run this again in a minute to \
-             carry on"
+            "the server's rate limit was reached (60 requests a minute per address \
+             by default, shared with your session's hooks). What was sent is on the \
+             server, run this again in a minute to continue"
                 .to_string(),
         ),
         other => Refusal::TheRun(other.to_string()),
@@ -336,7 +335,7 @@ async fn ask_what_the_server_has(
 fn unroutable_detail(rel: &str) -> Option<String> {
     if let Some((found, reserved)) = scope::miscased_reserved_dir(rel) {
         return Some(format!(
-            "'{found}/' is not '{reserved}/' — rename it and run this again"
+            "'{found}/' is not '{reserved}/', rename it and run this again"
         ));
     }
     let head = rel.split('/').next()?;

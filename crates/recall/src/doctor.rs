@@ -117,9 +117,9 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
         match (&rep.server_error, &rep.git_commit) {
             (Some(err), _) => out.push(fail(
                 "server",
-                format!("unreachable — {err}"),
-                "check RECALL_URL, and that this environment is allowed to reach it \
-                 (a cloud environment needs the domain under Allowed domains)",
+                format!("unreachable: {err}"),
+                "check RECALL_URL. A cloud environment also needs the domain under \
+                 Allowed domains",
             )),
             (None, Some(commit)) => out.push(ok("server", format!("answered, commit {commit}"))),
             (None, None) => out.push(ok("server", "answered")),
@@ -129,8 +129,8 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
     if rep.server_ok && !rep.merge_ready {
         out.push(warn(
             "merge",
-            "server is up but not logged in to the Claude CLI, so conflicting \
-             edits fall back to last-write-wins",
+            "the server's Claude CLI is not logged in, so conflicting edits use \
+             last-write-wins",
             "on the server: docker compose exec -it -u node recall-server claude setup-token",
         ));
     }
@@ -148,10 +148,7 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
             "this project's .claude/settings.json has no Recall hooks",
             "recall init",
         )),
-        (false, false) => out.push(ok(
-            "hooks",
-            "not in a git repository — nothing here to wire",
-        )),
+        (false, false) => out.push(ok("hooks", "not in a git repository")),
     }
 
     // `CLAUDE_CODE_REMOTE` answers the question that made this a permanent
@@ -161,15 +158,14 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
     match (rep.remote_session, rep.remote_memory_dir_set) {
         (true, false) => out.push(fail(
             "CLAUDE_CODE_REMOTE_MEMORY_DIR",
-            "not set in a remote session, so Claude Code's auto-memory is off \
-             entirely and there is nothing for Recall to sync",
+            "not set, so auto-memory is off in this remote session",
             // The one value in the whole setup that cannot be reasoned out.
-            "set it on this cloud environment, and note it is not $HOME: /home/user/.claude",
+            "set it to /home/user/.claude on the cloud environment (not $HOME)",
         )),
         (true, true) => out.push(ok("CLAUDE_CODE_REMOTE_MEMORY_DIR", "set")),
         (false, true) => out.push(ok(
             "CLAUDE_CODE_REMOTE_MEMORY_DIR",
-            "set, so the memory root is this rather than ~/.claude",
+            "set, memory lives here instead of ~/.claude",
         )),
         (false, false) => out.push(ok(
             "CLAUDE_CODE_REMOTE_MEMORY_DIR",
@@ -191,8 +187,7 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
         out.push(fail(
             "reserved directory",
             format!(
-                "{}/ is spelled differently from {}/, so nothing under it syncs — \
-                 and on a case-insensitive filesystem it looks identical",
+                "{}/ should be {}/ (case matters), so nothing under it syncs",
                 mis.found, mis.reserved
             ),
             format!("rename {}/ to {}/", mis.found, mis.reserved),
@@ -211,7 +206,7 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
         out.push(fail(
             "settings file",
             format!("{file} is not readable JSON, so nothing it declares is in effect"),
-            "Claude Code cannot read it either — fix the JSON".to_string(),
+            "fix the JSON, Claude Code cannot read it either".to_string(),
         ));
     }
 
@@ -238,6 +233,10 @@ fn source_detail(rep: &Report, source: Source) -> String {
                 .as_deref()
                 .unwrap_or("the credentials file")
         ),
+        Source::ConfigFile => format!(
+            "saved in {}",
+            rep.config_file.as_deref().unwrap_or("the config file")
+        ),
         _ => "set".to_string(),
     }
 }
@@ -263,8 +262,8 @@ fn credentials_findings(rep: &Report, out: &mut Vec<Finding>) {
                 d.file.clone(),
             ),
             None => (
-                "RECALL_TOKEN comes from your shell, so every process started from it \
-                 inherits the token"
+                "RECALL_TOKEN is exported by your shell, so every program you start \
+                 can read it"
                     .to_string(),
                 "your shell profile".to_string(),
             ),
@@ -273,8 +272,8 @@ fn credentials_findings(rep: &Report, out: &mut Vec<Finding>) {
             "token storage",
             detail,
             format!(
-                "recall connect <url> saves it to ~/.recall/credentials.json, readable by \
-                 you only; then remove RECALL_TOKEN from {remove_from}"
+                "run recall connect to save it in ~/.recall/credentials.toml, then \
+                 remove RECALL_TOKEN from {remove_from}"
             ),
         ));
     }
@@ -317,7 +316,7 @@ fn credentials_findings(rep: &Report, out: &mut Vec<Finding>) {
     if let Some(err) = &rep.credentials_error {
         out.push(warn(
             "credentials file",
-            format!("{err} — so nothing in it is in effect"),
+            format!("{err}, so nothing in it is in effect"),
             "move it aside and run recall connect again",
         ));
     }
@@ -326,7 +325,7 @@ fn credentials_findings(rep: &Report, out: &mut Vec<Finding>) {
         let file = rep
             .credentials_file
             .as_deref()
-            .unwrap_or("~/.recall/credentials.json");
+            .unwrap_or("~/.recall/credentials.toml");
         out.push(warn(
             "credentials file",
             format!("{file} is readable by other users"),
@@ -373,8 +372,8 @@ fn offbox_finding(rep: &Report, out: &mut Vec<Finding>) {
         out.push(warn(
             "off-box backup",
             format!(
-                "last verified copy was {} days ago ({stamp}) — the snapshots on \
-                 the server are the only copies of anything newer",
+                "last verified copy is {} days old ({stamp}), anything newer exists \
+                 only on the server",
                 age.whole_days()
             ),
             "on the server: check the cron job's mail, then run \
@@ -435,8 +434,8 @@ fn reserved_findings(rep: &Report, out: &mut Vec<Finding>) {
             Some(k) if files > 0 && !linked => out.push(fail(
                 name,
                 format!(
-                    "{k}: {files} file(s) synced, but MEMORY.md links none of them — \
-                     Claude Code opens what MEMORY.md links and nothing else"
+                    "{k}: {files} file(s) synced, but MEMORY.md links none of them, so \
+                     Claude Code never reads them"
                 ),
                 "recall pull".to_string(),
             )),
@@ -583,11 +582,11 @@ fn print_text(cfg: &ClientConfig, rep: &Report, found: &[Finding]) {
         (f, _) => ui::verdict(
             ui::Tone::Bad,
             &format!(
-                "{f} problem(s). Recall is not syncing {}.",
+                "{f} problem(s). {}",
                 if cfg.url.is_empty() {
-                    "anything here"
+                    "Nothing syncs here."
                 } else {
-                    "everything it looks like it is"
+                    "Some of it is not syncing."
                 }
             ),
         ),

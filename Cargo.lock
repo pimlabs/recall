@@ -1026,6 +1026,7 @@ dependencies = [
  "anyhow",
  "clap",
  "cliclack",
+ "console",
  "recall-hooks",
  "recall-server",
  "recall-wire",

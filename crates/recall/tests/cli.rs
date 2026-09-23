@@ -1492,7 +1492,7 @@ fn disconnect_removes_the_saved_token_and_is_honest_about_the_shell() {
     );
     assert!(
         r.stdout.contains("Your shell still supplies RECALL_TOKEN")
-            && r.stdout.contains("check your shell profile"),
+            && r.stdout.contains("Remove it from your shell profile"),
         "{}",
         r.stdout
     );
@@ -1833,7 +1833,8 @@ fn connect_names_the_machine_variables_a_shell_profile_still_exports() {
         r.stderr
     );
     assert!(
-        r.stderr.contains("RECALL_MACHINE_KEY is no longer needed"),
+        r.stderr
+            .contains("remove from your shell profile: RECALL_MACHINE_KEY"),
         "stderr: {}",
         r.stderr
     );

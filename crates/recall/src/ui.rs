@@ -164,7 +164,7 @@ mod tests {
     fn problems_in_status_values_are_toned_by_severity() {
         assert_eq!(value_tone("UNREACHABLE (timed out)"), Some(Tone::Bad));
         assert_eq!(
-            value_tone("NO — run 'recall init' in this project"),
+            value_tone("NO, run 'recall init' in this project"),
             Some(Tone::Warn)
         );
         assert_eq!(
@@ -173,6 +173,6 @@ mod tests {
         );
         assert_eq!(value_tone("(unset)"), Some(Tone::Quiet));
         assert_eq!(value_tone("yes"), None);
-        assert_eq!(value_tone("machine:jarvis — 2 file(s), linked"), None);
+        assert_eq!(value_tone("machine:jarvis, 2 file(s), linked"), None);
     }
 }

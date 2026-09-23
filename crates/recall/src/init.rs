@@ -18,7 +18,7 @@ pub fn run(path: Option<&Path>) -> anyhow::Result<i32> {
         None => match project::git_root() {
             Some(root) => root,
             None => anyhow::bail!(
-                "not inside a git repository — run this from the project you want to sync"
+                "not inside a git repository. Run this from the project you want to sync."
             ),
         },
     };
@@ -43,8 +43,7 @@ pub fn run(path: Option<&Path>) -> anyhow::Result<i32> {
 fn print_commit_hint(root: &Path) {
     println!(
         "
-  Next: review and commit the change, so fresh clones and cloud sessions
-  pick it up too — that's what makes this work without per-machine setup.
+  Next: commit it, so fresh clones and cloud sessions sync too.
 
     git -C {0} diff .claude/settings.json
     git -C {0} add .claude/settings.json && git -C {0} commit -m \"Enable Recall memory sync\"",
@@ -67,18 +66,18 @@ fn warn_about_unset_variables(root: &Path) {
 
     println!();
     if cfg.url.is_empty() {
-        println!("  ! No server yet — RECALL_URL is not set, and ~/.recall names none");
+        println!("  ! No server yet: RECALL_URL is not set, and ~/.recall names none");
     }
     if cfg.token.is_empty() {
-        println!("  ! No token yet — RECALL_TOKEN is not set, and ~/.recall holds none");
+        println!("  ! No token yet: RECALL_TOKEN is not set, and ~/.recall holds none");
     }
     println!(
         "
-  On this machine, connect it once — it asks for the token and checks it:
+  Connect this machine once. It asks for the token and checks it:
 
     recall connect https://your-recall-host
 
-  A claude.ai cloud environment sets RECALL_URL and RECALL_TOKEN in its own
-  variables instead; docs/reference/token-setup.md has the values it needs."
+  A claude.ai cloud environment sets RECALL_URL and RECALL_TOKEN as its own
+  variables instead. See docs/reference/token-setup.md."
     );
 }

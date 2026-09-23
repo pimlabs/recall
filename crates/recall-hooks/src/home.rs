@@ -470,7 +470,7 @@ fn load_toml<T: serde::de::DeserializeOwned + HasVersion>(path: &Path) -> Result
         return Err(Error::Parse {
             path: path.display().to_string(),
             reason: format!(
-                "version {} (this build understands {VERSION}) — nothing was changed",
+                "version {} (this build understands {VERSION}), nothing was changed",
                 value.version()
             ),
         });

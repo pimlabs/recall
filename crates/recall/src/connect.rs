@@ -57,10 +57,8 @@ async fn run(args: Args) -> Step<()> {
     // variables are the right store there, and they already win.
     if proj::remote_session() {
         return refuse(
-            "this is a remote session, and anything saved here is discarded with the \
-             container.",
-            "Set RECALL_URL and RECALL_TOKEN on the cloud environment instead — its \
-             variables are a secret store, and they are what Recall reads there.",
+            "this is a remote session, so nothing saved here would last.",
+            "Set RECALL_URL and RECALL_TOKEN on the cloud environment instead.",
         );
     }
 
@@ -125,16 +123,15 @@ async fn run(args: Args) -> Step<()> {
     let saved = creds.token_for(&url).map(str::to_string);
     if saved.is_none() && !interactive {
         return refuse(
-            "reads the token from a terminal, without echoing it, and there is no \
-             terminal here.",
-            "Where something else holds the secret, set RECALL_TOKEN instead.",
+            "needs a terminal to ask for the token.",
+            "In a script, set RECALL_TOKEN instead.",
         );
     }
 
     intro();
     if url.starts_with("http://") && !is_loopback(&url) {
         say_warning(&format!(
-            "{} uses plain http — the token is sent unencrypted",
+            "{} uses plain http, so the token is sent unencrypted",
             host(&url)
         ));
     }
@@ -145,7 +142,7 @@ async fn run(args: Args) -> Step<()> {
         Some(_) => {
             if !interactive {
                 return refuse(
-                    "needs a new token, and there is no terminal to ask for it on.",
+                    "needs a new token, but there is no terminal to ask for one.",
                     "Run recall connect in a terminal.",
                 );
             }
@@ -186,20 +183,17 @@ async fn run(args: Args) -> Step<()> {
     }
     let redundant = redundant_variables(&here);
     if !redundant.is_empty() {
-        let (vars, verb) = match redundant.as_slice() {
-            [one] => (one.to_string(), "is"),
-            many => (many.join(" and "), "are"),
-        };
         let _ = cliclack::log::remark(format!(
-            "{vars} {verb} no longer needed — remove from your shell profile"
+            "No longer needed, remove from your shell profile: {}",
+            redundant.join(", ")
         ));
     }
 
     let _ = cliclack::outro(match wiring {
         Wiring::NoProject => {
-            format!("Connected as {name} · run recall init in a project to sync it")
+            format!("Connected as {name}. Run recall init in a project to sync it.")
         }
-        Wiring::Declined => format!("Connected as {name} · run recall init to sync this project"),
+        Wiring::Declined => format!("Connected as {name}. Run recall init to sync this project."),
         Wiring::Already | Wiring::JustNow => format!("Connected as {name}"),
     });
     Ok(())
@@ -280,7 +274,7 @@ async fn ask_token(url: &str) -> Step<String> {
     for attempt in 1..=TOKEN_ATTEMPTS {
         let typed: String = answer(
             cliclack::password("Token  (the server's RECALL_TOKEN)")
-                .mask('▪')
+                .mask('•')
                 .validate(|s: &String| {
                     if s.trim().is_empty() {
                         Err("paste the token, or Ctrl-C to stop")
@@ -429,7 +423,7 @@ fn offer_init(args: &Args, interactive: bool) -> Step<Wiring> {
         _ => format!("git -C {}", ui::tilde(&root.display().to_string())),
     };
     let _ = cliclack::note(
-        "Hooks added — commit them so other clones sync too",
+        "Hooks added. Commit them so other clones sync too:",
         format!(
             "{git} add .claude/settings.json\n\
              {git} commit -m \"Enable Recall memory sync\""
@@ -481,7 +475,7 @@ async fn offer_backfill(here: &proj::Resolved, args: &Args, interactive: bool) -
     let left = outcome.entries.len() - sent - matches - outcome.count(Disposition::Internal);
     if left > 0 || outcome.stopped.is_some() {
         say_warning(&format!(
-            "{} skipped — recall backfill says why",
+            "{} skipped, run recall backfill to see why",
             files(left)
         ));
     }
@@ -523,7 +517,7 @@ fn environment_overrides(here: &proj::Resolved, connected: &str, name: &str) -> 
     let mut out = Vec::new();
     if cfg.url_source == Source::Environment && home::normalize_url(&cfg.url) != connected {
         out.push(format!(
-            "RECALL_URL in your shell still points to {} — unset it",
+            "RECALL_URL in your shell points to {}, unset it to use this server",
             host(&cfg.url)
         ));
     }
@@ -534,7 +528,7 @@ fn environment_overrides(here: &proj::Resolved, connected: &str, name: &str) -> 
                     "{} sets RECALL_TOKEN, which overrides the saved one",
                     d.file
                 ),
-                None => "RECALL_TOKEN in your shell overrides the saved one — remove it from \
+                None => "RECALL_TOKEN in your shell overrides the saved one, remove it from \
                          your shell profile"
                     .to_string(),
             },
@@ -543,7 +537,7 @@ fn environment_overrides(here: &proj::Resolved, connected: &str, name: &str) -> 
     let overridden = crate::status::overrides(here, &cfg);
     for o in overridden.iter().filter(|o| o.setting == "machine.name") {
         out.push(format!(
-            "{}={} overrides the name {name} — remove it from your shell profile",
+            "{}={} overrides the name {name}, remove it from your shell profile",
             o.variable, o.environment
         ));
     }
@@ -568,7 +562,45 @@ fn intro() {
     use std::sync::atomic::{AtomicBool, Ordering};
     static SHOWN: AtomicBool = AtomicBool::new(false);
     if !SHOWN.swap(true, Ordering::Relaxed) {
+        cliclack::set_theme(Bullets);
         let _ = cliclack::intro("recall connect");
+    }
+}
+
+/// cliclack's look with round marks instead of its squares and diamonds: a
+/// filled bullet for the step being asked or a result, a hollow one for a
+/// step that is done, and a bullet to mask the token.
+struct Bullets;
+
+const FILLED: console::Emoji = console::Emoji("●", "*");
+const HOLLOW: console::Emoji = console::Emoji("○", "o");
+const CROSS: console::Emoji = console::Emoji("✗", "x");
+
+impl cliclack::Theme for Bullets {
+    fn state_symbol(&self, state: &cliclack::ThemeState) -> String {
+        let color = self.state_symbol_color(state);
+        let symbol = match state {
+            cliclack::ThemeState::Active => FILLED,
+            cliclack::ThemeState::Submit => HOLLOW,
+            cliclack::ThemeState::Cancel | cliclack::ThemeState::Error(_) => CROSS,
+        };
+        color.apply_to(symbol).to_string()
+    }
+
+    fn active_symbol(&self) -> String {
+        console::style(FILLED).green().to_string()
+    }
+
+    fn submit_symbol(&self) -> String {
+        console::style(HOLLOW).green().to_string()
+    }
+
+    fn error_symbol(&self) -> String {
+        console::style(CROSS).red().to_string()
+    }
+
+    fn password_mask(&self) -> char {
+        '•'
     }
 }
 
@@ -651,7 +683,7 @@ fn refuse<T>(what: &str, then: &str) -> Step<T> {
 pub fn disconnect(url: Option<&str>) -> anyhow::Result<i32> {
     let here = proj::resolve();
     let Some(h) = home::locate(here.env.lookup()) else {
-        eprintln!("recall disconnect: no home directory, so nothing is saved — set RECALL_HOME");
+        eprintln!("recall disconnect: no home directory, so nothing is saved. Set RECALL_HOME.");
         return Ok(exit::CONFIG);
     };
     let (mut creds, mut config) = match load_both(&h) {
@@ -739,10 +771,7 @@ pub fn disconnect(url: Option<&str>) -> anyhow::Result<i32> {
 fn environment_token_origin(here: &proj::Resolved, verb: &str) -> String {
     match here.env.declared(&["RECALL_TOKEN"]).into_iter().next() {
         Some(d) => format!("{} {verb} RECALL_TOKEN.", d.file),
-        None => format!(
-            "Your shell {verb} RECALL_TOKEN — Recall can see the value but not which \
-             file exported it, so check your shell profile."
-        ),
+        None => format!("Your shell {verb} RECALL_TOKEN. Remove it from your shell profile."),
     }
 }
 

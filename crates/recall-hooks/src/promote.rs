@@ -133,7 +133,7 @@ pub enum Error {
     /// reconcile it.
     #[error(
         "{path} is in the {from} scope already; promote moves notes out of this project, \
-         not between scopes — move the file yourself and the next push will follow it"
+         not between scopes. Move the file yourself and the next push follows it"
     )]
     CrossScope {
         /// The path, relative to the memory directory.

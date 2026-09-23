@@ -16,10 +16,18 @@ break will be described here in full rather than smoothed over.
 
 ## Unreleased
 
-- **`recall connect` says less.** Every line is shorter — "Connected to
+- **`recall connect` says less.** Every line is shorter ("Connected to
   recall.example.com", "Saved token OK", "Sync recall?", "Uploaded 5 files",
-  "Connected as jarvis" — and the commit hint is just the two git commands.
-  Nothing about what it does or asks has changed.
+  "Connected as jarvis"), and the commit hint is just the two git commands.
+  Steps are marked with round bullets: filled for the question being asked,
+  hollow once answered, a cross when something failed; the token is masked
+  with bullets too. Nothing about what it does or asks has changed.
+- **Plainer wording in `doctor`, `status`, `init` and `backfill`.** Shorter
+  sentences, no dashes. `doctor` now says where the URL came from ("saved in
+  ~/.recall/config.toml") instead of just "set", and its token advice names
+  `credentials.toml` rather than 0.3.0's `credentials.json`. `status`
+  suggests `recall connect` for the machine scope instead of
+  `RECALL_MACHINE_KEY`.
 
 ## 0.3.2 — 2026-09-23
 

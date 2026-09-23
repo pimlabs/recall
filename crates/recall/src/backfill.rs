@@ -54,22 +54,20 @@ pub async fn run() -> anyhow::Result<i32> {
     list(
         &outcome.entries,
         Disposition::Held,
-        "held back — the server has a different version of these, so they were \
-         not overwritten. Nothing on this machine reconciles them: ask Claude to \
-         edit one and the server merges the two versions. Do not simply delete \
-         your copy — that propagates as a delete and removes the server's too:",
+        "held back: the server has a different version of these, so they were \
+         not overwritten. Edit one through Claude and the server merges the two. \
+         Deleting your copy deletes the server's too:",
     );
     list(
         &outcome.entries,
         Disposition::Deleted,
-        "deleted on the server — these were removed on another machine and this \
-         one has not caught up. 'recall pull' will remove them here:",
+        "deleted on the server: removed on another machine. 'recall pull' \
+         removes them here:",
     );
     list(
         &outcome.entries,
         Disposition::Refused,
-        "refused — the server will not accept these as they are, so the rest of \
-         the run went on without them:",
+        "refused by the server, so they were skipped:",
     );
     list(
         &outcome.entries,
@@ -109,7 +107,7 @@ fn list(entries: &[Entry], what: Disposition, heading: &str) {
     println!("\n  {heading}");
     for entry in named {
         match &entry.detail {
-            Some(why) => println!("    {} — {why}", entry.path),
+            Some(why) => println!("    {}: {why}", entry.path),
             None => println!("    {}", entry.path),
         }
     }
