@@ -413,6 +413,7 @@ impl Home {
         };
         create_private_dir(&self.dir).map_err(err)?;
         let deadline = std::time::Instant::now() + LOCK_WAIT;
+        let mut denied = 0;
         loop {
             match fs::OpenOptions::new()
                 .write(true)
@@ -421,6 +422,7 @@ impl Home {
             {
                 Ok(_) => return Ok(DevicesLock { home: self, path }),
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    denied = 0;
                     let stale = fs::metadata(&path)
                         .and_then(|m| m.modified())
                         .ok()
@@ -436,6 +438,21 @@ impl Home {
                             "another recall held device.key.lock for too long",
                         )));
                     }
+                    std::thread::sleep(LOCK_POLL);
+                }
+                // Windows refuses to create a file whose name belongs to one
+                // still being deleted, which the lock is for a moment after
+                // its holder lets go if anything had it open then. That is
+                // the lock being busy, not a permission problem, but only
+                // briefly: a directory this user really cannot write in is
+                // reported after a few refusals in a row rather than waited
+                // on for the whole of LOCK_WAIT.
+                Err(e)
+                    if cfg!(windows)
+                        && e.kind() == io::ErrorKind::PermissionDenied
+                        && denied < 20 =>
+                {
+                    denied += 1;
                     std::thread::sleep(LOCK_POLL);
                 }
                 Err(e) => return Err(err(e)),
