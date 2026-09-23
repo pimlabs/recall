@@ -78,9 +78,10 @@ either refuses or resumes; it never moves a tag.
 2. **Build** the client's targets on native runners, then **create the
    GitHub Release** with `checksums.txt`. `install.sh` (and, on Windows,
    `install.ps1`) work from this moment.
-3. **Stop and wait for you.** The `npm`, `crates` and `homebrew` jobs run in
-   the `release` environment, whose required reviewer is the owner. GitHub
-   notifies you; *Review deployments → Approve* releases all three.
+3. **Stop and wait for you.** The `npm`, `crates`, `homebrew` and `winget`
+   jobs run in the `release` environment, whose required reviewer is the
+   owner. GitHub notifies you; *Review deployments → Approve* releases all
+   four.
 4. **npm** and **crates.io** publish through *trusted publishing*: each
    registry trusts this workflow's OIDC identity and issues a credential that
    lasts for the job. No npm or crates.io token is stored anywhere — not in
@@ -88,10 +89,20 @@ either refuses or resumes; it never moves a tag.
 5. **Homebrew**: the formula is rewritten from the release's own checksums
    and pushed to `pimlabs/homebrew-tap`. The rewritten file is attached to the
    run; it lands in this repository through a PR like every other change.
+6. **winget**: [`vedantmgoyal9/winget-releaser`](https://github.com/vedantmgoyal9/winget-releaser)
+   opens a pull request against `microsoft/winget-pkgs` with the new
+   version's manifest. Needs a one-time first submission by hand before it
+   does anything — see [winget](#5-winget-first-submission-only) below.
 
-The three publishing jobs are independent — one failing does not stop the
-others — and each skips a version its registry already has, so **re-running
-a failed job is always safe**.
+The `npm`, `crates` and `homebrew` jobs are independent — one failing does
+not stop the others — and each skips a version its registry already has, so
+**re-running a failed job is always safe**. `winget` is independent of the
+other three the same way, but is not its own idempotency check the way they
+are: re-running it after it already opened a pull request for this version
+asks winget-pkgs to open another one, which is a mess to untangle rather than
+a safe no-op. If it fails partway, check whether a pull request exists at
+[microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs/pulls) before
+re-running the job.
 
 **Why an approval, not a check.** Nothing a registry accepts can be taken
 back: npm refuses to unpublish after 72 hours, and crates.io can yank a
@@ -123,6 +134,14 @@ Done once per repository; nothing here needs repeating per release.
    `HOMEBREW_TAP_TOKEN` on the `release` environment (not the repository),
    so only an approved job can read it. Without it the `homebrew` job warns
    and skips; everything else still publishes.
+5. **winget** — a *classic* personal access token with the `public_repo` and
+   `workflow` scopes (the second so a workflow-file change upstream in
+   `microsoft/winget-pkgs` doesn't fail the job intermittently — a fine-grained
+   token is not accepted here), saved as the secret `WINGET_TOKEN` on the
+   `release` environment. Without it the `winget` job warns and skips;
+   everything else still publishes. This alone is not enough to make the
+   `winget` job do anything, though — it also needs the fork and the first
+   submission below, done once, by hand.
 
 Once the first CI release has published cleanly, the old npm and crates.io
 tokens on any laptop can be revoked.
@@ -421,7 +440,101 @@ cargo install recall
 deleted, and the crate names are claimed for good. That is the reason this
 step is deliberate rather than automated.
 
-## 5. Afterwards
+## 5. winget (first submission only)
+
+Package identifier `PimLabs.Recall`, publisher `pimlabs`, license `MIT`,
+moniker `recall`. The `winget` job in `.github/workflows/release.yml`
+(`vedantmgoyal9/winget-releaser`, which drives
+[komac](https://github.com/russellbanks/Komac) under the hood) keeps this up
+to date automatically from then on — **but it updates an existing package,
+it does not create one.** At least one version has to already be in
+`microsoft/winget-pkgs` before that job does anything, so the first version
+after this feature was added has to go in by hand. Once it has, every later
+release needs nothing further here.
+
+This is a few one-time steps, done once total, not once per release:
+
+1. **Classic PAT.** [github.com/settings/tokens](https://github.com/settings/tokens)
+   → *Generate new token (classic)* → scopes `public_repo` and `workflow` (see
+   the One-time setup step above for why both). Copy it somewhere safe; GitHub
+   shows it only once. **Browser-only, works from any machine.**
+2. **Fork `microsoft/winget-pkgs`** under the `pimlabs` account — the same
+   account that owns this repository, which is what lets the action push to
+   it without a `fork-user` input. **Browser-only, works from any machine.**
+3. **Add the token as `WINGET_TOKEN`** on this repository's `release`
+   environment (*Settings → Environments → release → Environment secrets*),
+   not the repository's own secrets — same reasoning as
+   `HOMEBREW_TAP_TOKEN` above: only an approved job can read it.
+4. **The first submission itself.** This is the one step that touches a real
+   manifest, and it is where a mistake is most likely — the nested-zip shape
+   below is easy to get wrong by hand and easy to verify with
+   `packaging/winget/generate_manifest.py` first:
+
+   ```sh
+   python3 packaging/winget/generate_manifest.py 0.4.1 /path/to/checksums.txt
+   cat packaging/winget/out/0.4.1/manifests/p/PimLabs/Recall/0.4.1/*.yaml
+   ```
+
+   `checksums.txt` is the target release's own — download it from that
+   release's GitHub page, or run
+   `curl -fsSL https://github.com/pimlabs/recall/releases/download/v0.4.1/checksums.txt`.
+   This prints what a correct manifest looks like: `InstallerType: zip`,
+   `NestedInstallerType: portable`, one `Installers` entry per architecture,
+   and `NestedInstallerFiles` naming `recall.exe` with
+   `PortableCommandAlias: recall` — that alias is what makes `recall` the
+   command `winget install PimLabs.Recall` leaves on `PATH`, and it is the
+   one field an interactive wizard is most likely to skip past without
+   asking. This script is not itself what submits — neither komac nor
+   wingetcreate take a pre-written manifest folder as input for a *new*
+   package — it exists so you have the correct shape open next to the
+   wizard's prompts rather than guessing at them.
+
+   **Recommended: [komac](https://github.com/russellbanks/Komac).** It is
+   the tool the automated `winget` job itself uses, it runs on macOS and
+   Linux as well as Windows, and it is the only one of the two that does —
+   so the whole submission can be done from the same non-Windows machine
+   `scripts/release.sh` already runs on, with nothing installed beyond komac
+   itself:
+
+   ```sh
+   brew install komac                # macOS; or: cargo install --locked komac
+   komac token add                   # pastes the PAT from step 1, or:
+   komac token add --token=$(gh auth token)   # if you use the GitHub CLI
+   komac new PimLabs.Recall
+   ```
+
+   `komac new` asks for the package version, then an installer URL at a
+   time — give it both archive URLs from the release
+   (`https://github.com/pimlabs/recall/releases/download/v0.4.1/recall_windows_amd64.zip`
+   and the `arm64` one), and check what it infers against the generated
+   manifest above before accepting: installer type `zip`, nested installer
+   type `portable`, and a command alias of `recall`. Fill in the metadata
+   fields (publisher, license, moniker, description — the generated
+   `PimLabs.Recall.locale.en-US.yaml` has the exact values) the same way,
+   and choose to submit at the end; komac opens the pull request against
+   your fork from step 2.
+
+   **Alternative, Windows-only:
+   [wingetcreate](https://github.com/microsoft/winget-create).** Needs a
+   Windows machine (or a Windows VM) — there is no macOS or Linux build:
+
+   ```powershell
+   winget install wingetcreate
+   wingetcreate new
+   ```
+
+   Same interactive shape as `komac new`: paste in both archive URLs, check
+   the same fields against the generated manifest, and submit at the end
+   (`--token` or an interactive GitHub login if you'd rather not pass the
+   PAT on the command line).
+
+   Either way, the PR goes through `microsoft/winget-pkgs`' own moderation —
+   automated checks first, then a human review, commonly a few days. Once it
+   merges, `winget install PimLabs.Recall` works, and every release after
+   this one updates it without anyone touching a manifest again. Update
+   `docs/reference/install.md`'s winget row once it is confirmed working.
+
+## 6. Afterwards
 
 - `recall version` on a freshly installed binary should print the new version
   and the commit it was built from — and that commit should be the one the

@@ -14,6 +14,15 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
+## Unreleased
+
+- **winget publishing, set up but not live yet.** Every release can now
+  keep a `PimLabs.Recall` package in `microsoft/winget-pkgs` current, once
+  that package exists. The first version needs a one-time manual
+  submission, so `winget install PimLabs.Recall` does not work yet. See the
+  winget section of `docs/reference/releasing.md` for that submission;
+  `docs/reference/install.md` lists the channel once it is accepted.
+
 ## 0.4.0 — 2026-09-23
 
 - **Breaking: the server is its own binary, `recall-server`.** `recall serve`
