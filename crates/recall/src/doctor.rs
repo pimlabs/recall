@@ -164,6 +164,14 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
         (false, false) => out.push(ok("hooks", "not in a git repository")),
     }
 
+    // Windows only: Claude Code runs hook commands through Git Bash there
+    // and falls back to PowerShell without it, which cannot run the
+    // bash-form command `recall init` writes at all — the hook silently does
+    // nothing on every edit, and nothing else in this report would explain
+    // why. Nothing to check on Unix, where the hook command runs directly.
+    #[cfg(windows)]
+    out.push(git_bash_finding());
+
     // `CLAUDE_CODE_REMOTE` answers the question that made this a permanent
     // warning in both directions: unset is correct on a laptop and means
     // Claude Code's auto-memory is off entirely in a remote session, where
@@ -267,6 +275,70 @@ fn version_findings(rep: &Report, out: &mut Vec<Finding>) {
             "upgrade recall: brew upgrade recall, or npm install -g @pimlabs/recall",
         ));
     }
+}
+
+/// Whether Claude Code has a Git Bash to run hook commands through.
+///
+/// Checked the same way Claude Code itself is documented to resolve it:
+/// `CLAUDE_CODE_GIT_BASH_PATH` first, then `bash.exe` actually belonging to
+/// Git for Windows on `PATH` (not WSL's `System32\bash.exe`, which answers to
+/// the same name but is a different thing), then the two locations Git for
+/// Windows' own installer offers by default. **Not verified against a real
+/// Windows Claude Code install** — the env var name and the fallback order
+/// are the best-documented guess, not a confirmed contract. See
+/// docs/reference/install.md's Windows section.
+#[cfg(windows)]
+fn git_bash_finding() -> Finding {
+    if git_bash_available() {
+        ok("Git Bash", "found")
+    } else {
+        fail(
+            "Git Bash",
+            "not found, so Claude Code cannot run the hooks recall init writes \
+             (it falls back to PowerShell, which the committed hook command \
+             cannot run)",
+            "install Git for Windows: https://git-scm.com/download/win",
+        )
+    }
+}
+
+#[cfg(windows)]
+fn git_bash_available() -> bool {
+    if let Ok(path) = std::env::var("CLAUDE_CODE_GIT_BASH_PATH") {
+        if !path.is_empty() && std::path::Path::new(&path).is_file() {
+            return true;
+        }
+    }
+    if path_bash_is_git_bash() {
+        return true;
+    }
+    // Git for Windows' installer offers to skip adding itself to PATH, so a
+    // working install can still miss the check above.
+    for candidate in [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ] {
+        if std::path::Path::new(candidate).is_file() {
+            return true;
+        }
+    }
+    false
+}
+
+/// `bash.exe` on `PATH` might be WSL's launcher (`System32\bash.exe`) rather
+/// than Git for Windows' — same name, and WSL's answers to `bash -c` too, so
+/// it cannot be told apart by running it. Only a path that plainly names a
+/// Git installation is trusted.
+#[cfg(windows)]
+fn path_bash_is_git_bash() -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths).any(|dir| {
+                dir.join("bash.exe").is_file()
+                    && dir.to_string_lossy().to_ascii_lowercase().contains("git")
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// Where a value came from, in the words a finding uses.
@@ -540,6 +612,7 @@ const SECTIONS: &[(&str, &[&str])] = &[
         "This project",
         &[
             "hooks",
+            "Git Bash",
             "memory dir",
             "CLAUDE_CODE_REMOTE_MEMORY_DIR",
             "settings file",
@@ -1179,5 +1252,33 @@ mod tests {
         (time::OffsetDateTime::now_utc() - time::Duration::days(days))
             .format(&fmt)
             .unwrap()
+    }
+
+    // ---------------------------------------------------------------- Git Bash
+
+    /// Exercises the real environment rather than a stand-in: GitHub's
+    /// `windows-latest` runner is documented to ship Git for Windows, so this
+    /// pins that assumption down where a change to the runner image would be
+    /// noticed, instead of only being noticed by someone hitting the failure
+    /// on their own machine. Not verified anywhere but CI — there is no
+    /// Windows machine in the environment this was written in.
+    #[cfg(windows)]
+    #[test]
+    fn git_bash_is_found_on_this_runner() {
+        assert!(
+            git_bash_available(),
+            "expected Git for Windows on this runner; if the image changed, \
+             widen the search in git_bash_available()"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_healthy_windows_report_includes_a_git_bash_finding() {
+        let found = findings(&healthy());
+        let f = find(&found, "Git Bash").expect("a Git Bash finding on Windows");
+        // Whichever it says, it has to be one of the two — never silently
+        // absent, which is the whole point of this check existing.
+        assert!(matches!(f.level, Level::Ok | Level::Fail));
     }
 }
