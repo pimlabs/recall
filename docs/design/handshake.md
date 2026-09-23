@@ -327,80 +327,100 @@ minor release. It fits best alongside the move to release-built server
 images, which changes the Dockerfile anyway. Until then `recall serve` keeps
 working.
 
-## Part 5: end-to-end encryption, and merging without the server
+## Part 5: encrypted storage, and a worker that reads it
 
-The owner wants memory contents encrypted end to end (2026-09-23): the
-server stores ciphertext and never sees a note. Atuin does this for shell
-history. The obstacle is merge: today the server reconciles concurrent
-edits with the Claude CLI, which needs plaintext. So merge moves to the
-client, in layers, cheapest first.
+The owner's goal (2026-09-23): **one place to evaluate memory and improve it
+over time, kept secure, with the client hooks staying light.** The server
+reading memory is acceptable; everything reading it being exposed to the
+internet is not. So the server is split into two roles, the way Apple's
+iCloud offers Standard Data Protection (the provider holds keys and can
+process data) next to Advanced Data Protection (only the user's devices do).
+
+```
+            internet
+               │
+  ┌────────────▼─────────────┐  queue  ┌──────────────────────────────┐
+  │ recall-server (API)      │────────▶│ recall-worker                │
+  │ push / pull / admin      │         │ an enrolled device that holds│
+  │ stores ciphertext only   │◀────────│ the content key (revocable)  │
+  │ holds no content key     │ results │ semantic merge (Claude CLI)  │
+  │ audit log                │         │ evaluation and reports       │
+  └──────────────────────────┘         │ no inbound ports             │
+                                       └──────────────────────────────┘
+```
 
 ### Encryption
 
-- One **content key** per owner, generated on the first device. Every
-  file body is encrypted with an AEAD cipher (XChaCha20-Poly1305, as
-  secsync uses) before it leaves the machine.
+- One **content key** per owner. Clients encrypt every file body with an
+  AEAD cipher (XChaCha20-Poly1305, as secsync uses) before it leaves the
+  machine and decrypt what they pull. That is the only extra work a hook
+  does, and it is cheap.
 - A device receives the content key wrapped to its public key when it is
-  approved, by the device that approves it. This is why Part 5 comes
-  after Part 2: key distribution rides on enrolment.
-- **Cloud sessions** have no approving device online. The enrolment key
-  therefore has two halves: one it sends to the server to enrol, and one
-  it never sends, used locally to unwrap a copy of the content key the
-  server stores but cannot open.
-- A **recovery key** is shown once when the content key is created. If
-  every device is lost without it, the memory is gone. That is the cost
-  of the server being unable to read it.
+  approved (Part 2). Cloud sessions use a two-part enrolment key: one half
+  enrols, the other half, never sent, unwraps a copy of the content key
+  the server stores but cannot open.
+- The API server never holds the content key. A compromise of the part
+  that faces the internet exposes ciphertext and metadata, not notes.
+  Backups, including off-box ones, are ciphertext too.
+- A **recovery key** is shown once when the content key is created.
 - Not hidden: project keys, file paths, sizes and timings. secsync states
   the same limit: its protocol *"doesn't hide meta data from the server"*.
-  Encrypting paths is possible later and is not proposed.
 
-### Merge, in layers
+### The worker
 
-1. **Detect on the server without reading.** A push carries the version it
-   was based on, as an `If-Match` precondition (RFC 9110 §13.1.1). If the
-   stored version has moved on, the server answers `412 Precondition
-   Failed` and changes nothing: the "lost update" problem RFC 9110 names.
-   This replaces today's `base_sha256`, which the server compares against
-   plaintext.
-2. **Three-way merge on the client.** The client keeps the plaintext of
-   the version it last synced (its base) in `~/.recall`, fetches and
-   decrypts the new server version, and merges the three the way
-   `git merge-file` does: changes to different lines combine
-   automatically. Memory files are short Markdown notes, so most
-   concurrent edits touch different lines and need nothing more.
-3. **Let the session's own Claude resolve the rest.** When lines overlap
-   and the merge runs inside a Claude Code session (the push hook), the
-   hook returns both versions to the running session through the hook's
-   `additionalContext`, which Claude Code feeds back to the model. Claude
-   rewrites the file, and that edit is pushed like any other, against the
-   new base. The model already in the session does the semantic merge the
-   server does today, with no second login and no plaintext on the server.
-4. **Outside a session**, for example `recall backfill` in a terminal:
-   `claude -p` when the machine is logged in; otherwise a conflict copy
-   next to the file, as Syncthing does with
-   `<file>.sync-conflict-<date>-<time>-<device>.<ext>`, picked up by
-   layer 3 at the next session start.
-5. `MEMORY.md` is never merged. It is an index Recall regenerates.
+`recall-worker` is a client that runs next to the server: its own process
+and container on the same host, enrolled as a device like any other, listed
+in `recall devices list`, and revocable. It opens no port; it takes jobs
+from the API server's queue and posts results back.
 
-### What changes on the server
+It does the heavy work, so the hooks never wait for it:
 
-It stops merging and stops needing a `claude` login. It stores ciphertext,
-versions and metadata, and enforces `If-Match`. That also removes the
-multi-owner merge concern in Part 3.
+- **Semantic merge.** A push whose base is stale (`If-Match` fails, RFC 9110
+  §13.1.1) is accepted and queued rather than merged inline: the API answers
+  at once, the worker reconciles the two versions with the Claude CLI, and
+  the merged file arrives with the next pull. The `claude` login moves from
+  the API server to the worker.
+- **Evaluation.** Duplicates, stale notes, contradictions between files or
+  scopes, secrets that should not be in memory, notes in the wrong scope.
+  Reports appear on the admin page; nothing is changed without the owner.
+- Whatever evaluation or improvement is added later runs here, in one
+  place, without touching the hooks.
+
+`MEMORY.md` is never merged; it is an index Recall regenerates.
+
+### Audit
+
+The API server keeps an append-only log of every push, pull, merge,
+enrolment and revocation: which device, when, which version, and the
+ciphertext hash. Each entry carries the device's signature from Part 2.
+Chained as a Merkle tree, the way Certificate Transparency (RFC 9162) and
+Sigstore Rekor keep *"an immutable tamper resistant ledger"*, the log shows
+whether anything was removed or rewritten after the fact. It needs no
+plaintext, so it works whether or not the worker is running.
+
+### Strict end-to-end, as an option
+
+Revoking the worker's device key and rotating the content key leaves no
+server-side process able to read memory: Apple's Advanced Data Protection,
+where the service keys are deleted from Apple's HSMs. Merge then happens on
+the clients (a three-way merge like `git merge-file`, with overlapping
+edits handed to the running session's Claude through the hook's
+`additionalContext`, and a Syncthing-style conflict copy outside a
+session), and evaluation stops. Same data format, same keys; only who holds
+them changes. Not the default.
 
 ### Why not a CRDT
 
 Automerge and Yjs merge without conflicts and secsync relays them end to
 end encrypted. But they need the file stored as a CRDT document, and
-Claude Code reads and writes plain Markdown. The three-way merge above
-works on the files as they are.
+Claude Code reads and writes plain Markdown.
 
 ## Open decisions
 
-1. **End-to-end encryption.** Wanted by the owner; designed in Part 5. It
-   depends on Part 2 for key distribution, and replacing server-side
-   merge is a breaking change to the push contract, so it ships in a
-   minor release.
+1. **Encrypted storage and the worker.** Agreed by the owner (2026-09-23):
+   Part 5. It depends on Part 2 for key distribution, and moving merge
+   behind a queue changes the push contract, so it ships in a minor
+   release. Strict end-to-end stays an option, not the default.
 2. **`CLAUDE.md`'s ground rule.** It says *"single owner, one bearer
    token"*. This design keeps the single owner and replaces the single
    token with enrolled devices. That wording changes only with the owner's
@@ -435,4 +455,6 @@ works on the files as they are.
 - secsync, end-to-end encrypted CRDT relay (encryption, metadata limits)
 - Automerge
 - Syncthing, syncing: conflicting changes
+- Apple, iCloud data security overview; Advanced Data Protection
+- RFC 9162, Certificate Transparency 2.0; Sigstore Rekor
 - Claude Code hooks reference (`additionalContext` on PostToolUse and SessionStart)
