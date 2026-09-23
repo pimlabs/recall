@@ -14,6 +14,15 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
+## Unreleased
+
+- `recall-server` can terminate TLS itself now, for a machine with no
+  ingress in front of it: `RECALL_TLS_CERT`/`RECALL_TLS_KEY` for a
+  certificate already on disk, or `RECALL_TLS_ACME_DOMAINS`/
+  `RECALL_TLS_ACME_EMAIL` for one it gets and renews on its own from Let's
+  Encrypt. Off by default; the two existing ingress-based deployments are
+  unaffected. See `deploy/README.md` and `deploy/docker-compose.direct.yml`.
+
 ## 0.4.0 — 2026-09-23
 
 - **Breaking: the server is its own binary, `recall-server`.** `recall serve`

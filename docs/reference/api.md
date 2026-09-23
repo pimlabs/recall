@@ -72,6 +72,12 @@ can choose, and choosing your own bucket defeats the limit. It is trustworthy
 only because the container has no published port, so every request really
 does arrive through that ingress.
 
+`recall-server`'s own direct-TLS mode (`RECALL_TLS_CERT`/`RECALL_TLS_KEY`, or
+`RECALL_TLS_ACME_DOMAINS`) has no ingress at all, so no header is read there
+either: the client's address comes straight from the TCP connection, and the
+server refuses to start if `RECALL_TRUSTED_IP_HEADER` is set alongside it.
+See `deploy/README.md`.
+
 ## Protocol and client identity
 
 Every request the `recall` client sends names the protocol it speaks and the

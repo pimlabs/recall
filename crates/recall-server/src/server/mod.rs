@@ -10,11 +10,12 @@
 //! | anything else | 404 JSON |
 //!
 //! This module owns the shared state, the router, and the background jobs.
-//! The four things it wires together are private submodules, each living
-//! next to its own tests: `middleware.rs` (rate limiting, then auth),
-//! `handlers.rs` (one function per route), `respond.rs` (the JSON shape of
-//! every reply, errors included) and `limit.rs` (the per-IP window the
-//! middleware consults).
+//! The things it wires together are private submodules, each living next to
+//! its own tests: `middleware.rs` (rate limiting, then auth), `handlers.rs`
+//! (one function per route), `respond.rs` (the JSON shape of every reply,
+//! errors included), `limit.rs` (the per-IP window the middleware
+//! consults), and `tls.rs` (the direct-TLS accept loop, used only when
+//! `Config::tls` is on; plain HTTP, the default, never touches it).
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -31,6 +32,7 @@ use recall_wire::MergeError;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
+use crate::config::TlsMode;
 use crate::merge::{Merger, Status};
 use crate::{now, Config, Store};
 
@@ -38,6 +40,7 @@ mod handlers;
 mod limit;
 mod middleware;
 mod respond;
+mod tls;
 
 use handlers::{
     handle_admin_page, handle_admin_stats, handle_discovery, handle_health, handle_pull,
@@ -195,29 +198,49 @@ impl Server {
             .await
             .with_context(|| format!("binding {}", self.state.cfg.addr))?;
         eprintln!(
-            "recall server listening on {} (db: {})",
-            self.state.cfg.addr, self.state.cfg.db_path
+            "recall server listening on {} ({}, db: {})",
+            self.state.cfg.addr,
+            if self.state.cfg.tls.is_enabled() {
+                "tls"
+            } else {
+                "plain http"
+            },
+            self.state.cfg.db_path
         );
         self.serve_with_shutdown(listener, shutdown_signal()).await
     }
 
-    /// Serves on an already-bound listener until `shutdown` resolves.
+    /// Serves on an already-bound listener until `shutdown` resolves, in
+    /// whichever transport `cfg.tls` names (see `server/tls.rs`; plain HTTP,
+    /// the default, still goes through `axum::serve` directly, unchanged).
     pub async fn serve_with_shutdown<F>(&self, listener: TcpListener, shutdown: F) -> Result<()>
     where
         F: Future<Output = ()> + Send + 'static,
     {
         let tasks = self.start_background();
-        let result = axum::serve(
-            listener,
-            self.router()
-                .into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(shutdown)
-        .await;
+        let result = match &self.state.cfg.tls {
+            TlsMode::Off => axum::serve(
+                listener,
+                self.router()
+                    .into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown)
+            .await
+            .map_err(Into::into),
+            mode => {
+                // axum-server runs its own accept loop rather than
+                // axum::serve's, so the listener crosses over to std here.
+                // It is already non-blocking (tokio bound it), which is
+                // exactly what tokio::net::TcpListener::from_std, which
+                // axum-server calls internally, requires.
+                let listener = listener.into_std().context("preparing the TLS listener")?;
+                tls::serve(self.router(), listener, mode, shutdown).await
+            }
+        };
         for task in tasks {
             task.abort();
         }
-        result.map_err(Into::into)
+        result
     }
 }
 

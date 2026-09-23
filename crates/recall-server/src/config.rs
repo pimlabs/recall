@@ -15,6 +15,33 @@ pub enum ConfigError {
     /// worth supporting.
     #[error("RECALL_TOKEN is not set; refusing to start with no auth")]
     MissingToken,
+    /// `RECALL_TLS_CERT` and `RECALL_TLS_KEY` name one file each; half a
+    /// pair is almost always a typo in one of the two variable names.
+    #[error("RECALL_TLS_CERT and RECALL_TLS_KEY must both be set, or neither")]
+    PartialTlsFiles,
+    /// `RECALL_TLS_ACME_DOMAINS` and `RECALL_TLS_ACME_EMAIL` are the same
+    /// kind of pair, for the same reason.
+    #[error("RECALL_TLS_ACME_DOMAINS and RECALL_TLS_ACME_EMAIL must both be set, or neither")]
+    PartialTlsAcme,
+    /// The two TLS modes are mutually exclusive: each picks its own
+    /// certificate source, and a config with both is ambiguous about which
+    /// one wins rather than a config this server can just run.
+    #[error(
+        "RECALL_TLS_CERT/RECALL_TLS_KEY and RECALL_TLS_ACME_DOMAINS/RECALL_TLS_ACME_EMAIL \
+         are two different TLS modes; set one, not both"
+    )]
+    BothTlsModes,
+    /// With direct TLS there is no ingress, so the socket's own peer
+    /// address is the only client IP that is not the client's own choice.
+    /// Setting this variable anyway is either a no-op or, if it is ever
+    /// read, a way for a client to buy itself an unlimited number of token
+    /// guesses by rotating whatever header it names, so refusing to start
+    /// beats silently ignoring the setting.
+    #[error(
+        "RECALL_TRUSTED_IP_HEADER must not be set while TLS is on; with direct TLS there is no \
+         ingress, so the client IP always comes from the socket's peer address"
+    )]
+    TrustedIpHeaderWithTls,
 }
 
 /// What `recall-server` needs.
@@ -33,11 +60,12 @@ pub enum ConfigError {
 /// | [`backup_keep`] | `RECALL_BACKUP_KEEP` | 7 |
 /// | [`rate_limit_window`] | `RECALL_RATE_LIMIT_WINDOW_MS` | 60s |
 /// | [`rate_limit_max`] | `RECALL_RATE_LIMIT_MAX` | 60 |
-/// | [`trusted_ip_header`] | `RECALL_TRUSTED_IP_HEADER` | `cf-connecting-ip` |
+/// | [`trusted_ip_header`] | `RECALL_TRUSTED_IP_HEADER` | `cf-connecting-ip`, forced empty when [`tls`] is on |
 /// | [`merge_enabled`] | `RECALL_MERGE_ENABLED` | on |
 /// | [`merge_timeout`] | `RECALL_MERGE_TIMEOUT_MS` | 45s |
 /// | [`claude_bin`] | `RECALL_CLAUDE_BIN` | `claude` |
 /// | [`claude_status_interval`] | `RECALL_CLAUDE_STATUS_INTERVAL_MS` | 30m |
+/// | [`tls`] | `RECALL_TLS_CERT`/`RECALL_TLS_KEY`, or `RECALL_TLS_ACME_DOMAINS`/`RECALL_TLS_ACME_EMAIL`/`RECALL_TLS_ACME_DIR`/`RECALL_TLS_ACME_STAGING` | off |
 ///
 /// [`addr`]: Config::addr
 /// [`token`]: Config::token
@@ -53,6 +81,7 @@ pub enum ConfigError {
 /// [`merge_timeout`]: Config::merge_timeout
 /// [`claude_bin`]: Config::claude_bin
 /// [`claude_status_interval`]: Config::claude_status_interval
+/// [`tls`]: Config::tls
 #[derive(Debug, Clone)]
 pub struct Config {
     /// The socket to bind, assembled from host and port.
@@ -112,6 +141,59 @@ pub struct Config {
     pub claude_bin: String,
     /// How often to re-check that the binary is present and logged in.
     pub claude_status_interval: Duration,
+
+    /// Whether this server terminates TLS itself. Off by default: the two
+    /// existing deployments (`deploy/docker-compose.yml`,
+    /// `docker-compose.traefik.yml`) put an ingress in front instead, and
+    /// that stays the default. See [`TlsMode`].
+    pub tls: TlsMode,
+}
+
+/// Whether, and how, `recall-server` terminates TLS itself rather than
+/// leaving it to an ingress.
+///
+/// The two modes are mutually exclusive and each requires its own pair of
+/// variables in full; see [`ConfigError::PartialTlsFiles`],
+/// [`ConfigError::PartialTlsAcme`] and [`ConfigError::BothTlsModes`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TlsMode {
+    /// Plain HTTP on [`Config::addr`]. An ingress is expected to terminate
+    /// TLS in front of this, per `deploy/README.md`.
+    Off,
+    /// `RECALL_TLS_CERT` + `RECALL_TLS_KEY`: serve HTTPS on
+    /// [`Config::addr`] from a certificate and key already on disk, such as
+    /// one a separate ACME client keeps renewed.
+    Files {
+        /// PEM certificate chain path (`RECALL_TLS_CERT`).
+        cert_path: String,
+        /// PEM private key path (`RECALL_TLS_KEY`).
+        key_path: String,
+    },
+    /// `RECALL_TLS_ACME_DOMAINS` + `RECALL_TLS_ACME_EMAIL`: the server gets
+    /// and renews its own certificate from an ACME directory (Let's
+    /// Encrypt, by default) over TLS-ALPN-01, which needs only the one port
+    /// it is already serving on, port 80 is never touched.
+    Acme {
+        /// The domain names to request a certificate for.
+        domains: Vec<String>,
+        /// The contact address the ACME directory may use for expiry
+        /// notices.
+        email: String,
+        /// Where the issued certificate and account key are cached, so a
+        /// restart does not re-issue one (`RECALL_TLS_ACME_DIR`).
+        cache_dir: String,
+        /// Let's Encrypt's staging directory instead of production
+        /// (`RECALL_TLS_ACME_STAGING`): much higher rate limits while
+        /// testing, at the cost of a certificate no client will trust.
+        staging: bool,
+    },
+}
+
+impl TlsMode {
+    /// Whether the server terminates TLS at all, in either mode.
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self, TlsMode::Off)
+    }
 }
 
 impl Default for Config {
@@ -131,6 +213,7 @@ impl Default for Config {
             merge_timeout: Duration::from_secs(45),
             claude_bin: "claude".to_string(),
             claude_status_interval: Duration::from_secs(30 * 60),
+            tls: TlsMode::Off,
         }
     }
 }
@@ -161,6 +244,44 @@ impl Config {
         let num =
             |key: &str, fallback: u64| get(key).and_then(|v| v.parse().ok()).unwrap_or(fallback);
 
+        let files_tls = match (get("RECALL_TLS_CERT"), get("RECALL_TLS_KEY")) {
+            (Some(cert_path), Some(key_path)) => Some(TlsMode::Files {
+                cert_path,
+                key_path,
+            }),
+            (None, None) => None,
+            _ => return Err(ConfigError::PartialTlsFiles),
+        };
+        let acme_tls = match (get("RECALL_TLS_ACME_DOMAINS"), get("RECALL_TLS_ACME_EMAIL")) {
+            (Some(domains), Some(email)) => Some(TlsMode::Acme {
+                domains: domains
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|d| !d.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                email,
+                cache_dir: or("RECALL_TLS_ACME_DIR", "/data/acme"),
+                staging: get("RECALL_TLS_ACME_STAGING").as_deref() == Some("true"),
+            }),
+            (None, None) => None,
+            _ => return Err(ConfigError::PartialTlsAcme),
+        };
+        let tls = match (files_tls, acme_tls) {
+            (Some(_), Some(_)) => return Err(ConfigError::BothTlsModes),
+            (Some(mode), None) | (None, Some(mode)) => mode,
+            (None, None) => TlsMode::Off,
+        };
+        // With direct TLS there is no ingress, so the setting that protects
+        // the rate limiter behind one is not just unnecessary but actively
+        // dangerous here: reading it at all would let a direct client pick
+        // its own rate-limit bucket by supplying whatever header it names.
+        // Refusing to start beats silently ignoring a value left over from
+        // moving a deployment from behind an ingress to direct TLS.
+        if tls.is_enabled() && lookup("RECALL_TRUSTED_IP_HEADER").is_some() {
+            return Err(ConfigError::TrustedIpHeaderWithTls);
+        }
+
         let mut cfg = Config {
             addr: format!("0.0.0.0:{}", or("RECALL_PORT", "8787")),
             token: get("RECALL_TOKEN").unwrap_or_default(),
@@ -177,10 +298,17 @@ impl Config {
             rate_limit_window: Duration::from_millis(num("RECALL_RATE_LIMIT_WINDOW_MS", 60_000)),
             rate_limit_max: num("RECALL_RATE_LIMIT_MAX", 60) as u32,
             // Lowercased because HeaderMap lookups are case-insensitive but
-            // this is compared as a plain string.
-            trusted_ip_header: lookup("RECALL_TRUSTED_IP_HEADER")
-                .map(|v| v.trim().to_ascii_lowercase())
-                .unwrap_or_else(|| "cf-connecting-ip".to_string()),
+            // this is compared as a plain string. Forced empty under TLS
+            // regardless of this default: the check above already refused
+            // to start if the variable was set explicitly, and with no
+            // ingress in front, no header is safe to trust at all.
+            trusted_ip_header: if tls.is_enabled() {
+                String::new()
+            } else {
+                lookup("RECALL_TRUSTED_IP_HEADER")
+                    .map(|v| v.trim().to_ascii_lowercase())
+                    .unwrap_or_else(|| "cf-connecting-ip".to_string())
+            },
             // Opt-out, not opt-in: only the literal "false" disables it, so a
             // typo leaves merge on rather than silently off.
             merge_enabled: lookup("RECALL_MERGE_ENABLED").as_deref() != Some("false"),
@@ -190,6 +318,7 @@ impl Config {
                 "RECALL_CLAUDE_STATUS_INTERVAL_MS",
                 30 * 60_000,
             )),
+            tls,
         };
         if cfg.token.is_empty() {
             return Err(ConfigError::MissingToken);
@@ -340,6 +469,156 @@ mod tests {
                 !cfg.merge_timeout.is_zero(),
                 "a zero merge timeout fails every merge instantly and silently"
             );
+        }
+    }
+
+    #[test]
+    fn tls_is_off_by_default() {
+        assert_eq!(Config::default().tls, TlsMode::Off);
+        let cfg = Config::from_lookup(env(&[("RECALL_TOKEN", "t")])).unwrap();
+        assert_eq!(cfg.tls, TlsMode::Off);
+        assert_eq!(cfg.trusted_ip_header, "cf-connecting-ip");
+    }
+
+    #[test]
+    fn tls_files_mode_needs_both_variables() {
+        for pairs in [
+            &[("RECALL_TOKEN", "t"), ("RECALL_TLS_CERT", "/c.pem")][..],
+            &[("RECALL_TOKEN", "t"), ("RECALL_TLS_KEY", "/k.pem")][..],
+        ] {
+            assert!(
+                matches!(
+                    Config::from_lookup(env(pairs)),
+                    Err(ConfigError::PartialTlsFiles)
+                ),
+                "{pairs:?}"
+            );
+        }
+
+        let cfg = Config::from_lookup(env(&[
+            ("RECALL_TOKEN", "t"),
+            ("RECALL_TLS_CERT", "/c.pem"),
+            ("RECALL_TLS_KEY", "/k.pem"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            cfg.tls,
+            TlsMode::Files {
+                cert_path: "/c.pem".to_string(),
+                key_path: "/k.pem".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn tls_acme_mode_needs_both_variables_and_splits_domains() {
+        for pairs in [
+            &[
+                ("RECALL_TOKEN", "t"),
+                ("RECALL_TLS_ACME_DOMAINS", "example.com"),
+            ][..],
+            &[
+                ("RECALL_TOKEN", "t"),
+                ("RECALL_TLS_ACME_EMAIL", "me@example.com"),
+            ][..],
+        ] {
+            assert!(
+                matches!(
+                    Config::from_lookup(env(pairs)),
+                    Err(ConfigError::PartialTlsAcme)
+                ),
+                "{pairs:?}"
+            );
+        }
+
+        let cfg = Config::from_lookup(env(&[
+            ("RECALL_TOKEN", "t"),
+            ("RECALL_TLS_ACME_DOMAINS", " a.example.com, b.example.com ,"),
+            ("RECALL_TLS_ACME_EMAIL", "me@example.com"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            cfg.tls,
+            TlsMode::Acme {
+                domains: vec!["a.example.com".to_string(), "b.example.com".to_string()],
+                email: "me@example.com".to_string(),
+                cache_dir: "/data/acme".to_string(),
+                staging: false,
+            }
+        );
+    }
+
+    #[test]
+    fn tls_acme_staging_and_cache_dir_are_overridable() {
+        let cfg = Config::from_lookup(env(&[
+            ("RECALL_TOKEN", "t"),
+            ("RECALL_TLS_ACME_DOMAINS", "example.com"),
+            ("RECALL_TLS_ACME_EMAIL", "me@example.com"),
+            ("RECALL_TLS_ACME_DIR", "/tmp/acme-cache"),
+            ("RECALL_TLS_ACME_STAGING", "true"),
+        ]))
+        .unwrap();
+        let TlsMode::Acme {
+            cache_dir, staging, ..
+        } = cfg.tls
+        else {
+            panic!("expected TlsMode::Acme, got {:?}", cfg.tls);
+        };
+        assert_eq!(cache_dir, "/tmp/acme-cache");
+        assert!(staging);
+    }
+
+    #[test]
+    fn configuring_both_tls_modes_is_refused() {
+        assert!(matches!(
+            Config::from_lookup(env(&[
+                ("RECALL_TOKEN", "t"),
+                ("RECALL_TLS_CERT", "/c.pem"),
+                ("RECALL_TLS_KEY", "/k.pem"),
+                ("RECALL_TLS_ACME_DOMAINS", "example.com"),
+                ("RECALL_TLS_ACME_EMAIL", "me@example.com"),
+            ])),
+            Err(ConfigError::BothTlsModes)
+        ));
+    }
+
+    /// The mandatory security rule: behind an ingress the trusted header is
+    /// how the rate limiter learns the real client address, but direct TLS
+    /// has no ingress to set it, so a client that could still choose the
+    /// value would buy itself unlimited token guesses. Setting the
+    /// variable at all alongside TLS is refused outright, matching
+    /// `scripts/trusted-ip-check.sh`'s socket-level proof of the same rule.
+    #[test]
+    fn trusted_ip_header_with_tls_refuses_to_start() {
+        for tls_pairs in [
+            &[("RECALL_TLS_CERT", "/c.pem"), ("RECALL_TLS_KEY", "/k.pem")][..],
+            &[
+                ("RECALL_TLS_ACME_DOMAINS", "example.com"),
+                ("RECALL_TLS_ACME_EMAIL", "me@example.com"),
+            ][..],
+        ] {
+            let mut pairs = vec![("RECALL_TOKEN", "t")];
+            pairs.extend_from_slice(tls_pairs);
+
+            // Even an explicit empty value, which would mean the same thing
+            // TLS mode forces anyway, is refused: the point is that this
+            // variable is not this deployment's business to set at all.
+            for header_value in ["x-real-ip", "cf-connecting-ip", ""] {
+                let mut pairs = pairs.clone();
+                pairs.push(("RECALL_TRUSTED_IP_HEADER", header_value));
+                assert!(
+                    matches!(
+                        Config::from_lookup(env(&pairs)),
+                        Err(ConfigError::TrustedIpHeaderWithTls)
+                    ),
+                    "{pairs:?}"
+                );
+            }
+
+            // Unset is the only value that is allowed, and it forces the
+            // empty string, not the plain-HTTP default of cf-connecting-ip.
+            let cfg = Config::from_lookup(env(&pairs)).unwrap();
+            assert_eq!(cfg.trusted_ip_header, "");
         }
     }
 }

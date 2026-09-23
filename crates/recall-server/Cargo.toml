@@ -27,6 +27,14 @@ time.workspace = true
 # io-util is needed to stream the merge prompt into the CLI's stdin.
 tokio = { workspace = true, features = ["io-util"] }
 
+# Direct TLS (server/tls.rs), both modes off unless configured. Only this
+# crate uses any of these; see the workspace Cargo.toml for the `ring`
+# choice.
+rustls.workspace = true
+axum-server.workspace = true
+rustls-acme.workspace = true
+futures-util.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 # Only to drive the Router in tests without binding a real socket.

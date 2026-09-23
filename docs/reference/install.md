@@ -752,10 +752,14 @@ Each release publishes it for Linux, amd64 and arm64, as
 `recall-server_linux_<arch>.tar.gz`; `cargo install recall-server` builds it
 anywhere else.
 
-In practice it runs in Docker behind an ingress — a Cloudflare Tunnel or an
-existing Traefik, one compose file each. See
-[`deploy/README.md`](../../deploy/README.md), which also covers backups and
-the one-time `claude setup-token` step that enables semantic merge.
+In practice it runs in Docker, most often behind an ingress — a Cloudflare
+Tunnel or an existing Traefik, one compose file each — but it can also
+terminate TLS itself (`RECALL_TLS_CERT`/`RECALL_TLS_KEY`, or
+`RECALL_TLS_ACME_DOMAINS` for a certificate it gets and renews on its own),
+for a machine with no ingress in front of it at all. See
+[`deploy/README.md`](../../deploy/README.md), which covers all three, plus
+backups and the one-time `claude setup-token` step that enables semantic
+merge.
 
 ## Releases
 

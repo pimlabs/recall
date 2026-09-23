@@ -1,0 +1,97 @@
+# Recall terminating TLS itself, for a machine with no ingress in front of
+# it at all: no Traefik, no Cloudflare Tunnel, nothing else routing to it.
+#
+#   cd deploy
+#   cp .env.example .env          # fill in RECALL_TOKEN, RECALL_TLS_ACME_DOMAINS, RECALL_TLS_ACME_EMAIL
+#   docker compose -f docker-compose.direct.yml up -d --build
+#
+# The trade-off against the other two files: certificate issuance and
+# renewal now live inside recall-server itself, and port 443 is exposed
+# straight to the internet rather than sitting behind something else. Use
+# docker-compose.yml or docker-compose.traefik.yml instead if either of
+# those already fits this machine. See deploy/README.md's "If you are using
+# direct TLS" section for the full trade-offs.
+#
+# DNS for every domain in RECALL_TLS_ACME_DOMAINS must already point at this
+# host before the first run: Let's Encrypt validates over the same
+# connection this server accepts everything else on (TLS-ALPN-01), so there
+# is no separate port 80 step and no separate ACME client to run.
+
+name: recall
+
+services:
+  recall-server:
+    build:
+      # Context is the repo root, not deploy/: the image reads the version
+      # from Cargo.toml (or builds from crates/), then copies the entrypoint
+      # next to this file.
+      context: ..
+      dockerfile: deploy/Dockerfile
+      # The binary comes from the GitHub Release named by RECALL_VERSION, or
+      # by this checkout's Cargo.toml when that is unset; see the Dockerfile.
+      # RECALL_SOURCE=source builds it from the checkout instead.
+      args:
+        RECALL_SOURCE: ${RECALL_SOURCE:-release}
+        RECALL_VERSION: ${RECALL_VERSION:-}
+        GIT_COMMIT: ${GIT_COMMIT:-}
+    container_name: recall-server
+    restart: unless-stopped
+    environment:
+      RECALL_TOKEN: ${RECALL_TOKEN:?set RECALL_TOKEN in deploy/.env}
+      # Not 443: the container runs as the unprivileged `node` user (see
+      # docker-entrypoint.sh), which cannot bind a port below 1024 without
+      # extra capabilities this image does not grant it. The `ports:` line
+      # below maps the host's 443 onto this instead, which needs nothing
+      # special — the same trick any "run as non-root, publish 443" image
+      # uses.
+      RECALL_PORT: "8443"
+      RECALL_DB_PATH: /data/recall.db
+      RECALL_BACKUP_DIR: /backups
+      RECALL_BACKUP_INTERVAL_HOURS: "24"
+      RECALL_BACKUP_KEEP: "7"
+      # ACME sub-mode: the server gets and renews its own certificate. See
+      # deploy/README.md for the RECALL_TLS_CERT/RECALL_TLS_KEY sub-mode
+      # instead, which needs a volume mount rather than these three.
+      RECALL_TLS_ACME_DOMAINS: ${RECALL_TLS_ACME_DOMAINS:?set RECALL_TLS_ACME_DOMAINS in deploy/.env}
+      RECALL_TLS_ACME_EMAIL: ${RECALL_TLS_ACME_EMAIL:?set RECALL_TLS_ACME_EMAIL in deploy/.env}
+      RECALL_TLS_ACME_STAGING: ${RECALL_TLS_ACME_STAGING:-}
+      # RECALL_TLS_ACME_DIR is left at its default (/data/acme): that is
+      # already inside the recall-data volume below, so the issued
+      # certificate survives rebuilds with no volume of its own.
+      #
+      # Deliberately not set. With no ingress in front of this container,
+      # the TCP connection's own address is the only client IP that isn't
+      # the client's own choosing — recall-server refuses to start if this
+      # is set anyway. See docs/reference/api.md and
+      # scripts/tls-trusted-ip-check.sh.
+      # RECALL_TRUSTED_IP_HEADER:
+    volumes:
+      - recall-data:/data
+      - ./backups:/backups
+      # To use the RECALL_TLS_CERT/RECALL_TLS_KEY sub-mode instead of ACME,
+      # replace the three RECALL_TLS_ACME_* lines above with:
+      #   RECALL_TLS_CERT: /certs/fullchain.pem
+      #   RECALL_TLS_KEY: /certs/privkey.pem
+      # and add a mount for wherever those files actually live, e.g.:
+      #   - /etc/letsencrypt/live/recall.yourdomain.com:/certs:ro
+    # Published, not exposed: this file's whole point is that nothing else
+    # is in front of it. Only 443 reaches the internet; RECALL_PORT above is
+    # an internal detail nothing outside this compose file needs to know.
+    ports:
+      - "443:8443"
+
+  # Read-only DB browser for the owner's own use. Kept off the internet on
+  # purpose: it has no bearer-token auth of its own, so its port is bound to
+  # 127.0.0.1 rather than published like recall-server's above.
+  sqlite-web:
+    image: coleifer/sqlite-web
+    container_name: recall-sqlite-web
+    restart: unless-stopped
+    command: sqlite_web -H 0.0.0.0 -p 8080 -x -r /data/recall.db
+    volumes:
+      - recall-data:/data:ro
+    ports:
+      - "127.0.0.1:8081:8080"
+
+volumes:
+  recall-data:

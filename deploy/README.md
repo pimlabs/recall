@@ -23,15 +23,16 @@ nothing here changes except where you run it.
 
 ## Which ingress
 
-Two compose files, same server, same image, same volume:
+Three compose files, same server, same image, same volume:
 
 | File | Ingress | Use it when |
 |---|---|---|
 | `docker-compose.yml` | Cloudflare Tunnel | The machine runs nothing else public. Brings its own ingress and needs no open ports. |
 | `docker-compose.traefik.yml` | An existing Traefik | The machine already routes other services through Traefik. One ingress you understand beats a second one you have to remember. |
+| `docker-compose.direct.yml` | None — the server terminates TLS itself | The machine has no ingress at all and you would rather not add one just for this. |
 
-Whichever you pick, two properties have to hold together, and neither is
-optional:
+The first two put something else in front of the container and have two
+properties that have to hold together, neither optional:
 
 1. **The container has no published port.** Both files use `expose`, never
    `ports`. The origin must be unreachable except through the ingress.
@@ -46,6 +47,16 @@ attempts at guessing the token. Exactly one header is read, so anything sent
 under another name is ignored — but only the missing `ports:` keeps the
 ingress in the path at all.
 
+**`docker-compose.direct.yml` is a different model, not a variant of the
+above.** There is no ingress, so the container's port *is* published, and
+`RECALL_TRUSTED_IP_HEADER` is deliberately left unset: with nothing in front
+of the server, the only address that isn't the client's own choosing is the
+one the TCP connection itself arrived from, so the server reads that
+instead. Setting the variable anyway is refused at startup rather than
+silently ignored — see `crates/recall-server/src/config.rs` and
+`scripts/tls-trusted-ip-check.sh`, which proves the same property this
+section proves for the other two, on a real TLS socket.
+
 Running Recall directly on the host instead of in a container is a worse
 trade than it looks: the semantic merge shells out to the `claude` CLI, which
 is a Node package, so "just one Rust binary" is not what gets installed. The
@@ -55,7 +66,7 @@ running as non-root over a pre-existing root-owned volume, and rollback.
 
 ## Prerequisites
 
-Both ingresses need:
+All three need:
 
 - **Docker Engine with Compose v2** (`docker compose`, not the old
   `docker-compose`). Any distribution of it will do.
@@ -90,6 +101,12 @@ five-minute smoke test.
 The Traefik option needs a Traefik already running on that machine, and a DNS
 record for your chosen hostname pointing at it. Set the DNS up first —
 Let's Encrypt cannot issue a certificate until it resolves.
+
+The direct-TLS option needs port 443 free on that machine (nothing else
+already bound to it) and, for its ACME sub-mode, the same DNS-first rule as
+Traefik above — `recall-server` cannot get a certificate for a hostname that
+does not resolve to it yet. Its `RECALL_TLS_CERT`/`RECALL_TLS_KEY` sub-mode
+needs no DNS at all, since it never talks to a certificate authority itself.
 
 ## 1. Set up the ingress
 
@@ -130,6 +147,37 @@ own header comment says the same thing; this is how to find each one.
 3. **The hostname** in `traefik.http.routers.recall.rule: Host(...)`. It has
    to match what `RECALL_URL` will be on every client.
 
+### If you are using direct TLS
+
+Nothing to create up front, but the trade-offs are worth reading before you
+pick this over the other two:
+
+- **Certificate renewal lives inside `recall-server` itself**, not in a
+  separate tool you have to remember to keep running. Two ways to give it a
+  certificate, both off unless configured, and configuring both — or half of
+  either — is a startup error:
+  - **`RECALL_TLS_CERT` + `RECALL_TLS_KEY`** point at a PEM certificate and
+    key already on disk (a bind mount into the container), kept renewed by
+    something else — certbot, a script, a certificate copied out of another
+    Traefik. The server never writes to these files, only reads them at
+    startup.
+  - **`RECALL_TLS_ACME_DOMAINS` + `RECALL_TLS_ACME_EMAIL`** ask the server to
+    get and renew its own certificate from Let's Encrypt, over TLS-ALPN-01 —
+    the challenge is answered on the same port the server already listens
+    on, so nothing else needs port 80 or a separate ACME client. The DNS for
+    every domain listed must already point at this machine before the first
+    run, and the issued certificate is cached under `RECALL_TLS_ACME_DIR`
+    (default `/data/acme`, inside the same named volume as the database, so
+    it survives rebuilds). `RECALL_TLS_ACME_STAGING=true` switches to Let's
+    Encrypt's staging directory, for testing without burning the real rate
+    limit — its certificate is not one any real client will trust.
+- **Port 443 is exposed directly to whatever can reach this machine.** The
+  other two files never publish a port at all; this one has to, since there
+  is no ingress to publish it for. `docker-compose.direct.yml` runs
+  `recall-server` on an unprivileged internal port and maps only `443` on the
+  host to it, so the process itself never needs root or a Linux capability
+  to bind a privileged port.
+
 ## 2. Configure secrets
 
 ```sh
@@ -138,10 +186,15 @@ cp .env.example .env
 ```
 
 Fill in `.env`:
-- `RECALL_TOKEN` — generate with `openssl rand -hex 32`. Required for both
-  ingresses.
+- `RECALL_TOKEN` — generate with `openssl rand -hex 32`. Required for all
+  three.
 - `CLOUDFLARE_TUNNEL_TOKEN` — the token copied in step 1.3. **Cloudflare
-  only**; leave it empty with Traefik.
+  only**; leave it empty otherwise.
+- `RECALL_TLS_ACME_DOMAINS`, `RECALL_TLS_ACME_EMAIL`, `RECALL_TLS_ACME_STAGING`
+  — **direct TLS only**, and only for the ACME sub-mode described above; leave
+  them empty otherwise. Switching to the `RECALL_TLS_CERT`/`RECALL_TLS_KEY`
+  sub-mode instead needs its own volume mount, which isn't in `.env` — see the
+  comments in `docker-compose.direct.yml`.
 
 `.env` is gitignored — never commit it.
 
@@ -161,6 +214,14 @@ An existing Traefik:
 cd deploy
 docker compose -f docker-compose.traefik.yml up -d --build
 docker compose -f docker-compose.traefik.yml logs -f
+```
+
+Direct TLS:
+
+```sh
+cd deploy
+docker compose -f docker-compose.direct.yml up -d --build
+docker compose -f docker-compose.direct.yml logs -f
 ```
 
 The first build takes a minute or two, most of it installing the `claude`

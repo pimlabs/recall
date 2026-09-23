@@ -31,6 +31,16 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "ti
 axum = "0.8"
 # rustls rather than native-tls: no OpenSSL to find or cross-compile against.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# recall-server's own direct-TLS mode (optional; off unless RECALL_TLS_CERT
+# or RECALL_TLS_ACME_DOMAINS is set). `ring`, not the default `aws-lc-rs`:
+# aws-lc-rs needs cmake and a C++ toolchain to build its own copy of
+# BoringSSL, and the server's release build is static musl, cross-compiled
+# with nothing but musl-gcc (release.yml) — see CLAUDE.md's crypto rule.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls-acme = { version = "0.15", default-features = false, features = ["ring", "tokio", "axum", "tls12", "webpki-roots"] }
+# Only for AcmeState::next(), which drives certificate issuance/renewal.
+futures-util = { version = "0.3", default-features = false }
 rusqlite = { version = "0.32", features = ["bundled"] }
 clap = { version = "4", features = ["derive"] }
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
