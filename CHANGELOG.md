@@ -83,6 +83,10 @@ break will be described here in full rather than smoothed over.
 - **`/health`'s `merge` gains `worker` and `queue`** while a worker is
   enrolled, and `claude_cli` is then the worker's CLI. Discovery lists a
   new `merge_queue` capability.
+- **`recall status` and `recall doctor` show the merge queue** on a server
+  with a worker, and warn once the oldest waiting merge is an hour old,
+  which is what a stopped worker looks like. `recall status --json` gains
+  `merge_worker` and, with a worker, `merge_queue`.
 - **`POST /v1/devices/approve` accepts `"scope": "worker"`**, and its
   refusal of an unknown scope now says `scope must be sync, admin or
   worker`.

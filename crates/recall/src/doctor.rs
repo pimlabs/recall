@@ -139,13 +139,23 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
         version_findings(rep, &mut out);
     }
 
-    if rep.server_ok && !rep.merge_ready {
+    if rep.server_ok && !rep.merge_ready && rep.merge_worker {
+        out.push(warn(
+            "merge",
+            "the merge worker's Claude CLI is not logged in, so conflicting edits wait \
+             in its queue unmerged",
+            "on the server: docker compose exec -it -u node recall-worker claude setup-token",
+        ));
+    } else if rep.server_ok && !rep.merge_ready {
         out.push(warn(
             "merge",
             "the server's Claude CLI is not logged in, so conflicting edits use \
              last-write-wins",
             "on the server: docker compose exec -it -u node recall-server claude setup-token",
         ));
+    }
+    if rep.server_ok {
+        queue_finding(rep, &mut out);
     }
 
     // ---- can Claude Code see the memory at all
@@ -501,11 +511,46 @@ fn offbox_finding(rep: &Report, out: &mut Vec<Finding>) {
     }
 }
 
+/// How long the oldest merge may wait before it is worth saying so. A
+/// worker drains a job within seconds of the push; an hour means it is not
+/// running, or cannot merge.
+const QUEUE_STALE_AFTER: time::Duration = time::Duration::hours(1);
+
+/// The merge worker's queue, when there is a worker: silent while it
+/// drains, loud once the oldest job has waited an hour, the way a merge
+/// that degrades to last-write-wins is made visible rather than silent.
+fn queue_finding(rep: &Report, out: &mut Vec<Finding>) {
+    let Some(q) = &rep.merge_queue else {
+        return;
+    };
+    let waited = q.oldest_queued_at.as_deref().and_then(age_of);
+    match waited {
+        Some(age) if age >= QUEUE_STALE_AFTER => out.push(warn(
+            "merge queue",
+            format!(
+                "{} merge{} waiting, the oldest for {} minutes; pushes still land, \
+                 unmerged, until the worker takes them",
+                q.queued,
+                if q.queued == 1 { "" } else { "s" },
+                age.whole_minutes()
+            ),
+            "on the server: docker compose logs recall-worker, and check it is running",
+        )),
+        _ => out.push(ok(
+            "merge queue",
+            match q.queued {
+                0 => "nothing waiting".to_string(),
+                n => format!("{n} waiting"),
+            },
+        )),
+    }
+}
+
 /// How long ago a timestamp in the API's format was.
 ///
 /// [`None`] rather than a guess when it cannot be parsed — a report that
 /// invents an age is worse than one that admits it cannot read the value.
-fn age_of(stamp: &str) -> Option<time::Duration> {
+pub(crate) fn age_of(stamp: &str) -> Option<time::Duration> {
     let fmt = time::macros::format_description!(
         "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
     );
@@ -602,6 +647,7 @@ const SECTIONS: &[(&str, &[&str])] = &[
             "server",
             "version",
             "merge",
+            "merge queue",
             "token storage",
             "credentials file",
             "config file",
@@ -768,6 +814,8 @@ mod tests {
             min_client: Some("0.1.0".into()),
             client_version: "0.3.3".into(),
             merge_ready: true,
+            merge_worker: false,
+            merge_queue: None,
             synced_files: 4,
             last_synced_at: None,
             // No stamp: the ordinary case for a deployment with no off-box
@@ -1172,6 +1220,74 @@ mod tests {
         assert_eq!(f.level, Level::Fail);
         assert_eq!(f.fix.as_deref(), Some("recall init"));
         assert_eq!(verdict(&found), exit::CONFIG);
+    }
+
+    // ----------------------------------------------------------- merge queue
+
+    fn with_worker(oldest: Option<String>, queued: u64) -> Report {
+        let mut rep = healthy();
+        rep.merge_worker = true;
+        rep.merge_queue = Some(recall_wire::QueueStatus {
+            queued,
+            leased: 0,
+            failed: 0,
+            oldest_queued_at: oldest,
+        });
+        rep
+    }
+
+    fn stamp_minutes_ago(minutes: i64) -> String {
+        let fmt = time::macros::format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+        );
+        (time::OffsetDateTime::now_utc() - time::Duration::minutes(minutes))
+            .format(&fmt)
+            .unwrap()
+    }
+
+    #[test]
+    fn no_worker_no_queue_finding() {
+        assert!(find(&findings(&healthy()), "merge queue").is_none());
+    }
+
+    #[test]
+    fn a_queue_that_drains_is_fine() {
+        let found = findings(&with_worker(Some(stamp_minutes_ago(2)), 1));
+        assert_eq!(find(&found, "merge queue").unwrap().level, Level::Ok);
+        let found = findings(&with_worker(None, 0));
+        assert_eq!(
+            find(&found, "merge queue").unwrap().detail,
+            "nothing waiting"
+        );
+    }
+
+    /// The worker stopped: pushes keep landing, and the only sign is a job
+    /// that keeps getting older.
+    #[test]
+    fn a_job_waiting_an_hour_is_a_warning() {
+        let found = findings(&with_worker(Some(stamp_minutes_ago(61)), 3));
+        let f = find(&found, "merge queue").unwrap();
+        assert_eq!(f.level, Level::Warn);
+        assert!(f.detail.starts_with("3 merges waiting"), "{}", f.detail);
+        assert!(f.fix.as_deref().unwrap().contains("recall-worker"));
+        assert_eq!(
+            verdict(&found),
+            exit::OK,
+            "a warning never fails the command"
+        );
+    }
+
+    #[test]
+    fn a_worker_that_cannot_merge_names_the_worker() {
+        let mut rep = with_worker(None, 0);
+        rep.merge_ready = false;
+        let found = findings(&rep);
+        assert!(find(&found, "merge")
+            .unwrap()
+            .fix
+            .as_deref()
+            .unwrap()
+            .contains("recall-worker claude setup-token"));
     }
 
     // ---------------------------------------------------------------- off-box

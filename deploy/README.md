@@ -543,6 +543,14 @@ from the same Dockerfile (`target: worker`), with:
 `scripts/compose-check.py` asserts each of those in both compose files, and
 CI runs it.
 
+What that buys, and what it does not: a compromise of the server process
+no longer reaches the `claude` login, once the server's own copy is removed
+(see below), and no hook ever waits on a slow merge. It does not protect
+against root on the host, which reaches both volumes, and merges still see
+your notes in plain text, and the server still stores them that way.
+Encrypted storage, where the server cannot read them, is later work (Part 5
+of `docs/design/handshake.md`).
+
 While no worker is approved, the server merges inline as it always has, so
 starting the service changes nothing until you approve it. Once one is,
 a conflicting push is stored as sent and answered at once, and the merged
