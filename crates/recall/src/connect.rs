@@ -7,7 +7,7 @@
 //! do: a saved token that still works is not asked for again, and a project
 //! already wired is not offered.
 //!
-//! Against a server that enrolls devices (0.4.1 and later), the token step
+//! Against a server that enrols devices (0.4.1 and later), the token step
 //! becomes enrolment: the machine makes a key pair, shows a code and the
 //! key's fingerprint, and is approved from a machine already trusted, or,
 //! for the first one, with the operator's `RECALL_TOKEN` after asking. Once
@@ -131,7 +131,7 @@ async fn run(args: Args) -> Step<()> {
     // and only a terminal can supply it. Deliberately a terminal and nothing
     // else: every other way in is another way out, and automation already
     // has RECALL_TOKEN. A machine with a device key needs no token, and one
-    // told `--yes` may enroll and wait for someone to approve it. Decided
+    // told `--yes` may enrol and wait for someone to approve it. Decided
     // before the network is touched.
     let saved = creds.token_for(&url).map(str::to_string);
     let saved_device = h
@@ -142,7 +142,7 @@ async fn run(args: Args) -> Step<()> {
     if saved.is_none() && saved_device.is_none() && !interactive && !args.yes {
         return refuse(
             "needs a terminal to ask for the token.",
-            "In a script, set RECALL_TOKEN instead, or pass --yes to enroll this machine and \
+            "In a script, set RECALL_TOKEN instead, or pass --yes to enrol this machine and \
              wait for it to be approved.",
         );
     }
@@ -155,7 +155,7 @@ async fn run(args: Args) -> Step<()> {
         ));
     }
 
-    let enrolls = reach(&url).await?;
+    let enrols = reach(&url).await?;
     let setup = Setup {
         args: &args,
         here: &here,
@@ -163,7 +163,7 @@ async fn run(args: Args) -> Step<()> {
         url: &url,
         interactive,
     };
-    let name = if enrolls {
+    let name = if enrols {
         match setup
             .enroll(creds, config, saved.clone(), saved_device)
             .await?
@@ -225,7 +225,7 @@ enum Approval {
 
 impl Setup<'_> {
     /// The shared token, as before devices: asked for or checked, then
-    /// saved. What happens against a server that does not enroll devices.
+    /// saved. What happens against a server that does not enrol devices.
     async fn with_token(
         &self,
         (mut creds, mut config): (home::Credentials, home::Config),
@@ -274,7 +274,7 @@ impl Setup<'_> {
         Ok(name)
     }
 
-    /// Makes this machine a device of a server that enrolls them, or
+    /// Makes this machine a device of a server that enrols them, or
     /// confirms it already is one. The machine's name, when it is set up;
     /// [`None`] when it should stay on the token, because enrolling needs a
     /// confirmation nobody is there to give.
@@ -287,7 +287,7 @@ impl Setup<'_> {
     ) -> Step<Option<String>> {
         let url = self.url;
 
-        // Already a device here: nothing to enroll, as long as the server
+        // Already a device here: nothing to enrol, as long as the server
         // still agrees.
         if let Some(entry) = saved_device {
             match check_device(url, &entry).await? {
@@ -341,7 +341,7 @@ impl Setup<'_> {
                 return refuse(
                     &format!("{}.", e.reason()),
                     &format!(
-                        "On an admin device: recall devices revoke {name}. Or enroll under \
+                        "On an admin device: recall devices revoke {name}. Or enrol under \
                          another name: recall connect --name {name}-2"
                     ),
                 )
@@ -412,8 +412,8 @@ impl Setup<'_> {
             (None, Some(t)) => (Some(t), "RECALL_TOKEN"),
             (None, None) => (None, ""),
         };
-        let confirm = "Approve this machine yourself with the server's RECALL_TOKEN, as an admin \
-                       device? Do this for your first machine";
+        let confirm = "Approve this machine with the server's RECALL_TOKEN, as an admin device? \
+                       That is how your first machine is approved";
 
         if let Some(token) = token {
             // Nobody to confirm, and not told to go ahead: this machine
@@ -421,7 +421,7 @@ impl Setup<'_> {
             if !self.interactive && !self.args.yes {
                 say_warning(
                     "Not enrolled: that needs a confirmation. Run recall connect in a \
-                     terminal, or with --yes, to enroll this machine",
+                     terminal, or with --yes, to enrol this machine",
                 );
                 return Ok(None);
             }
@@ -671,7 +671,7 @@ fn check_url(url: &str) -> Step<()> {
 /// `GET /health`: whether anything answers at `url` at all. Asked on its own
 /// so that "unreachable" and "wrong token" are never confused.
 ///
-/// Then the discovery document, for whether the server enrolls devices:
+/// Then the discovery document, for whether the server enrols devices:
 /// `true` when it does, and `false` for one that does not or is too old to
 /// say, which is then connected with the token as before.
 async fn reach(url: &str) -> Step<bool> {
@@ -687,9 +687,9 @@ async fn reach(url: &str) -> Step<bool> {
         Err(e) => Err(e.to_string()),
     };
     match result {
-        Ok(enrolls) => {
+        Ok(enrols) => {
             spinner.stop(format!("Connected to {}", host(url)));
-            Ok(enrolls)
+            Ok(enrols)
         }
         Err(e) => {
             spinner.error(format!("Can't reach {}", host(url)));

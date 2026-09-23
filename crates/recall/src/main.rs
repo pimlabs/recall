@@ -110,7 +110,7 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t = promote::Target::Global)]
         to: promote::Target,
     },
-    /// Set this machine up: enroll it with the server (or save its token),
+    /// Set this machine up: enrol it with the server (or save its token),
     /// name it, and wire the project you are in
     Connect {
         /// The server's URL, including https://; defaults to the saved one

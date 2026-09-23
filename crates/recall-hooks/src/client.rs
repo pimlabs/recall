@@ -55,7 +55,7 @@ impl Error {
     /// Whether the server no longer knows the device this client signs as:
     /// revoked, or removed after sitting idle (an ephemeral one). Either
     /// way, the key this machine holds will never work again there, and
-    /// the only way back is to enroll anew.
+    /// the only way back is to enrol anew.
     pub fn device_gone(&self) -> bool {
         match self {
             Error::Status { code: 401, .. } => matches!(

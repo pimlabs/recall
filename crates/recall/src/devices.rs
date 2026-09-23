@@ -1,6 +1,6 @@
 //! `recall devices` — the owner's commands for the machines enrolled on a
 //! server: list them, approve a new one by the code it shows, revoke one,
-//! and make or revoke the enrolment keys cloud sessions enroll with.
+//! and make or revoke the enrolment keys cloud sessions enrol with.
 //!
 //! Everything here is an admin request, so it needs a device enrolled with
 //! the `admin` scope or the operator's `RECALL_TOKEN`. The first device
@@ -61,7 +61,7 @@ pub enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Enrolment keys, which let cloud sessions enroll themselves
+    /// Enrolment keys, which let cloud sessions enrol themselves
     #[command(name = "enroll-key", subcommand)]
     EnrollKey(KeyCmd),
 }
@@ -71,7 +71,7 @@ pub enum Cmd {
 pub enum KeyCmd {
     /// Make an enrolment key. It is shown once
     Create {
-        /// A label, and the start of the name of every device it enrolls
+        /// A label, and the start of the name of every device it enrols
         #[arg(long)]
         tag: Option<String>,
         /// How long it works: days, such as 90d, or weeks, such as 12w (at most 365 days)
@@ -80,7 +80,7 @@ pub enum KeyCmd {
         /// The most devices it may have enrolled at once
         #[arg(long)]
         max_devices: Option<u32>,
-        /// Devices it enrolls stay until revoked, instead of being removed once idle
+        /// Devices it enrols stay until revoked, instead of being removed once idle
         #[arg(long)]
         persistent: bool,
         /// Machine-readable output, for scripts
@@ -196,7 +196,7 @@ fn admin_client(cfg: &ClientConfig) -> Result<Client, String> {
     if cfg.device.is_none() {
         return Err(
             "this needs a device enrolled as admin, or the server's RECALL_TOKEN. Run recall \
-             connect to enroll this machine."
+             connect to enrol this machine."
                 .to_string(),
         );
     }
@@ -212,7 +212,7 @@ fn server_error(e: &client::Error) -> i32 {
             "This machine's device has the sync scope. Run this on an admin device, or with the \
              server's RECALL_TOKEN set."
         }
-        _ if e.device_gone() => "Run recall connect to enroll this machine again.",
+        _ if e.device_gone() => "Run recall connect to enrol this machine again.",
         client::Error::Transport(_) => "Check the server is up: recall doctor",
         _ => "",
     };
@@ -265,7 +265,7 @@ async fn list(cfg: &ClientConfig, client: &Client, json: bool) -> Done {
         return Ok(exit::OK);
     }
     if list.devices.is_empty() {
-        println!("No devices yet. recall connect enrolls this machine.");
+        println!("No devices yet. recall connect enrols this machine.");
         return Ok(exit::OK);
     }
     let this = cfg.device.as_ref().map(|d| d.device_id.as_str());
@@ -415,7 +415,7 @@ async fn revoke(cfg: &ClientConfig, client: &Client, name: &str, yes: bool, json
             revoked.name
         );
         if this {
-            println!("That was this machine: recall connect enrolls it again.");
+            println!("That was this machine: recall connect enrols it again.");
         }
     }
     Ok(exit::OK)
@@ -474,7 +474,7 @@ async fn create_key(
     println!("This is the only time it is shown: the server keeps only its hash.");
     println!("Put it in your cloud environment's variables as RECALL_ENROLL_KEY.");
     println!(
-        "Anyone holding it can enroll a machine that reads and writes your memory, until it \
+        "Anyone holding it can enrol a machine that reads and writes your memory, until it \
          expires or: recall devices enroll-key revoke {}",
         created.id
     );
@@ -517,7 +517,7 @@ async fn revoke_key(client: &Client, id: &str, revoke_devices: bool, json: bool)
         println!("{}", serde_json::to_string_pretty(&key)?);
         return Ok(exit::OK);
     }
-    println!("Revoked enrolment key {}: it enrolls nothing more.", key.id);
+    println!("Revoked enrolment key {}: it enrols nothing more.", key.id);
     if revoke_devices {
         println!("Every device it enrolled is revoked too.");
     } else {

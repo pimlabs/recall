@@ -45,7 +45,7 @@ pub enum ConfigError {
     #[error("RECALL_TOKEN must be set")]
     MissingToken,
     /// A saved device key that cannot be read back into a key.
-    #[error("the device key saved for this server is damaged; run recall connect to enroll again")]
+    #[error("the device key saved for this server is damaged; run recall connect to enrol again")]
     DamagedDevice,
 }
 
@@ -78,7 +78,7 @@ pub struct ClientConfig {
     /// Why `device.key` could not be used, when it exists and could not.
     pub device_error: Option<String>,
     /// `RECALL_ENROLL_KEY`: an enrolment key, with which a machine that has
-    /// no device key yet enrolls itself, approved at once. What a cloud
+    /// no device key yet enrols itself, approved at once. What a cloud
     /// environment holds instead of `RECALL_TOKEN`.
     pub enroll_key: Option<String>,
     /// Why a file in `~/.recall` could not be used, when one exists and

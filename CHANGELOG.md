@@ -16,14 +16,53 @@ break will be described here in full rather than smoothed over.
 
 ## Unreleased
 
+- **`recall connect` enrols this machine as a device** when the server
+  supports it (this release's server does). It makes an Ed25519 key pair,
+  shows a code and the key's fingerprint, and is approved either from a
+  machine already enrolled as admin (`recall devices approve <code>`) or,
+  for your first machine, with the server's `RECALL_TOKEN` after asking,
+  which makes it an admin device. From then on the machine signs every
+  request and sends no token, and the token `connect` had saved in
+  `~/.recall/credentials.toml` is removed; it still works on the server.
+  `--yes` and `--name` still work for scripts. Against an older server,
+  `connect` saves the token exactly as before.
+- **The device key is a file, `~/.recall/device.key`**, created readable by
+  you only, one key per server. Not the OS keychain: a hook runs on every
+  memory write and must never stop for a keychain dialog, which macOS shows
+  after an upgrade. `recall disconnect` removes it too.
+- **Cloud sessions enrol themselves with `RECALL_ENROLL_KEY`.** Set an
+  enrolment key on the cloud environment instead of `RECALL_TOKEN`, and
+  each session's first `recall pull` enrols it (approved at once,
+  ephemeral) and carries on. Nothing is typed, and a failure falls back to
+  `RECALL_TOKEN` or leaves memory untouched, as a pull always has.
+- **A revoked or swept device enrols again by itself** when
+  `RECALL_ENROLL_KEY` is set: the hook that is refused enrols once and
+  retries. Without it, the hook says to run `recall connect`, and the
+  session still starts.
+- **New command: `recall devices`.** `list` (scope, ephemeral, last seen,
+  agent), `approve <code>` (shows the machine's name, agent and fingerprint
+  and asks first; `--fingerprint` refuses a key with any other, `--admin`
+  gives the admin scope), `revoke <name>`, and `enroll-key create --tag
+  cloud --expires 90d` (shown once), `enroll-key list` and `enroll-key
+  revoke <id>`. `--yes` and `--json` for scripts.
+- **`recall doctor` reports the device**: its name, scope and where its
+  key lives, checked with the server. It warns while a machine the server
+  could enrol still uses the shared token, and while a token is kept that
+  an enrolled machine no longer sends. `RECALL_TOKEN` unset is no longer a
+  failure on a machine with a device key or `RECALL_ENROLL_KEY`.
+- **`recall status --json` gains** `auth` (`device`, `bearer` or `none`),
+  `device` (id, name, scope, ephemeral, key storage and file, and whether
+  the server confirmed it), `device_file`, `device_error`,
+  `device_file_exposed`, `enroll_key_set` and `server_devices`. Every
+  existing field is unchanged.
+
 - **The server enrols devices.** A machine can now be enrolled with a key
   pair of its own and sign its requests (RFC 9421, Ed25519) instead of
   sending `RECALL_TOKEN`: it asks `POST /v1/devices/enroll` for a short
   code, the owner approves the code, and the machine is a device that can
   be listed and revoked on its own. Cloud sessions can enrol with an
-  expiring enrolment key instead of a code. This release is the server
-  half; the client does not enrol yet, so nothing changes for a machine
-  until it does. See "Devices" in `docs/reference/api.md`.
+  expiring enrolment key instead of a code. See "Devices" in
+  `docs/reference/api.md`.
 - **`RECALL_TOKEN` works exactly as before**, on every route, and is how
   the first device is approved. Nothing that worked stops working.
 - **A device's pushes carry its own name.** A push a device signed is

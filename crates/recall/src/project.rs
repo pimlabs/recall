@@ -183,7 +183,7 @@ impl Resolved {
         })
     }
 
-    /// Enrolls this machine with `RECALL_ENROLL_KEY` when it has no device
+    /// Enrols this machine with `RECALL_ENROLL_KEY` when it has no device
     /// key for the server in effect: a cloud session's first hook.
     ///
     /// Never an error, because it runs inside a hook. What happened is one
@@ -216,7 +216,7 @@ impl Resolved {
                     ", using RECALL_TOKEN instead"
                 };
                 eprintln!(
-                    "{hook}: could not enroll with RECALL_ENROLL_KEY ({}){fallback}",
+                    "{hook}: could not enrol with RECALL_ENROLL_KEY ({}){fallback}",
                     enroll_failure(&e)
                 );
             }
@@ -225,7 +225,7 @@ impl Resolved {
     }
 
     /// After the server refused this machine's device as unknown or
-    /// revoked: enrolls afresh when `RECALL_ENROLL_KEY` allows it, and
+    /// revoked: enrols afresh when `RECALL_ENROLL_KEY` allows it, and
     /// otherwise says what to do. [`Some`] with the new configuration only
     /// when there is something worth retrying with.
     pub async fn reenroll(
@@ -237,7 +237,7 @@ impl Resolved {
         if cfg.enroll_key.is_none() {
             eprintln!("{hook}: the server no longer accepts this machine's device key ({why})");
             eprintln!(
-                "{hook}:   run recall connect to enroll this machine again, or set \
+                "{hook}:   run recall connect to enrol this machine again, or set \
                  RECALL_ENROLL_KEY to have a cloud session do it by itself"
             );
             return None;
@@ -260,7 +260,7 @@ impl Resolved {
 fn enroll_failure(e: &device::Error) -> String {
     match e {
         device::Error::Client(recall_hooks::client::Error::Status { code: 404, .. }) => {
-            "this server does not enroll devices; it is older than 0.4.1".to_string()
+            "this server does not enrol devices; it is older than 0.4.1".to_string()
         }
         device::Error::Client(c) => c.reason(),
         other => other.to_string(),

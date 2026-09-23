@@ -1993,7 +1993,7 @@ fn saved_device(home: &Path, url: &str) -> Option<recall_hooks::home::DeviceEntr
 }
 
 /// A machine connected the way a person's first one is: its token saved,
-/// then `recall connect --yes`, which enrolls it and approves it with that
+/// then `recall connect --yes`, which enrols it and approves it with that
 /// token.
 fn enrolled(server: &LiveServer, repo: &Repo, name: &str) -> tempfile::TempDir {
     let home = recall_home_with(&[(&server.url, "right")], &server.url);
@@ -2045,7 +2045,7 @@ fn doctor_finding(cwd: &Path, env: &[(&str, &str)], check: &str) -> serde_json::
         .unwrap_or_else(|| panic!("no {check} finding: {found}"))
 }
 
-/// A machine that has asked to enroll and is waiting for approval, made
+/// A machine that has asked to enrol and is waiting for approval, made
 /// directly so the test holds its key.
 fn pending_enrollment(
     url: &str,
@@ -2061,7 +2061,7 @@ fn pending_enrollment(
 }
 
 /// The first machine: `connect --yes` with the operator's token saved
-/// enrolls it, shows the code and the fingerprint, approves it as admin,
+/// enrols it, shows the code and the fingerprint, approves it as admin,
 /// and stops keeping the token. From then on it needs no token for
 /// anything, the owner's commands included.
 #[test]
@@ -2284,7 +2284,7 @@ fn devices_approve_refuses_a_key_whose_fingerprint_is_not_the_one_given() {
 }
 
 /// A cloud session holds `RECALL_ENROLL_KEY` and nothing else. Its first
-/// pull enrolls it, approved at once and ephemeral, with nothing typed; its
+/// pull enrols it, approved at once and ephemeral, with nothing typed; its
 /// later hooks sign as that device; and it cannot do anything an admin can.
 #[test]
 fn a_cloud_session_enrolls_itself_at_its_first_pull_with_an_enrolment_key() {
@@ -2348,7 +2348,7 @@ fn a_cloud_session_enrolls_itself_at_its_first_pull_with_an_enrolment_key() {
 }
 
 /// A revoked device, and one the server swept away after it sat idle, are
-/// both refused as gone. A session holding `RECALL_ENROLL_KEY` enrolls
+/// both refused as gone. A session holding `RECALL_ENROLL_KEY` enrols
 /// again, once, and the hook that noticed still does its work.
 #[test]
 fn a_cloud_session_enrolls_again_after_its_device_is_revoked_or_swept() {
@@ -2410,7 +2410,7 @@ fn a_cloud_session_enrolls_again_after_its_device_is_revoked_or_swept() {
 
 /// A laptop's revoked device, with no enrolment key: the session still
 /// starts, the hook says what to do, doctor fails it, and `connect`
-/// enrolls it afresh, approved this time from another machine by code.
+/// enrols it afresh, approved this time from another machine by code.
 #[test]
 fn a_revoked_laptop_is_told_to_connect_and_connect_enrolls_it_again() {
     let server = live_server("right");
@@ -2432,7 +2432,7 @@ fn a_revoked_laptop_is_told_to_connect_and_connect_enrolls_it_again() {
     assert_eq!(finding["level"], "fail", "{finding}");
     assert_eq!(finding["fix"], "recall connect", "{finding}");
 
-    // No token is kept any more, so `connect --yes` enrolls and waits for
+    // No token is kept any more, so `connect --yes` enrols and waits for
     // someone to approve the code it shows.
     let mut child = command(&["connect", "--yes"], repo.path(), &env)
         .stdin(Stdio::null())
@@ -2706,7 +2706,7 @@ fn against_a_server_without_devices_everything_stays_on_the_token() {
     let r = push_memory(&repo, &env, "fact.md", "A fact.\n");
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
     assert!(
-        r.stderr.contains("this server does not enroll devices")
+        r.stderr.contains("this server does not enrol devices")
             && r.stderr.contains("using RECALL_TOKEN instead"),
         "stderr: {}",
         r.stderr

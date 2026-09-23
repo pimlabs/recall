@@ -1,7 +1,7 @@
 //! This machine as an enrolled device: its key, and how it signs requests
 //! with it.
 //!
-//! A machine enrolls once per server (`recall connect`, or a cloud session's
+//! A machine enrols once per server (`recall connect`, or a cloud session's
 //! first `recall pull`) and from then on signs every request with an Ed25519
 //! key it generated, instead of sending the shared `RECALL_TOKEN`. The wire
 //! half of that, what is signed and how, is [`recall_wire::signature`], one
@@ -20,7 +20,7 @@ use crate::client::{self, Client, Enrolled};
 use crate::home::{DeviceEntry, Home};
 
 /// The variable a cloud environment holds an enrolment key in. With it, a
-/// session that has no device key enrolls itself at its first pull, and is
+/// session that has no device key enrols itself at its first pull, and is
 /// approved at once.
 pub const ENROLL_KEY_VAR: &str = "RECALL_ENROLL_KEY";
 
@@ -31,7 +31,7 @@ pub enum Error {
     #[error("no randomness to make a key with: {0}")]
     Random(String),
     /// The saved key is not one.
-    #[error("the device key saved for this server is damaged; run recall connect to enroll again")]
+    #[error("the device key saved for this server is damaged; run recall connect to enrol again")]
     Damaged,
     /// The server refused, or could not be reached.
     #[error(transparent)]
@@ -146,7 +146,7 @@ impl Signer {
     }
 }
 
-/// The name a machine asks to enroll as, when nobody chose one: what it
+/// The name a machine asks to enrol as, when nobody chose one: what it
 /// labels its pushes with, when the server would accept that, else a plain
 /// one. The server names a device enrolled with an enrolment key itself and
 /// ignores this, but still checks it.
@@ -161,7 +161,7 @@ pub fn enroll_name(label: &str) -> String {
     }
 }
 
-/// Enrolls this machine at `url` with an enrolment key, and saves the key
+/// Enrols this machine at `url` with an enrolment key, and saves the key
 /// the server approved.
 ///
 /// A cloud session's way in: no code to show and nobody to approve it, so

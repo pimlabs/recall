@@ -234,10 +234,10 @@ pub struct Report {
     pub device_error: Option<String>,
     /// Whether anyone but its owner can read the device key file.
     pub device_file_exposed: bool,
-    /// Whether `RECALL_ENROLL_KEY` is set, with which a session enrolls
+    /// Whether `RECALL_ENROLL_KEY` is set, with which a session enrols
     /// itself at its first pull.
     pub enroll_key_set: bool,
-    /// Whether the server enrolls devices and accepts their signatures, per
+    /// Whether the server enrols devices and accepts their signatures, per
     /// its discovery document. Absent when it did not say: unreachable, or
     /// older than the document.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -773,7 +773,7 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
             d.key_file
         );
     } else if rep.enroll_key_set {
-        field!("device       : none yet, RECALL_ENROLL_KEY enrolls one at the next pull");
+        field!("device       : none yet, RECALL_ENROLL_KEY enrols one at the next pull");
     }
     if let Some(err) = &rep.device_error {
         field!("device       : UNREADABLE ({err})");

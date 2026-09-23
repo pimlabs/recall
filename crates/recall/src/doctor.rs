@@ -113,7 +113,7 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
     } else if rep.enroll_key_set {
         out.push(ok(
             "RECALL_TOKEN",
-            "not needed, RECALL_ENROLL_KEY enrolls this session as a device",
+            "not needed, RECALL_ENROLL_KEY enrols this session as a device",
         ));
     } else {
         out.push(fail("RECALL_TOKEN", "not set anywhere", WHERE_TO_SET));
@@ -259,7 +259,7 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
 /// Whether this machine is an enrolled device, and whether it should be.
 ///
 /// Two warnings carry the move off the shared token (Part 2 of
-/// `docs/design/handshake.md`): one while a machine that could enroll has
+/// `docs/design/handshake.md`): one while a machine that could enrol has
 /// not, and one while a machine that has still holds the token it no longer
 /// sends. Neither fails the command: the token still works.
 fn device_findings(rep: &Report, out: &mut Vec<Finding>) {
@@ -268,7 +268,7 @@ fn device_findings(rep: &Report, out: &mut Vec<Finding>) {
         out.push(warn(
             "device key",
             format!("{err}, so this machine does not sign with it"),
-            "move it aside and run recall connect to enroll again",
+            "move it aside and run recall connect to enrol again",
         ));
     }
     if rep.device_file_exposed {
@@ -284,7 +284,7 @@ fn device_findings(rep: &Report, out: &mut Vec<Finding>) {
             (Some(true), true) if rep.enroll_key_set => out.push(warn(
                 "device",
                 "RECALL_ENROLL_KEY is set, but this session has not enrolled yet",
-                "recall pull enrolls it, and says why when it cannot",
+                "recall pull enrols it, and says why when it cannot",
             )),
             (Some(true), true) if rep.token_set => out.push(warn(
                 "device",
@@ -299,7 +299,7 @@ fn device_findings(rep: &Report, out: &mut Vec<Finding>) {
             )),
             (Some(false), _) => out.push(ok(
                 "device",
-                "not available, the server does not enroll devices",
+                "not available, the server does not enrol devices",
             )),
             _ => {}
         }
@@ -313,7 +313,7 @@ fn device_findings(rep: &Report, out: &mut Vec<Finding>) {
         if d.ephemeral { ", ephemeral" } else { "" }
     );
     let reenroll = if rep.remote_session && rep.enroll_key_set {
-        "the next session start enrolls again with RECALL_ENROLL_KEY"
+        "the next session start enrols again with RECALL_ENROLL_KEY"
     } else {
         "recall connect"
     };
