@@ -1,0 +1,1 @@
+{"protocol":{"current":1,"supported":[1]},"server":{"version":"0.3.3-dev+gabc1234","build":{"channel":"dev","revision":"abc1234"}},"min_client":"0.1.0","auth":{"methods":["bearer"]},"capabilities":{"limits":{"max_body_bytes":5242880,"rate_limit":{"max":60,"window_seconds":60}},"merge_base":{},"scopes":{"kinds":["project","global","machine"]}}}

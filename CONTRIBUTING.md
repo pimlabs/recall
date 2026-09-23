@@ -81,6 +81,13 @@ libraries whose interesting behaviour is internal, and the last two are
 asked whether their outside edge — an HTTP surface, a command-line one —
 behaves for someone who only has the outside.
 
+`recall-wire`'s one `tests/` file is that same question asked of the wire:
+`tests/golden.rs` reads what every released version actually sent, kept in
+`crates/recall-wire/fixtures/wire/`, with nothing but the public types. A
+field renamed or dropped fails there before it reaches a client in the
+field. Add a directory there when a release changes a shape; the README in
+it says how.
+
 Note that `tests/` means **`crates/<name>/tests/`**. Cargo does not compile a
 `tests/` at the root of a workspace; a directory there would silently never
 run. `fixtures/` at the root holds data, not tests, and says so in its own

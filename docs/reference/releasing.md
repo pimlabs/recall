@@ -423,5 +423,9 @@ step is deliberate rather than automated.
   tag points at. The workflow reads it back from the checkout for exactly
   this reason, so a mismatch means the wrong ref was built, not a cosmetic
   slip.
+- If the release changed a request or response shape, capture it as golden
+  fixtures: `./scripts/capture-wire-fixtures.sh <version>`, then commit the
+  new directory under `crates/recall-wire/fixtures/wire/`. Its README has
+  the rules.
 - Cutting over the production server is separate — see `deploy/README.md`, and
   run `./scripts/compat-check.sh` before and after.

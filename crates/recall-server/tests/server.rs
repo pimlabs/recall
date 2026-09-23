@@ -723,3 +723,40 @@ async fn protocol_1_and_no_header_are_both_served() {
         assert_eq!(status, StatusCode::OK, "header {header:?}");
     }
 }
+
+/// Every push a released client has sent is still accepted, byte for byte.
+/// The fixtures are the ones `recall-wire`'s golden tests read; this is the
+/// same promise from the side that has to honour it.
+#[tokio::test]
+async fn every_push_a_released_client_sent_is_still_accepted() {
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../recall-wire/fixtures/wire");
+    let mut sent = 0;
+    for version in std::fs::read_dir(&root).unwrap() {
+        let version = version.unwrap().path();
+        for name in ["push_request.json", "push_request_delete.json"] {
+            let path = version.join(name);
+            let Ok(body) = std::fs::read(&path) else {
+                continue;
+            };
+            let h = harness(|_| {});
+            let req = Request::builder()
+                .method("POST")
+                .uri("/sync")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            let (status, _, resp) = h.send(req).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{}: {}",
+                path.display(),
+                String::from_utf8_lossy(&resp)
+            );
+            sent += 1;
+        }
+    }
+    assert!(sent >= 4, "found only {sent} request fixtures");
+}
