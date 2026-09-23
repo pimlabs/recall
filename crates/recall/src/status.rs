@@ -374,7 +374,11 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
             .as_deref()
             .is_some_and(recall_hooks::home::readable_by_others),
         config_file: cfg.config_file.as_ref().map(|p| p.display().to_string()),
-        auth: if cfg.device.is_some() {
+        // Nothing is sent while `device.key` cannot be read, whatever else
+        // there is: see `ClientConfig::client`.
+        auth: if cfg.device_error.is_some() {
+            "none"
+        } else if cfg.device.is_some() {
             "device"
         } else if !cfg.token.is_empty() {
             "bearer"
@@ -425,7 +429,22 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
         return rep;
     }
 
-    match cfg.client() {
+    // A device key that cannot be used is the device's problem, reported as
+    // `device_error`, and says nothing about whether the server is up.
+    // `/health` and the discovery document are asked anyway, with no
+    // credential at all: neither needs one, and this machine has none it
+    // may send.
+    let (client, usable) = match cfg.client() {
+        Ok(client) => (Ok(client), true),
+        Err(e) if e.is_device() => {
+            rep.device_error.get_or_insert_with(|| e.to_string());
+            rep.auth = "none";
+            let anonymous = recall_hooks::client::Client::new(&cfg.url, "");
+            (anonymous.map_err(|e| e.to_string()), false)
+        }
+        Err(e) => (Err(e.to_string()), false),
+    };
+    match client {
         Ok(client) => {
             match client.health().await {
                 Ok(health) => {
@@ -458,7 +477,7 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
             // The one request that says whether this machine is still
             // enrolled: a device key the server has revoked or swept looks
             // exactly like a working one from here.
-            if rep.server_ok {
+            if rep.server_ok && usable {
                 if let Some(device) = rep.device.as_mut() {
                     match client.me().await {
                         Ok(me) => {
@@ -475,13 +494,13 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
                     }
                 }
             }
-            if rep.token_set || rep.device.is_some() {
+            if usable && (rep.token_set || rep.device.is_some()) {
                 if let Ok(resp) = client.pull(&rep.project_key).await {
                     rep.synced_files = resp.files.iter().filter(|f| !f.deleted).count();
                 }
             }
         }
-        Err(err) => rep.server_error = Some(err.to_string()),
+        Err(err) => rep.server_error = Some(err),
     }
     rep
 }

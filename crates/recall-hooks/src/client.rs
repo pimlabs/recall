@@ -49,21 +49,54 @@ pub enum Error {
     /// No randomness for a signature's nonce.
     #[error("could not sign the request: no randomness for a nonce: {0}")]
     Nonce(String),
+    /// The server answered with a redirect, which is never followed: see
+    /// [`Client::new`].
+    #[error("the server redirected to {location}; update RECALL_URL if that is where it is now")]
+    Redirect {
+        /// The HTTP status, a 3xx.
+        code: u16,
+        /// Where it pointed, as sent.
+        location: String,
+    },
 }
 
+/// What the server says when a signature names a device it has no record
+/// of: one it removed after it sat idle (an ephemeral device, swept), or
+/// one it never had.
+const UNKNOWN_DEVICE: &str = "unauthorized: unknown device";
+
+/// What the server says when a signature names a device the owner revoked.
+const REVOKED_DEVICE: &str = "unauthorized: this device has been revoked";
+
 impl Error {
-    /// Whether the server no longer knows the device this client signs as:
-    /// revoked, or removed after sitting idle (an ephemeral one). Either
-    /// way, the key this machine holds will never work again there, and
-    /// the only way back is to enrol anew.
+    /// Whether the server no longer accepts the device this client signs
+    /// as, for either reason: [`Error::device_unknown`] or
+    /// [`Error::device_revoked`]. Either way the key this machine holds will
+    /// never work there again. What may be done about it differs, which is
+    /// why the two are also asked apart.
     pub fn device_gone(&self) -> bool {
-        match self {
-            Error::Status { code: 401, .. } => matches!(
-                self.reason().as_str(),
-                "unauthorized: unknown device" | "unauthorized: this device has been revoked"
-            ),
-            _ => false,
-        }
+        self.device_unknown() || self.device_revoked()
+    }
+
+    /// Whether the server has no record of the device this client signs
+    /// as: an ephemeral one removed after sitting idle, which a cloud
+    /// session holding an authkey may replace by enrolling again.
+    pub fn device_unknown(&self) -> bool {
+        self.refused_as(UNKNOWN_DEVICE)
+    }
+
+    /// Whether the owner revoked the device this client signs as. Nothing on
+    /// this machine may undo that by itself: a revocation that a hook could
+    /// answer by enrolling again would cut nothing off.
+    pub fn device_revoked(&self) -> bool {
+        self.refused_as(REVOKED_DEVICE)
+    }
+
+    /// A 401 whose reason is exactly `reason`. Every other 401, a signature
+    /// that did not verify or a clock too far off, says nothing about
+    /// whether the device still exists.
+    fn refused_as(&self, reason: &str) -> bool {
+        matches!(self, Error::Status { code: 401, .. }) && self.reason() == reason
     }
 
     /// Whether the server refused a signature for being dated before it
@@ -116,7 +149,7 @@ pub enum Poll {
 }
 
 /// A Recall API client.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Client {
     base_url: String,
     token: String,
@@ -126,6 +159,19 @@ pub struct Client {
     http: reqwest::Client,
 }
 
+/// Never prints the token: a client ends up in a test failure or a log line
+/// as easily as anything else, and the token is the one secret it holds.
+/// The signer prints its device id and nothing of its key.
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client")
+            .field("base_url", &self.base_url)
+            .field("token", &crate::config::redacted(&self.token))
+            .field("signer", &self.signer)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Client {
     /// Builds a client for one server. Trailing slashes on `base_url` are
     /// trimmed, so a URL pasted with one does not produce `//sync`.
@@ -133,6 +179,16 @@ impl Client {
     /// Every request says which protocol it speaks and which build sent it,
     /// so a server can refuse a protocol it does not speak by name and the
     /// operator can see which versions are still out there.
+    ///
+    /// A redirect is never followed, and no `Referer` is sent. Following
+    /// one would send the request again to wherever `Location` points,
+    /// another host included: a `307` or `308` repeats the body, which holds
+    /// an authkey when enrolling and a memory file when pushing, and the
+    /// signature headers go with it. reqwest drops `Authorization` on a
+    /// redirect to another host, but nothing else. Recall talks to the one
+    /// server it was given, so a redirect means that URL is wrong, and the
+    /// person who set it is told so ([`Error::Redirect`]) rather than having
+    /// it silently corrected by whoever answered.
     pub fn new(base_url: &str, token: &str) -> Result<Self, Error> {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -147,6 +203,8 @@ impl Client {
                 .timeout(TIMEOUT)
                 .user_agent(discovery::user_agent())
                 .default_headers(headers)
+                .redirect(reqwest::redirect::Policy::none())
+                .referer(false)
                 .build()?,
         })
     }
@@ -346,8 +404,14 @@ impl Client {
         request: reqwest::RequestBuilder,
     ) -> Result<T, Error> {
         let Some(signer) = &self.signer else {
-            let request = request.bearer_auth(&self.token).build()?;
-            return read(self.http.execute(request).await?).await;
+            // No token, no header: an empty `Bearer` says nothing a missing
+            // one does not, and a client made to carry no credential should
+            // not look as if it tried one.
+            let request = match self.token.as_str() {
+                "" => request,
+                token => request.bearer_auth(token),
+            };
+            return read(self.http.execute(request.build()?).await?).await;
         };
         let mut next = request.build()?;
         let mut retries = 0;
@@ -387,6 +451,16 @@ const RESTART_WAIT: Duration = Duration::from_millis(2500);
 /// success.
 async fn read<T: DeserializeOwned>(response: reqwest::Response) -> Result<T, Error> {
     let status = response.status();
+    if status.is_redirection() {
+        return Err(Error::Redirect {
+            code: status.as_u16(),
+            location: response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+                .unwrap_or_else(|| "nowhere it said".to_string()),
+        });
+    }
     // Read as bytes rather than text: the body is only ever decoded as
     // JSON, and this keeps the client off reqwest's optional charset
     // feature.
@@ -600,6 +674,122 @@ mod tests {
 
         let right = Client::new(&server.url, "right").unwrap();
         right.check_token().await.unwrap();
+    }
+
+    /// A redirect is reported with where it pointed, and nothing reaches
+    /// that place: not a token, not a signature, and not a body, which when
+    /// enrolling carries the authkey.
+    #[tokio::test]
+    async fn a_redirect_is_reported_and_never_followed() {
+        let elsewhere = FakeServer::start().await;
+        for code in [301, 302, 307, 308] {
+            let server = FakeServer::start().await;
+            let location = format!("{}/sync", elsewhere.url);
+            server.redirect_to(code, &location);
+
+            let bearer = Client::new(&server.url, "s3cret").unwrap();
+            let req = PushRequest {
+                project_key: "acme/app".into(),
+                file_path: "MEMORY.md".into(),
+                content: Some("private".into()),
+                source_env: "test".into(),
+                ..Default::default()
+            };
+            let err = bearer.push(&req).await.unwrap_err();
+            match &err {
+                Error::Redirect {
+                    code: got,
+                    location: to,
+                } => {
+                    assert_eq!((*got, to.as_str()), (code, location.as_str()));
+                }
+                other => panic!("expected a redirect, got {other:?}"),
+            }
+            let said = err.to_string();
+            assert!(
+                said.contains(&format!("the server redirected to {location}"))
+                    && said.contains("update RECALL_URL"),
+                "{said}"
+            );
+
+            let key = crate::device::DeviceKey::generate().unwrap();
+            let signed = Client::new(&server.url, "")
+                .unwrap()
+                .with_signer(key.signer("dev_x"));
+            assert!(matches!(
+                signed.push(&req).await,
+                Err(Error::Redirect { .. })
+            ));
+            let enrol = key.enroll_request("laptop", Some("recall-ak-secret"));
+            assert!(matches!(
+                Client::new(&server.url, "").unwrap().enroll(&enrol).await,
+                Err(Error::Redirect { .. })
+            ));
+            assert_eq!(server.requests(), 3, "{code}: each was sent once");
+        }
+        assert_eq!(elsewhere.requests(), 0, "nothing followed a redirect");
+    }
+
+    /// Only the two refusals that name the device say it is gone, and only
+    /// "unknown device" is one a cloud session may answer by enrolling
+    /// again. Any other 401 says nothing about the device.
+    #[test]
+    fn only_the_server_naming_the_device_says_it_is_gone() {
+        let refusal = |reason: &str| Error::Status {
+            code: 401,
+            body: serde_json::json!({ "error": reason }).to_string(),
+        };
+        let unknown = refusal(UNKNOWN_DEVICE);
+        assert!(unknown.device_gone() && unknown.device_unknown() && !unknown.device_revoked());
+        let revoked = refusal(REVOKED_DEVICE);
+        assert!(revoked.device_gone() && revoked.device_revoked() && !revoked.device_unknown());
+        for other in [
+            "unauthorized: signature does not verify",
+            "unauthorized: signature created too far in the past",
+            "unauthorized",
+        ] {
+            let e = refusal(other);
+            assert!(
+                !e.device_gone() && !e.device_unknown() && !e.device_revoked(),
+                "{other}"
+            );
+        }
+        let forbidden = Error::Status {
+            code: 403,
+            body: serde_json::json!({ "error": UNKNOWN_DEVICE }).to_string(),
+        };
+        assert!(!forbidden.device_gone(), "only a 401 says it");
+    }
+
+    /// A signature refused for any reason but the server having only just
+    /// started is not signed again: it would be refused again, and a hook
+    /// would wait seconds for nothing.
+    #[tokio::test]
+    async fn a_refused_signature_is_not_signed_again() {
+        let server = FakeServer::start().await;
+        server.fail_with(
+            401,
+            r#"{"error":"unauthorized: signature does not verify"}"#,
+        );
+        let key = crate::device::DeviceKey::generate().unwrap();
+        let client = Client::new(&server.url, "")
+            .unwrap()
+            .with_signer(key.signer("dev_x"));
+
+        let started = std::time::Instant::now();
+        let err = client.pull("acme/app").await.unwrap_err();
+        assert!(!err.signed_too_soon(), "{err}");
+        assert_eq!(server.requests(), 1, "sent once");
+        assert!(started.elapsed() < RESTART_WAIT, "and not waited on");
+    }
+
+    /// The token never reaches a log line or a test failure.
+    #[test]
+    fn nothing_prints_the_token() {
+        let client = Client::new("https://recall.example.com", "s3cret-token").unwrap();
+        let printed = format!("{client:?}");
+        assert!(!printed.contains("s3cret-token"), "{printed}");
+        assert!(printed.contains("recall.example.com"), "{printed}");
     }
 
     #[tokio::test]

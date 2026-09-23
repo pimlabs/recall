@@ -11,7 +11,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use recall_hooks::{claude, declared_env, device, home, project, scope, ClientConfig, Context};
+use recall_hooks::{
+    claude, client, declared_env, device, home, project, scope, ClientConfig, Context,
+};
 
 /// The project root, resolved the way Claude Code resolves it: the git root,
 /// falling back to the working directory.
@@ -167,6 +169,9 @@ impl Resolved {
     /// The same, from a configuration the caller already holds: one a hook
     /// has just enrolled a device into, say.
     pub fn hook_context_for(&self, cfg: &ClientConfig) -> anyhow::Result<Context> {
+        // The client first: while `device.key` cannot be read, that is why
+        // nothing can be sent, and a missing token is not.
+        let client = cfg.client()?;
         cfg.require()?;
 
         let root_str = self.root.to_string_lossy().to_string();
@@ -179,8 +184,41 @@ impl Resolved {
                 cfg.machine_key.clone(),
             ),
             source_env: cfg.source_env.clone(),
-            client: cfg.client()?,
+            client,
         })
+    }
+
+    /// Makes `device.key` readable by its owner only when something has
+    /// widened it, and says so: the hook that narrows it is the one that
+    /// warns, so it is said once.
+    ///
+    /// Mended rather than refused. ssh refuses a private key others can
+    /// read and leaves the fix to the person who ran it, who is right there;
+    /// a hook has nobody there, and refusing would stop every sync over
+    /// something one `chmod` mends. What the `chmod` cannot mend is a copy
+    /// someone already took, which is why it is said rather than done
+    /// quietly.
+    pub fn protect_device_key(&self, cfg: &ClientConfig, hook: &str) {
+        let Some(path) = cfg.device_file.as_deref() else {
+            return;
+        };
+        let shown = crate::ui::tilde(&path.display().to_string());
+        match home::restrict_to_owner(path) {
+            Ok(false) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(true) => {
+                eprintln!(
+                    "{hook}: {shown} was readable by other users; it is now readable by you only"
+                );
+                eprintln!(
+                    "{hook}:   if anyone else can log in to this machine, revoke its device \
+                     (recall devices revoke <name>) and run recall connect"
+                );
+            }
+            Err(e) => eprintln!(
+                "{hook}: {shown} is readable by other users, and making it yours alone failed: {e}"
+            ),
+        }
     }
 
     /// Enrols this machine with `RECALL_AUTHKEY` when it has no device
@@ -190,18 +228,63 @@ impl Resolved {
     /// line on stderr, prefixed with `hook`, and the configuration comes
     /// back either holding the new device or as it was, in which case the
     /// token, if there is one, is used as before.
-    pub async fn enroll_if_needed(&self, mut cfg: ClientConfig, hook: &str) -> ClientConfig {
+    ///
+    /// Done holding the device lock, and looked for again once it is held:
+    /// hooks run at once, and a new session's first few edits would
+    /// otherwise each enrol a device of their own.
+    pub async fn enroll_if_needed(&self, cfg: ClientConfig, hook: &str) -> ClientConfig {
         let Some(authkey) = cfg.authkey.clone() else {
             return cfg;
         };
-        if cfg.device.is_some() || cfg.url.is_empty() {
+        // With `device.key` unreadable there is no telling whether it holds
+        // this server's key, and a new one could not be saved beside it: the
+        // device would be enrolled on the server and lost here.
+        // `ClientConfig::client` refuses, and says why.
+        if cfg.device.is_some() || cfg.url.is_empty() || cfg.device_error.is_some() {
             return cfg;
         }
         let Some(h) = home::locate(self.env.lookup()) else {
             eprintln!("{hook}: RECALL_AUTHKEY is set, but there is no home directory to keep a device key in");
             return cfg;
         };
-        match device::enrol_with_authkey(&h, &cfg.url, &authkey, &cfg.source_env).await {
+        let held = match h.lock_devices() {
+            Ok(held) => held,
+            Err(e) => {
+                eprintln!(
+                    "{hook}: could not enrol with RECALL_AUTHKEY ({e}){}",
+                    fallback(&cfg)
+                );
+                return cfg;
+            }
+        };
+        self.enroll_holding(&held, cfg, &authkey, hook).await
+    }
+
+    /// [`Resolved::enroll_if_needed`]'s work, once the lock is held.
+    async fn enroll_holding(
+        &self,
+        held: &home::DevicesLock<'_>,
+        mut cfg: ClientConfig,
+        authkey: &str,
+        hook: &str,
+    ) -> ClientConfig {
+        // Another hook may have enrolled while this one waited.
+        match held.load() {
+            Ok(devices) => {
+                if let Some(entry) = devices.for_url(&cfg.url) {
+                    cfg.device = Some(entry.clone());
+                    return cfg;
+                }
+            }
+            Err(e) => {
+                // Damaged since the configuration was read: the same as
+                // finding it damaged then, nothing sent in its place.
+                eprintln!("{hook}: could not enrol with RECALL_AUTHKEY ({e})");
+                cfg.device_error = Some(e.to_string());
+                return cfg;
+            }
+        }
+        match device::enrol_with_authkey(held, &cfg.url, authkey, &cfg.source_env).await {
             Ok(entry) => {
                 eprintln!(
                     "{hook}: enrolled this session as device {} with RECALL_AUTHKEY",
@@ -210,49 +293,121 @@ impl Resolved {
                 cfg.device = Some(entry);
             }
             Err(e) => {
-                let fallback = if cfg.token.is_empty() {
-                    ""
-                } else {
-                    ", using RECALL_TOKEN instead"
-                };
                 eprintln!(
-                    "{hook}: could not enrol with RECALL_AUTHKEY ({}){fallback}",
-                    enroll_failure(&e)
+                    "{hook}: could not enrol with RECALL_AUTHKEY ({}){}",
+                    enroll_failure(&e),
+                    fallback(&cfg)
                 );
             }
         }
         cfg
     }
 
-    /// After the server refused this machine's device as unknown or
-    /// revoked: enrols afresh when `RECALL_AUTHKEY` allows it, and
-    /// otherwise says what to do. [`Some`] with the new configuration only
-    /// when there is something worth retrying with.
-    pub async fn reenroll(
+    /// After the server refused this machine's device (`refusal` is one of
+    /// the two refusals [`client::Error::device_gone`] names): the
+    /// configuration to retry with, when there is one, and otherwise a line
+    /// or two on stderr saying what to do.
+    ///
+    /// - Another hook has already enrolled again, so the device saved now is
+    ///   not the one refused: retry as that one.
+    /// - Revoked: never enrolled again, and the key is left where it is. A
+    ///   revocation is the owner cutting this machine off, and one that a
+    ///   hook answered by enrolling again with `RECALL_AUTHKEY` would cut
+    ///   off nothing that holds one, an admin laptop included.
+    /// - Unknown, and ephemeral, with `RECALL_AUTHKEY`: a cloud session's
+    ///   device swept away after sitting idle, which is what the authkey is
+    ///   for. The old key is forgotten, for this server only, and a new one
+    ///   enrolled.
+    /// - Unknown otherwise: says to run `recall connect` and keeps the key.
+    ///   Only a person drops a device that was not made to be thrown away.
+    ///
+    /// All of it holding the device lock, so that hooks refused at once
+    /// enrol one device between them.
+    pub async fn after_refusal(
         &self,
         cfg: &ClientConfig,
         hook: &str,
-        why: &str,
+        refusal: &client::Error,
     ) -> Option<ClientConfig> {
-        if cfg.authkey.is_none() {
-            eprintln!("{hook}: the server no longer accepts this machine's device key ({why})");
+        let refused = cfg.device.as_ref()?;
+        let why = refusal.reason();
+        let why = why.trim_start_matches("unauthorized: ");
+        let h = home::locate(self.env.lookup())?;
+        let held = match h.lock_devices() {
+            Ok(held) => held,
+            Err(e) => {
+                eprintln!("{hook}: the server refused this machine's device ({why}), and {e}");
+                return None;
+            }
+        };
+        let saved = match held.load() {
+            Ok(devices) => devices.for_url(&cfg.url).cloned(),
+            Err(e) => {
+                eprintln!("{hook}: the server refused this machine's device ({why}), and {e}");
+                return None;
+            }
+        };
+        if let Some(saved) = saved.filter(|s| s.device_id != refused.device_id) {
+            let mut retry = cfg.clone();
+            retry.device = Some(saved);
+            return Some(retry);
+        }
+
+        if refusal.device_revoked() {
             eprintln!(
-                "{hook}:   run recall connect to enrol this machine again, or set \
-                 RECALL_AUTHKEY to have a cloud session do it by itself"
+                "{hook}: the server refused this machine's device {} ({why}), and it is not \
+                 enrolled again by itself",
+                refused.name
             );
+            let then = if remote_session() {
+                "a new session enrols afresh with RECALL_AUTHKEY, unless that authkey is revoked \
+                 too"
+            } else {
+                "if it should be, run recall connect to enrol this machine again"
+            };
+            eprintln!("{hook}:   {then}");
             return None;
         }
-        let h = home::locate(self.env.lookup())?;
-        // The old key is dropped, not kept for a retry: a revoked device
-        // stays revoked, and a swept one no longer exists.
-        let _ = h.forget_device(&cfg.url);
-        let mut fresh = cfg.clone();
-        fresh.device = None;
+        let authkey = match (&cfg.authkey, refused.ephemeral) {
+            (Some(authkey), true) => authkey.clone(),
+            (None, true) => {
+                eprintln!("{hook}: the server no longer accepts this machine's device key ({why})");
+                eprintln!(
+                    "{hook}:   run recall connect to enrol this machine again, or set \
+                     RECALL_AUTHKEY to have a cloud session do it by itself"
+                );
+                return None;
+            }
+            (_, false) => {
+                eprintln!(
+                    "{hook}: the server no longer knows this machine's device {} ({why})",
+                    refused.name
+                );
+                eprintln!("{hook}:   run recall connect to enrol this machine again");
+                return None;
+            }
+        };
+        if let Err(e) = held.forget_device(&cfg.url) {
+            eprintln!("{hook}: the server no longer knows this session's device ({why}), and {e}");
+            return None;
+        }
         eprintln!(
             "{hook}: the server no longer knows this session's device ({why}), enrolling again"
         );
-        let fresh = self.enroll_if_needed(fresh, hook).await;
+        let mut fresh = cfg.clone();
+        fresh.device = None;
+        let fresh = self.enroll_holding(&held, fresh, &authkey, hook).await;
         fresh.device.is_some().then_some(fresh)
+    }
+}
+
+/// What a failed enrolment falls back to, for the end of the line that
+/// says so.
+fn fallback(cfg: &ClientConfig) -> &'static str {
+    if cfg.token.is_empty() {
+        ""
+    } else {
+        ", using RECALL_TOKEN instead"
     }
 }
 

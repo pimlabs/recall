@@ -17,7 +17,7 @@ use recall_wire::devices::{EnrollRequest, SCOPE_SYNC};
 use recall_wire::signature::{self, SigningKey};
 
 use crate::client::{self, Client, Enrolled};
-use crate::home::{DeviceEntry, Home};
+use crate::home::{DeviceEntry, DevicesLock};
 
 /// The variable a cloud environment holds an authkey in. With it, a
 /// session that has no device key enrols itself at its first pull, and is
@@ -168,8 +168,12 @@ pub fn enroll_name(label: &str) -> String {
 /// the server approves it at once (Tailscale's `preauthorized`). A fresh key
 /// every time, never an old one, so a revoked or swept device is never
 /// brought back.
+///
+/// Takes the held lock rather than the home, so that whoever calls it has
+/// looked for a key saved by another process under the same lock first:
+/// see [`crate::home::Home::lock_devices`].
 pub async fn enrol_with_authkey(
-    home: &Home,
+    held: &DevicesLock<'_>,
     url: &str,
     authkey: &str,
     label: &str,
@@ -192,7 +196,7 @@ pub async fn enrol_with_authkey(
         &scope,
         approved.ephemeral,
     );
-    home.save_device(url, entry.clone())?;
+    held.save_device(url, entry.clone())?;
     Ok(entry)
 }
 

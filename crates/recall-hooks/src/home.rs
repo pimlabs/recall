@@ -33,7 +33,9 @@
 //! not warn about it on that platform. What protects them there is where
 //! they are: `%USERPROFILE%\.recall`, inside the user's profile, whose
 //! access list Windows sets to the user, SYSTEM and Administrators, and
-//! which every file created in it inherits.
+//! which every file created in it inherits. A `RECALL_HOME` outside the
+//! profile has no such protection, and [`inside_profile`] is how `recall
+//! doctor` knows not to claim it.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -376,23 +378,69 @@ impl Home {
     }
 
     /// Saves `entry` as this machine's device at `url`, keeping every other
-    /// server's.
+    /// server's. Takes [`Home::lock_devices`] for the read and the write.
     pub fn save_device(&self, url: &str, entry: DeviceEntry) -> Result<(), Error> {
-        let mut devices = self.load_devices()?.unwrap_or_default();
-        devices.insert(url, entry);
-        self.save_devices(&devices)
+        self.lock_devices()?.save_device(url, entry)
     }
 
     /// Forgets the device saved for `url`. Returns whether there was one.
+    /// Takes [`Home::lock_devices`] for the read and the write.
     pub fn forget_device(&self, url: &str) -> Result<bool, Error> {
-        let Some(mut devices) = self.load_devices()? else {
-            return Ok(false);
+        self.lock_devices()?.forget_device(url)
+    }
+
+    /// Waits for, and takes, the lock every change to `device.key` is made
+    /// under, until the [`DevicesLock`] is dropped.
+    ///
+    /// `device.key` is changed by reading it, changing one server's entry
+    /// and writing the whole file back. Two processes doing that at once
+    /// lose one change, and hooks do run at once: Claude Code starts one per
+    /// edit, and a cloud session's first few edits can all find no device
+    /// key and each enrol one. Holding this across "is there a key, enrol,
+    /// save" makes the second find the first one's key instead.
+    ///
+    /// A lock file created with `O_EXCL` rather than an OS file lock: the
+    /// standard library's is newer than this workspace's Rust, and this
+    /// needs no crate for what a file created only-if-absent already does.
+    /// What that costs is a lock left behind by a process killed while
+    /// holding it, which is why one older than [`LOCK_STALE`] is taken over:
+    /// nothing holds it that long on purpose.
+    pub fn lock_devices(&self) -> Result<DevicesLock<'_>, Error> {
+        let path = self.dir.join(DEVICE_LOCK_FILE);
+        let err = |source| Error::Write {
+            path: path.display().to_string(),
+            source,
         };
-        let removed = devices.remove(url);
-        if removed {
-            self.save_devices(&devices)?;
+        create_private_dir(&self.dir).map_err(err)?;
+        let deadline = std::time::Instant::now() + LOCK_WAIT;
+        loop {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(_) => return Ok(DevicesLock { home: self, path }),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    let stale = fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|at| at.elapsed().ok())
+                        .is_some_and(|age| age > LOCK_STALE);
+                    if stale {
+                        let _ = fs::remove_file(&path);
+                        continue;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "another recall held device.key.lock for too long",
+                        )));
+                    }
+                    std::thread::sleep(LOCK_POLL);
+                }
+                Err(e) => return Err(err(e)),
+            }
         }
-        Ok(removed)
     }
 
     /// `credentials.json`, which 0.3.0 wrote and [`Home::migrate_legacy`]
@@ -524,6 +572,62 @@ impl Home {
     }
 }
 
+/// `device.key.lock`, beside the file it guards.
+const DEVICE_LOCK_FILE: &str = "device.key.lock";
+
+/// How old a lock must be to be taken over as left behind. What is done
+/// under it is at most one enrolment, a single request with a sixty-second
+/// timeout, and some file writes.
+const LOCK_STALE: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// How long to wait for the lock before giving up: long enough to outlast
+/// a lock left behind, which is taken over once stale.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(100);
+
+/// How often a process waiting for the lock looks again.
+const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// `device.key`, held by this process until dropped: see
+/// [`Home::lock_devices`]. Everything that changes the file while holding
+/// it reads it afresh first, so nothing another process saved is lost.
+#[derive(Debug)]
+pub struct DevicesLock<'a> {
+    home: &'a Home,
+    path: PathBuf,
+}
+
+impl DevicesLock<'_> {
+    /// `device.key` as it is now, empty when there is none.
+    pub fn load(&self) -> Result<Devices, Error> {
+        Ok(self.home.load_devices()?.unwrap_or_default())
+    }
+
+    /// Saves `entry` as this machine's device at `url`, keeping every other
+    /// server's.
+    pub fn save_device(&self, url: &str, entry: DeviceEntry) -> Result<(), Error> {
+        let mut devices = self.load()?;
+        devices.insert(url, entry);
+        self.home.save_devices(&devices)
+    }
+
+    /// Forgets the device saved for `url`, and no other. Returns whether
+    /// there was one.
+    pub fn forget_device(&self, url: &str) -> Result<bool, Error> {
+        let mut devices = self.load()?;
+        let removed = devices.remove(url);
+        if removed {
+            self.home.save_devices(&devices)?;
+        }
+        Ok(removed)
+    }
+}
+
+impl Drop for DevicesLock<'_> {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
 /// A machine name as `config.toml` may hold it, or [`None`] if it cannot be
 /// one.
 ///
@@ -596,6 +700,45 @@ pub fn readable_by_others(path: &Path) -> bool {
         let _ = path;
         false
     }
+}
+
+/// Makes `path` readable by its owner only, when anyone else could read it.
+/// `Ok(true)` when it had to. Always `Ok(false)` off Unix, for the reason
+/// [`readable_by_others`] always answers `false` there.
+pub fn restrict_to_owner(path: &Path) -> io::Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(path)?.permissions().mode();
+        if mode & 0o077 == 0 {
+            return Ok(false);
+        }
+        fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o700))?;
+        Ok(true)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(false)
+    }
+}
+
+/// Whether `path` is inside `profile`, the user's profile directory
+/// (`%USERPROFILE%`), compared the way Windows compares paths: component by
+/// component, and ignoring case.
+///
+/// On Windows that is what protects the files here, not mode bits: the
+/// profile's access list, which covers only what is inside it. A
+/// `RECALL_HOME` elsewhere gets whatever that directory's list says, and
+/// nothing here reads it, so nothing may claim the profile's protection for
+/// it.
+pub fn inside_profile(path: &Path, profile: &str) -> bool {
+    let profile = profile.trim();
+    if profile.is_empty() {
+        return false;
+    }
+    let lower = |p: &str| p.to_lowercase();
+    Path::new(&lower(&path.to_string_lossy())).starts_with(lower(profile))
 }
 
 fn load_toml<T: serde::de::DeserializeOwned + HasVersion>(path: &Path) -> Result<Option<T>, Error> {
@@ -681,18 +824,31 @@ fn write_atomic(path: &Path, header: &str, body: &str, mode: u32) -> Result<(), 
 
 /// `0700`: the directory holds a secret, and its listing is nobody else's
 /// business either.
+///
+/// One that already exists is narrowed to that too, when it is wider: made
+/// by hand, restored from a backup or unpacked from a dotfiles repository,
+/// it can be `0755`. Narrowing is best effort, because `RECALL_HOME` may name
+/// a directory this user does not own, and a write there has never failed
+/// for that reason.
 fn create_private_dir(dir: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::DirBuilderExt;
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         match fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(dir)
         {
-            Err(e) if e.kind() != io::ErrorKind::AlreadyExists => Err(e),
-            _ => Ok(()),
+            Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
+            _ => {}
         }
+        if let Ok(meta) = fs::metadata(dir) {
+            let mode = meta.permissions().mode();
+            if mode & 0o077 != 0 {
+                let _ = fs::set_permissions(dir, fs::Permissions::from_mode(mode & 0o700));
+            }
+        }
+        Ok(())
     }
     #[cfg(not(unix))]
     {
@@ -866,6 +1022,155 @@ mod tests {
         assert_eq!(mode(&home.config_path()), 0o644);
         assert_eq!(mode(home.dir()), 0o700);
         assert!(!readable_by_others(&home.credentials_path()));
+    }
+
+    fn entry(id: &str) -> DeviceEntry {
+        DeviceEntry {
+            device_id: id.to_string(),
+            name: id.to_string(),
+            scope: "sync".to_string(),
+            ephemeral: false,
+            private_key: "c2VlZA".to_string(),
+        }
+    }
+
+    /// One key per server: saving or forgetting one server's device never
+    /// touches another's.
+    #[test]
+    fn each_server_keeps_its_own_device_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::at(dir.path());
+        home.save_device("https://a.example.com", entry("dev_a"))
+            .unwrap();
+        home.save_device("https://b.example.com/", entry("dev_b"))
+            .unwrap();
+        home.save_device("https://a.example.com", entry("dev_a2"))
+            .unwrap();
+
+        let devices = home.load_devices().unwrap().unwrap();
+        assert_eq!(
+            devices
+                .for_url("https://a.example.com")
+                .map(|d| d.device_id.as_str()),
+            Some("dev_a2")
+        );
+        assert_eq!(
+            devices
+                .for_url("https://b.example.com")
+                .map(|d| d.device_id.as_str()),
+            Some("dev_b")
+        );
+
+        assert!(home.forget_device("https://A.example.com").unwrap());
+        let devices = home.load_devices().unwrap().unwrap();
+        assert!(devices.for_url("https://a.example.com").is_none());
+        assert!(devices.for_url("https://b.example.com").is_some());
+        assert!(
+            !dir.path().join(DEVICE_LOCK_FILE).exists(),
+            "the lock goes with the change"
+        );
+    }
+
+    /// Only one process at a time holds the lock: a second waits until the
+    /// first lets go.
+    #[test]
+    fn the_device_lock_is_held_by_one_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::at(dir.path().join(".recall"));
+        let held = home.lock_devices().unwrap();
+        let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waiter = {
+            let (home, released) = (home.clone(), released.clone());
+            std::thread::spawn(move || {
+                let _second = home.lock_devices().unwrap();
+                released.load(std::sync::atomic::Ordering::SeqCst)
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        released.store(true, std::sync::atomic::Ordering::SeqCst);
+        drop(held);
+        assert!(
+            waiter.join().unwrap(),
+            "the second took the lock only once the first let it go"
+        );
+    }
+
+    /// A lock left behind by a process that died holding it is taken over
+    /// once it is older than anything holds it on purpose.
+    #[test]
+    fn a_lock_left_behind_is_taken_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::at(dir.path());
+        let left = fs::File::create(dir.path().join(DEVICE_LOCK_FILE)).unwrap();
+        left.set_modified(std::time::SystemTime::now() - LOCK_STALE * 2)
+            .unwrap();
+        drop(left);
+        let started = std::time::Instant::now();
+        home.save_device("https://a.example.com", entry("dev_a"))
+            .unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    /// A `~/.recall` made wider than `0700`, by hand or by a restore, is
+    /// narrowed by the next write to it.
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_wide_directory_is_narrowed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let recall = dir.path().join(".recall");
+        fs::create_dir(&recall).unwrap();
+        fs::set_permissions(&recall, fs::Permissions::from_mode(0o755)).unwrap();
+        Home::at(&recall).save_config(&Config::default()).unwrap();
+        assert_eq!(
+            fs::metadata(&recall).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_others_can_read_is_made_the_owners_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("device.key");
+        fs::write(&file, "x").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(readable_by_others(&file));
+        assert!(restrict_to_owner(&file).unwrap());
+        assert!(!readable_by_others(&file));
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!restrict_to_owner(&file).unwrap(), "nothing left to do");
+    }
+
+    /// Inside the profile, whatever the case; a sibling whose name merely
+    /// starts the same way is not inside it.
+    #[test]
+    fn only_a_path_inside_the_profile_is_inside_it() {
+        let profile = "/home/eko";
+        assert!(inside_profile(
+            Path::new("/home/eko/.recall/device.key"),
+            profile
+        ));
+        assert!(inside_profile(
+            Path::new("/HOME/Eko/.recall/device.key"),
+            profile
+        ));
+        assert!(!inside_profile(
+            Path::new("/home/ekon/.recall/device.key"),
+            profile
+        ));
+        assert!(!inside_profile(
+            Path::new("/srv/recall/device.key"),
+            profile
+        ));
+        assert!(!inside_profile(
+            Path::new("/home/eko/.recall/device.key"),
+            ""
+        ));
     }
 
     /// Replaced whole by a rename; nothing named like a temp file is left.

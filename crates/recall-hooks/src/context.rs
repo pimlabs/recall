@@ -155,15 +155,23 @@ pub enum Error {
 }
 
 impl Error {
-    /// Whether the server refused because it no longer knows the device
-    /// this machine signs as: revoked, or swept away after sitting idle.
-    /// The one refusal a hook can do something about, by enrolling again.
-    pub fn device_gone(&self) -> bool {
+    /// The server's refusal, when the server is what failed: what a hook
+    /// reads to tell a device the server no longer accepts from any other
+    /// failure.
+    pub fn server_error(&self) -> Option<&crate::client::Error> {
         match self {
             Error::Push { source, .. }
             | Error::PushDelete { source, .. }
-            | Error::Pull { source, .. } => source.device_gone(),
-            _ => false,
+            | Error::Pull { source, .. } => Some(source),
+            _ => None,
         }
+    }
+
+    /// Whether the server refused because it no longer accepts the device
+    /// this machine signs as: revoked, or swept away after sitting idle.
+    /// See [`crate::client::Error::device_gone`] for why a hook asks which.
+    pub fn device_gone(&self) -> bool {
+        self.server_error()
+            .is_some_and(crate::client::Error::device_gone)
     }
 }

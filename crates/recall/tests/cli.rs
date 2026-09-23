@@ -2363,49 +2363,84 @@ fn a_cloud_session_enrolls_itself_at_its_first_pull_with_an_enrolment_key() {
     assert!(r.stderr.contains("sync scope"), "stderr: {}", r.stderr);
 }
 
-/// A revoked device, and one the server swept away after it sat idle, are
-/// both refused as gone. A session holding `RECALL_AUTHKEY` enrols
-/// again, once, and the hook that noticed still does its work.
-#[test]
-fn a_cloud_session_enrolls_again_after_its_device_is_revoked_or_swept() {
-    let server = live_server("right");
-    let repo = git_repo();
-    let key = block_on(
-        operator(&server).create_authkey(&recall_wire::AuthkeyRequest {
+/// An authkey for cloud sessions, which enrols ephemeral devices.
+fn ephemeral_authkey(server: &LiveServer) -> String {
+    block_on(
+        operator(server).create_authkey(&recall_wire::AuthkeyRequest {
             tag: "cloud".into(),
             expires_in_days: 1,
             ephemeral: true,
             max_devices: None,
         }),
     )
-    .unwrap();
+    .unwrap()
+    .key
+}
+
+/// A device entry made here rather than by enrolling, for a server that
+/// has never heard of it.
+fn made_up_device(id: &str, name: &str, ephemeral: bool) -> recall_hooks::home::DeviceEntry {
+    recall_hooks::device::DeviceKey::generate()
+        .unwrap()
+        .entry(id, name, "admin", ephemeral)
+}
+
+/// Whether a hook's stderr says it enrolled, or set about enrolling.
+fn enrolled_again(stderr: &str) -> bool {
+    stderr.contains("enrolling again") || stderr.contains("enrolled this session")
+}
+
+/// Every device the server lists, revoked ones included.
+fn devices_on(server: &LiveServer) -> Vec<recall_wire::Device> {
+    block_on(operator(server).devices()).unwrap().devices
+}
+
+/// A cloud session's device swept away after it sat idle is refused as
+/// unknown, and a session holding `RECALL_AUTHKEY` enrols again, once,
+/// and the hook that noticed still does its work. Only that server's key is
+/// replaced: another server's, in the same file, is kept.
+#[test]
+fn a_cloud_session_enrolls_again_after_its_device_is_swept() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let key = ephemeral_authkey(&server);
     let home = tempfile::tempdir().unwrap();
     let home_str = home.path().to_string_lossy().to_string();
     let env = [
         ("RECALL_HOME", home_str.as_str()),
         ("RECALL_URL", server.url.as_str()),
-        ("RECALL_AUTHKEY", key.key.as_str()),
+        ("RECALL_AUTHKEY", key.as_str()),
     ];
     assert_eq!(run(&["pull"], repo.path(), &env, None).code, 0);
     let first = saved_device(home.path(), &server.url).unwrap();
+    let elsewhere = "https://elsewhere.example.com";
+    let other = made_up_device("dev_elsewhere", "jarvis", false);
+    recall_hooks::home::Home::at(home.path())
+        .save_device(elsewhere, other.clone())
+        .unwrap();
 
-    block_on(operator(&server).revoke_device(&first.device_id)).unwrap();
-    let r = push_memory(&repo, &env, "after-revoke.md", "Still here.\n");
+    server.sweep_every_ephemeral_device();
+    let r = push_memory(&repo, &env, "after-sweep.md", "Still here.\n");
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
     assert!(
-        r.stderr
-            .contains("(this device has been revoked), enrolling again"),
+        r.stderr.contains("(unknown device), enrolling again"),
         "stderr: {}",
         r.stderr
     );
     let second = saved_device(home.path(), &server.url).unwrap();
     assert_ne!(second.device_id, first.device_id);
+    assert!(second.ephemeral);
     let files = stored(&server, &repo, &env);
     let file = files
         .iter()
-        .find(|f| f.file_path == "after-revoke.md")
+        .find(|f| f.file_path == "after-sweep.md")
         .expect("the push went through after enrolling again");
     assert_eq!(file.source_env, second.name);
+    assert_eq!(
+        saved_device(home.path(), elsewhere).as_ref(),
+        Some(&other),
+        "another server's key is kept"
+    );
 
     server.sweep_every_ephemeral_device();
     let r = run(&["pull"], repo.path(), &env, None);
@@ -2422,6 +2457,366 @@ fn a_cloud_session_enrolls_again_after_its_device_is_revoked_or_swept() {
     );
     let third = saved_device(home.path(), &server.url).unwrap();
     assert_ne!(third.device_id, second.device_id);
+    assert_eq!(saved_device(home.path(), elsewhere).as_ref(), Some(&other));
+}
+
+/// Revoking a device cuts it off, whatever the machine holds. A cloud
+/// session with `RECALL_AUTHKEY` does not enrol again, and neither does an
+/// admin laptop that has one set: the hook says so, a session still
+/// starts, the key stays where it is, and the server gains no device.
+#[test]
+fn a_revoked_device_is_not_enrolled_again_even_with_an_authkey() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let key = ephemeral_authkey(&server);
+
+    let cloud = tempfile::tempdir().unwrap();
+    let cloud_str = cloud.path().to_string_lossy().to_string();
+    let env = [
+        ("RECALL_HOME", cloud_str.as_str()),
+        ("RECALL_URL", server.url.as_str()),
+        ("RECALL_AUTHKEY", key.as_str()),
+    ];
+    assert_eq!(run(&["pull"], repo.path(), &env, None).code, 0);
+    let session = saved_device(cloud.path(), &server.url).unwrap();
+    block_on(operator(&server).revoke_device(&session.device_id)).unwrap();
+
+    let r = push_memory(&repo, &env, "after-revoke.md", "Not synced.\n");
+    assert_eq!(r.code, 2, "the push is refused: {}", r.stderr);
+    assert!(
+        r.stderr.contains("this device has been revoked")
+            && r.stderr.contains("not enrolled again")
+            && !r.stderr.contains("enrolling again"),
+        "stderr: {}",
+        r.stderr
+    );
+    let r = run(&["pull"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "a session must still start: {}", r.stderr);
+    assert!(
+        r.stderr.contains("not enrolled again"),
+        "stderr: {}",
+        r.stderr
+    );
+    assert_eq!(
+        saved_device(cloud.path(), &server.url).as_ref(),
+        Some(&session),
+        "the revoked key is kept, so the next hook is refused too"
+    );
+    assert_eq!(devices_on(&server).len(), 1);
+
+    let laptop = enrolled(&server, &repo, "jarvis");
+    let laptop_str = laptop.path().to_string_lossy().to_string();
+    let admin = saved_device(laptop.path(), &server.url).unwrap();
+    assert_eq!(admin.scope, "admin");
+    block_on(operator(&server).revoke_device(&admin.device_id)).unwrap();
+    let env = [
+        ("RECALL_HOME", laptop_str.as_str()),
+        ("RECALL_AUTHKEY", key.as_str()),
+    ];
+    let r = run(&["pull"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(
+        r.stderr.contains("not enrolled again") && r.stderr.contains("recall connect"),
+        "stderr: {}",
+        r.stderr
+    );
+    let r = push_memory(&repo, &env, "laptop.md", "Not synced either.\n");
+    assert_eq!(r.code, 2, "stderr: {}", r.stderr);
+    assert_eq!(
+        saved_device(laptop.path(), &server.url).as_ref(),
+        Some(&admin)
+    );
+    assert_eq!(devices_on(&server).len(), 2, "no new device");
+}
+
+/// A device the server has no record of, and that was not made to be thrown
+/// away, is not replaced by a hook even with `RECALL_AUTHKEY` set: the key
+/// is kept and the hook says to run `recall connect`.
+#[test]
+fn a_lasting_device_the_server_does_not_know_is_left_to_connect() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let key = ephemeral_authkey(&server);
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+    let lasting = made_up_device("dev_neverenrolledhere", "jarvis", false);
+    recall_hooks::home::Home::at(home.path())
+        .save_device(&server.url, lasting.clone())
+        .unwrap();
+    let env = [
+        ("RECALL_HOME", home_str.as_str()),
+        ("RECALL_URL", server.url.as_str()),
+        ("RECALL_AUTHKEY", key.as_str()),
+    ];
+
+    let r = run(&["pull"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(
+        r.stderr.contains("unknown device") && r.stderr.contains("run recall connect"),
+        "stderr: {}",
+        r.stderr
+    );
+    assert!(!enrolled_again(&r.stderr), "stderr: {}", r.stderr);
+    assert_eq!(
+        saved_device(home.path(), &server.url).as_ref(),
+        Some(&lasting)
+    );
+    assert!(devices_on(&server).is_empty());
+}
+
+/// Any other refusal of a signature, here one that does not verify, says
+/// nothing about whether the device still exists: the key is kept and
+/// nothing is enrolled, even for an ephemeral device with an authkey at
+/// hand.
+#[test]
+fn a_signature_the_server_refuses_keeps_the_key_and_enrols_nothing() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let key = ephemeral_authkey(&server);
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [
+        ("RECALL_HOME", home_str.as_str()),
+        ("RECALL_URL", server.url.as_str()),
+        ("RECALL_AUTHKEY", key.as_str()),
+    ];
+    assert_eq!(run(&["pull"], repo.path(), &env, None).code, 0);
+    let session = saved_device(home.path(), &server.url).unwrap();
+    // The device the server knows, signed for with some other key.
+    let wrong = recall_hooks::device::DeviceKey::generate().unwrap().entry(
+        &session.device_id,
+        &session.name,
+        &session.scope,
+        true,
+    );
+    recall_hooks::home::Home::at(home.path())
+        .save_device(&server.url, wrong.clone())
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let r = push_memory(&repo, &env, "fact.md", "A fact.\n");
+    assert_eq!(r.code, 2, "stderr: {}", r.stderr);
+    assert!(!enrolled_again(&r.stderr), "stderr: {}", r.stderr);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "nor signed again and again"
+    );
+    let r = run(&["pull"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(!enrolled_again(&r.stderr), "stderr: {}", r.stderr);
+    assert_eq!(
+        saved_device(home.path(), &server.url).as_ref(),
+        Some(&wrong)
+    );
+    assert_eq!(devices_on(&server).len(), 1);
+}
+
+/// Hooks run at once: a new session's first burst of edits, or a burst
+/// just after its device was swept. Between them they enrol one device,
+/// not one each, and every one of them does its work.
+#[test]
+fn hooks_that_start_at_once_enrol_one_device_between_them() {
+    const AT_ONCE: usize = 8;
+    let server = live_server("right");
+    let repo = git_repo();
+    let key = ephemeral_authkey(&server);
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [
+        ("RECALL_HOME", home_str.as_str()),
+        ("RECALL_URL", server.url.as_str()),
+        ("RECALL_AUTHKEY", key.as_str()),
+    ];
+    let finish = |children: Vec<std::process::Child>| {
+        for child in children {
+            let out = child.wait_with_output().unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    };
+
+    let pulls = (0..AT_ONCE)
+        .map(|_| {
+            command(&["pull"], repo.path(), &env)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    finish(pulls);
+    let listed = devices_on(&server);
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    let first = saved_device(home.path(), &server.url).unwrap();
+    assert_eq!(listed[0].id, first.device_id);
+
+    server.sweep_every_ephemeral_device();
+    let memory_dir = status_json(repo.path(), &env)["memory_dir"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    std::fs::create_dir_all(&memory_dir).unwrap();
+    let pushes = (0..AT_ONCE)
+        .map(|i| {
+            let file = Path::new(&memory_dir).join(format!("burst-{i}.md"));
+            std::fs::write(&file, format!("Edit {i}.\n")).unwrap();
+            let mut child = command(&["push"], repo.path(), &env)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(hook_payload(&file).as_bytes())
+                .unwrap();
+            child
+        })
+        .collect();
+    finish(pushes);
+    let second = saved_device(home.path(), &server.url).unwrap();
+    assert_ne!(second.device_id, first.device_id);
+    let listed = devices_on(&server);
+    let new: Vec<_> = listed.iter().filter(|d| d.id != first.device_id).collect();
+    assert_eq!(new.len(), 1, "{listed:?}");
+    assert_eq!(new[0].id, second.device_id);
+    let files = stored(&server, &repo, &env);
+    for i in 0..AT_ONCE {
+        assert!(
+            files.iter().any(|f| f.file_path == format!("burst-{i}.md")),
+            "burst-{i}.md was pushed: {files:?}"
+        );
+    }
+}
+
+/// A `device.key` that cannot be read stops the hooks with a line saying
+/// so, rather than sending `RECALL_TOKEN` in its place: it may hold this
+/// server's key, and the token is the shared secret enrolling stopped
+/// sending. Nor is anything enrolled, which could not be saved.
+#[test]
+fn an_unreadable_device_key_is_no_reason_to_send_the_token() {
+    let fake = fake_server(release_before_devices);
+    let repo = git_repo();
+    let home = recall_home_with(&[(&fake.url, "right")], &fake.url);
+    let home_str = home.path().to_string_lossy().to_string();
+    std::fs::write(home.path().join("device.key"), "servers = [").unwrap();
+    let env = [
+        ("RECALL_HOME", home_str.as_str()),
+        ("RECALL_TOKEN", "right"),
+        ("RECALL_AUTHKEY", "recall-ak-whatever"),
+    ];
+
+    let r = push_memory(&repo, &env, "fact.md", "A fact.\n");
+    assert_eq!(r.code, 1, "stderr: {}", r.stderr);
+    assert!(
+        r.stderr.contains("device.key") && r.stderr.contains("RECALL_TOKEN included"),
+        "stderr: {}",
+        r.stderr
+    );
+    let r = run(&["pull"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(
+        r.stderr.contains("device.key") && r.stderr.contains("leaving local memory untouched"),
+        "stderr: {}",
+        r.stderr
+    );
+
+    let seen = fake.seen();
+    assert!(
+        seen.iter()
+            .all(|s| s.authorization.is_none() && !s.signed && s.path != "/sync"),
+        "{seen:?}"
+    );
+    assert!(
+        seen.iter().all(|s| !s.path.starts_with("/v1/")),
+        "nothing enrolled: {seen:?}"
+    );
+}
+
+/// `recall status` reports a `device.key` others can read, and leaves it
+/// as it is; the next hook makes it its owner's alone and says so, once.
+#[cfg(unix)]
+#[test]
+fn a_device_key_others_can_read_is_reported_then_made_private_by_a_hook() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+    recall_hooks::home::Home::at(home.path())
+        .save_device(DEAD_SERVER, made_up_device("dev_x", "jarvis", false))
+        .unwrap();
+    let key_file = home.path().join("device.key");
+    std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let mode = || std::fs::metadata(&key_file).unwrap().permissions().mode() & 0o777;
+    let env = [
+        ("RECALL_HOME", home_str.as_str()),
+        ("RECALL_URL", DEAD_SERVER),
+    ];
+
+    let rep = status_json(repo.path(), &env);
+    assert_eq!(rep["device_file_exposed"], true, "{rep}");
+    assert_eq!(mode(), 0o644, "status only reports");
+
+    let r = run(&["pull"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(
+        r.stderr.contains("was readable by other users"),
+        "stderr: {}",
+        r.stderr
+    );
+    assert_eq!(mode(), 0o600);
+    let again = run(&["pull"], repo.path(), &env, None);
+    assert!(
+        !again.stderr.contains("readable by other users"),
+        "said once: {}",
+        again.stderr
+    );
+    assert_eq!(status_json(repo.path(), &env)["device_file_exposed"], false);
+}
+
+/// A damaged device key is the device's problem, and status reports it as
+/// one: the server is still asked whether it is up, with nothing that
+/// identifies this machine, so `server_ok` goes on meaning just that.
+#[test]
+fn status_reports_a_damaged_device_key_as_the_devices_problem() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let home = recall_home_with(&[(&server.url, "right")], &server.url);
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [("RECALL_HOME", home_str.as_str())];
+
+    std::fs::write(home.path().join("device.key"), "servers = [").unwrap();
+    let rep = status_json(repo.path(), &env);
+    assert_eq!(rep["server_ok"], true, "{rep}");
+    assert!(rep.get("server_error").is_none(), "{rep}");
+    assert!(rep["device_error"].is_string(), "{rep}");
+    assert_eq!(rep["auth"], "none", "{rep}");
+    assert_eq!(
+        doctor_finding(repo.path(), &env, "device key")["level"],
+        "fail"
+    );
+
+    // A file that reads, holding something for this server that is no key.
+    std::fs::remove_file(home.path().join("device.key")).unwrap();
+    let mut damaged = made_up_device("dev_x", "jarvis", false);
+    damaged.private_key = "not a key".into();
+    recall_hooks::home::Home::at(home.path())
+        .save_device(&server.url, damaged)
+        .unwrap();
+    let rep = status_json(repo.path(), &env);
+    assert_eq!(rep["server_ok"], true, "{rep}");
+    assert!(rep.get("server_error").is_none(), "{rep}");
+    assert!(
+        rep["device_error"].as_str().unwrap().contains("damaged"),
+        "{rep}"
+    );
+    assert_eq!(rep["auth"], "none", "{rep}");
 }
 
 /// A laptop's revoked device, with no authkey: the session still

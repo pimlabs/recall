@@ -264,10 +264,12 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
 /// sends. Neither fails the command: the token still works.
 fn device_findings(rep: &Report, out: &mut Vec<Finding>) {
     let key_file = rep.device_file.as_deref().unwrap_or("~/.recall/device.key");
+    // A failure rather than a warning: the hooks send nothing at all while
+    // it lasts, not even `RECALL_TOKEN` in the key's place.
     if let Some(err) = &rep.device_error {
-        out.push(warn(
+        out.push(fail(
             "device key",
-            format!("{err}, so this machine does not sign with it"),
+            format!("{err}, so this machine sends nothing to the server"),
             "move it aside and run recall connect to enrol again",
         ));
     }
@@ -322,7 +324,8 @@ fn device_findings(rep: &Report, out: &mut Vec<Finding>) {
             "device",
             format!(
                 "enrolled as {what}, key in {} ({})",
-                d.key_file, KEY_PROTECTION
+                d.key_file,
+                key_protection(&d.key_file)
             ),
         )),
         Some(false) if d.gone => out.push(fail(
@@ -397,10 +400,22 @@ fn device_findings(rep: &Report, out: &mut Vec<Finding>) {
 /// keeps others out of it on this platform. Not the OS keychain, and the
 /// report does not pretend otherwise; `recall_hooks::home` says why.
 #[cfg(unix)]
-const KEY_PROTECTION: &str = "a file readable by you only";
+fn key_protection(_key_file: &str) -> &'static str {
+    "a file readable by you only"
+}
+
+/// On Windows, what keeps others out is the user profile's access list,
+/// which covers only what is inside the profile: a `RECALL_HOME` elsewhere
+/// gets whatever that directory allows, which nothing here reads.
 #[cfg(not(unix))]
-const KEY_PROTECTION: &str =
-    "a file in your user profile, which only you and administrators can read";
+fn key_protection(key_file: &str) -> &'static str {
+    let profile = std::env::var("USERPROFILE").unwrap_or_default();
+    if recall_hooks::home::inside_profile(std::path::Path::new(key_file), &profile) {
+        "a file in your user profile, which only you and administrators can read"
+    } else {
+        "a file outside your user profile, so who else can read it is up to that directory"
+    }
+}
 
 /// Whether this client and the server can talk at all, from the server's
 /// discovery document. Silent against a server too old to publish one:
