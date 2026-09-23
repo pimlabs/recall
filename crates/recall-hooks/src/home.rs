@@ -1,9 +1,18 @@
-//! `~/.recall`: the two files that make up one machine's Recall setup.
+//! `~/.recall`: the files that make up one machine's Recall setup.
 //!
 //! ```text
 //! ~/.recall/config.toml        0644  server, machine name — safe to read, edit, back up
 //! ~/.recall/credentials.toml   0600  one token per server — written by `recall connect`
+//! ~/.recall/device.key         0600  this machine's device keys, one per server
 //! ```
+//!
+//! `device.key` holds what a machine enrolled as a device signs its requests
+//! with (see `docs/design/handshake.md`). It is a file, not the OS keychain,
+//! and on purpose: `recall push` runs on every memory write, and a keychain
+//! can stop a hook to show a dialog nobody is there to answer. macOS does
+//! exactly that when the binary asking changes, which an upgrade does. The
+//! file is created `0600` inside the `0700` directory, which is the same
+//! protection `gh` and Claude Code give their own tokens on Linux.
 //!
 //! Two files rather than one because they are handled differently, not
 //! because they describe different things. The config is something a person
@@ -21,7 +30,10 @@
 //! way but nothing restricts them — there is no mode-bit equivalent to check
 //! or set — so [`readable_by_others`] always answers `false` there rather
 //! than implying a protection that is not present, and `recall doctor` does
-//! not warn about it on that platform.
+//! not warn about it on that platform. What protects them there is where
+//! they are: `%USERPROFILE%\.recall`, inside the user's profile, whose
+//! access list Windows sets to the user, SYSTEM and Administrators, and
+//! which every file created in it inherits.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -44,6 +56,7 @@ const CONFIG_FILE: &str = "config.toml";
 const CREDENTIALS_FILE: &str = "credentials.toml";
 /// What 0.3.0 wrote: both the default server and the tokens, in JSON.
 const LEGACY_FILE: &str = "credentials.json";
+const DEVICE_FILE: &str = "device.key";
 
 const CONFIG_HEADER: &str = "\
 # Recall's settings for this machine. Safe to read, edit and back up.
@@ -55,6 +68,12 @@ const CONFIG_HEADER: &str = "\
 const CREDENTIALS_HEADER: &str = "\
 # Written by `recall connect`. Readable by you only.
 # Do not edit, commit or share this file; `recall disconnect` removes an entry.
+";
+
+const DEVICE_HEADER: &str = "\
+# This machine's device keys, written by `recall connect`. Readable by you only.
+# Each private key was made on this machine and never leaves it: do not copy,
+# commit or share this file. `recall disconnect` removes an entry.
 ";
 
 /// Why a file could not be used.
@@ -206,6 +225,78 @@ impl Credentials {
     }
 }
 
+/// One server's entry in `device.key`: the device this machine is there,
+/// and the key it signs with.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DeviceEntry {
+    /// `dev_…`, the `keyid` every signature names.
+    pub device_id: String,
+    /// The name the server knows it by, which a push it signs is stored
+    /// under.
+    pub name: String,
+    /// `sync` or `admin`, as the server said when it was approved.
+    pub scope: String,
+    /// Whether the server removes it once idle: a cloud session enrolled
+    /// with an enrolment key.
+    #[serde(default)]
+    pub ephemeral: bool,
+    /// The Ed25519 private key's 32-byte seed, base64url without padding.
+    pub private_key: String,
+}
+
+/// Never prints the private key: a configuration is logged and printed in
+/// test failures, and this is the one secret that must not travel.
+impl std::fmt::Debug for DeviceEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceEntry")
+            .field("device_id", &self.device_id)
+            .field("name", &self.name)
+            .field("scope", &self.scope)
+            .field("ephemeral", &self.ephemeral)
+            .field("private_key", &"(hidden)")
+            .finish()
+    }
+}
+
+/// `device.key`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Devices {
+    /// The file's format version; see [`VERSION`].
+    #[serde(default = "default_version")]
+    pub version: u32,
+    /// One device per server, keyed by normalised URL like the tokens: an
+    /// enrolment belongs to the server that approved it, and each server
+    /// gets its own key, so re-enrolling at one never touches another.
+    #[serde(default)]
+    pub servers: BTreeMap<String, DeviceEntry>,
+}
+
+impl Default for Devices {
+    fn default() -> Self {
+        Self {
+            version: VERSION,
+            servers: BTreeMap::new(),
+        }
+    }
+}
+
+impl Devices {
+    /// The device saved for `url`, which is normalised first.
+    pub fn for_url(&self, url: &str) -> Option<&DeviceEntry> {
+        self.servers.get(&normalize_url(url))
+    }
+
+    /// Saves `entry` for `url`, replacing any earlier one.
+    pub fn insert(&mut self, url: &str, entry: DeviceEntry) {
+        self.servers.insert(normalize_url(url), entry);
+    }
+
+    /// Forgets `url`. Returns whether there was anything to forget.
+    pub fn remove(&mut self, url: &str) -> bool {
+        self.servers.remove(&normalize_url(url)).is_some()
+    }
+}
+
 /// The `~/.recall` directory and the files in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Home {
@@ -251,6 +342,57 @@ impl Home {
     /// `credentials.toml`.
     pub fn credentials_path(&self) -> PathBuf {
         self.dir.join(CREDENTIALS_FILE)
+    }
+
+    /// `device.key`.
+    pub fn device_path(&self) -> PathBuf {
+        self.dir.join(DEVICE_FILE)
+    }
+
+    /// Reads `device.key`. `Ok(None)` when there is none: a machine that
+    /// uses the shared token, or has not connected at all.
+    pub fn load_devices(&self) -> Result<Option<Devices>, Error> {
+        load_toml(&self.device_path())
+    }
+
+    /// Writes `device.key` atomically, readable by its owner only, and
+    /// created that way rather than narrowed afterwards, like the
+    /// credentials. An empty store removes the file instead.
+    pub fn save_devices(&self, devices: &Devices) -> Result<(), Error> {
+        if devices.servers.is_empty() {
+            return match fs::remove_file(self.device_path()) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => Err(Error::Write {
+                    path: self.device_path().display().to_string(),
+                    source: e,
+                }),
+                _ => Ok(()),
+            };
+        }
+        let body = toml::to_string(devices).map_err(|e| Error::Write {
+            path: self.device_path().display().to_string(),
+            source: io::Error::other(e),
+        })?;
+        write_atomic(&self.device_path(), DEVICE_HEADER, &body, 0o600)
+    }
+
+    /// Saves `entry` as this machine's device at `url`, keeping every other
+    /// server's.
+    pub fn save_device(&self, url: &str, entry: DeviceEntry) -> Result<(), Error> {
+        let mut devices = self.load_devices()?.unwrap_or_default();
+        devices.insert(url, entry);
+        self.save_devices(&devices)
+    }
+
+    /// Forgets the device saved for `url`. Returns whether there was one.
+    pub fn forget_device(&self, url: &str) -> Result<bool, Error> {
+        let Some(mut devices) = self.load_devices()? else {
+            return Ok(false);
+        };
+        let removed = devices.remove(url);
+        if removed {
+            self.save_devices(&devices)?;
+        }
+        Ok(removed)
     }
 
     /// `credentials.json`, which 0.3.0 wrote and [`Home::migrate_legacy`]
@@ -494,6 +636,12 @@ impl HasVersion for Config {
 }
 
 impl HasVersion for Credentials {
+    fn version(&self) -> u32 {
+        self.version
+    }
+}
+
+impl HasVersion for Devices {
     fn version(&self) -> u32 {
         self.version
     }

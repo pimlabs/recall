@@ -2,12 +2,19 @@
 
 use std::time::Duration;
 
+use recall_wire::devices::{self as wire_devices, EnrollPollRequest, EnrollRequest};
+use recall_wire::signature::{self, SignatureError, Target};
 use recall_wire::{
-    discovery, Discovery, Health, PushRequest, PushResponse, SyncResponse, ValidationError,
-    DISCOVERY_PATH, PROTOCOL, PROTOCOL_HEADER,
+    discovery, ApproveRequest, Device, DeviceIdentity, DeviceList, Discovery, EnrollApproved,
+    EnrollKey, EnrollKeyCreated, EnrollKeyList, EnrollKeyRequest, EnrollKeyRevokeRequest,
+    EnrollPending, EnrollPollResponse, ErrorResponse, Health, PendingEnrollment, PushRequest,
+    PushResponse, SyncResponse, ValidationError, DISCOVERY_PATH, PROTOCOL, PROTOCOL_HEADER,
 };
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::de::DeserializeOwned;
+use serde::Serialize;
+
+use crate::device::Signer;
 
 /// A generous but bounded timeout. The server may be running a semantic
 /// merge through the `claude` CLI, which takes several seconds — but these
@@ -35,6 +42,67 @@ pub enum Error {
     /// The server answered with something this client cannot parse.
     #[error("server sent a response this client can't parse: {0}")]
     Decode(#[from] serde_json::Error),
+    /// A request could not be signed. Only a bug gets here: what is signed
+    /// is built by this client, not read from anywhere.
+    #[error("could not sign the request: {0}")]
+    Sign(#[from] SignatureError),
+    /// No randomness for a signature's nonce.
+    #[error("could not sign the request: no randomness for a nonce: {0}")]
+    Nonce(String),
+}
+
+impl Error {
+    /// Whether the server no longer knows the device this client signs as:
+    /// revoked, or removed after sitting idle (an ephemeral one). Either
+    /// way, the key this machine holds will never work again there, and
+    /// the only way back is to enroll anew.
+    pub fn device_gone(&self) -> bool {
+        match self {
+            Error::Status { code: 401, .. } => matches!(
+                self.reason().as_str(),
+                "unauthorized: unknown device" | "unauthorized: this device has been revoked"
+            ),
+            _ => false,
+        }
+    }
+
+    /// The server's own words, when it answered with an error body, and
+    /// this error's otherwise: what a person reads.
+    pub fn reason(&self) -> String {
+        match self {
+            Error::Status { body, .. } => serde_json::from_str::<ErrorResponse>(body)
+                .map(|e| e.error)
+                .unwrap_or_else(|_| body.clone()),
+            other => other.to_string(),
+        }
+    }
+}
+
+/// What `POST /v1/devices/enroll` answered.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(untagged)]
+pub enum Enrolled {
+    /// Approved at once, with an enrolment key.
+    Approved(EnrollApproved),
+    /// Waiting for someone to approve the code.
+    Pending(EnrollPending),
+}
+
+/// What one poll of an enrolment learned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Poll {
+    /// Approved: sign as this device from now on.
+    Approved(EnrollPollResponse),
+    /// Nobody has decided yet; wait the interval and ask again.
+    Pending,
+    /// Asked too soon: wait five seconds longer, from now on.
+    SlowDown,
+    /// Fifteen minutes passed with no approval.
+    Expired,
+    /// Denied, or approved and then revoked.
+    Denied,
+    /// The server knows no such enrolment.
+    Unknown,
 }
 
 /// A Recall API client.
@@ -42,6 +110,9 @@ pub enum Error {
 pub struct Client {
     base_url: String,
     token: String,
+    /// Set once this machine is an enrolled device: every request is then
+    /// signed with its key, and the token is not sent.
+    signer: Option<Signer>,
     http: reqwest::Client,
 }
 
@@ -61,12 +132,30 @@ impl Client {
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             token: token.to_string(),
+            signer: None,
             http: reqwest::Client::builder()
                 .timeout(TIMEOUT)
                 .user_agent(discovery::user_agent())
                 .default_headers(headers)
                 .build()?,
         })
+    }
+
+    /// The same client, signing every request as an enrolled device
+    /// instead of sending the token.
+    ///
+    /// Never both: a request carrying the right bearer token is the
+    /// operator's whatever else it carries, so sending the token alongside
+    /// would make every signed request the operator's and the device's name
+    /// meaningless.
+    pub fn with_signer(mut self, signer: Signer) -> Self {
+        self.signer = Some(signer);
+        self
+    }
+
+    /// Whether requests are signed rather than carrying the token.
+    pub fn signs(&self) -> bool {
+        self.signer.is_some()
     }
 
     /// The normalized server URL this client will call.
@@ -131,11 +220,139 @@ impl Client {
         self.send::<serde_json::Value>(request).await.map(|_| ())
     }
 
+    /// Starts enrolling this machine: `POST /v1/devices/enroll`.
+    /// Unauthenticated; with an enrolment key the answer is an approved
+    /// device, and without one a code for someone to approve.
+    pub async fn enroll(&self, req: &EnrollRequest) -> Result<Enrolled, Error> {
+        self.send(self.post_json(wire_devices::ENROLL_PATH, req)?)
+            .await
+    }
+
+    /// Asks once whether an enrolment was approved. RFC 8628's answers
+    /// arrive as `400`s, and are read into [`Poll`] rather than returned
+    /// as errors, since all but one of them mean "keep going" or "stop".
+    pub async fn poll(&self, enrollment_id: &str) -> Result<Poll, Error> {
+        let req = EnrollPollRequest {
+            enrollment_id: enrollment_id.to_string(),
+        };
+        match self
+            .send::<EnrollPollResponse>(self.post_json(wire_devices::ENROLL_POLL_PATH, &req)?)
+            .await
+        {
+            Ok(approved) => Ok(Poll::Approved(approved)),
+            Err(e @ Error::Status { code: 400, .. }) => match e.reason().as_str() {
+                wire_devices::AUTHORIZATION_PENDING => Ok(Poll::Pending),
+                wire_devices::SLOW_DOWN => Ok(Poll::SlowDown),
+                wire_devices::EXPIRED_TOKEN => Ok(Poll::Expired),
+                wire_devices::ACCESS_DENIED => Ok(Poll::Denied),
+                wire_devices::INVALID_GRANT => Ok(Poll::Unknown),
+                _ => Err(e),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Which device signed this request: how a machine checks it is still
+    /// enrolled.
+    pub async fn me(&self) -> Result<DeviceIdentity, Error> {
+        let request = self.http.get(format!(
+            "{}{}",
+            self.base_url,
+            wire_devices::DEVICES_ME_PATH
+        ));
+        self.send(request).await
+    }
+
+    /// What approving `user_code` would approve. Admin.
+    pub async fn pending(&self, user_code: &str) -> Result<PendingEnrollment, Error> {
+        let request = self.http.get(format!(
+            "{}{}",
+            self.base_url,
+            wire_devices::pending_path(user_code)
+        ));
+        self.send(request).await
+    }
+
+    /// Approves a code. Admin.
+    pub async fn approve(&self, req: &ApproveRequest) -> Result<Device, Error> {
+        self.send(self.post_json(wire_devices::APPROVE_PATH, req)?)
+            .await
+    }
+
+    /// Every device, revoked ones included. Admin.
+    pub async fn devices(&self) -> Result<DeviceList, Error> {
+        let request = self
+            .http
+            .get(format!("{}{}", self.base_url, wire_devices::DEVICES_PATH));
+        self.send(request).await
+    }
+
+    /// Revokes a device by id. Admin.
+    pub async fn revoke_device(&self, id: &str) -> Result<Device, Error> {
+        let path = wire_devices::revoke_device_path(id);
+        self.send(self.post_json(&path, &serde_json::json!({}))?)
+            .await
+    }
+
+    /// Makes an enrolment key. Admin; the key is in the answer and nowhere
+    /// else.
+    pub async fn create_enroll_key(
+        &self,
+        req: &EnrollKeyRequest,
+    ) -> Result<EnrollKeyCreated, Error> {
+        self.send(self.post_json(wire_devices::ENROLL_KEYS_PATH, req)?)
+            .await
+    }
+
+    /// Every enrolment key, without the keys themselves. Admin.
+    pub async fn enroll_keys(&self) -> Result<EnrollKeyList, Error> {
+        let request = self.http.get(format!(
+            "{}{}",
+            self.base_url,
+            wire_devices::ENROLL_KEYS_PATH
+        ));
+        self.send(request).await
+    }
+
+    /// Stops an enrolment key enrolling anything more, and with
+    /// `revoke_devices` revokes what it already enrolled. Admin.
+    pub async fn revoke_enroll_key(
+        &self,
+        id: &str,
+        revoke_devices: bool,
+    ) -> Result<EnrollKey, Error> {
+        let path = wire_devices::revoke_enroll_key_path(id);
+        self.send(self.post_json(&path, &EnrollKeyRevokeRequest { revoke_devices })?)
+            .await
+    }
+
+    /// A JSON `POST` to `path`, the body serialized here so it is exactly
+    /// the bytes that are signed.
+    fn post_json<B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<reqwest::RequestBuilder, Error> {
+        Ok(self
+            .http
+            .post(format!("{}{path}", self.base_url))
+            .header("Content-Type", "application/json")
+            .body(serde_json::to_vec(body)?))
+    }
+
     async fn send<T: DeserializeOwned>(
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<T, Error> {
-        let response = request.bearer_auth(&self.token).send().await?;
+        let request = match &self.signer {
+            Some(signer) => {
+                let mut request = request.build()?;
+                sign(signer, &mut request)?;
+                request
+            }
+            None => request.bearer_auth(&self.token).build()?,
+        };
+        let response = self.http.execute(request).await?;
         let status = response.status();
         // Read as bytes rather than text: the body is only ever decoded as
         // JSON, and this keeps the client off reqwest's optional charset
@@ -150,6 +367,76 @@ impl Client {
         }
         Ok(serde_json::from_slice(&body)?)
     }
+}
+
+/// Signs `request` as `signer`'s device, the way
+/// [`recall_wire::signature::sign_request`] describes: the method, host,
+/// path and query exactly as they will be sent, the protocol header, and
+/// the digest of the exact body bytes.
+///
+/// Read off the built request rather than assembled alongside it, so what
+/// is signed cannot drift from what is sent: reqwest encodes the query, and
+/// the server checks the encoding it received.
+fn sign(signer: &Signer, request: &mut reqwest::Request) -> Result<(), Error> {
+    let protocol = PROTOCOL.to_string();
+    let nonce = nonce()?;
+    let created = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let signed = {
+        let url = request.url();
+        let host = url.host_str().unwrap_or_default();
+        // `port()` is `None` for the scheme's default port, which is what
+        // `Host` leaves out too, and the server drops `:80` and `:443`
+        // either way.
+        let authority = signature::normalize_authority(&match url.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host.to_string(),
+        });
+        let target = Target {
+            method: request.method().as_str(),
+            authority: &authority,
+            path: url.path(),
+            query: url.query(),
+        };
+        let body = request
+            .body()
+            .and_then(|b| b.as_bytes())
+            .unwrap_or_default();
+        signature::sign_request(
+            &signer.key,
+            &signer.device_id,
+            &target,
+            &protocol,
+            body,
+            created,
+            &nonce,
+        )?
+    };
+    let headers = request.headers_mut();
+    // Set on the request itself rather than left to the client's defaults,
+    // so the value signed is certainly the value sent.
+    for (name, value) in [
+        (PROTOCOL_HEADER, protocol),
+        (signature::CONTENT_DIGEST_HEADER, signed.content_digest),
+        (signature::SIGNATURE_INPUT_HEADER, signed.signature_input),
+        (signature::SIGNATURE_HEADER, signed.signature),
+    ] {
+        let value = HeaderValue::from_str(&value)
+            .map_err(|_| Error::Sign(SignatureError::Malformed("header value")))?;
+        headers.insert(HeaderName::from_static(name), value);
+    }
+    Ok(())
+}
+
+/// A fresh nonce: 128 random bits, base64url. Never reused, because the
+/// server refuses a nonce it has seen from this device inside the window.
+fn nonce() -> Result<String, Error> {
+    use base64::Engine;
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|e| Error::Nonce(e.to_string()))?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
 
 #[cfg(test)]

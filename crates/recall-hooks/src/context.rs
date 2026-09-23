@@ -153,3 +153,17 @@ pub enum Error {
     #[error(transparent)]
     Io(#[from] io::Error),
 }
+
+impl Error {
+    /// Whether the server refused because it no longer knows the device
+    /// this machine signs as: revoked, or swept away after sitting idle.
+    /// The one refusal a hook can do something about, by enrolling again.
+    pub fn device_gone(&self) -> bool {
+        match self {
+            Error::Push { source, .. }
+            | Error::PushDelete { source, .. }
+            | Error::Pull { source, .. } => source.device_gone(),
+            _ => false,
+        }
+    }
+}

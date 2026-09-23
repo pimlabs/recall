@@ -46,8 +46,25 @@ pub async fn push() -> anyhow::Result<i32> {
         return Ok(exit::OK);
     }
 
-    let ctx = here.hook_context()?;
-    match recall_hooks::push(&ctx, &triggered).await {
+    let cfg = here.enroll_if_needed(here.config(), "recall-push").await;
+    let ctx = here.hook_context_for(&cfg)?;
+    let result = match recall_hooks::push(&ctx, &triggered).await {
+        // Once, and only for the one refusal enrolling again can fix.
+        Err(err) if err.device_gone() => {
+            match here
+                .reenroll(&cfg, "recall-push", &device_reason(&err))
+                .await
+            {
+                Some(cfg) => {
+                    let ctx = here.hook_context_for(&cfg)?;
+                    recall_hooks::push(&ctx, &triggered).await
+                }
+                None => Err(err),
+            }
+        }
+        other => other,
+    };
+    match result {
         Ok(res) => {
             if res.pushed.is_some() || !res.deleted.is_empty() {
                 eprintln!(
@@ -70,14 +87,35 @@ pub async fn push() -> anyhow::Result<i32> {
 pub async fn pull() -> anyhow::Result<i32> {
     // An unconfigured or unreachable server warns on stderr and exits 0,
     // leaving whatever is already on disk alone.
-    let ctx = match project::resolve().hook_context() {
+    let here = project::resolve();
+    // A cloud session with RECALL_ENROLL_KEY and no device key yet becomes
+    // a device here, before its first request, with nobody asked anything.
+    let cfg = here.enroll_if_needed(here.config(), "recall-pull").await;
+    if cfg.device.is_none() && cfg.token.is_empty() && cfg.enroll_key.is_some() {
+        eprintln!("recall-pull: no device key and no RECALL_TOKEN, leaving local memory untouched");
+        return Ok(exit::OK);
+    }
+    let ctx = match here.hook_context_for(&cfg) {
         Ok(ctx) => ctx,
         Err(err) => {
             eprintln!("recall-pull: {err}, leaving local memory untouched");
             return Ok(exit::OK);
         }
     };
-    match recall_hooks::pull(&ctx).await {
+    let result = match recall_hooks::pull(&ctx).await {
+        Err(err) if err.device_gone() => {
+            match here
+                .reenroll(&cfg, "recall-pull", &device_reason(&err))
+                .await
+                .and_then(|cfg| here.hook_context_for(&cfg).ok())
+            {
+                Some(ctx) => recall_hooks::pull(&ctx).await,
+                None => Err(err),
+            }
+        }
+        other => other,
+    };
+    match result {
         Ok(res) => {
             eprintln!("{}", res.describe(ctx.project_key()));
             Ok(exit::OK)
@@ -86,5 +124,18 @@ pub async fn pull() -> anyhow::Result<i32> {
             eprintln!("recall-pull: fetch failed ({err}), leaving local memory untouched");
             Ok(exit::OK)
         }
+    }
+}
+
+/// The server's reason for refusing a device, for the line that says so.
+fn device_reason(err: &recall_hooks::Error) -> String {
+    match err {
+        recall_hooks::Error::Push { source, .. }
+        | recall_hooks::Error::PushDelete { source, .. }
+        | recall_hooks::Error::Pull { source, .. } => source
+            .reason()
+            .trim_start_matches("unauthorized: ")
+            .to_string(),
+        other => other.to_string(),
     }
 }

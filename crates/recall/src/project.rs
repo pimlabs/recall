@@ -11,9 +11,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use recall_hooks::{
-    claude, client::Client, declared_env, home, project, scope, ClientConfig, Context,
-};
+use recall_hooks::{claude, declared_env, device, home, project, scope, ClientConfig, Context};
 
 /// The project root, resolved the way Claude Code resolves it: the git root,
 /// falling back to the working directory.
@@ -163,7 +161,12 @@ impl Resolved {
     /// Fails when the server is not configured, which is the one thing a
     /// hook cannot work around.
     pub fn hook_context(&self) -> anyhow::Result<Context> {
-        let cfg = self.config();
+        self.hook_context_for(&self.config())
+    }
+
+    /// The same, from a configuration the caller already holds: one a hook
+    /// has just enrolled a device into, say.
+    pub fn hook_context_for(&self, cfg: &ClientConfig) -> anyhow::Result<Context> {
         cfg.require()?;
 
         let root_str = self.root.to_string_lossy().to_string();
@@ -171,13 +174,96 @@ impl Resolved {
             memory_dir: cfg.claude.memory_dir(&root_str),
             state_file: cfg.claude.state_file(&root_str),
             scopes: scope::scopes(
-                self.project_key(&cfg, &remote()),
+                self.project_key(cfg, &remote()),
                 cfg.global_key.clone(),
                 cfg.machine_key.clone(),
             ),
             source_env: cfg.source_env.clone(),
-            client: Client::new(&cfg.url, &cfg.token)?,
+            client: cfg.client()?,
         })
+    }
+
+    /// Enrolls this machine with `RECALL_ENROLL_KEY` when it has no device
+    /// key for the server in effect: a cloud session's first hook.
+    ///
+    /// Never an error, because it runs inside a hook. What happened is one
+    /// line on stderr, prefixed with `hook`, and the configuration comes
+    /// back either holding the new device or as it was, in which case the
+    /// token, if there is one, is used as before.
+    pub async fn enroll_if_needed(&self, mut cfg: ClientConfig, hook: &str) -> ClientConfig {
+        let Some(enroll_key) = cfg.enroll_key.clone() else {
+            return cfg;
+        };
+        if cfg.device.is_some() || cfg.url.is_empty() {
+            return cfg;
+        }
+        let Some(h) = home::locate(self.env.lookup()) else {
+            eprintln!("{hook}: RECALL_ENROLL_KEY is set, but there is no home directory to keep a device key in");
+            return cfg;
+        };
+        match device::enroll_with_key(&h, &cfg.url, &enroll_key, &cfg.source_env).await {
+            Ok(entry) => {
+                eprintln!(
+                    "{hook}: enrolled this session as device {} with RECALL_ENROLL_KEY",
+                    entry.name
+                );
+                cfg.device = Some(entry);
+            }
+            Err(e) => {
+                let fallback = if cfg.token.is_empty() {
+                    ""
+                } else {
+                    ", using RECALL_TOKEN instead"
+                };
+                eprintln!(
+                    "{hook}: could not enroll with RECALL_ENROLL_KEY ({}){fallback}",
+                    enroll_failure(&e)
+                );
+            }
+        }
+        cfg
+    }
+
+    /// After the server refused this machine's device as unknown or
+    /// revoked: enrolls afresh when `RECALL_ENROLL_KEY` allows it, and
+    /// otherwise says what to do. [`Some`] with the new configuration only
+    /// when there is something worth retrying with.
+    pub async fn reenroll(
+        &self,
+        cfg: &ClientConfig,
+        hook: &str,
+        why: &str,
+    ) -> Option<ClientConfig> {
+        if cfg.enroll_key.is_none() {
+            eprintln!("{hook}: the server no longer accepts this machine's device key ({why})");
+            eprintln!(
+                "{hook}:   run recall connect to enroll this machine again, or set \
+                 RECALL_ENROLL_KEY to have a cloud session do it by itself"
+            );
+            return None;
+        }
+        let h = home::locate(self.env.lookup())?;
+        // The old key is dropped, not kept for a retry: a revoked device
+        // stays revoked, and a swept one no longer exists.
+        let _ = h.forget_device(&cfg.url);
+        let mut fresh = cfg.clone();
+        fresh.device = None;
+        eprintln!(
+            "{hook}: the server no longer knows this session's device ({why}), enrolling again"
+        );
+        let fresh = self.enroll_if_needed(fresh, hook).await;
+        fresh.device.is_some().then_some(fresh)
+    }
+}
+
+/// Why an enrolment with an enrolment key failed, in a line.
+fn enroll_failure(e: &device::Error) -> String {
+    match e {
+        device::Error::Client(recall_hooks::client::Error::Status { code: 404, .. }) => {
+            "this server does not enroll devices; it is older than 0.4.1".to_string()
+        }
+        device::Error::Client(c) => c.reason(),
+        other => other.to_string(),
     }
 }
 

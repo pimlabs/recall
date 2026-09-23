@@ -30,6 +30,8 @@ pub enum Source {
     CredentialsFile,
     /// `~/.recall/config.toml` — the server and this machine's name.
     ConfigFile,
+    /// `~/.recall/device.key` — this machine's device key.
+    DeviceFile,
 }
 
 /// Why configuration is unusable. The messages match the ones the Go and
@@ -42,6 +44,9 @@ pub enum ConfigError {
     /// A server, but no way to authenticate against it.
     #[error("RECALL_TOKEN must be set")]
     MissingToken,
+    /// A saved device key that cannot be read back into a key.
+    #[error("the device key saved for this server is damaged; run recall connect to enroll again")]
+    DamagedDevice,
 }
 
 /// What `recall push`, `pull`, `status` and `init` need.
@@ -64,6 +69,18 @@ pub struct ClientConfig {
     pub credentials_file: Option<std::path::PathBuf>,
     /// `~/.recall/config.toml`, likewise.
     pub config_file: Option<std::path::PathBuf>,
+    /// `~/.recall/device.key`, likewise.
+    pub device_file: Option<std::path::PathBuf>,
+    /// This machine's device at [`ClientConfig::url`], when it is enrolled
+    /// there. With one, every request is signed with its key and
+    /// [`ClientConfig::token`] is not sent at all.
+    pub device: Option<home::DeviceEntry>,
+    /// Why `device.key` could not be used, when it exists and could not.
+    pub device_error: Option<String>,
+    /// `RECALL_ENROLL_KEY`: an enrolment key, with which a machine that has
+    /// no device key yet enrolls itself, approved at once. What a cloud
+    /// environment holds instead of `RECALL_TOKEN`.
+    pub enroll_key: Option<String>,
     /// Why a file in `~/.recall` could not be used, when one exists and
     /// could not. Not an error here, for the reason nothing in this type is:
     /// a broken file must not stop `recall status` from saying so.
@@ -146,6 +163,7 @@ pub const VARS: &[&str] = &[
     "RECALL_PROJECT_KEY",
     "RECALL_GLOBAL_KEY",
     "RECALL_MACHINE_KEY",
+    crate::device::ENROLL_KEY_VAR,
     // Where `recall connect` keeps credentials. Read only when the
     // environment leaves the URL or the token unset.
     home::HOME_VAR,
@@ -247,6 +265,13 @@ impl ClientConfig {
             machine_source = source_or(&machine_key, Source::ConfigFile);
         }
 
+        // Looked up for the URL in effect, like the token, and for the same
+        // reason: an enrolment belongs to the server that approved it.
+        let device = url
+            .as_deref()
+            .and_then(|u| saved.devices.for_url(u))
+            .cloned();
+
         ClientConfig {
             url: url.unwrap_or_default(),
             token: token.unwrap_or_default(),
@@ -254,6 +279,12 @@ impl ClientConfig {
             token_source,
             credentials_file: saved.home.as_ref().map(home::Home::credentials_path),
             config_file: saved.home.as_ref().map(home::Home::config_path),
+            device_file: saved.home.as_ref().map(home::Home::device_path),
+            device,
+            device_error: saved.device_error,
+            enroll_key: var(&lookup, crate::device::ENROLL_KEY_VAR)
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty()),
             credentials_error: saved.error,
             config_problems,
             saved_server: saved.config.server.clone(),
@@ -279,15 +310,61 @@ impl ClientConfig {
 
     /// Reports what's missing for an operation that actually talks to the
     /// server.
+    ///
+    /// Either credential will do: a device key, or the token. So will an
+    /// enrolment key, which the hooks turn into a device key before they
+    /// need one.
     pub fn require(&self) -> Result<(), ConfigError> {
         if self.url.is_empty() {
             return Err(ConfigError::MissingUrl);
         }
-        if self.token.is_empty() {
+        if self.token.is_empty() && self.device.is_none() && self.enroll_key.is_none() {
             return Err(ConfigError::MissingToken);
         }
         Ok(())
     }
+
+    /// Where the credential requests are sent with came from: the device
+    /// key when there is one, since it wins, and the token's source
+    /// otherwise.
+    pub fn auth_source(&self) -> Source {
+        if self.device.is_some() {
+            Source::DeviceFile
+        } else {
+            self.token_source
+        }
+    }
+
+    /// A client for the server in effect: signing as this machine's device
+    /// when it has one, and sending the token when it does not.
+    ///
+    /// The device wins over the token wherever the token came from, the
+    /// environment included. It is the narrower credential, the one that
+    /// can be revoked on its own, and a machine enrolled on purpose should
+    /// not quietly go back to the shared secret because a shell profile
+    /// still exports it.
+    pub fn client(&self) -> Result<crate::client::Client, ClientError> {
+        let client = crate::client::Client::new(&self.url, &self.token)?;
+        match &self.device {
+            Some(entry) => {
+                let signer = crate::device::Signer::from_entry(entry)
+                    .map_err(|_| ClientError::Config(ConfigError::DamagedDevice))?;
+                Ok(client.with_signer(signer))
+            }
+            None => Ok(client),
+        }
+    }
+}
+
+/// Why [`ClientConfig::client`] could not build a client.
+#[derive(Debug, thiserror::Error)]
+pub enum ClientError {
+    /// The configuration cannot be used.
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    /// The HTTP client could not be built.
+    #[error(transparent)]
+    Client(#[from] crate::client::Error),
 }
 
 /// What `~/.recall` holds, read once per configuration.
@@ -296,6 +373,8 @@ struct Saved {
     config: home::Config,
     credentials: home::Credentials,
     error: Option<String>,
+    devices: home::Devices,
+    device_error: Option<String>,
 }
 
 impl Saved {
@@ -315,6 +394,8 @@ impl Saved {
             config: home::Config::default(),
             credentials: home::Credentials::default(),
             error: None,
+            devices: home::Devices::default(),
+            device_error: None,
         };
         let Some(h) = out.home.clone() else {
             return out;
@@ -340,6 +421,12 @@ impl Saved {
         }
         if !errors.is_empty() {
             out.error = Some(errors.join("; "));
+        }
+        // Kept apart from the other two files' errors: a damaged device key
+        // is fixed by enrolling again, not by editing a file.
+        match h.load_devices() {
+            Ok(d) => out.devices = d.unwrap_or_default(),
+            Err(e) => out.device_error = Some(e.to_string()),
         }
         out
     }
