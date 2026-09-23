@@ -41,8 +41,7 @@ struct Harness {
 }
 
 /// A stand-in `claude`: `auth status` says it is logged in; a merge waits
-/// `sleep` seconds, then answers `merged` (or with the two inputs joined
-/// when `merged` is empty).
+/// `sleep` seconds, then answers `merged`.
 fn fake_claude(sleep: u32, merged: &str) -> (TempDir, String) {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
@@ -898,6 +897,58 @@ async fn health_shows_the_worker_and_the_queue_only_once_one_is_enrolled() {
     let queue = health.merge.queue.unwrap();
     assert_eq!((queue.queued, queue.leased, queue.failed), (1, 0, 0));
     assert!(queue.oldest_queued_at.is_some());
+}
+
+/// Every job request fixture is read by today's server. The answers are
+/// not 200 for the results, since their job and lease belong to the scratch
+/// server they were captured against, but none is that the body did not
+/// parse.
+#[tokio::test]
+async fn every_job_request_fixture_is_understood() {
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../recall-wire/fixtures/wire");
+    let h = harness(|_| {});
+    let w = h.worker().await;
+    let mut sent = 0;
+    for version in std::fs::read_dir(&root).unwrap() {
+        let version = version.unwrap().path();
+        let read = |name: &str| {
+            std::fs::read(version.join(name))
+                .ok()
+                .map(|b| serde_json::from_slice::<Value>(&b).unwrap())
+        };
+        if let Some(body) = read("job_claim_request.json") {
+            // Something to claim, so the claim's wait is not waited out.
+            h.conflict().await;
+            let claimed: ClaimResponse = ok(h.signed(&w, "POST", CLAIM_PATH, Some(body)).await);
+            assert!(claimed.job.is_some());
+            sent += 1;
+        }
+        for name in ["job_result_request.json", "job_result_request_error.json"] {
+            if let Some(body) = read(name) {
+                assert_eq!(
+                    error_of(h.result(&w, "job_scratch", body).await),
+                    (StatusCode::NOT_FOUND, "no job has that id".into()),
+                    "{name}"
+                );
+                sent += 1;
+            }
+        }
+        if let Some(body) = read("device_approve_request_worker.json") {
+            assert_eq!(
+                error_of(
+                    h.call("POST", devices::APPROVE_PATH, Some(TOKEN), Some(body))
+                        .await
+                ),
+                (
+                    StatusCode::NOT_FOUND,
+                    "no enrolment is waiting with that code".into()
+                )
+            );
+            sent += 1;
+        }
+    }
+    assert!(sent >= 4, "found only {sent} job request fixtures");
 }
 
 #[tokio::test]
