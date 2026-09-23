@@ -260,8 +260,18 @@ jobs:
   # source, and windows-latest carries the MSVC toolchain cc-rs needs for
   # that automatically — the same reason release.yml's msvc builds need
   # nothing extra either.
+  #
+  # Both architectures the release builds. arm64 is here rather than first
+  # met at release time because `ring`, under reqwest's TLS, compiles C and
+  # assembly for its target: if that fails on windows-11-arm it fails the
+  # release's build matrix, and `publish` waits for every leg, so one
+  # architecture would hold back every channel.
   windows:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
 
@@ -271,7 +281,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: windows
+          key: ${{ matrix.os }}
 
       - name: cargo fmt
         run: cargo fmt --all --check

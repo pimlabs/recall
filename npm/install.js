@@ -65,6 +65,28 @@ function extractSingleFile(archive, destDir, expectedName, ext) {
   return extracted;
 }
 
+// On macOS and Linux, npm's bin link is a symlink to bin/recall, which ships
+// as a Node shim. The shim works, but it starts Node on every call, and
+// `recall push` runs on every memory write in a session: measured, 52 ms a
+// call through the shim against 6 ms for the binary itself. So once the
+// binary is verified it replaces the shim at that path, and the symlink
+// then points straight at it — the optimization esbuild's installer makes
+// for the same reason. The shim stays on Windows, where npm wraps bin files
+// in .cmd and .ps1 scripts that need something Node can run.
+//
+// A rename, so the path always holds either the shim or the whole binary.
+// If it fails the shim is still there, still works, and is only slower.
+function putBinaryWhereTheLinkPoints() {
+  const shim = path.join(binDir, "recall");
+  try {
+    fs.renameSync(binPath, shim);
+    return shim;
+  } catch (err) {
+    console.warn(`recall: kept the Node shim (${err.message}); every call starts Node first`);
+    return binPath;
+  }
+}
+
 async function main() {
   const key = `${process.platform}:${process.arch}`;
   const platform = PLATFORMS[key];
@@ -104,10 +126,12 @@ async function main() {
     const extracted = extractSingleFile(archive, binDir, exeName, ext);
     fs.renameSync(extracted, binPath);
     // No mode bits on Windows; chmod there would be a no-op at best.
+    let installed = binPath;
     if (process.platform !== "win32") {
       fs.chmodSync(binPath, 0o755);
+      installed = putBinaryWhereTheLinkPoints();
     }
-    console.log(`recall: installed ${binPath}`);
+    console.log(`recall: installed ${installed}`);
   } catch (err) {
     fail(
       `could not install the binary: ${err.message}\n` +

@@ -5,14 +5,17 @@
 import worker from "../install-worker.js";
 
 const SCRIPT = "#!/usr/bin/env bash\necho hello\n";
+const PS1_SCRIPT = "Write-Host hello\n";
 
+// Each upstream answers with its own body, so a route that proxied the
+// wrong script would fail its body check instead of passing on a shared one.
 let upstreamStatus = 200;
 let upstreamCalls = 0;
-globalThis.fetch = async () => {
+globalThis.fetch = async (url) => {
   upstreamCalls += 1;
-  return upstreamStatus === 200
-    ? new Response(SCRIPT, { status: 200 })
-    : new Response("nope", { status: upstreamStatus });
+  if (upstreamStatus !== 200) return new Response("nope", { status: upstreamStatus });
+  const body = String(url).endsWith("/install.ps1") ? PS1_SCRIPT : SCRIPT;
+  return new Response(body, { status: 200 });
 };
 
 let failures = 0;
@@ -40,7 +43,7 @@ console.log("\nthe installer (PowerShell)");
   check("/install.ps1 status", res.status, 200);
   check("/install.ps1 content-type", res.headers.get("content-type"), "text/plain; charset=utf-8");
   check("/install.ps1 nosniff", res.headers.get("x-content-type-options"), "nosniff");
-  check("/install.ps1 body is the upstream script", await res.text(), SCRIPT);
+  check("/install.ps1 body is the upstream install.ps1", await res.text(), PS1_SCRIPT);
 }
 
 console.log("\nthe hostname's past");

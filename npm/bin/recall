@@ -2,6 +2,11 @@
 // Shim: npm creates a bin link at install time, but the real binary is
 // fetched by postinstall (install.js) and lands next to this file.
 //
+// On macOS and Linux this file is normally gone after install: install.js
+// moves the verified binary over it, so the bin link runs the binary with
+// no Node in between. It is what runs on Windows, and anywhere that move
+// failed.
+//
 // A Node script rather than a POSIX shell script. npm's cmd-shim reads a
 // bin file's shebang to decide how to run it on Windows; a `node` shebang
 // gets the same reliable .cmd/.ps1 wrapper every other npm CLI package

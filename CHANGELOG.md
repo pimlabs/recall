@@ -26,6 +26,10 @@ break will be described here in full rather than smoothed over.
   missing. The server remains Linux-only; winget and code signing are not
   done yet. See `docs/reference/install.md`'s Windows section, including
   what is a documented guess rather than verified on a real machine.
+- **npm on macOS and Linux runs the binary directly.** The installer now
+  puts the verified binary where npm's `recall` link points, instead of
+  leaving a wrapper script in between, so a hook call through an npm
+  install starts one process rather than two.
 
 ## 0.4.0 — 2026-09-23
 
