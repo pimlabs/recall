@@ -452,13 +452,13 @@ fn print_declared_env(rep: &Report) {
         };
         let mut note = String::new();
         if var.empty {
-            note.push_str(" — declared EMPTY, so the setting is off");
+            note.push_str(", declared EMPTY, so the setting is off");
         }
         if var.shadows_shell {
             note.push_str(if var.empty {
                 ", and it hides the value set in this shell"
             } else {
-                " — this overrides the value set in this shell"
+                ", overrides the value set in this shell"
             });
         }
         field!("{label}: {} from {}{note}", var.name, var.file);
@@ -500,12 +500,12 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
         ),
         KeySource::Remote => "from the git remote".to_string(),
         KeySource::LocalPath => {
-            "from this checkout's path — no git remote, so another machine will \
-             disagree; set RECALL_PROJECT_KEY on both"
+            "from this checkout's path. With no git remote another machine will \
+             disagree, so set RECALL_PROJECT_KEY on both"
                 .to_string()
         }
         KeySource::DeclaredButRejected => {
-            "RECALL_PROJECT_KEY was SET BUT UNUSABLE and ignored — it must be \
+            "RECALL_PROJECT_KEY was SET BUT UNUSABLE and ignored. It must be \
              non-empty, free of whitespace, and not under 'global:'"
                 .to_string()
         }
@@ -528,7 +528,7 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
         if rep.hooks_wired {
             "yes"
         } else {
-            "NO — run 'recall init' in this project"
+            "NO, run 'recall init' in this project"
         }
     );
     print_declared_env(rep);
@@ -536,7 +536,7 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
         "global       : {}",
         match &rep.global_key {
             None if rep.rejected_vars.contains(&"RECALL_GLOBAL_KEY") =>
-                "off — RECALL_GLOBAL_KEY was SET BUT EMPTY once trimmed, so it was ignored"
+                "off, RECALL_GLOBAL_KEY was SET BUT EMPTY once trimmed, so it was ignored"
                     .to_string(),
             // An empty *declaration* never reaches `rejected_vars`: an empty
             // value reads as unset before anything gets a chance to refuse
@@ -544,16 +544,14 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
             // that is already set, two lines under a report saying where it
             // was set and that it is empty.
             None if declared_empty(rep, "RECALL_GLOBAL_KEY") => format!(
-                "off — RECALL_GLOBAL_KEY is declared empty in {}, which reads as unset",
+                "off, RECALL_GLOBAL_KEY is declared empty in {}, which reads as unset",
                 declared_in(rep, "RECALL_GLOBAL_KEY").unwrap_or("a settings file")
             ),
             None => "off (set RECALL_GLOBAL_KEY to share memories across projects)".to_string(),
-            Some(key) if rep.global_linked => format!(
-                "{key} — {} file(s), linked from MEMORY.md",
-                rep.global_files
-            ),
+            Some(key) if rep.global_linked =>
+                format!("{key}, {} file(s), linked from MEMORY.md", rep.global_files),
             Some(key) => format!(
-                "{key} — {} file(s), NOT linked from MEMORY.md yet (run 'recall pull')",
+                "{key}, {} file(s), NOT linked from MEMORY.md yet (run 'recall pull')",
                 rep.global_files
             ),
         }
@@ -562,28 +560,28 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
         "machine      : {}",
         match &rep.machine_key {
             None if rep.rejected_vars.contains(&"RECALL_MACHINE_KEY") =>
-                "off — RECALL_MACHINE_KEY was SET BUT EMPTY once trimmed, so it was ignored"
+                "off, RECALL_MACHINE_KEY was SET BUT EMPTY once trimmed, so it was ignored"
                     .to_string(),
             None if declared_empty(rep, "RECALL_MACHINE_KEY") => format!(
-                "off — RECALL_MACHINE_KEY is declared empty in {}, which reads as unset",
+                "off, RECALL_MACHINE_KEY is declared empty in {}, which reads as unset",
                 declared_in(rep, "RECALL_MACHINE_KEY").unwrap_or("a settings file")
             ),
             // Deliberately not phrased as an invitation. The global line
             // suggests setting a key because sharing more is usually what
             // someone wants; this content is true of one machine only, and a
             // cloud session — a new machine every time — should leave it off.
-            None => "off (set RECALL_MACHINE_KEY for memories about this machine only)".to_string(),
-            Some(key) if rep.machine_files == 0 => format!("{key} — no files yet"),
+            None => "off (name this machine with recall connect)".to_string(),
+            Some(key) if rep.machine_files == 0 => format!("{key}, no files yet"),
             Some(key) if rep.machine_linked => {
                 format!(
-                    "{key} — {} file(s), linked from MEMORY.md",
+                    "{key}, {} file(s), linked from MEMORY.md",
                     rep.machine_files
                 )
             }
             // The state this scope shipped in: the files arrive and Claude
             // Code never opens them, because it reads what MEMORY.md links.
             Some(key) => format!(
-                "{key} — {} file(s), NOT linked from MEMORY.md yet (run 'recall pull')",
+                "{key}, {} file(s), NOT linked from MEMORY.md yet (run 'recall pull')",
                 rep.machine_files
             ),
         }
@@ -638,10 +636,10 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
         );
     }
     if let Some(err) = &rep.credentials_error {
-        field!("credentials  : UNREADABLE — {err}");
+        field!("credentials  : UNREADABLE ({err})");
     }
     if rep.credentials_exposed {
-        field!("credentials  : readable by other users — chmod 600 {from_file}");
+        field!("credentials  : readable by other users, run chmod 600 {from_file}");
     }
 
     if !rep.url_set {
@@ -664,7 +662,7 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
         if rep.merge_ready {
             "ready (claude CLI logged in)"
         } else {
-            "not configured — server falls back to last-write-wins"
+            "not configured, so the server uses last-write-wins"
         }
     );
     field!("synced files : {} on server", rep.synced_files);

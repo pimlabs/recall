@@ -47,6 +47,8 @@ anstyle = "1"
 # `recall connect`'s prompts: the token read without echo, the name, the
 # questions, and a spinner while the server answers.
 cliclack = "0.5"
+# The styling type cliclack's theme hooks take; already in the tree through it.
+console = "0.16"
 
 [profile.release]
 strip = true

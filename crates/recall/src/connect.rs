@@ -57,10 +57,8 @@ async fn run(args: Args) -> Step<()> {
     // variables are the right store there, and they already win.
     if proj::remote_session() {
         return refuse(
-            "this is a remote session, and anything saved here is discarded with the \
-             container.",
-            "Set RECALL_URL and RECALL_TOKEN on the cloud environment instead — its \
-             variables are a secret store, and they are what Recall reads there.",
+            "this is a remote session, so nothing saved here would last.",
+            "Set RECALL_URL and RECALL_TOKEN on the cloud environment instead.",
         );
     }
 
@@ -125,31 +123,26 @@ async fn run(args: Args) -> Step<()> {
     let saved = creds.token_for(&url).map(str::to_string);
     if saved.is_none() && !interactive {
         return refuse(
-            "reads the token from a terminal, without echoing it, and there is no \
-             terminal here.",
-            "Where something else holds the secret, set RECALL_TOKEN instead.",
+            "needs a terminal to ask for the token.",
+            "In a script, set RECALL_TOKEN instead.",
         );
     }
 
     intro();
     if url.starts_with("http://") && !is_loopback(&url) {
         say_warning(&format!(
-            "{url} is plain http, so the token crosses the network unencrypted on every \
-             request."
+            "{} uses plain http, so the token is sent unencrypted",
+            host(&url)
         ));
     }
 
     reach(&url).await?;
     let token = match saved {
-        Some(token) if verify(&url, &token).await? => {
-            say_step("Kept the saved token — it still works");
-            token
-        }
+        Some(token) if verify(&url, &token, "saved token").await? => token,
         Some(_) => {
-            say_warning("The saved token was rejected, so the server's token has changed.");
             if !interactive {
                 return refuse(
-                    "needs a new token, and there is no terminal to ask for it on.",
+                    "needs a new token, but there is no terminal to ask for one.",
                     "Run recall connect in a terminal.",
                 );
             }
@@ -173,7 +166,7 @@ async fn run(args: Args) -> Step<()> {
         );
     }
     say_success(&format!(
-        "Saved to {}  (the token is readable by you only)",
+        "Saved to {}",
         ui::tilde(&h.dir().display().to_string())
     ));
 
@@ -190,24 +183,19 @@ async fn run(args: Args) -> Step<()> {
     }
     let redundant = redundant_variables(&here);
     if !redundant.is_empty() {
-        let (vars, verb, it) = match redundant.as_slice() {
-            [one] => (one.to_string(), "says", "it"),
-            many => (many.join(" and "), "say", "them"),
-        };
         let _ = cliclack::log::remark(format!(
-            "{vars} {verb} the same as the name, so you can remove {it} from your shell \
-             profile — left there, {it} would overrule a later rename."
+            "No longer needed, remove from your shell profile: {}",
+            redundant.join(", ")
         ));
     }
 
-    let closing = match wiring {
-        Wiring::NoProject => "Run recall init in each project you want synced.",
-        Wiring::Declined => "This project is not synced until you run recall init.",
-        Wiring::Already | Wiring::JustNow => "This project syncs from its next session.",
-    };
-    let _ = cliclack::outro(format!(
-        "Connected as {name}. {closing}\n   Check on it any time: recall doctor"
-    ));
+    let _ = cliclack::outro(match wiring {
+        Wiring::NoProject => {
+            format!("Connected as {name}. Run recall init in a project to sync it.")
+        }
+        Wiring::Declined => format!("Connected as {name}. Run recall init to sync this project."),
+        Wiring::Already | Wiring::JustNow => format!("Connected as {name}"),
+    });
     Ok(())
 }
 
@@ -226,48 +214,49 @@ fn check_url(url: &str) -> Step<()> {
 /// `GET /health`: whether anything answers at `url` at all. Asked on its own
 /// so that "unreachable" and "wrong token" are never confused.
 async fn reach(url: &str) -> Step<()> {
-    let spinner = spin(&format!("Reaching {url}"));
+    let spinner = spin(&format!("Connecting to {}", host(url)));
     let result = match Client::new(url, "") {
         Ok(client) => client.health().await.map_err(|e| e.to_string()),
         Err(e) => Err(e.to_string()),
     };
     match result {
         Ok(_) => {
-            spinner.stop(format!("Reached {url}"));
+            spinner.stop(format!("Connected to {}", host(url)));
             Ok(())
         }
         Err(e) => {
-            spinner.error(format!("Could not reach {url}"));
+            spinner.error(format!("Can't reach {}", host(url)));
             refuse(&format!("could not reach {url}: {e}"), "Nothing was saved.")
         }
     }
 }
 
-/// Whether the server accepts `token`. `Ok(false)` is a clear rejection;
-/// anything else that goes wrong ends the flow, because it says nothing
-/// about the token either way.
-async fn verify(url: &str, token: &str) -> Step<bool> {
-    let spinner = spin("Checking the token");
+/// Whether the server accepts `token` — `what` is how the spinner names it.
+/// `Ok(false)` is a clear rejection; anything else that goes wrong ends the
+/// flow, because it says nothing about the token either way.
+async fn verify(url: &str, token: &str, what: &str) -> Step<bool> {
+    let spinner = spin(&format!("Checking {what}"));
     let result = match Client::new(url, token) {
         Ok(client) => client.check_token().await,
         Err(e) => {
-            spinner.error("Could not check the token");
+            spinner.error(format!("Couldn't check {what}"));
             return refuse(&e.to_string(), "Nothing was saved.");
         }
     };
+    let what = capitalized(what);
     match result {
         Ok(()) => {
-            spinner.stop("Token accepted");
+            spinner.stop(format!("{what} OK"));
             Ok(true)
         }
         Err(client::Error::Status {
             code: 401 | 403, ..
         }) => {
-            spinner.error("Token rejected");
+            spinner.error(format!("{what} rejected"));
             Ok(false)
         }
         Err(e) => {
-            spinner.error("Could not check the token");
+            spinner.error(format!("Couldn't check {}", what.to_lowercase()));
             refuse(
                 &format!("{url} answered /health but not an authenticated call: {e}"),
                 "Nothing was saved.",
@@ -282,16 +271,13 @@ const TOKEN_ATTEMPTS: usize = 3;
 
 /// Asks for the token until the server accepts one.
 async fn ask_token(url: &str) -> Step<String> {
-    let _ = cliclack::log::remark(
-        "The token is the server's RECALL_TOKEN, the one its deploy/.env holds.",
-    );
     for attempt in 1..=TOKEN_ATTEMPTS {
         let typed: String = answer(
-            cliclack::password(format!("Token for {url}"))
-                .mask('▪')
+            cliclack::password("Token  (the server's RECALL_TOKEN)")
+                .mask('•')
                 .validate(|s: &String| {
                     if s.trim().is_empty() {
-                        Err("paste the token, or press Ctrl-C to stop")
+                        Err("paste the token, or Ctrl-C to stop")
                     } else {
                         Ok(())
                     }
@@ -299,13 +285,11 @@ async fn ask_token(url: &str) -> Step<String> {
                 .interact(),
         )?;
         let token = typed.trim().to_string();
-        if verify(url, &token).await? {
+        if verify(url, &token, "token").await? {
             return Ok(token);
         }
         if attempt < TOKEN_ATTEMPTS {
-            say_warning(&format!(
-                "{url} is up, and it rejected that token. Try again."
-            ));
+            let _ = cliclack::log::remark("Try again");
         }
     }
     refuse(
@@ -332,11 +316,11 @@ fn machine_name(
     )
     .unwrap_or_else(|| "this-machine".to_string());
     if !interactive || args.yes {
-        say_step(&format!("Machine name: {suggested}"));
+        say_step(&format!("Machine name  {suggested}"));
         return Ok(suggested);
     }
     let typed: String = answer(
-        cliclack::input("Name this machine — it labels what this machine syncs")
+        cliclack::input("Machine name")
             .default_input(&suggested)
             .validate(|s: &String| match home::machine_name(s) {
                 Some(_) => Ok(()),
@@ -413,21 +397,15 @@ fn offer_init(args: &Args, interactive: bool) -> Step<Wiring> {
         .map(|b| settings::is_wired(&b))
         .unwrap_or(false);
     if wired {
-        say_step(&format!(
-            "{} is already set up to sync",
-            project_name(&root)
-        ));
+        say_step(&format!("{} already syncs", project_name(&root)));
         return Ok(Wiring::Already);
     }
     let yes = args.yes
         || (interactive
             && answer(
-                cliclack::confirm(format!(
-                    "Sync this project, {}? This adds Recall's hooks to .claude/settings.json",
-                    project_name(&root)
-                ))
-                .initial_value(true)
-                .interact(),
+                cliclack::confirm(format!("Sync {}?", project_name(&root)))
+                    .initial_value(true)
+                    .interact(),
             )?);
     if !yes {
         return Ok(Wiring::Declined);
@@ -440,13 +418,15 @@ fn offer_init(args: &Args, interactive: bool) -> Step<Wiring> {
     }
     // Committing it is not a nicety: it is what makes a fresh clone or a
     // cloud session sync without any setup of its own.
-    let root = ui::tilde(&root.display().to_string());
+    let git = match std::env::current_dir() {
+        Ok(cwd) if cwd == root => "git".to_string(),
+        _ => format!("git -C {}", ui::tilde(&root.display().to_string())),
+    };
     let _ = cliclack::note(
-        "Wired .claude/settings.json — now commit it",
+        "Hooks added. Commit them so other clones sync too:",
         format!(
-            "Committed, it makes fresh clones and cloud sessions sync too.\n\n\
-             git -C {root} add .claude/settings.json\n\
-             git -C {root} commit -m \"Enable Recall memory sync\""
+            "{git} add .claude/settings.json\n\
+             {git} commit -m \"Enable Recall memory sync\""
         ),
     );
     Ok(Wiring::JustNow)
@@ -463,12 +443,12 @@ async fn offer_backfill(here: &proj::Resolved, args: &Args, interactive: bool) -
     let yes = args.yes
         || (interactive
             && answer(
-                cliclack::confirm("Send this project's existing memory to the server now?")
+                cliclack::confirm("Upload existing memory?")
                     .initial_value(true)
                     .interact(),
             )?);
     if !yes {
-        let _ = cliclack::log::remark("Whenever you want to: recall backfill");
+        let _ = cliclack::log::remark("Later: recall backfill");
         return Ok(());
     }
     let later = "The connection is saved; run recall backfill to try again.";
@@ -476,25 +456,27 @@ async fn offer_backfill(here: &proj::Resolved, args: &Args, interactive: bool) -
         Ok(ctx) => ctx,
         Err(e) => return refuse(&e.to_string(), later),
     };
-    let spinner = spin("Sending what the server does not have yet");
+    let spinner = spin("Uploading memory");
     let outcome = match backfill(&ctx).await {
         Ok(outcome) => outcome,
         Err(e) => {
-            spinner.error("The first sync did not run");
+            spinner.error("Upload failed");
             return refuse(&e.to_string(), later);
         }
     };
     let sent = outcome.count(Disposition::Sent);
     let matches = outcome.count(Disposition::Matches);
-    spinner.stop(format!(
-        "First sync: {sent} sent, {matches} already on the server"
-    ));
+    spinner.stop(match matches {
+        0 => format!("Uploaded {}", files(sent)),
+        _ => format!("Uploaded {} · {matches} already there", files(sent)),
+    });
     // Every file is accounted for, as `recall backfill` insists; the lists
     // themselves are that command's, and it is safe to run again.
     let left = outcome.entries.len() - sent - matches - outcome.count(Disposition::Internal);
     if left > 0 || outcome.stopped.is_some() {
         say_warning(&format!(
-            "{left} file(s) were not sent. recall backfill lists them, and why."
+            "{} skipped, run recall backfill to see why",
+            files(left)
         ));
     }
     Ok(())
@@ -507,6 +489,27 @@ fn project_name(root: &Path) -> String {
         .unwrap_or_else(|| root.display().to_string())
 }
 
+/// `url` without its scheme — what a person calls a server.
+fn host(url: &str) -> &str {
+    url.split_once("://").map_or(url, |(_, rest)| rest)
+}
+
+/// `1 file`, `3 files`.
+fn files(n: usize) -> String {
+    match n {
+        1 => "1 file".to_string(),
+        n => format!("{n} files"),
+    }
+}
+
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 /// Whatever in the environment still wins over what was just saved, named,
 /// because otherwise `connect` looks like it did nothing.
 fn environment_overrides(here: &proj::Resolved, connected: &str, name: &str) -> Vec<String> {
@@ -514,22 +517,27 @@ fn environment_overrides(here: &proj::Resolved, connected: &str, name: &str) -> 
     let mut out = Vec::new();
     if cfg.url_source == Source::Environment && home::normalize_url(&cfg.url) != connected {
         out.push(format!(
-            "RECALL_URL is set to {}, so this machine keeps talking to that server. \
-             Unset it to use {connected}.",
-            cfg.url
+            "RECALL_URL in your shell points to {}, unset it to use this server",
+            host(&cfg.url)
         ));
     }
     if cfg.token_source == Source::Environment {
-        out.push(format!(
-            "{} It wins over the saved one; remove it to finish the move.",
-            environment_token_origin(here, "also supplies")
-        ));
+        out.push(
+            match here.env.declared(&["RECALL_TOKEN"]).into_iter().next() {
+                Some(d) => format!(
+                    "{} sets RECALL_TOKEN, which overrides the saved one",
+                    d.file
+                ),
+                None => "RECALL_TOKEN in your shell overrides the saved one, remove it from \
+                         your shell profile"
+                    .to_string(),
+            },
+        );
     }
     let overridden = crate::status::overrides(here, &cfg);
     for o in overridden.iter().filter(|o| o.setting == "machine.name") {
         out.push(format!(
-            "{}={} wins over the name {name}. Remove it from your shell profile; \
-             the name is all Recall needs now.",
+            "{}={} overrides the name {name}, remove it from your shell profile",
             o.variable, o.environment
         ));
     }
@@ -554,7 +562,45 @@ fn intro() {
     use std::sync::atomic::{AtomicBool, Ordering};
     static SHOWN: AtomicBool = AtomicBool::new(false);
     if !SHOWN.swap(true, Ordering::Relaxed) {
-        let _ = cliclack::intro(" recall connect ");
+        cliclack::set_theme(Bullets);
+        let _ = cliclack::intro("recall connect");
+    }
+}
+
+/// cliclack's look with round marks instead of its squares and diamonds: a
+/// filled bullet for the step being asked or a result, a hollow one for a
+/// step that is done, and a bullet to mask the token.
+struct Bullets;
+
+const FILLED: console::Emoji = console::Emoji("●", "*");
+const HOLLOW: console::Emoji = console::Emoji("○", "o");
+const CROSS: console::Emoji = console::Emoji("✗", "x");
+
+impl cliclack::Theme for Bullets {
+    fn state_symbol(&self, state: &cliclack::ThemeState) -> String {
+        let color = self.state_symbol_color(state);
+        let symbol = match state {
+            cliclack::ThemeState::Active => FILLED,
+            cliclack::ThemeState::Submit => HOLLOW,
+            cliclack::ThemeState::Cancel | cliclack::ThemeState::Error(_) => CROSS,
+        };
+        color.apply_to(symbol).to_string()
+    }
+
+    fn active_symbol(&self) -> String {
+        console::style(FILLED).green().to_string()
+    }
+
+    fn submit_symbol(&self) -> String {
+        console::style(HOLLOW).green().to_string()
+    }
+
+    fn error_symbol(&self) -> String {
+        console::style(CROSS).red().to_string()
+    }
+
+    fn password_mask(&self) -> char {
+        '•'
     }
 }
 
@@ -637,7 +683,7 @@ fn refuse<T>(what: &str, then: &str) -> Step<T> {
 pub fn disconnect(url: Option<&str>) -> anyhow::Result<i32> {
     let here = proj::resolve();
     let Some(h) = home::locate(here.env.lookup()) else {
-        eprintln!("recall disconnect: no home directory, so nothing is saved — set RECALL_HOME");
+        eprintln!("recall disconnect: no home directory, so nothing is saved. Set RECALL_HOME.");
         return Ok(exit::CONFIG);
     };
     let (mut creds, mut config) = match load_both(&h) {
@@ -725,10 +771,7 @@ pub fn disconnect(url: Option<&str>) -> anyhow::Result<i32> {
 fn environment_token_origin(here: &proj::Resolved, verb: &str) -> String {
     match here.env.declared(&["RECALL_TOKEN"]).into_iter().next() {
         Some(d) => format!("{} {verb} RECALL_TOKEN.", d.file),
-        None => format!(
-            "Your shell {verb} RECALL_TOKEN — Recall can see the value but not which \
-             file exported it, so check your shell profile."
-        ),
+        None => format!("Your shell {verb} RECALL_TOKEN. Remove it from your shell profile."),
     }
 }
 

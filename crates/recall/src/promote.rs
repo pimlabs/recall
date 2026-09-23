@@ -43,7 +43,7 @@ pub async fn run(file: &Path, to: Target) -> anyhow::Result<i32> {
         Ok(res) => {
             if res.resumed {
                 println!(
-                    "recall: finished an earlier promotion of {} — it was already in {}",
+                    "recall: finished an earlier promotion of {}, it was already in {}",
                     res.from, res.to
                 );
             } else {

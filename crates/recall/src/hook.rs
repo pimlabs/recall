@@ -35,8 +35,8 @@ pub async fn push() -> anyhow::Result<i32> {
         if let Some(slug) = foreign_memory_slug(&here.memory_root(), &here.memory_dir(), &triggered)
         {
             eprintln!(
-                "recall-push: that file is memory for {slug}, not for this project \
-                 — nothing was pushed"
+                "recall-push: that file is memory for {slug}, not for this project, \
+                 so nothing was pushed"
             );
             eprintln!(
                 "recall-push:   standing in {}; a git worktree has its own memory directory",
