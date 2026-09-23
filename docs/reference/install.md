@@ -10,9 +10,10 @@ give you. If you do not have one yet, start at
 session. Recall is single-owner by design: one token, no accounts. Nothing
 here sets up access for anyone else.
 
-Recall is a single Rust binary, and the same artifact runs both halves
-(`recall serve` is the server). Install once per machine, then run
-`recall init` and `recall backfill` once per project.
+This installs `recall`, the client. The server is a separate binary,
+`recall-server`, set up once from [`deploy/README.md`](../../deploy/README.md).
+Install the client once per machine, then run `recall init` and `recall
+backfill` once per project.
 
 ## Install
 
@@ -123,8 +124,6 @@ git clone https://github.com/pimlabs/recall && cd recall
 cargo build --release -p recall
 # binary at target/release/recall
 ```
-
-The first build is slow — `rusqlite` compiles SQLite from C.
 
 ## Connect to your server
 
@@ -672,11 +671,16 @@ than the one it replaces — async would turn that into a race.
 
 ## Running the server
 
-The same binary:
+A binary of its own since 0.4.0. Until then it was `recall serve`, and
+typing that now says where it went:
 
 ```sh
-RECALL_TOKEN=... RECALL_DB_PATH=/data/recall.db recall serve
+RECALL_TOKEN=... RECALL_DB_PATH=/data/recall.db recall-server
 ```
+
+Each release publishes it for Linux, amd64 and arm64, as
+`recall-server_linux_<arch>.tar.gz`; `cargo install recall-server` builds it
+anywhere else.
 
 In practice it runs in Docker behind an ingress — a Cloudflare Tunnel or an
 existing Traefik, one compose file each. See
@@ -686,8 +690,9 @@ the one-time `claude setup-token` step that enables semantic merge.
 ## Releases
 
 Binaries are published by a GitHub Actions workflow when a `v*` tag is
-pushed: four archives — macOS and Linux, x64 and arm64 — plus a
-`checksums.txt` that npm's installer verifies against. `v0.1.0` was the
+pushed: four client archives (macOS and Linux, x64 and arm64), two server
+archives (Linux, x64 and arm64), and a `checksums.txt` that npm's installer
+and the server image both verify against. `v0.1.0` was the
 first, on 2026-09-14.
 
 npm and `install.sh` download those archives, so both are tied to a released

@@ -4,7 +4,7 @@
 # the Node implementation to this one, and after.
 #
 #   cargo build --release
-#   ./scripts/compat-check.sh target/release/recall
+#   ./scripts/compat-check.sh target/release/recall-server
 #
 # The Node server itself is gone from the tree; what remains of it is
 # `fixtures/node-written.db`, a database it actually wrote, captured
@@ -16,7 +16,7 @@
 # because it used the real thing where the tests used a stand-in.
 set -u
 
-BIN="${1:-target/release/recall}"
+BIN="${1:-target/release/recall-server}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FIXTURE="$REPO_ROOT/fixtures/node-written.db"
 TOKEN="compat-token"
@@ -55,13 +55,13 @@ check_bytes() {
   fi
 }
 
-[ -x "$BIN" ] || { echo "no binary at $BIN — build it first (cargo build -p recall)"; exit 1; }
+[ -x "$BIN" ] || { echo "no binary at $BIN — build it first (cargo build --release -p recall-server)"; exit 1; }
 BIN="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
 [ -f "$FIXTURE" ] || { echo "missing $FIXTURE"; exit 1; }
 
 start_rust() {
   RECALL_TOKEN="$TOKEN" RECALL_PORT="$PORT" RECALL_DB_PATH="$1" RECALL_MERGE_ENABLED=false \
-    "$BIN" serve >"$WORK/rust.log" 2>&1 &
+    "$BIN" >"$WORK/rust.log" 2>&1 &
   PIDS="$PIDS $!"
   for _ in $(seq 1 50); do
     curl -sf "http://localhost:$PORT/health" >/dev/null 2>&1 && return 0

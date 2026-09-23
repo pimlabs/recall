@@ -1,16 +1,14 @@
 //! `recall` — sync Claude Code's auto memory across machines.
 //!
-//! One binary, both halves: `recall serve` runs the server, everything else
-//! runs on a developer machine or inside a Claude Code session as a hook.
-//! This file is only the dispatcher; each command lives in its own module,
-//! and the reasoning about *how loudly it is allowed to fail* lives with it.
+//! The client: it runs on a developer machine or inside a Claude Code
+//! session as a hook. This file is only the dispatcher; each command lives
+//! in its own module, and the reasoning about *how loudly it is allowed to
+//! fail* lives with it.
 //!
-//! # Where the server starts, too
-//!
-//! This is the entry point for **both** halves — `serve` starts the HTTP
-//! server that `recall-server` implements. If you came looking for where the
-//! server process begins and expected `recall-server` to hold a `main`, this
-//! is the file.
+//! The server is not in here. Until 0.4.0 `recall serve` ran it from this
+//! binary; it is now `recall-server`, a binary of its own in the
+//! `recall-server` crate, and this crate does not depend on it. See Part 4
+//! of `docs/design/handshake.md`.
 //!
 //! It was called `recall-cli` until the v0.1.0 release preflight found that
 //! name taken on crates.io by an unrelated project, and `recall` taken too,
@@ -33,7 +31,6 @@ mod hook;
 mod init;
 mod project;
 mod promote;
-mod serve;
 mod status;
 mod ui;
 
@@ -141,7 +138,10 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Run the sync server
+    /// Moved to its own binary, `recall-server`, in 0.4.0. Kept hidden so
+    /// that typing it explains where the server went instead of failing
+    /// with "unrecognized subcommand".
+    #[command(hide = true)]
     Serve,
     /// Hook entry point — called by PostToolUse
     Push,
@@ -170,8 +170,7 @@ fn main() {
         std::process::exit(exit::CONFIG);
     };
 
-    // Only `serve` is long-running and genuinely concurrent. The hook
-    // commands each make one request and exit, so they get a
+    // The commands each make a few requests and exit, so they get a
     // single-threaded runtime — `recall push` runs on every memory write in
     // a session, and spinning up a thread pool to make one HTTP call is
     // waste the user pays for repeatedly.
@@ -182,7 +181,14 @@ fn main() {
         }
         Cmd::Init { path } => init::run(path.as_deref()),
         Cmd::Backfill => block_on_current(backfill::run()),
-        Cmd::Serve => block_on_multi(serve::run()),
+        Cmd::Serve => {
+            eprintln!(
+                "recall: the server is its own binary since 0.4.0. Run recall-server \
+                 instead, with the same environment. See \
+                 https://github.com/pimlabs/recall/blob/main/docs/reference/install.md"
+            );
+            Ok(exit::CONFIG)
+        }
         Cmd::Promote { file, to } => block_on_current(promote::run(&file, to)),
         Cmd::Connect { url, name, yes } => {
             block_on_current(connect::connect(connect::Args { url, name, yes }))
@@ -207,15 +213,6 @@ fn block_on_current<F: std::future::Future<Output = anyhow::Result<i32>>>(
     fut: F,
 ) -> anyhow::Result<i32> {
     tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?
-        .block_on(fut)
-}
-
-fn block_on_multi<F: std::future::Future<Output = anyhow::Result<i32>>>(
-    fut: F,
-) -> anyhow::Result<i32> {
-    tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
         .block_on(fut)

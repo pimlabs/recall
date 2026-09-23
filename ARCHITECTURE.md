@@ -17,12 +17,15 @@
 
 No peer-to-peer link between environments — every environment only ever talks to the server. This is what makes the "ephemeral session with zero prior setup" requirement work: there's nothing to pair, just one URL + one token.
 
-## One binary
+## One workspace, two binaries
 
-Client and server are the same Rust binary (`docs/history/rust-rewrite.md`):
-`recall serve` runs the server; `recall init` / `status` / `backfill` /
-`promote` / `push` / `pull` run on a developer machine. That is not packaging
-convenience. The validation rules and the tombstone/empty-file distinction
+Client and server are built from one Rust workspace, at one version
+(`docs/history/rust-rewrite.md`): `recall-server` runs the server; `recall
+init` / `status` / `backfill` / `promote` / `push` / `pull` run on a
+developer machine. Until 0.4.0 they were one binary, `recall serve` being the
+server, and every laptop carried a server it never ran; Part 4 of
+`docs/design/handshake.md` has the split. The shared workspace is not
+packaging convenience. The validation rules and the tombstone/empty-file distinction
 previously existed twice — in JavaScript on the server and in bash on the
 client — with nothing keeping them in agreement. The `recall-wire` crate is
 now the single definition both halves use, which is also why the workspace

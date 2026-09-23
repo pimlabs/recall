@@ -61,7 +61,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          run_id=$(gh run list --workflow ci-deploy.yml --commit "$GITHUB_SHA" --event push \
+          run_id=$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" --event push \
             --json databaseId --jq '.[0].databaseId')
           if [ -z "$run_id" ]; then
             echo "::error::No CI run for $GITHUB_SHA yet. Wait for it, then run this again."

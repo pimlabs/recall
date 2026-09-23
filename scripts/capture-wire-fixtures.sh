@@ -3,11 +3,11 @@
 # Captures what a released server puts on the wire, as golden fixtures for
 # crates/recall-wire/tests/golden.rs.
 #
-#   ./scripts/capture-wire-fixtures.sh 0.3.3
+#   ./scripts/capture-wire-fixtures.sh 0.4.0
 #
-# Downloads that version's release archive for this machine, runs its
-# server on a scratch database, and saves each response into
-# crates/recall-wire/fixtures/wire/<version>/. A file that already exists is
+# Downloads that version's release archive for this machine (the server's
+# own, from 0.4.0), runs its server on a scratch database, and saves each
+# response into crates/recall-wire/fixtures/wire/<version>/. A file that already exists is
 # left alone: a shipped fixture is never rewritten, see the README there.
 # Request fixtures are not captured here; they are written from the
 # client's PushRequest at that tag.
@@ -28,11 +28,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Before 0.4.0 the server was `recall serve`, inside the client's archive,
+# built for Linux and macOS. From 0.4.0 it is `recall-server`, in its own
+# archive, built for Linux only: that is where servers run.
+if [ "$(printf '%s\n' "$VERSION" 0.4.0 | sort -V | head -1)" = 0.4.0 ]; then
+  NAME=recall-server
+  SERVE=""
+else
+  NAME=recall
+  SERVE=serve
+fi
 case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64) ASSET=recall_linux_amd64 ;;
-  Linux-aarch64 | Linux-arm64) ASSET=recall_linux_arm64 ;;
-  Darwin-x86_64) ASSET=recall_darwin_amd64 ;;
-  Darwin-arm64) ASSET=recall_darwin_arm64 ;;
+  Linux-x86_64) ASSET=${NAME}_linux_amd64 ;;
+  Linux-aarch64 | Linux-arm64) ASSET=${NAME}_linux_arm64 ;;
+  Darwin-x86_64) ASSET=${NAME}_darwin_amd64 ;;
+  Darwin-arm64) ASSET=${NAME}_darwin_arm64 ;;
   *) echo "no release archive for $(uname -s)-$(uname -m)" >&2; exit 1 ;;
 esac
 
@@ -42,9 +52,12 @@ tar -xzf "$WORK/a.tar.gz" -C "$WORK"
 BIN="$WORK/$ASSET"
 "$BIN" version
 
+# $SERVE is deliberately unquoted: empty for recall-server, which takes no
+# subcommand.
+# shellcheck disable=SC2086
 RECALL_TOKEN=fixture-token RECALL_PORT="$PORT" RECALL_DB_PATH="$WORK/db.sqlite" \
   RECALL_MERGE_ENABLED=false RECALL_GIT_COMMIT=abc1234 \
-  "$BIN" serve >"$WORK/server.log" 2>&1 &
+  "$BIN" $SERVE >"$WORK/server.log" 2>&1 &
 SERVER=$!
 for _ in $(seq 1 40); do
   curl -sf "$URL/health" >/dev/null 2>&1 && break

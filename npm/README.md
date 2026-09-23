@@ -36,7 +36,8 @@ there. Notes true of one box and wrong on the next — its RAM, which of two
 reach a machine they would be false on: name the machine in
 `~/.recall/config.toml`, and `recall promote <file> --to machine`.
 
-`recall serve` runs the server side — the same binary, self-hosted.
+The server is a separate binary, `recall-server`, usually run from the
+Docker setup in the repository below. This package installs only the client.
 
 Full documentation, including standing up the server:
 https://github.com/pimlabs/recall

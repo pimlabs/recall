@@ -4,7 +4,7 @@
 # the headers it does not name actually ignored?
 #
 #   cargo build --release
-#   ./scripts/trusted-ip-check.sh target/release/recall
+#   ./scripts/trusted-ip-check.sh target/release/recall-server
 #
 # This is a security property, not a nicety. Rate limiting runs before auth so
 # that a flood of invalid tokens is limited too — so a client that can pick its
@@ -27,7 +27,7 @@ chk() { [ "$2" = "$3" ] && ok "$1" || { bad "$1"; printf '        got %s want %s
 start() { # port, trusted header
   RECALL_TOKEN="$TOKEN" RECALL_PORT="$1" RECALL_DB_PATH="$WORK/$1.db" \
     RECALL_MERGE_ENABLED=false RECALL_RATE_LIMIT_MAX=3 RECALL_RATE_LIMIT_WINDOW_MS=60000 \
-    RECALL_TRUSTED_IP_HEADER="$2" "$BIN" serve >"$WORK/$1.log" 2>&1 &
+    RECALL_TRUSTED_IP_HEADER="$2" "$BIN" >"$WORK/$1.log" 2>&1 &
   PIDS="$PIDS $!"
   for _ in $(seq 1 50); do curl -sf "http://127.0.0.1:$1/health" >/dev/null 2>&1 && return; sleep 0.2; done
   echo "server on :$1 never came up"; cat "$WORK/$1.log"; exit 1

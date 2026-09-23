@@ -179,9 +179,9 @@ cargo fmt --all --check
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
 cargo build --release
-./scripts/compat-check.sh target/release/recall     # 19 checks
-./scripts/api-doc-check.sh target/release/recall    # 27 checks
-./scripts/trusted-ip-check.sh target/release/recall # 9 checks
+./scripts/compat-check.sh target/release/recall-server     # 19 checks
+./scripts/api-doc-check.sh target/release/recall-server    # 33 checks
+./scripts/trusted-ip-check.sh target/release/recall-server # 9 checks
 ```
 
 Confirm the version is the same in all three places — they are not linked, so

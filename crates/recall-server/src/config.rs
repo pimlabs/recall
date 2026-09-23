@@ -17,7 +17,7 @@ pub enum ConfigError {
     MissingToken,
 }
 
-/// What `recall serve` needs.
+/// What `recall-server` needs.
 ///
 /// Every field has a default that is safe to run with, except [`token`],
 /// which has none — see [`ConfigError::MissingToken`].
@@ -27,7 +27,7 @@ pub enum ConfigError {
 /// | [`addr`] | `RECALL_HOST`, `RECALL_PORT` | `0.0.0.0:8787` |
 /// | [`token`] | `RECALL_TOKEN` | *required* |
 /// | [`db_path`] | `RECALL_DB_PATH` | `data/recall.db` |
-/// | [`git_commit`] | `RECALL_GIT_COMMIT` | `unknown` |
+/// | [`git_commit`] | `RECALL_GIT_COMMIT` | the commit the binary was built from, else `unknown` |
 /// | [`backup_dir`] | `RECALL_BACKUP_DIR` | off |
 /// | [`backup_interval`] | `RECALL_BACKUP_INTERVAL_MS` | 24h |
 /// | [`backup_keep`] | `RECALL_BACKUP_KEEP` | 7 |
@@ -63,6 +63,8 @@ pub struct Config {
     /// is the same file the Node server wrote.
     pub db_path: String,
     /// Reported by `GET /health` so a deploy can be confirmed from outside.
+    /// A release binary knows its own commit, stamped at build time; the
+    /// variable overrides it, for an image built from a checkout.
     pub git_commit: String,
 
     /// Where periodic database snapshots go. Empty disables backups.
@@ -163,7 +165,10 @@ impl Config {
             addr: format!("0.0.0.0:{}", or("RECALL_PORT", "8787")),
             token: get("RECALL_TOKEN").unwrap_or_default(),
             db_path: or("RECALL_DB_PATH", "data/recall.db"),
-            git_commit: or("RECALL_GIT_COMMIT", "unknown"),
+            git_commit: or(
+                "RECALL_GIT_COMMIT",
+                option_env!("RECALL_GIT_COMMIT").unwrap_or("unknown"),
+            ),
             backup_dir: get("RECALL_BACKUP_DIR").unwrap_or_default(),
             backup_interval: Duration::from_secs(
                 num("RECALL_BACKUP_INTERVAL_HOURS", 24).saturating_mul(3600),

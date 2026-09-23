@@ -14,8 +14,32 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
-## Unreleased
+## 0.4.0 — 2026-09-23
 
+- **Breaking: the server is its own binary, `recall-server`.** `recall serve`
+  is gone from the client; typing it now says where the server went and
+  exits 1. A server run from this repository's Docker setup needs nothing
+  done by hand, since the image runs `recall-server` itself. A server started
+  as `recall serve` some other way: install `recall-server` (each release
+  publishes it for Linux amd64 and arm64, and `cargo install recall-server`
+  builds it anywhere) and run it with the same environment. Nothing about
+  what it serves, stores or accepts changed.
+- **The client is smaller**: 3.2 MB instead of 4.5 MB on Linux x86_64. It
+  no longer carries a web server or SQLite, and installs from npm, Homebrew,
+  curl and crates.io get only the client.
+- **The server image runs the release's own binary.** `deploy/Dockerfile`
+  downloads the `recall-server` the release published and checks it against
+  the release's `checksums.txt` instead of compiling, so a server build takes
+  a minute rather than several and needs no memory to compile. The version
+  comes from the checkout's `Cargo.toml`, or `RECALL_VERSION`.
+  `RECALL_SOURCE=source` still builds from the checkout.
+- **A server runs releases, not `main`.** Each release deploys itself, and
+  any released version can be deployed from Actions → Deploy, which is also
+  how to roll back. A push to `main` no longer deploys anything. A
+  deployment whose SSH key has a forced `command=` that pulls `main` has to
+  drop it; see `docs/reference/github-actions-deploy.md`.
+- **`GET /health` names the commit a release binary was built from** even
+  when `RECALL_GIT_COMMIT` is not set.
 - **`recall connect` says less.** Every line is shorter ("Connected to
   recall.example.com", "Saved token OK", "Sync recall?", "Uploaded 5 files",
   "Connected as jarvis"), and the commit hint is just the two git commands.
