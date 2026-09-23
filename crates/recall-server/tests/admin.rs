@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use recall_server::merge::Status;
 use recall_server::{Config, Server, Store};
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -73,7 +74,12 @@ impl Fixture {
             // No RECALL_TOKEN on purpose: an admin command needs none.
             .env_clear()
             .env("RECALL_DB_PATH", self.db())
-            .env("RECALL_BACKUP_DIR", self.backups());
+            .env("RECALL_BACKUP_DIR", self.backups())
+            // Every change waits out the server's merge window after it
+            // commits. A millisecond here leaves the fixed margin, about a
+            // second, instead of the 45 a real server's default costs; the
+            // race test sets its own.
+            .env("RECALL_MERGE_TIMEOUT_MS", "1");
         cmd
     }
 
@@ -298,7 +304,49 @@ fn rename_moves_every_row_after_taking_a_backup() {
         "the backup's path is printed: {stdout}"
     );
     assert_eq!(dump(&snapshots[0]), before);
-    assert!(stdout.contains(&format!("Confirmed with --yes for project key \"{OLD}\"")));
+    assert!(
+        stdout.contains(&format!(
+            "Confirmed with --yes for project key to rename \"{OLD}\", and key to rename it to \
+             \"me/new\"."
+        )),
+        "{stdout}"
+    );
+    assert!(stdout.contains("Checked: the change held."), "{stdout}");
+}
+
+/// A typo in the target is the costlier one: it strands the project under
+/// a key no machine asks for. So the target is typed back too.
+#[test]
+fn a_rename_goes_ahead_only_when_both_keys_are_typed_back() {
+    let fx = Fixture::new();
+    let before = fx.dump();
+    for typed in [
+        format!("{OLD}\n"),
+        format!("{OLD}\nme/nwe\n"),
+        format!("{OLD}\nme/new \n"),
+        "me/new\nme/new\n".to_string(),
+    ] {
+        let out = fx.admin_typing(&["rename", OLD, "me/new"], &typed);
+        assert_exit(&out, 1);
+        let (stdout, _) = text(&out);
+        assert_eq!(
+            stdout.contains("Then type the key to rename it to, \"me/new\""),
+            typed.starts_with(OLD),
+            "asked for the target once the source was right: {stdout}"
+        );
+    }
+    let out = fx.admin_typing(&["rename", OLD, "me/new"], &format!("{OLD}\nme/nwe\n"));
+    assert!(
+        text(&out).1.contains("\"me/nwe\" is not \"me/new\""),
+        "{:?}",
+        text(&out)
+    );
+    assert_eq!(fx.dump(), before);
+    assert!(fx.snapshots().is_empty(), "no backup until it is confirmed");
+
+    let out = fx.admin_typing(&["rename", OLD, "me/new"], &format!("{OLD}\nme/new\n"));
+    assert_exit(&out, 0);
+    assert_eq!(under(&fx.dump(), "me/new").len(), 3);
 }
 
 /// The primary key is (project_key, file_path). Refused whether or not the
@@ -314,6 +362,12 @@ fn a_rename_onto_a_key_that_holds_rows_is_refused_and_changes_nothing() {
     let (_, stderr) = text(&out);
     assert!(stderr.contains("already holds 1 row(s)"), "{stderr}");
     assert!(stderr.contains("The database was not changed."), "{stderr}");
+    // The advice is the safe fold, not "point the machine at it and let it
+    // push", whose first pull overwrites that machine's files.
+    assert!(stderr.contains("Do not fold"), "{stderr}");
+    assert!(stderr.contains("memory directory aside first"), "{stderr}");
+    assert!(stderr.contains(&format!("\"{OLD}.archived-20")), "{stderr}");
+    assert!(!stderr.contains("then remove"), "{stderr}");
     // Disjoint: acme/app has only unrelated.md. Still refused.
     let out = fx.admin(&["rename", OLD, "acme/app", "--yes"]);
     assert_exit(&out, 1);
@@ -355,6 +409,42 @@ fn remove_deletes_that_key_only_after_a_backup() {
         before,
         "the backup holds what was removed"
     );
+}
+
+/// Removing a key whose notes were meant to have been folded elsewhere is
+/// the moment content is lost without anyone noticing. The plan says how
+/// many files hold content no other key has, before the confirmation.
+#[test]
+fn remove_warns_before_confirming_about_content_no_other_key_has() {
+    let fx = Fixture::new();
+    // MEMORY.md and notes.md are nowhere else; old.md is a tombstone.
+    let out = fx.admin_typing(&["remove", OLD], "no\n");
+    assert_exit(&out, 1);
+    let (stdout, _) = text(&out);
+    let warning = stdout
+        .find("Warning: 2 of these file(s) hold content that no live file under any other key")
+        .unwrap_or_else(|| panic!("{stdout}"));
+    let prompt = stdout.find("To go ahead").unwrap();
+    assert!(warning < prompt, "warned before asking: {stdout}");
+    assert!(stdout.contains(&format!("\"{OLD}.archived-20")), "{stdout}");
+
+    // Once notes.md's content is under another key too, at any path, only
+    // MEMORY.md is left to warn about.
+    fx.sql(&format!(
+        "INSERT INTO memory_files VALUES ('me/thing', 'folded/notes.md', 'a fact\n', 'x', '{T1}', 0)"
+    ));
+    let out = fx.admin(&["remove", OLD, "--dry-run"]);
+    assert_exit(&out, 0);
+    let (stdout, _) = text(&out);
+    assert!(stdout.contains("Warning: 1 of these file(s)"), "{stdout}");
+
+    // A key whose every file is somewhere else gets no warning at all.
+    fx.sql(&format!(
+        "INSERT INTO memory_files VALUES ('copy', 'notes.md', 'a fact\n', 'x', '{T1}', 0)"
+    ));
+    let out = fx.admin(&["remove", "copy", "--dry-run"]);
+    assert_exit(&out, 0);
+    assert!(!text(&out).0.contains("Warning"), "{:?}", text(&out));
 }
 
 // ---------------------------------------------------------------- restore
@@ -428,6 +518,82 @@ fn restore_does_not_overwrite_without_the_flag_and_says_what_would_change() {
         "a restore never deletes what the backup does not have"
     );
     assert!(under(&after, OLD).iter().any(|r| r.1 == "MEMORY.md"));
+}
+
+/// A backup's tombstone for a file that is live now is an old deletion,
+/// and putting it back deletes the file on every machine at its next pull.
+/// `--overwrite` alone does not do that; `--restore-deletions` must be
+/// asked for as well.
+#[test]
+fn restore_turns_a_live_file_into_a_tombstone_only_with_restore_deletions() {
+    let fx = Fixture::new();
+    // The backup has old.md as a tombstone and notes.md as "a fact".
+    let snapshot = Store::open(fx.db())
+        .unwrap()
+        .backup(fx.dir.path().join("periodic"), 7)
+        .unwrap();
+    let snap = snapshot.to_str().unwrap();
+    // Since: old.md written again, on purpose, and notes.md edited.
+    fx.sql(&format!(
+        "UPDATE memory_files SET content = 'written again', deleted = 0,
+             updated_at = '2026-09-23T00:00:00.000Z'
+             WHERE project_key = '{OLD}' AND file_path = 'old.md';
+         UPDATE memory_files SET content = 'edited since', updated_at = '2026-09-23T00:00:00.000Z'
+             WHERE project_key = '{OLD}' AND file_path = 'notes.md';"
+    ));
+    let old_md = |fx: &Fixture| {
+        under(&fx.dump(), OLD)
+            .into_iter()
+            .find(|r| r.1 == "old.md")
+            .cloned()
+            .unwrap()
+    };
+
+    let out = fx.admin(&["restore", snap, OLD, "--yes", "--overwrite"]);
+    assert_exit(&out, 0);
+    let (stdout, _) = text(&out);
+    let skipped = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("skipped"))
+        .unwrap_or_else(|| panic!("{stdout}"));
+    assert!(skipped.contains("old.md"), "{skipped}");
+    assert!(skipped.contains("--restore-deletions"), "{skipped}");
+    assert!(
+        stdout.contains("1 live file(s) the backup has as deleted were left as they are"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("tombstones, which deletes"), "{stdout}");
+    let kept = old_md(&fx);
+    assert_eq!((kept.2.as_str(), kept.5), ("written again", 0));
+    let notes = under(&fx.dump(), OLD)
+        .into_iter()
+        .find(|r| r.1 == "notes.md")
+        .cloned()
+        .unwrap();
+    assert_eq!(notes.2, "a fact\n", "the ordinary overwrite still happened");
+
+    let out = fx.admin(&[
+        "restore",
+        snap,
+        OLD,
+        "--yes",
+        "--overwrite",
+        "--restore-deletions",
+    ]);
+    assert_exit(&out, 0);
+    let (stdout, _) = text(&out);
+    let delete = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("delete "))
+        .unwrap_or_else(|| panic!("{stdout}"));
+    assert!(delete.contains("old.md"), "{delete}");
+    assert!(delete.contains("file -> tombstone"), "{delete}");
+    assert!(
+        stdout
+            .contains("1 live file(s) turned into tombstones, which deletes them on every machine"),
+        "{stdout}"
+    );
+    assert_eq!(old_md(&fx).5, 1, "a tombstone now, as asked");
 }
 
 #[test]
@@ -584,6 +750,94 @@ fn no_backup_means_no_change() {
     assert_eq!(fx.dump(), before);
 }
 
+/// A backup that fails part way leaves nothing behind: a partial file named
+/// like a good snapshot is worse than none, since it sorts among them and
+/// does not open. A file size limit cuts `VACUUM INTO` short for real; the
+/// shell ignores SIGXFSZ first so the write fails with EFBIG instead of the
+/// signal killing the process.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_backup_cut_short_leaves_no_partial_file_and_changes_nothing() {
+    let fx = Fixture::new();
+    let before = fx.dump();
+    let out = Command::new("/bin/sh")
+        .arg("-c")
+        // A few 512-byte blocks: less than one database page, so the very
+        // first page the backup writes is cut short.
+        .arg(r#"trap '' XFSZ; ulimit -f 4 && exec "$0" admin remove "$1" --yes"#)
+        .arg(env!("CARGO_BIN_EXE_recall-server"))
+        .arg(OLD)
+        .env_clear()
+        .env("RECALL_DB_PATH", fx.db())
+        .env("RECALL_BACKUP_DIR", fx.backups())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_exit(&out, 1);
+    assert!(
+        text(&out).1.contains("taking the backup"),
+        "{:?}",
+        text(&out)
+    );
+    assert!(
+        fx.backups().join("admin").is_dir(),
+        "the backup was started, so this is the case that matters"
+    );
+    assert_eq!(fx.snapshots(), Vec::<PathBuf>::new(), "no partial file");
+    assert_eq!(fx.dump(), before);
+}
+
+/// A push that lands while the owner is reading the plan: the backup taken
+/// after the confirmation does not hold what was shown, so nothing changes,
+/// and that backup is deleted rather than left to pile up, one per retry.
+#[test]
+fn a_backup_that_does_not_hold_what_was_shown_stops_the_change_and_is_deleted() {
+    let fx = Fixture::new();
+    let mut child = fx
+        .command(&["remove", OLD])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut shown = Vec::new();
+    let mut buf = [0u8; 4096];
+    while !String::from_utf8_lossy(&shown).contains("without the quotes: ") {
+        let n = stdout.read(&mut buf).unwrap();
+        assert!(
+            n > 0,
+            "ended before asking: {}",
+            String::from_utf8_lossy(&shown)
+        );
+        shown.extend_from_slice(&buf[..n]);
+    }
+    fx.sql(&format!(
+        "INSERT INTO memory_files VALUES ('{OLD}', 'late.md', 'arrived', 'x', '{T1}', 0)"
+    ));
+    let before = fx.dump();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{OLD}\n").as_bytes())
+        .unwrap();
+    let mut rest = String::new();
+    stdout.read_to_string(&mut rest).unwrap();
+    let out = child.wait_with_output().unwrap();
+
+    assert_eq!(out.status.code(), Some(1), "{rest}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("does not hold the rows shown above"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("The database was not changed."), "{stderr}");
+    assert!(rest.contains("Deleted that backup again"), "{rest}");
+    assert!(fx.snapshots().is_empty(), "{:?}", fx.snapshots());
+    assert_eq!(fx.dump(), before);
+}
+
 /// `changes()` disagreeing with the plan rolls the whole change back. A
 /// trigger that silently skips one row stands in for whatever could make
 /// that happen in real life; it is exactly the case the check exists for,
@@ -632,9 +886,10 @@ fn a_changes_mismatch_rolls_back_every_command() {
     }
 }
 
-/// `docker compose exec` runs as root unless told otherwise; a change made
-/// as anyone but the database's owner is refused before it starts. Only
-/// checkable where the test itself can hand the file to someone else.
+/// `docker exec` runs as root unless told otherwise; a change made as
+/// anyone but the database's owner is refused before it starts. End to end
+/// only where the test itself can hand the file to someone else, which is
+/// as root; the decision itself is unit-tested in `admin.rs` everywhere.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_change_as_someone_other_than_the_owner_is_refused() {
@@ -665,27 +920,48 @@ struct Running {
 
 impl Running {
     fn start(db: &Path) -> Self {
+        Self::start_with(db, None)
+    }
+
+    /// With `claude`, merge is on and runs that stand-in CLI, which the
+    /// server is told is logged in.
+    fn start_with(db: &Path, claude: Option<&Path>) -> Self {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let store = Arc::new(Store::open(db).unwrap());
         let server = Server::new(
             Config {
                 token: TOKEN.into(),
-                merge_enabled: false,
-                claude_bin: "definitely-not-a-real-binary".into(),
+                merge_enabled: claude.is_some(),
+                claude_bin: claude.map_or("definitely-not-a-real-binary".into(), |p| {
+                    p.to_str().unwrap().to_string()
+                }),
+                merge_timeout: Duration::from_secs(20),
                 rate_limit_max: 100_000,
                 trusted_ip_header: String::new(),
                 ..Config::default()
             },
             store,
         );
+        server.set_claude_status(Status {
+            checked_at: recall_server::now(),
+            available: claude.is_some(),
+            logged_in: claude.is_some(),
+            error: String::new(),
+        });
         let listener = rt
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
             .unwrap();
         let addr = listener.local_addr().unwrap();
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        // The router, not `serve_with_shutdown`: that also starts the
+        // background status probe, which would run the stand-in as `claude
+        // auth status` and overwrite the status set above.
+        let app = server
+            .router()
+            .into_make_service_with_connect_info::<SocketAddr>();
         rt.spawn(async move {
-            let _ = server
-                .serve_with_shutdown(listener, async {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
                     let _ = stopped.await;
                 })
                 .await;
@@ -819,6 +1095,108 @@ fn a_lock_held_past_the_busy_timeout_fails_cleanly() {
     assert_eq!(ok, "ok");
     assert_eq!(push(server.addr, OLD, "after.md"), 200);
     assert_eq!(pulled(server.addr, OLD), 4);
+}
+
+/// A stand-in `claude` that takes `seconds` to merge, which is how long a
+/// push holds a row it has read without holding any lock.
+#[cfg(unix)]
+fn slow_claude(dir: &Path, seconds: u32) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("slow-claude");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\ncat > /dev/null\nsleep {seconds}\n\
+             printf '%s' '{{\"is_error\":false,\"result\":\"merged late\"}}'\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// The race a lock cannot close: a push reads a row, merges for a while
+/// holding no lock, and writes after the change has committed, partly
+/// undoing it. The command cannot prevent that from its side, so it waits
+/// out the merge window and says exactly what came back and what to do.
+#[cfg(unix)]
+#[test]
+fn a_push_being_merged_as_a_change_commits_is_reported_afterwards() {
+    let fx = Fixture::new();
+    let claude = slow_claude(fx.dir.path(), 2);
+    let server = Running::start_with(&fx.db(), Some(&claude));
+    let addr = server.addr;
+    let snapshot = Store::open(fx.db())
+        .unwrap()
+        .backup(fx.dir.path().join("periodic"), 7)
+        .unwrap();
+    let snap = snapshot.to_str().unwrap().to_string();
+
+    // A remove, with a push to notes.md already merging as it commits.
+    let pushing = thread::spawn(move || push(addr, OLD, "notes.md"));
+    thread::sleep(Duration::from_millis(500));
+    let out = fx
+        .command(&["remove", OLD, "--yes"])
+        .env("RECALL_MERGE_TIMEOUT_MS", "4000")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(pushing.join().unwrap(), 200);
+    assert_exit(&out, 3);
+    let (stdout, stderr) = text(&out);
+    assert!(stdout.contains("Done: removed 3 row(s)"), "{stdout}");
+    assert!(stdout.contains("Waiting 5.0s"), "{stdout}");
+    assert!(
+        stderr.contains(&format!(
+            "1 row(s) are under \"{OLD}\" again:\n  notes.md\n"
+        )),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("run `recall-server admin remove {OLD}` again")),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("was not changed"), "{stderr}");
+    let back = under(&fx.dump(), OLD)
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(back.len(), 1);
+    assert_eq!(back[0].2, "merged late", "what the push wrote after");
+
+    // A restore --overwrite, with a push to notes.md merging the version
+    // the restore replaces.
+    fx.sql(&format!(
+        "UPDATE memory_files SET content = 'edited since' WHERE project_key = '{OLD}'"
+    ));
+    let pushing = thread::spawn(move || push(addr, OLD, "notes.md"));
+    thread::sleep(Duration::from_millis(500));
+    let out = fx
+        .command(&["restore", &snap, OLD, "--yes", "--overwrite"])
+        .env("RECALL_MERGE_TIMEOUT_MS", "4000")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(pushing.join().unwrap(), 200);
+    assert_exit(&out, 3);
+    let (_, stderr) = text(&out);
+    assert!(
+        stderr.contains(&format!(
+            "1 restored row(s) under \"{OLD}\" are no longer what it wrote:\n  notes.md\n"
+        )),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "run `recall-server admin restore --overwrite {snap} {OLD}` again"
+        )),
+        "{stderr}"
+    );
+
+    // And with nothing in flight, the same check passes quietly.
+    let out = fx.admin(&["restore", &snap, OLD, "--yes", "--overwrite"]);
+    assert_exit(&out, 0);
+    assert!(text(&out).0.contains("Checked: the change held."));
 }
 
 // ---------------------------------------------------------------- not over HTTP

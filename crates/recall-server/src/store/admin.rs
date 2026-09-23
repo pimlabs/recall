@@ -35,11 +35,6 @@ use super::Store;
 /// change how an admin command behaves against a running server.
 pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Journal modes under which SQLite can roll a transaction back, including
-/// after a crash half way through. `off` and `memory` cannot, and a change
-/// to the only copy of someone's memory is not made without that.
-const SAFE_JOURNAL_MODES: [&str; 4] = ["delete", "truncate", "persist", "wal"];
-
 /// Whether an admin command may write to the database it opens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Access {
@@ -99,16 +94,84 @@ pub(crate) struct Restore {
     /// Backup rows with no live row at the same path: inserted.
     pub(crate) add: Vec<Row>,
     /// Live rows that differ from the backup's: `(live, backup)`. Replaced
-    /// only when `allow_overwrite` is set.
+    /// only when `allow_overwrite` is set. Never a live file the backup has
+    /// as a tombstone: those are `deletions`.
     pub(crate) overwrite: Vec<(Row, Row)>,
+    /// Live files the backup has as tombstones: `(live, backup)`.
+    ///
+    /// Kept apart from `overwrite` because replacing one is a deletion, and
+    /// not only on the server: every machine removes the file at its next
+    /// pull. A backup's tombstone is an old decision, and the file may have
+    /// been written again since on purpose, so these are skipped unless
+    /// `allow_deletions` is set, and listed either way.
+    pub(crate) deletions: Vec<(Row, Row)>,
     /// Paths whose live row is already identical to the backup's.
     pub(crate) unchanged: Vec<String>,
-    /// Live paths the backup does not have. A restore never deletes, so
-    /// these stay as they are.
+    /// Live paths the backup does not have. A restore never removes a row,
+    /// so these stay as they are.
     pub(crate) live_only: Vec<String>,
     /// `--overwrite`.
     pub(crate) allow_overwrite: bool,
+    /// `--restore-deletions`, which the command accepts only together with
+    /// `--overwrite`.
+    pub(crate) allow_deletions: bool,
 }
+
+impl Restore {
+    /// The deletions this restore makes, which is none unless allowed.
+    pub(crate) fn applied_deletions(&self) -> &[(Row, Row)] {
+        if self.allow_deletions {
+            &self.deletions
+        } else {
+            &[]
+        }
+    }
+
+    /// The deletions this restore leaves as they are.
+    pub(crate) fn skipped_deletions(&self) -> &[(Row, Row)] {
+        if self.allow_deletions {
+            &[]
+        } else {
+            &self.deletions
+        }
+    }
+
+    /// Whether it replaces any live row, rather than only adding rows where
+    /// there were none. Only a replacement can be undone by a push that was
+    /// already in flight; see [`Plan::undone`].
+    pub(crate) fn replaces_live_rows(&self) -> bool {
+        !self.overwrite.is_empty() || !self.applied_deletions().is_empty()
+    }
+
+    /// Every row this restore writes, as it will be written.
+    fn written(&self) -> impl Iterator<Item = &Row> {
+        self.add.iter().chain(
+            self.overwrite
+                .iter()
+                .chain(self.applied_deletions())
+                .map(|(_, backup)| backup),
+        )
+    }
+}
+
+/// Why a change was abandoned before it wrote anything: the write lock never
+/// came, or what the database held once it did was no longer what the owner
+/// had been shown.
+///
+/// A type of its own so the command can tell these apart from every other
+/// failure. They are the ones in which the backup the command took is known
+/// to be of no use, having been taken for a change that never began, so the
+/// command deletes it rather than leaving one behind per retry.
+#[derive(Debug)]
+pub(crate) struct Abandoned(pub(crate) String);
+
+impl std::fmt::Display for Abandoned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Abandoned {}
 
 impl Plan {
     /// How many rows the change must touch. [`Store::apply`] commits only
@@ -116,7 +179,7 @@ impl Plan {
     pub(crate) fn expected_changes(&self) -> usize {
         match self {
             Plan::Rename { rows, .. } | Plan::Remove { rows, .. } => rows.len(),
-            Plan::Restore(r) => r.add.len() + r.overwrite.len(),
+            Plan::Restore(r) => r.add.len() + r.overwrite.len() + r.applied_deletions().len(),
         }
     }
 
@@ -147,14 +210,29 @@ impl Plan {
                     // (project_key, file_path), so an overlap would fail
                     // outright, and a partial fold of one project into
                     // another has no single right answer for the paths that
-                    // do overlap: the semantic merge is the server's job,
-                    // through POST /sync, not this command's.
+                    // do overlap.
+                    //
+                    // The advice matters as much as the refusal. The obvious
+                    // fold, pointing the old machine at `to` and letting it
+                    // push, loses data: its first pull writes `to`'s version
+                    // of every file both keys have over its own before
+                    // anything is pushed, and backfill skips a file that
+                    // differs. So the machine's files are copied aside
+                    // first, and the old key is kept under another name
+                    // rather than removed.
+                    let archive = archive_key(from);
                     return Some(format!(
                         "{to:?} already holds {} row(s), and a rename only moves rows onto a \
                          key that holds none, since the primary key is (project_key, file_path). \
-                         To fold {from:?} into {to:?}, set RECALL_PROJECT_KEY={to} on the machine \
-                         that wrote {from:?} and let it push, which merges through the server; \
-                         then remove {from:?}",
+                         Do not fold {from:?} into {to:?} by pointing its machine at {to:?} and \
+                         letting it push: that machine's first pull writes {to:?}'s version of \
+                         every file both keys have over its own before it pushes anything. \
+                         Instead, copy that machine's memory directory aside first (`recall \
+                         status` prints where it is), rename {from:?} to an archive key such as \
+                         {archive:?} rather than removing it, set RECALL_PROJECT_KEY={to} on \
+                         that machine, and bring back by hand what the copy has that {to:?} \
+                         lacks. \"Folding one key into another\" in deploy/README.md has the \
+                         steps",
                         occupied.len()
                     ));
                 }
@@ -187,10 +265,93 @@ impl Plan {
             // The backup's rows are what they were when read: the file is
             // never written to, and re-reading it would compare it with
             // itself.
-            Plan::Restore(r) => {
-                restore_plan(conn, &r.key, r.backup.clone(), r.allow_overwrite).map(Plan::Restore)
-            }
+            Plan::Restore(r) => restore_plan(
+                conn,
+                &r.key,
+                r.backup.clone(),
+                r.allow_overwrite,
+                r.allow_deletions,
+            )
+            .map(Plan::Restore),
         }
+    }
+
+    /// What is wrong with `snapshot` as the backup of this change, if
+    /// anything: it must hold, row for row, what the change replaces.
+    ///
+    /// `VACUUM INTO` reporting success is not the same as the file holding
+    /// what the owner was shown. The file could be cut short by a full disk
+    /// that SQLite did not notice, or a push could land between showing the
+    /// plan and taking the backup, and then the backup is of a state nobody
+    /// looked at. Either way the change must not go ahead on its strength.
+    /// A rename and a remove compare every row of the keys involved; a
+    /// restore compares the rows it replaces, and counts the rest.
+    pub(crate) fn snapshot_mismatch(&self, snapshot: &Store) -> Result<Option<String>> {
+        let differs = |key: &str, held: &[Row], shown: usize| {
+            format!(
+                "it holds {} row(s) under {key:?} where {shown} were shown",
+                held.len()
+            )
+        };
+        Ok(match self {
+            Plan::Rename {
+                from,
+                to,
+                rows,
+                occupied,
+            } => {
+                let held = snapshot.rows(from)?;
+                let target = snapshot.rows(to)?;
+                if held != *rows {
+                    Some(differs(from, &held, rows.len()))
+                } else if target != *occupied {
+                    Some(differs(to, &target, occupied.len()))
+                } else {
+                    None
+                }
+            }
+            Plan::Remove { key, rows } => {
+                let held = snapshot.rows(key)?;
+                (held != *rows).then(|| differs(key, &held, rows.len()))
+            }
+            Plan::Restore(r) => {
+                let held = snapshot.rows(&r.key)?;
+                let shown =
+                    r.overwrite.len() + r.deletions.len() + r.unchanged.len() + r.live_only.len();
+                let replaced_held = r
+                    .overwrite
+                    .iter()
+                    .chain(&r.deletions)
+                    .all(|(live, _)| held.contains(live));
+                (held.len() != shown || !replaced_held).then(|| differs(&r.key, &held, shown))
+            }
+        })
+    }
+
+    /// Paths where, some time after this change committed, the database no
+    /// longer shows it: rows under the key a rename or remove emptied, or a
+    /// restored row that is no longer what the restore wrote.
+    ///
+    /// The one cause the admin command waits for is a push that was in
+    /// flight: the server reads the stored row, may merge for up to
+    /// `RECALL_MERGE_TIMEOUT_MS` holding no lock, and then writes, so a push
+    /// that read before the change committed writes after it, under the old
+    /// key or over the restored row. The other is a machine still syncing
+    /// under the old key, or editing a restored file, which the same check
+    /// sees just as well.
+    pub(crate) fn undone(&self, store: &Store) -> Result<Vec<String>> {
+        let paths = |rows: Vec<Row>| rows.into_iter().map(|r| r.file_path).collect();
+        Ok(match self {
+            Plan::Rename { from, .. } => paths(store.rows(from)?),
+            Plan::Remove { key, .. } => paths(store.rows(key)?),
+            Plan::Restore(r) => {
+                let live = store.rows(&r.key)?;
+                r.written()
+                    .filter(|w| !live.contains(w))
+                    .map(|w| w.file_path.clone())
+                    .collect()
+            }
+        })
     }
 
     /// Runs the change, returning the sum of `changes()` over every
@@ -223,7 +384,7 @@ impl Plan {
                         ),
                     )?;
                 }
-                for (_, row) in &r.overwrite {
+                for (_, row) in r.overwrite.iter().chain(r.applied_deletions()) {
                     changed += conn.execute(
                         "UPDATE memory_files
                          SET content = ?3, source_env = ?4, updated_at = ?5, deleted = ?6
@@ -304,23 +465,6 @@ impl Store {
         })
     }
 
-    /// Refuses a journal mode under which a transaction cannot be rolled
-    /// back. Changing the mode is not this command's business: switching the
-    /// file to WAL, say, would break sqlite-web, whose volume is mounted
-    /// read-only and so cannot create the `-shm` file WAL needs.
-    pub(crate) fn check_journal_mode(&self) -> Result<String> {
-        let conn = self.lock();
-        let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
-        let mode = mode.to_ascii_lowercase();
-        if !SAFE_JOURNAL_MODES.contains(&mode.as_str()) {
-            bail!(
-                "the database's journal_mode is {mode}, under which SQLite cannot roll back a \
-                 transaction that fails half way"
-            );
-        }
-        Ok(mode)
-    }
-
     /// Every project key with its counts, ordered by key.
     pub(crate) fn summaries(&self) -> Result<Vec<Summary>> {
         let conn = self.lock();
@@ -365,8 +509,31 @@ impl Store {
         key: &str,
         backup: Vec<Row>,
         allow_overwrite: bool,
+        allow_deletions: bool,
     ) -> Result<Plan> {
-        restore_plan(&self.lock(), key, backup, allow_overwrite).map(Plan::Restore)
+        restore_plan(&self.lock(), key, backup, allow_overwrite, allow_deletions).map(Plan::Restore)
+    }
+
+    /// The live files under `key` whose content no live row under any other
+    /// key has, by path.
+    ///
+    /// Removing these is removing that content from the live database
+    /// altogether, which is what `remove` warns about. Content is compared
+    /// whole and byte for byte, at any path: this answers "is it anywhere
+    /// else", not "did it move". A tombstone elsewhere does not count, since
+    /// no machine will ever pull its content.
+    pub(crate) fn unique_live_paths(&self, key: &str) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT a.file_path FROM memory_files a
+             WHERE a.project_key = ?1 AND a.deleted = 0
+               AND NOT EXISTS (
+                   SELECT 1 FROM memory_files b
+                   WHERE b.project_key != ?1 AND b.deleted = 0 AND b.content = a.content)
+             ORDER BY a.file_path",
+        )?;
+        let paths = stmt.query_map((key,), |r| r.get(0))?;
+        paths.collect::<rusqlite::Result<_>>().map_err(Into::into)
     }
 
     /// Makes the change `shown` describes, in one transaction, or not at
@@ -374,22 +541,33 @@ impl Store {
     ///
     /// `BEGIN IMMEDIATE` takes the write lock up front, so this waits (for
     /// [`BUSY_TIMEOUT`]) behind a server write rather than failing part way
-    /// through; the server only ever runs single-statement transactions, so
-    /// it waits behind this one the same way and nothing can deadlock.
+    /// through; the server's statements are each their own transaction, so
+    /// each waits behind this one the same way and nothing can deadlock.
+    ///
+    /// What the lock cannot do is order this change against a push as a
+    /// whole. A push is several statements: the server reads the stored
+    /// row, may merge for up to `RECALL_MERGE_TIMEOUT_MS` holding no lock,
+    /// then writes. A push that read before this commits writes after it,
+    /// and so partly undoes it: it puts a row back under the key a rename or
+    /// remove emptied, or writes a merge of the old row over a restored one.
+    /// This function cannot see that, since it happens after it returns; the
+    /// command waits out the merge window and checks with [`Plan::undone`].
     pub(crate) fn apply(&self, shown: &Plan) -> Result<usize> {
         let mut conn = self.lock();
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|e| busy(e, "starting the change"))?;
+            .map_err(|e| Abandoned(format!("{:#}", busy(e, "starting the change"))))?;
 
         // From here, any early return drops `tx`, and rusqlite rolls back a
         // transaction that is dropped without being committed.
         let now = shown.recompute(&tx)?;
         if now != *shown {
-            bail!(
+            return Err(Abandoned(
                 "the rows involved changed after they were shown (a push arrived meanwhile?). \
                  Rolled back. Run the command again to see them as they are now"
-            );
+                    .into(),
+            )
+            .into());
         }
         if let Some(why) = now.refusal() {
             bail!("refusing: {why}");
@@ -415,7 +593,8 @@ impl Store {
 /// The wire only asks for a non-empty key. These are stricter because no
 /// client derives such a key, and a key that differs from another only by a
 /// trailing space would be invisible in every listing: a rename onto one is
-/// a typo that strands a project where no machine will ever pull it.
+/// a typo that strands a project where no machine will ever pull it. The
+/// same goes for a character that prints as nothing at all.
 fn unusable_key(key: &str) -> Option<&'static str> {
     if key.is_empty() {
         Some("is empty")
@@ -423,9 +602,61 @@ fn unusable_key(key: &str) -> Option<&'static str> {
         Some("starts or ends with whitespace")
     } else if key.chars().any(char::is_control) {
         Some("contains a control character")
+    } else if key.chars().any(invisible) {
+        Some("contains an invisible or formatting character")
     } else {
         None
     }
+}
+
+/// Whether `c` prints as nothing, or changes how the text around it
+/// prints, rather than showing as a glyph of its own: a line or paragraph
+/// separator (Zl, Zp), a format character (Cf, such as a zero-width space,
+/// a joiner or a bidi override), or any other Default_Ignorable_Code_Point
+/// (fillers, variation selectors, tags). Control characters (Cc) are
+/// `char::is_control`'s, and not repeated here.
+///
+/// Written out rather than taken from a crate, because this is the one
+/// place the server needs Unicode properties. The ranges are Unicode 15's
+/// General_Category Cf, Zl and Zp, and DerivedCoreProperties'
+/// Default_Ignorable_Code_Point, merged; a character added to those in a
+/// later version is at worst shown unquoted, never acted on as a different
+/// key, since keys are always compared exactly.
+pub(crate) fn invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{034F}'
+            | '\u{061C}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}'
+            | '\u{115F}'..='\u{1160}'
+            | '\u{17B4}'..='\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FEFF}'
+            | '\u{FFA0}'
+            | '\u{FFF0}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0000}'..='\u{E0FFF}'
+    )
+}
+
+/// A key to rename `key` to when it is being retired but kept, dated so a
+/// second one on another day does not collide with the first.
+pub(crate) fn archive_key(key: &str) -> String {
+    format!("{key}.archived-{}", &crate::now()[..10])
 }
 
 fn no_such_key(key: &str) -> String {
@@ -455,6 +686,7 @@ fn restore_plan(
     key: &str,
     backup: Vec<Row>,
     allow_overwrite: bool,
+    allow_deletions: bool,
 ) -> Result<Restore> {
     let live = rows_under(conn, key)?;
     let live_by_path: HashMap<&str, &Row> =
@@ -462,11 +694,15 @@ fn restore_plan(
 
     let mut add = Vec::new();
     let mut overwrite = Vec::new();
+    let mut deletions = Vec::new();
     let mut unchanged = Vec::new();
     for row in &backup {
         match live_by_path.get(row.file_path.as_str()) {
             None => add.push(row.clone()),
             Some(current) if *current == row => unchanged.push(row.file_path.clone()),
+            Some(current) if !current.deleted && row.deleted => {
+                deletions.push(((*current).clone(), row.clone()))
+            }
             Some(current) => overwrite.push(((*current).clone(), row.clone())),
         }
     }
@@ -480,9 +716,11 @@ fn restore_plan(
         backup,
         add,
         overwrite,
+        deletions,
         unchanged,
         live_only,
         allow_overwrite,
+        allow_deletions,
     })
 }
 
@@ -587,7 +825,9 @@ mod tests {
         let mut backup = st.rows("old/key").unwrap();
         backup[0].content = "older alpha".into();
 
-        let plan = st.plan_restore("old/key", backup.clone(), false).unwrap();
+        let plan = st
+            .plan_restore("old/key", backup.clone(), false, false)
+            .unwrap();
         let Plan::Restore(r) = &plan else {
             unreachable!()
         };
@@ -597,7 +837,7 @@ mod tests {
         assert!(err.contains("--overwrite"), "{err}");
         assert_eq!(st.rows("old/key").unwrap()[0].content, "alpha");
 
-        let plan = st.plan_restore("old/key", backup, true).unwrap();
+        let plan = st.plan_restore("old/key", backup, true, false).unwrap();
         assert_eq!(st.apply(&plan).unwrap(), 1);
         assert_eq!(st.rows("old/key").unwrap()[0].content, "older alpha");
     }
@@ -616,7 +856,7 @@ mod tests {
             updated_at: T0.into(),
             deleted: false,
         });
-        let Plan::Restore(r) = st.plan_restore("old/key", backup, false).unwrap() else {
+        let Plan::Restore(r) = st.plan_restore("old/key", backup, false, false).unwrap() else {
             unreachable!()
         };
         assert_eq!(r.unchanged, vec!["a.md"]);
@@ -669,6 +909,18 @@ mod tests {
             (" me/thing", "whitespace"),
             ("me/thing\n", "whitespace"),
             ("me/\u{7}thing", "control"),
+            // Each prints as nothing, so the key would look like "me/thing"
+            // in every listing while no machine could ever ask for it.
+            ("me/\u{200B}thing", "invisible"),
+            ("\u{FEFF}me/thing", "invisible"),
+            ("me/thing\u{2060}", "invisible"),
+            ("me/\u{202E}gniht", "invisible"),
+            ("me/\u{2028}thing", "invisible"),
+            ("me/\u{2029}thing", "invisible"),
+            ("me/\u{00AD}thing", "invisible"),
+            ("me/\u{3164}thing", "invisible"),
+            ("me/thing\u{FE0F}", "invisible"),
+            ("me/thing\u{E0041}", "invisible"),
         ] {
             let plan = Plan::Rename {
                 from: "a".into(),
@@ -679,5 +931,137 @@ mod tests {
             let refusal = plan.refusal().unwrap();
             assert!(refusal.contains(why), "{to:?}: {refusal}");
         }
+        // Visible characters of any script, and a space inside, stay usable.
+        for fine in ["me/thing", "local:-Users-me-my project", "我/项目", "é/ü"] {
+            assert_eq!(unusable_key(fine), None, "{fine:?}");
+        }
+    }
+
+    /// The failure that deletes its own backup has to be recognisable as
+    /// such, and only it: the command decides on the type, not the words.
+    #[test]
+    fn a_plan_that_went_stale_is_abandoned() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, st) = live(&dir);
+        let plan = st.plan_rename("old/key", "new/key").unwrap();
+        Store::open(&path)
+            .unwrap()
+            .upsert("old/key", "late.md", "arrived", "laptop", T0)
+            .unwrap();
+        assert!(st.apply(&plan).unwrap_err().is::<Abandoned>());
+
+        let plan = st.plan_rename("old/key", "other").unwrap();
+        assert!(!st.apply(&plan).unwrap_err().is::<Abandoned>(), "a refusal");
+    }
+
+    /// A backup's tombstone does not turn a live file into one, which would
+    /// delete it on every machine, unless that is asked for by name.
+    #[test]
+    fn restore_turns_a_live_file_into_a_tombstone_only_when_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, st) = live(&dir);
+        let mut backup = st.rows("old/key").unwrap();
+        backup[0].deleted = true; // a.md: live now, deleted in the backup
+        backup[1].content = "older beta".into(); // b.md: an ordinary overwrite
+
+        let plan = st
+            .plan_restore("old/key", backup.clone(), true, false)
+            .unwrap();
+        let Plan::Restore(r) = &plan else {
+            unreachable!()
+        };
+        assert_eq!(r.deletions.len(), 1);
+        assert_eq!(r.deletions[0].0.file_path, "a.md");
+        assert_eq!(r.skipped_deletions().len(), 1);
+        assert_eq!(r.overwrite.len(), 1, "only b.md");
+        assert_eq!(plan.expected_changes(), 1);
+        assert_eq!(st.apply(&plan).unwrap(), 1);
+        let rows = st.rows("old/key").unwrap();
+        assert!(!rows[0].deleted, "a.md is still a file");
+        assert_eq!(rows[1].content, "older beta");
+
+        let plan = st.plan_restore("old/key", backup, true, true).unwrap();
+        assert_eq!(plan.expected_changes(), 1);
+        assert_eq!(st.apply(&plan).unwrap(), 1);
+        assert!(st.rows("old/key").unwrap()[0].deleted, "now it is not");
+    }
+
+    #[test]
+    fn unique_live_paths_are_the_content_found_under_no_other_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, st) = live(&dir);
+        // Nothing of old/key is anywhere else. c.md is a tombstone, so it
+        // is not live content to begin with.
+        assert_eq!(st.unique_live_paths("old/key").unwrap(), ["a.md", "b.md"]);
+        // The same content at another path, under another key, counts.
+        Store::open(dir.path().join("recall.db"))
+            .unwrap()
+            .upsert("copy", "moved/b.md", "beta", "laptop", T0)
+            .unwrap();
+        assert_eq!(st.unique_live_paths("old/key").unwrap(), ["a.md"]);
+        // A tombstone holding it does not.
+        let other = Store::open(dir.path().join("recall.db")).unwrap();
+        other.upsert("gone", "a.md", "alpha", "laptop", T0).unwrap();
+        other.tombstone("gone", "a.md", "laptop", T0).unwrap();
+        assert_eq!(st.unique_live_paths("old/key").unwrap(), ["a.md"]);
+    }
+
+    /// The backup is checked against the plan, not trusted because
+    /// `VACUUM INTO` returned.
+    #[test]
+    fn a_snapshot_that_does_not_hold_the_plans_rows_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, st) = live(&dir);
+        let remove = st.plan_remove("old/key").unwrap();
+        let rename = st.plan_rename("old/key", "new/key").unwrap();
+        let mut backup = st.rows("old/key").unwrap();
+        backup[1].content = "older beta".into();
+        let restore = st.plan_restore("old/key", backup, true, false).unwrap();
+
+        let good = Store::open_existing(&st.backup(dir.path().join("a"), 9).unwrap(), Access::Read)
+            .unwrap();
+        for plan in [&remove, &rename, &restore] {
+            assert_eq!(plan.snapshot_mismatch(&good).unwrap(), None, "{plan:?}");
+        }
+
+        let writer = Store::open(&path).unwrap();
+        writer.upsert("old/key", "b.md", "edited", "x", T0).unwrap();
+        let bad = Store::open_existing(&st.backup(dir.path().join("b"), 9).unwrap(), Access::Read)
+            .unwrap();
+        for plan in [&remove, &rename, &restore] {
+            let why = plan.snapshot_mismatch(&bad).unwrap().unwrap();
+            assert!(why.contains("\"old/key\""), "{why}");
+        }
+    }
+
+    /// What a push in flight does after a change commits, done by hand
+    /// here, is what `undone` reports.
+    #[test]
+    fn undone_names_what_came_back_after_a_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, st) = live(&dir);
+        let writer = Store::open(&path).unwrap();
+
+        let rename = st.plan_rename("old/key", "new/key").unwrap();
+        st.apply(&rename).unwrap();
+        assert!(rename.undone(&st).unwrap().is_empty());
+        writer.upsert("old/key", "b.md", "late", "x", T0).unwrap();
+        assert_eq!(rename.undone(&st).unwrap(), ["b.md"]);
+
+        let remove = st.plan_remove("new/key").unwrap();
+        st.apply(&remove).unwrap();
+        assert!(remove.undone(&st).unwrap().is_empty());
+        writer.upsert("new/key", "a.md", "late", "x", T0).unwrap();
+        assert_eq!(remove.undone(&st).unwrap(), ["a.md"]);
+
+        let mut backup = st.rows("other").unwrap();
+        backup[0].content = "older".into();
+        let restore = st.plan_restore("other", backup, true, false).unwrap();
+        st.apply(&restore).unwrap();
+        assert!(restore.undone(&st).unwrap().is_empty());
+        writer
+            .upsert("other", "a.md", "older, merged with an edit", "x", T0)
+            .unwrap();
+        assert_eq!(restore.undone(&st).unwrap(), ["a.md"]);
     }
 }
