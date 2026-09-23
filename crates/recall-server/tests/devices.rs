@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, Request, StatusCode};
-use recall_server::{Config, Server, Store};
+use recall_server::{Config, Server, Store, TlsMode};
 use recall_wire::devices::{self, AUTHKEY_PREFIX};
 use recall_wire::signature::{self, encode_public_key, fingerprint, SigningKey, Target};
 use recall_wire::{
@@ -2133,4 +2133,212 @@ async fn an_ipv6_client_is_one_address_for_its_whole_64() {
     assert_eq!(pull("198.51.100.20").await, StatusCode::OK);
     assert_eq!(pull("::ffff:198.51.100.20").await, StatusCode::OK);
     assert_eq!(pull("198.51.100.20").await, StatusCode::TOO_MANY_REQUESTS);
+}
+
+// ---------------------------------------------------------------------------
+// over direct TLS
+// ---------------------------------------------------------------------------
+
+/// One HTTP/1.1 request over its own TLS connection to a server whose
+/// certificate is `der`, for a server started with `RECALL_TLS_CERT`.
+async fn send_over_tls(
+    addr: std::net::SocketAddr,
+    der: &rustls::pki_types::CertificateDer<'static>,
+    req: Request<Body>,
+) -> (StatusCode, Bytes) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(der.clone()).unwrap();
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut tls = tokio_rustls::TlsConnector::from(Arc::new(config))
+        .connect(
+            rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+            tcp,
+        )
+        .await
+        .unwrap();
+
+    let (parts, body) = req.into_parts();
+    let body = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+    let mut head = format!("{} {} HTTP/1.1\r\n", parts.method, parts.uri);
+    if !parts.headers.contains_key("host") {
+        head.push_str("host: localhost\r\n");
+    }
+    for (name, value) in &parts.headers {
+        head.push_str(&format!("{name}: {}\r\n", value.to_str().unwrap()));
+    }
+    head.push_str(&format!(
+        "content-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    ));
+    tls.write_all(head.as_bytes()).await.unwrap();
+    tls.write_all(&body).await.unwrap();
+
+    // The server may close without a close_notify; what arrived before
+    // that is the whole response either way.
+    let mut raw = Vec::new();
+    let _ = tls.read_to_end(&mut raw).await;
+    let end = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or_else(|| panic!("no response head in {:?}", String::from_utf8_lossy(&raw)));
+    let head = String::from_utf8_lossy(&raw[..end]).to_ascii_lowercase();
+    assert!(!head.contains("transfer-encoding: chunked"), "{head}");
+    let status: u16 = head.split(' ').nth(1).unwrap().parse().unwrap();
+    (
+        StatusCode::from_u16(status).unwrap(),
+        Bytes::copy_from_slice(&raw[end + 4..]),
+    )
+}
+
+/// Direct TLS serves the one router plain HTTP does, every group and layer
+/// of it: the enrolment routes with their small bodies, the operator's
+/// token, a device's signature, the admin scope held against a sync
+/// device. And the address the limiter and the enrolment cap count is the
+/// TCP peer's, through the same bucketing as plain HTTP: were the peer
+/// address not reaching the middleware, the enrolment would be recorded as
+/// from `unknown`.
+#[tokio::test]
+async fn direct_tls_serves_every_route_group_the_same_way() {
+    let certs = tempfile::tempdir().unwrap();
+    let rcgen::CertifiedKey { cert, key_pair } =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+    let cert_path = certs.path().join("cert.pem");
+    let key_path = certs.path().join("key.pem");
+    std::fs::write(&cert_path, cert.pem()).unwrap();
+    std::fs::write(&key_path, key_pair.serialize_pem()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let der = cert.der().clone();
+
+    let h = harness(|c| {
+        c.tls = TlsMode::Files {
+            cert_path: cert_path.to_string_lossy().into_owned(),
+            key_path: key_path.to_string_lossy().into_owned(),
+        };
+        // What `Config::from_env` leaves it as with TLS on.
+        c.trusted_ip_header = String::new();
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let serving = h.server.serve_with_shutdown(listener, async move {
+        let _ = stopped.await;
+    });
+
+    let client = async {
+        let send = |req: Request<Body>| send_over_tls(addr, &der, req);
+        let call =
+            |method: &str, uri: &str, token: Option<&str>, body: Option<serde_json::Value>| {
+                let mut req = Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json");
+                if let Some(t) = token {
+                    req = req.header("authorization", format!("Bearer {t}"));
+                }
+                send(
+                    req.body(body.map(|b| Body::from(b.to_string())).unwrap_or_default())
+                        .unwrap(),
+                )
+            };
+
+        // Enrolling: no credential, the enrolment group's own layers.
+        let mut machine = Machine::new(90);
+        let pending: EnrollPending = ok(call(
+            "POST",
+            devices::ENROLL_PATH,
+            None,
+            Some(json!({"name": machine.name, "public_key": machine.public_key(), "agent": "recall/test"})),
+        )
+        .await);
+        let recorded_from: String = rusqlite::Connection::open(h.dir.path().join("recall.db"))
+            .unwrap()
+            .query_row(
+                "SELECT client_ip FROM device_enrollments WHERE enrollment_id = ?1",
+                [&pending.enrollment_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recorded_from, "127.0.0.1", "the TCP peer, not `unknown`");
+
+        // The admin group, with the operator's token and without.
+        assert_eq!(
+            call("GET", "/admin/stats", None, None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call("GET", "/admin/stats", Some(TOKEN), None).await.0,
+            StatusCode::OK
+        );
+        let device: Device = ok(call(
+            "POST",
+            devices::APPROVE_PATH,
+            Some(TOKEN),
+            Some(json!({"user_code": pending.user_code, "scope": "sync"})),
+        )
+        .await);
+        let polled: EnrollPollResponse = ok(call(
+            "POST",
+            devices::ENROLL_POLL_PATH,
+            None,
+            Some(json!({ "enrollment_id": pending.enrollment_id })),
+        )
+        .await);
+        assert_eq!(polled.device_id, device.id);
+        machine.id = device.id.clone();
+        let _: AuthkeyList = ok(call("GET", devices::AUTHKEYS_PATH, Some(TOKEN), None).await);
+
+        // The device's own signature: `/v1/devices/me` and `/sync` take
+        // it, and the admin group holds a sync device to its scope.
+        assert_eq!(
+            call("GET", devices::DEVICES_ME_PATH, None, None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let me: DeviceIdentity = ok(send(signed_request(
+            "GET",
+            devices::DEVICES_ME_PATH,
+            Vec::new(),
+            &Signing::by(&machine),
+        ))
+        .await);
+        assert_eq!(me.device_id, device.id);
+        let _: PushResponse = ok(send(signed_request(
+            "POST",
+            "/sync",
+            push_body("over tls").to_string().into_bytes(),
+            &Signing::by(&machine),
+        ))
+        .await);
+        assert_eq!(
+            send(signed_request(
+                "GET",
+                devices::DEVICES_PATH,
+                Vec::new(),
+                &Signing::by(&machine),
+            ))
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call("GET", "/nope", None, None).await.0,
+            StatusCode::NOT_FOUND
+        );
+        drop(stop);
+    };
+
+    let (served, ()) = tokio::join!(serving, client);
+    served.unwrap();
 }
