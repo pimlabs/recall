@@ -664,7 +664,7 @@ fn offbox_finding(rep: &Report, out: &mut Vec<Finding>) {
 ///
 /// [`None`] rather than a guess when it cannot be parsed — a report that
 /// invents an age is worse than one that admits it cannot read the value.
-fn age_of(stamp: &str) -> Option<time::Duration> {
+pub(crate) fn age_of(stamp: &str) -> Option<time::Duration> {
     let fmt = time::macros::format_description!(
         "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
     );

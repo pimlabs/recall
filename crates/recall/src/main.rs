@@ -26,6 +26,7 @@
 
 mod backfill;
 mod connect;
+mod devices;
 mod doctor;
 mod hook;
 mod init;
@@ -109,8 +110,8 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t = promote::Target::Global)]
         to: promote::Target,
     },
-    /// Set this machine up: the server's token, this machine's name, and the
-    /// project you are in
+    /// Set this machine up: enroll it with the server (or save its token),
+    /// name it, and wire the project you are in
     Connect {
         /// The server's URL, including https://; defaults to the saved one
         url: Option<String>,
@@ -121,7 +122,11 @@ enum Cmd {
         #[arg(long, short)]
         yes: bool,
     },
-    /// Remove a saved token
+    /// List, approve and revoke the machines enrolled on the server, and
+    /// the enrolment keys cloud sessions use
+    #[command(subcommand)]
+    Devices(devices::Cmd),
+    /// Remove a saved token, and this machine's device key
     Disconnect {
         /// The server; defaults to the one most recently connected
         url: Option<String>,
@@ -194,6 +199,7 @@ fn main() {
             block_on_current(connect::connect(connect::Args { url, name, yes }))
         }
         Cmd::Disconnect { url } => connect::disconnect(url.as_deref()),
+        Cmd::Devices(cmd) => block_on_current(devices::run(cmd)),
         Cmd::Status { json } => block_on_current(status::run(json)),
         Cmd::Doctor { json } => block_on_current(doctor::run(json)),
         Cmd::Push => block_on_current(hook::push()),

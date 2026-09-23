@@ -7,16 +7,26 @@
 //! do: a saved token that still works is not asked for again, and a project
 //! already wired is not offered.
 //!
+//! Against a server that enrolls devices (0.4.1 and later), the token step
+//! becomes enrolment: the machine makes a key pair, shows a code and the
+//! key's fingerprint, and is approved from a machine already trusted, or,
+//! for the first one, with the operator's `RECALL_TOKEN` after asking. Once
+//! enrolled it signs its requests and the saved token is removed.
+//!
 //! What lives here is the part a person sees. The files, and why there are
-//! two of them, are `recall_hooks::home`'s.
+//! several of them, are `recall_hooks::home`'s.
 
 use std::io::{self, IsTerminal};
 use std::path::Path;
 
-use recall_hooks::client::{self, Client};
+use recall_hooks::client::{self, Client, Enrolled, Poll};
 use recall_hooks::config::Source;
+use recall_hooks::device::{DeviceKey, Signer};
 use recall_hooks::home::{self, Home};
 use recall_hooks::{backfill, exit, settings, Disposition};
+use recall_wire::devices::SCOPE_ADMIN;
+use recall_wire::discovery::AUTH_DEVICE_SIG;
+use recall_wire::{ApproveRequest, DeviceIdentity, EnrollPending, EnrollPollResponse};
 
 use crate::project as proj;
 use crate::ui;
@@ -58,7 +68,8 @@ async fn run(args: Args) -> Step<()> {
     if proj::remote_session() {
         return refuse(
             "this is a remote session, so nothing saved here would last.",
-            "Set RECALL_URL and RECALL_TOKEN on the cloud environment instead.",
+            "Set RECALL_URL and RECALL_ENROLL_KEY (or RECALL_TOKEN) on the cloud environment \
+             instead.",
         );
     }
 
@@ -78,7 +89,7 @@ async fn run(args: Args) -> Step<()> {
 
     // Before any prompt, so a file this cannot read stops things before the
     // user has typed a secret — and so it is never overwritten.
-    let (mut creds, mut config) = match load_both(&h) {
+    let (creds, config) = match load_both(&h) {
         Ok(both) => both,
         Err(e) => {
             return refuse(
@@ -119,12 +130,20 @@ async fn run(args: Args) -> Step<()> {
     // A token has to come from the person unless a saved one still works,
     // and only a terminal can supply it. Deliberately a terminal and nothing
     // else: every other way in is another way out, and automation already
-    // has RECALL_TOKEN. Decided before the network is touched.
+    // has RECALL_TOKEN. A machine with a device key needs no token, and one
+    // told `--yes` may enroll and wait for someone to approve it. Decided
+    // before the network is touched.
     let saved = creds.token_for(&url).map(str::to_string);
-    if saved.is_none() && !interactive {
+    let saved_device = h
+        .load_devices()
+        .ok()
+        .flatten()
+        .and_then(|d| d.for_url(&url).cloned());
+    if saved.is_none() && saved_device.is_none() && !interactive && !args.yes {
         return refuse(
             "needs a terminal to ask for the token.",
-            "In a script, set RECALL_TOKEN instead.",
+            "In a script, set RECALL_TOKEN instead, or pass --yes to enroll this machine and \
+             wait for it to be approved.",
         );
     }
 
@@ -136,39 +155,27 @@ async fn run(args: Args) -> Step<()> {
         ));
     }
 
-    reach(&url).await?;
-    let token = match saved {
-        Some(token) if verify(&url, &token, "saved token").await? => token,
-        Some(_) => {
-            if !interactive {
-                return refuse(
-                    "needs a new token, but there is no terminal to ask for one.",
-                    "Run recall connect in a terminal.",
-                );
-            }
-            ask_token(&url).await?
-        }
-        None => ask_token(&url).await?,
+    let enrolls = reach(&url).await?;
+    let setup = Setup {
+        args: &args,
+        here: &here,
+        home: &h,
+        url: &url,
+        interactive,
     };
-
-    let name = machine_name(&args, &config, &here, interactive)?;
-
-    creds.insert(&url, &token);
-    config.server = Some(url.clone());
-    config.machine.name = Some(name.clone());
-    if let Err(e) = h
-        .save_credentials(&creds)
-        .and_then(|()| h.save_config(&config))
-    {
-        return refuse(
-            &format!("the token is valid, but saving it failed: {e}"),
-            "",
-        );
-    }
-    say_success(&format!(
-        "Saved to {}",
-        ui::tilde(&h.dir().display().to_string())
-    ));
+    let name = if enrolls {
+        match setup
+            .enroll(creds, config, saved.clone(), saved_device)
+            .await?
+        {
+            Some(name) => name,
+            // Kept on the token: enrolling needs a confirmation, and
+            // there is nobody to give it.
+            None => setup.with_token(load_both_or_stop(&h)?, saved).await?,
+        }
+    } else {
+        setup.with_token((creds, config), saved).await?
+    };
 
     // Resolved again, so what follows reads what was just saved — the way
     // every later command will.
@@ -199,6 +206,456 @@ async fn run(args: Args) -> Step<()> {
     Ok(())
 }
 
+/// What every step of setting up the connection needs to know.
+struct Setup<'a> {
+    args: &'a Args,
+    here: &'a proj::Resolved,
+    home: &'a Home,
+    url: &'a str,
+    interactive: bool,
+}
+
+/// How a machine being enrolled will be approved.
+enum Approval {
+    /// By this command, with the operator's token: the first device.
+    Token(String),
+    /// By someone else, from a machine already trusted.
+    Elsewhere,
+}
+
+impl Setup<'_> {
+    /// The shared token, as before devices: asked for or checked, then
+    /// saved. What happens against a server that does not enroll devices.
+    async fn with_token(
+        &self,
+        (mut creds, mut config): (home::Credentials, home::Config),
+        saved: Option<String>,
+    ) -> Step<String> {
+        let url = self.url;
+        if saved.is_none() && !self.interactive {
+            return refuse(
+                "needs a terminal to ask for the token.",
+                "In a script, set RECALL_TOKEN instead.",
+            );
+        }
+        let token = match saved {
+            Some(token) if verify(url, &token, "saved token").await? => token,
+            Some(_) => {
+                if !self.interactive {
+                    return refuse(
+                        "needs a new token, but there is no terminal to ask for one.",
+                        "Run recall connect in a terminal.",
+                    );
+                }
+                ask_token(url).await?
+            }
+            None => ask_token(url).await?,
+        };
+
+        let name = machine_name(self.args, &config, self.here, self.interactive)?;
+
+        creds.insert(url, &token);
+        config.server = Some(url.to_string());
+        config.machine.name = Some(name.clone());
+        if let Err(e) = self
+            .home
+            .save_credentials(&creds)
+            .and_then(|()| self.home.save_config(&config))
+        {
+            return refuse(
+                &format!("the token is valid, but saving it failed: {e}"),
+                "",
+            );
+        }
+        say_success(&format!(
+            "Saved to {}",
+            ui::tilde(&self.home.dir().display().to_string())
+        ));
+        Ok(name)
+    }
+
+    /// Makes this machine a device of a server that enrolls them, or
+    /// confirms it already is one. The machine's name, when it is set up;
+    /// [`None`] when it should stay on the token, because enrolling needs a
+    /// confirmation nobody is there to give.
+    async fn enroll(
+        &self,
+        creds: home::Credentials,
+        config: home::Config,
+        saved: Option<String>,
+        saved_device: Option<home::DeviceEntry>,
+    ) -> Step<Option<String>> {
+        let url = self.url;
+
+        // Already a device here: nothing to enroll, as long as the server
+        // still agrees.
+        if let Some(entry) = saved_device {
+            match check_device(url, &entry).await? {
+                Some(me) => {
+                    let entry = home::DeviceEntry {
+                        name: me.name,
+                        scope: me.scope,
+                        ephemeral: me.ephemeral,
+                        ..entry
+                    };
+                    let name = machine_name(self.args, &config, self.here, self.interactive)?;
+                    self.save_enrolled(creds, config, entry, &name)?;
+                    return Ok(Some(name));
+                }
+                None => {
+                    // Gone for good: revoked, or unknown to the server. The
+                    // old key is dropped and a new one enrolled.
+                    let _ = self.home.forget_device(url);
+                }
+            }
+        }
+
+        let cfg = self.here.config();
+        let env_token = (cfg.token_source == Source::Environment
+            && home::normalize_url(&cfg.url) == url)
+            .then(|| cfg.token.clone());
+        let approval = match self.approval(saved, env_token).await? {
+            Some(approval) => approval,
+            None => return Ok(None),
+        };
+        let name = machine_name(self.args, &config, self.here, self.interactive)?;
+
+        let key = match DeviceKey::generate() {
+            Ok(key) => key,
+            Err(e) => return refuse(&e.to_string(), "Nothing was saved."),
+        };
+        let fingerprint = key.fingerprint();
+        let open = match Client::new(url, "") {
+            Ok(client) => client,
+            Err(e) => return refuse(&e.to_string(), "Nothing was saved."),
+        };
+        let pending = match open.enroll(&key.enroll_request(&name, None)).await {
+            Ok(Enrolled::Pending(pending)) => pending,
+            Ok(Enrolled::Approved(_)) => {
+                return refuse(
+                    "the server approved this machine without anyone approving it.",
+                    "Nothing was saved. That should not happen without an enrolment key.",
+                )
+            }
+            Err(e @ client::Error::Status { code: 409, .. }) => {
+                return refuse(
+                    &format!("{}.", e.reason()),
+                    &format!(
+                        "On an admin device: recall devices revoke {name}. Or enroll under \
+                         another name: recall connect --name {name}-2"
+                    ),
+                )
+            }
+            Err(e) => {
+                return refuse(
+                    &format!("could not start enrolling: {}", e.reason()),
+                    "Nothing was saved.",
+                )
+            }
+        };
+
+        let _ = cliclack::log::info(format!(
+            "Enrolling this machine as {name}\n\
+             Code         {}\n\
+             Fingerprint  {fingerprint}",
+            pending.user_code
+        ));
+
+        let approved = match approval {
+            Approval::Token(token) => {
+                self_approve(url, &token, &pending.user_code, &fingerprint).await?;
+                match open.poll(&pending.enrollment_id).await {
+                    Ok(Poll::Approved(approved)) => approved,
+                    Ok(other) => {
+                        return refuse(
+                            &format!("approved, but the server then answered {other:?}."),
+                            "Run recall connect again.",
+                        )
+                    }
+                    Err(e) => {
+                        return refuse(
+                            &format!("approved, but asking for the result failed: {}", e.reason()),
+                            "Run recall connect again.",
+                        )
+                    }
+                }
+            }
+            Approval::Elsewhere => {
+                let _ = cliclack::note(
+                    "Approve it from a machine enrolled as admin, or one holding the server's \
+                     RECALL_TOKEN",
+                    format!(
+                        "recall devices approve {}\n\
+                         It shows the fingerprint: check it is the one above.",
+                        pending.user_code
+                    ),
+                );
+                wait_for_approval(&open, &pending).await?
+            }
+        };
+
+        let entry = key.entry(&approved.device_id, &name, &approved.scope, false);
+        self.save_enrolled(creds, config, entry, &name)?;
+        Ok(Some(name))
+    }
+
+    /// Decides how the machine is to be approved, asking when there is
+    /// someone to ask. [`None`]: not now, stay on the token.
+    async fn approval(
+        &self,
+        saved: Option<String>,
+        env_token: Option<String>,
+    ) -> Step<Option<Approval>> {
+        let url = self.url;
+        let (token, what) = match (saved, env_token) {
+            (Some(t), _) => (Some(t), "saved token"),
+            (None, Some(t)) => (Some(t), "RECALL_TOKEN"),
+            (None, None) => (None, ""),
+        };
+        let confirm = "Approve this machine yourself with the server's RECALL_TOKEN, as an admin \
+                       device? Do this for your first machine";
+
+        if let Some(token) = token {
+            // Nobody to confirm, and not told to go ahead: this machine
+            // stays on the token, as it would have before devices.
+            if !self.interactive && !self.args.yes {
+                say_warning(
+                    "Not enrolled: that needs a confirmation. Run recall connect in a \
+                     terminal, or with --yes, to enroll this machine",
+                );
+                return Ok(None);
+            }
+            if verify(url, &token, what).await? {
+                if self.args.yes {
+                    say_step("Approving this machine with RECALL_TOKEN, as an admin device");
+                    return Ok(Some(Approval::Token(token)));
+                }
+                let yes = answer(cliclack::confirm(confirm).initial_value(true).interact())?;
+                return Ok(Some(if yes {
+                    Approval::Token(token)
+                } else {
+                    Approval::Elsewhere
+                }));
+            }
+            if !self.interactive {
+                return refuse(
+                    "needs a new token, but there is no terminal to ask for one.",
+                    "Run recall connect in a terminal.",
+                );
+            }
+        }
+
+        if !self.interactive {
+            // `--yes` with no token: someone approves it from elsewhere.
+            return Ok(Some(Approval::Elsewhere));
+        }
+        let choice = answer(
+            cliclack::select("How will this machine be approved?")
+                .item(
+                    "elsewhere",
+                    "From a machine already enrolled as admin",
+                    "recall devices approve <code> there",
+                )
+                .item(
+                    "token",
+                    "With the server's RECALL_TOKEN, as an admin device",
+                    "your first machine",
+                )
+                .interact(),
+        )?;
+        if choice == "token" {
+            return Ok(Some(Approval::Token(ask_token(url).await?)));
+        }
+        Ok(Some(Approval::Elsewhere))
+    }
+
+    /// Saves an approved device, then everything that follows from it: the
+    /// config names the server and the machine, and the shared token, no
+    /// longer sent, is no longer kept.
+    ///
+    /// The key is saved first: an approval is the one thing here that
+    /// cannot simply be done again.
+    fn save_enrolled(
+        &self,
+        mut creds: home::Credentials,
+        mut config: home::Config,
+        entry: home::DeviceEntry,
+        name: &str,
+    ) -> Step<()> {
+        let url = self.url;
+        let (device, scope) = (entry.name.clone(), entry.scope.clone());
+        if let Err(e) = self.home.save_device(url, entry) {
+            return refuse(
+                &format!("approved, but saving the device key failed: {e}"),
+                &format!("On an admin device: recall devices revoke {device}, then run recall connect again."),
+            );
+        }
+        config.server = Some(url.to_string());
+        config.machine.name = Some(name.to_string());
+        if let Err(e) = self.home.save_config(&config) {
+            return refuse(
+                &format!("the device key is saved, but the config is not: {e}"),
+                "",
+            );
+        }
+        say_success(&format!(
+            "Enrolled as {device} ({scope}), key saved in {}",
+            ui::tilde(&self.home.device_path().display().to_string())
+        ));
+
+        if creds.remove(url) {
+            let saved = if creds.servers.is_empty() {
+                self.home.delete_credentials()
+            } else {
+                self.home.save_credentials(&creds)
+            };
+            match saved {
+                Ok(()) => {
+                    let _ = cliclack::log::remark(format!(
+                        "Removed the shared token from {}: this machine signs its requests \
+                         now. The token still works on the server; rotating RECALL_TOKEN \
+                         there is the operator's call.",
+                        ui::tilde(&self.home.credentials_path().display().to_string())
+                    ));
+                }
+                Err(e) => say_warning(&format!(
+                    "could not remove the shared token, which is no longer needed: {e}"
+                )),
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Asks the server whether this machine's saved device is still one.
+/// [`Some`] with what the server knows it as; [`None`] when it is revoked
+/// or unknown, which only a new enrolment mends. Anything else ends the
+/// flow: it says nothing about the device either way.
+async fn check_device(url: &str, entry: &home::DeviceEntry) -> Step<Option<DeviceIdentity>> {
+    let spinner = spin("Checking this machine's device key");
+    let client = match Signer::from_entry(entry)
+        .map_err(|e| e.to_string())
+        .and_then(|s| {
+            Client::new(url, "")
+                .map(|c| c.with_signer(s))
+                .map_err(|e| e.to_string())
+        }) {
+        Ok(client) => client,
+        Err(e) => {
+            spinner.error("Device key unusable");
+            say_warning(&format!("{e}; enrolling again"));
+            return Ok(None);
+        }
+    };
+    match client.me().await {
+        Ok(me) => {
+            spinner.stop(format!("Enrolled as {} ({})", me.name, me.scope));
+            Ok(Some(me))
+        }
+        Err(e) if e.device_gone() => {
+            spinner.error("Device key no longer accepted");
+            say_warning(&format!(
+                "The server refused this machine's device key ({}), so it is enrolled again",
+                e.reason().trim_start_matches("unauthorized: ")
+            ));
+            Ok(None)
+        }
+        Err(e) => {
+            spinner.error("Couldn't check the device key");
+            refuse(
+                &format!("could not check this machine's device key: {}", e.reason()),
+                "Nothing was changed.",
+            )
+        }
+    }
+}
+
+/// Approves this machine's own code with the operator's token, bound to
+/// the fingerprint this machine computed, so the server approves exactly
+/// the key that was enrolled.
+async fn self_approve(url: &str, token: &str, code: &str, fingerprint: &str) -> Step<()> {
+    let spinner = spin("Approving with RECALL_TOKEN");
+    let req = ApproveRequest {
+        user_code: code.to_string(),
+        scope: SCOPE_ADMIN.to_string(),
+        fingerprint: Some(fingerprint.to_string()),
+    };
+    let result = match Client::new(url, token) {
+        Ok(client) => client.approve(&req).await,
+        Err(e) => Err(e),
+    };
+    match result {
+        Ok(_) => {
+            spinner.stop("Approved as an admin device");
+            Ok(())
+        }
+        Err(e) => {
+            spinner.error("Approval failed");
+            refuse(
+                &format!("could not approve this machine: {}", e.reason()),
+                "Nothing was saved. Run recall connect again.",
+            )
+        }
+    }
+}
+
+/// Polls until someone approves the code, as RFC 8628 §3.5 says: every
+/// `interval` seconds, five more after each `slow_down`, and never past
+/// the code's expiry.
+async fn wait_for_approval(client: &Client, pending: &EnrollPending) -> Step<EnrollPollResponse> {
+    let spinner = spin(&format!("Waiting for approval of {}", pending.user_code));
+    let mut interval = pending.interval.max(1);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(pending.expires_in.max(1) + interval);
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+        let stop = |what: &str, then: &str| {
+            spinner.error("Not approved");
+            refuse::<EnrollPollResponse>(what, then)
+        };
+        match client.poll(&pending.enrollment_id).await {
+            Ok(Poll::Approved(approved)) => {
+                spinner.stop(format!("Approved, {} scope", approved.scope));
+                return Ok(approved);
+            }
+            Ok(Poll::Pending) => {}
+            Ok(Poll::SlowDown) => interval += 5,
+            // Rate limited: the same answer in HTTP's words.
+            Err(client::Error::Status { code: 429, .. }) => interval += 5,
+            Ok(Poll::Expired) => {
+                return stop(
+                    "the code expired before anyone approved it.",
+                    "Nothing was saved. Run recall connect again for a new code.",
+                )
+            }
+            Ok(Poll::Denied) => return stop("the enrolment was denied.", "Nothing was saved."),
+            Ok(Poll::Unknown) => {
+                return stop(
+                    "the server no longer knows this enrolment.",
+                    "Nothing was saved. Run recall connect again.",
+                )
+            }
+            Err(e) => {
+                return stop(
+                    &format!("could not ask whether it was approved: {}", e.reason()),
+                    "Nothing was saved. Run recall connect again.",
+                )
+            }
+        }
+        if std::time::Instant::now() > deadline {
+            return stop(
+                "the code expired before anyone approved it.",
+                "Nothing was saved. Run recall connect again for a new code.",
+            );
+        }
+    }
+}
+
+/// Both files again, for a flow that changed its mind about enrolling.
+fn load_both_or_stop(h: &Home) -> Step<(home::Credentials, home::Config)> {
+    load_both(h).or_else(|e| refuse(&e.to_string(), "Nothing was changed."))
+}
+
 /// Refuses a URL that is not one, before anything else happens.
 fn check_url(url: &str) -> Step<()> {
     if has_host(url) {
@@ -213,16 +670,26 @@ fn check_url(url: &str) -> Step<()> {
 
 /// `GET /health`: whether anything answers at `url` at all. Asked on its own
 /// so that "unreachable" and "wrong token" are never confused.
-async fn reach(url: &str) -> Step<()> {
+///
+/// Then the discovery document, for whether the server enrolls devices:
+/// `true` when it does, and `false` for one that does not or is too old to
+/// say, which is then connected with the token as before.
+async fn reach(url: &str) -> Step<bool> {
     let spinner = spin(&format!("Connecting to {}", host(url)));
     let result = match Client::new(url, "") {
-        Ok(client) => client.health().await.map_err(|e| e.to_string()),
+        Ok(client) => match client.health().await {
+            Ok(_) => Ok(match client.discover().await {
+                Ok(Some(doc)) => doc.accepts(AUTH_DEVICE_SIG) && doc.devices().is_some(),
+                _ => false,
+            }),
+            Err(e) => Err(e.to_string()),
+        },
         Err(e) => Err(e.to_string()),
     };
     match result {
-        Ok(_) => {
+        Ok(enrolls) => {
             spinner.stop(format!("Connected to {}", host(url)));
-            Ok(())
+            Ok(enrolls)
         }
         Err(e) => {
             spinner.error(format!("Can't reach {}", host(url)));
@@ -521,7 +988,19 @@ fn environment_overrides(here: &proj::Resolved, connected: &str, name: &str) -> 
             host(&cfg.url)
         ));
     }
-    if cfg.token_source == Source::Environment {
+    if cfg.token_source == Source::Environment && cfg.device.is_some() {
+        out.push(
+            match here.env.declared(&["RECALL_TOKEN"]).into_iter().next() {
+                Some(d) => format!(
+                    "{} sets RECALL_TOKEN, which this machine no longer needs; remove it",
+                    d.file
+                ),
+                None => "RECALL_TOKEN in your shell is no longer needed here, remove it from \
+                         your shell profile"
+                    .to_string(),
+            },
+        );
+    } else if cfg.token_source == Source::Environment {
         out.push(
             match here.env.declared(&["RECALL_TOKEN"]).into_iter().next() {
                 Some(d) => format!(
@@ -694,30 +1173,72 @@ pub fn disconnect(url: Option<&str>) -> anyhow::Result<i32> {
             return Ok(exit::CONFIG);
         }
     };
+    let mut devices = match h.load_devices() {
+        Ok(d) => d.unwrap_or_default(),
+        Err(e) => {
+            eprintln!("recall disconnect: {e}");
+            eprintln!("  Nothing was changed.");
+            return Ok(exit::CONFIG);
+        }
+    };
     let path = h.credentials_path();
 
+    // Every server something is saved for, a token or a device key.
+    let mut saved: Vec<String> = creds.servers.keys().cloned().collect();
+    for u in devices.servers.keys() {
+        if !saved.contains(u) {
+            saved.push(u.clone());
+        }
+    }
     let target = match url {
         Some(u) => Some(home::normalize_url(u)),
         None => config.server.clone().or_else(|| {
             // With exactly one server there is nothing to choose between.
-            (creds.servers.len() == 1)
-                .then(|| creds.servers.keys().next().cloned())
-                .flatten()
+            (saved.len() == 1).then(|| saved[0].clone())
         }),
     };
 
     match target {
-        None if creds.servers.is_empty() => {
+        None if saved.is_empty() => {
             println!("No token is saved in {}.", path.display());
         }
         None => {
             eprintln!("recall disconnect: more than one server is saved; name one:");
-            for u in creds.servers.keys() {
+            for u in &saved {
                 eprintln!("  recall disconnect {u}");
             }
             return Ok(exit::CONFIG);
         }
         Some(target) => {
+            // The device key first, and on its own: removing it is the one
+            // part that changes how this machine appears to the server.
+            if let Some(device) = devices.for_url(&target).cloned() {
+                devices.remove(&target);
+                if let Err(e) = h.save_devices(&devices) {
+                    eprintln!("recall disconnect: {e}");
+                    return Ok(exit::CONFIG);
+                }
+                println!(
+                    "Removed this machine's device key for {target} from {}.",
+                    h.device_path().display()
+                );
+                // The key is gone from here, not from the server's list,
+                // and only an admin can take it off that.
+                println!(
+                    "The server still lists the device {}. To revoke it: recall devices \
+                     revoke {} on an admin device.",
+                    device.name, device.name
+                );
+                if config.server.as_deref() == Some(target.as_str())
+                    && creds.token_for(&target).is_none()
+                {
+                    config.server = None;
+                    if let Err(e) = h.save_config(&config) {
+                        eprintln!("recall disconnect: {e}");
+                        return Ok(exit::CONFIG);
+                    }
+                }
+            }
             if creds.remove(&target) {
                 let result = if creds.servers.is_empty() {
                     h.delete_credentials()
@@ -746,7 +1267,7 @@ pub fn disconnect(url: Option<&str>) -> anyhow::Result<i32> {
                     "The token itself still works on the server. To revoke it, rotate \
                      RECALL_TOKEN there and reconnect every machine."
                 );
-            } else {
+            } else if !saved.contains(&target) {
                 println!("No token for {target} is saved in {}.", path.display());
             }
         }
