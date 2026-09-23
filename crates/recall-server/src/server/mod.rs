@@ -46,6 +46,9 @@ use tokio::task::JoinHandle;
 use crate::merge::{Merger, Status};
 use crate::{format_timestamp, now, Config, Store};
 
+// Without passkeys nothing starts a session, so the half of this module
+// that makes one goes unused; the half that checks one still runs.
+#[cfg_attr(not(feature = "passkeys"), allow(dead_code))]
 mod admin;
 mod auth;
 mod devices;

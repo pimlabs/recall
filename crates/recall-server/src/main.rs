@@ -21,8 +21,15 @@ Recall's sync server. Configured by environment variables; see
 https://github.com/pimlabs/recall/blob/main/docs/reference/install.md
 
 Usage: recall-server [version | --version | -V | help | --help | -h]
+       recall-server reset-passkeys
 
-With no argument it serves until stopped. RECALL_TOKEN is required.";
+With no argument it serves until stopped. RECALL_TOKEN is required.
+
+reset-passkeys removes every passkey registered for /admin, and every
+session they signed in, from the database at RECALL_DB_PATH. It is for an
+owner who has lost all of them; RECALL_TOKEN can then register a first
+passkey again. Run it where the server runs, such as with
+docker compose exec.";
 
 /// What `recall-server version` prints: the same shape as `recall
 /// version`, so one reading of either tells the same story.
@@ -40,6 +47,36 @@ fn version_line() -> String {
     }
 }
 
+/// Removes every admin passkey, so the bootstrap is open again.
+///
+/// A command rather than a route on purpose: the one way back in after the
+/// last passkey is lost must not be something `RECALL_TOKEN` can do over
+/// the network, or a leaked token could replace the owner's passkeys. This
+/// needs a shell where the database is, which is more than the token.
+fn reset_passkeys() -> ExitCode {
+    let db = std::env::var("RECALL_DB_PATH")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| "data/recall.db".to_string());
+    if !std::path::Path::new(&db).exists() {
+        eprintln!("recall-server: no database at {db}; set RECALL_DB_PATH");
+        return ExitCode::FAILURE;
+    }
+    match Store::open(&db).and_then(|store| store.reset_admin_credentials()) {
+        Ok(n) => {
+            println!(
+                "Removed {n} passkey(s) and their sessions from {db}. \
+                 Open /admin and register a new one with RECALL_TOKEN."
+            );
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("recall-server: {err:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
@@ -52,6 +89,7 @@ fn main() -> ExitCode {
             println!("{USAGE}");
             return ExitCode::SUCCESS;
         }
+        ["reset-passkeys"] => return reset_passkeys(),
         _ => {
             eprintln!(
                 "recall-server: unexpected arguments: {}\n\n{USAGE}",

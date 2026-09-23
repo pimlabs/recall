@@ -53,3 +53,36 @@ fn an_unknown_argument_is_a_usage_error() {
     assert_eq!(out.status.code(), Some(2), "stderr: {stderr}");
     assert!(stderr.contains("Usage: recall-server"), "stderr: {stderr}");
 }
+
+/// The way back in for an owner who lost every passkey: a command run where
+/// the database is, never a route the token can reach.
+#[test]
+fn reset_passkeys_empties_the_passkeys_and_needs_the_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("r.db");
+    let db_str = db.to_string_lossy().to_string();
+    let out = run(&["reset-passkeys"], &[("RECALL_DB_PATH", &db_str)]);
+    assert_eq!(out.status.code(), Some(1), "no database there yet");
+
+    let store = recall_server::Store::open(&db).unwrap();
+    store
+        .add_admin_credential(
+            &recall_server::store::NewAdminCredential {
+                id: "cred",
+                user_handle: "u",
+                name: "phone",
+                passkey: "{}",
+                sign_count: 0,
+                created_at: "2026-09-23T10:00:00.000Z",
+            },
+            true,
+        )
+        .unwrap();
+    drop(store);
+    let out = run(&["reset-passkeys"], &[("RECALL_DB_PATH", &db_str)]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("Removed 1 passkey"), "{stdout}");
+    let store = recall_server::Store::open(&db).unwrap();
+    assert!(!store.has_admin_credentials().unwrap());
+}
