@@ -19,7 +19,7 @@ use crate::now;
 mod devices;
 
 pub use devices::{
-    plain_name, Created, Decision, Inserted, NewDevice, NewEnrollKey, NewEnrollment, Poll, Waiting,
+    plain_name, Created, Decision, Inserted, NewAuthkey, NewDevice, NewEnrollment, Poll, Waiting,
 };
 
 /// Frozen: an already-deployed database was created with exactly this.

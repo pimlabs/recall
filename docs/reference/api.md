@@ -38,9 +38,9 @@ asserts what this page says about them.
 | [`POST /v1/devices/deny`](#post-v1devicesapprove-and-post-v1devicesdeny) | admin | Refuse one |
 | [`GET /v1/devices`](#get-v1devices) | admin | Every device |
 | [`POST /v1/devices/{id}/revoke`](#post-v1devicesidrevoke) | admin | Revoke one |
-| [`POST /v1/enroll-keys`](#post-v1enroll-keys) | admin | Make an enrolment key, for cloud sessions |
-| [`GET /v1/enroll-keys`](#get-v1enroll-keys-and-post-v1enroll-keysidrevoke) | admin | Every enrolment key |
-| [`POST /v1/enroll-keys/{id}/revoke`](#get-v1enroll-keys-and-post-v1enroll-keysidrevoke) | admin | Stop one enrolling anything more |
+| [`POST /v1/authkeys`](#post-v1authkeys) | admin | Make an authkey, for cloud sessions |
+| [`GET /v1/authkeys`](#get-v1authkeys-and-post-v1authkeysidrevoke) | admin | Every authkey |
+| [`POST /v1/authkeys/{id}/revoke`](#get-v1authkeys-and-post-v1authkeysidrevoke) | admin | Stop one enrolling anything more |
 
 "yes" is either credential below; "admin" is `RECALL_TOKEN` or a device
 approved with the `admin` scope; "device" is any device's signature.
@@ -596,11 +596,11 @@ OAuth device authorization
 grant](https://www.rfc-editor.org/rfc/rfc8628): the machine asks for a
 short code, the owner approves the code from somewhere already trusted, and
 the machine polls until it is approved. A cloud session, which cannot wait
-for anyone, enrols with an [enrolment key](#post-v1enroll-keys) instead
+for anyone, enrols with an [authkey](#post-v1authkeys) instead
 and is approved at once.
 
 A device has a **scope**: `sync` may use every route except the admin ones;
-`admin` may also approve, list and revoke devices and enrolment keys. The
+`admin` may also approve, list and revoke devices and authkeys. The
 operator's `RECALL_TOKEN` can do everything an `admin` device can, which is
 how the first device is approved.
 
@@ -623,14 +623,14 @@ Unauthenticated, and rate limited like every other route.
 
 | Field | Type | Required | Notes |
 |---|---|:---:|---|
-| `name` | string | yes | What the owner sees the machine as. At most 64 characters, and none that hide what the name says: no control or format characters (Unicode categories Cc and Cf, which include the bidirectional overrides and the zero-width characters), no line or paragraph separators, no other invisible ones. Stored trimmed and in Unicode's composed form (NFC). No two unrevoked devices share a name, or names a person would read as one: they are compared after NFKC, without case, and by their Unicode confusable skeletons (UTS #39), so `Laptop`, `lаptop` with a Cyrillic `а`, and `1aptop` are all `laptop`, and `Straße` is `STRASSE`. A revoked device's name is free again. Ignored with `enroll_key`: see below. |
+| `name` | string | yes | What the owner sees the machine as. At most 64 characters, and none that hide what the name says: no control or format characters (Unicode categories Cc and Cf, which include the bidirectional overrides and the zero-width characters), no line or paragraph separators, no other invisible ones. Stored trimmed and in Unicode's composed form (NFC). No two unrevoked devices share a name, or names a person would read as one: they are compared after NFKC, without case, and by their Unicode confusable skeletons (UTS #39), so `Laptop`, `lаptop` with a Cyrillic `а`, and `1aptop` are all `laptop`, and `Straße` is `STRASSE`. A revoked device's name is free again. Ignored with `authkey`: see below. |
 | `public_key` | string | yes | The Ed25519 public key: the raw 32 bytes, base64url, no padding. A key of small order is refused. |
 | `agent` | string | no | The client's `User-Agent`, shown in the device list. At most 256 characters, under the same rules as `name`. |
-| `enroll_key` | string | no | An [enrolment key](#post-v1enroll-keys). With a valid one the device is approved at once. |
+| `authkey` | string | no | An [authkey](#post-v1authkeys). With a valid one the device is approved at once. |
 
 ### Response: waiting for approval
 
-Without `enroll_key`, RFC 8628 §3.2's device authorization response, the
+Without `authkey`, RFC 8628 §3.2's device authorization response, the
 enrolment id standing where the RFC has its `device_code`:
 
 ```json
@@ -662,7 +662,7 @@ the code is approved: approving one whose name is taken is a `409`, and
 the owner can deny the code, so the machine hears `access_denied` and can
 enrol again under another name.
 
-### Response: approved with an enrolment key
+### Response: approved with an authkey
 
 ```json
 { "device_id": "dev_7e3jth4xgnksqm7hyx5z5j4quq", "name": "cloud-7e3jth4x", "scope": "sync", "ephemeral": true }
@@ -681,8 +681,8 @@ device is removed once it has made no signed request for
 |:---:|---|
 | `200` | Either response above. |
 | `400` | Bad JSON, or a field that breaks the rules above, with the rule as the error. |
-| `401` | `{"error":"unauthorized: this enrolment key is not one this server issued"}`, `…has expired` or `…has been revoked`. |
-| `403` | The enrolment key already has as many unrevoked devices as its `max_devices`. |
+| `401` | `{"error":"unauthorized: this authkey is not one this server issued"}`, `…has expired` or `…has been revoked`. |
+| `403` | The authkey already has as many unrevoked devices as its `max_devices`. |
 | `413` | A body over 8 KiB. |
 | `429` | Rate limited; or five enrolments from this address are already waiting: `{"error":"too many enrolments from this address are waiting for approval; approve or deny them, or let them expire"}`. The address is counted as the rate limiter counts it, an IPv6 one by its /64. |
 | `503` | A thousand enrolments are already waiting for approval: `{"error":"too many enrolments are waiting for approval, try again later"}`. |
@@ -808,7 +808,7 @@ Admin. Every device, newest first, revoked ones included.
       "agent": "recall/0.4.1 (macos-aarch64)",
       "fingerprint": "SHA256:sWwtG+rRJiY5dk/bDuTTd0WZM2vUk0BM2ksRNsWfIGI",
       "public_key": "JrQLj5P_89iXES9-vFgrIy29clF9CC_oPPsw3c5D0bs",
-      "enroll_key_id": null,
+      "authkey_id": null,
       "created_at": "2026-09-23T12:04:54.311Z",
       "last_seen": "2026-09-23T12:31:02.118Z",
       "revoked_at": null
@@ -826,7 +826,7 @@ Admin. Every device, newest first, revoked ones included.
 | `agent` | The `agent` it enrolled with. |
 | `fingerprint` | Its key's fingerprint, as the machine showed it. |
 | `public_key` | Its key, base64url. |
-| `enroll_key_id` | The enrolment key it came in with, or `null` when a person approved it. |
+| `authkey_id` | The authkey it came in with, or `null` when a person approved it. |
 | `created_at` | When it was approved. |
 | `last_seen` | Its latest signed request, to within a minute, or `null` before its first. |
 | `revoked_at` | When it was revoked, or `null`. |
@@ -838,9 +838,9 @@ with `revoked_at` set, and the answer is the device as it now stands.
 Revoking one already revoked keeps the first time. `404` with `{"error":"no
 device has that id"}` for an id that is not there.
 
-## `POST /v1/enroll-keys`
+## `POST /v1/authkeys`
 
-Admin. Makes an **enrolment key**: a credential for machines that cannot
+Admin. Makes an **authkey**: a credential for machines that cannot
 wait for someone to approve a code, such as cloud sessions. It enrols
 devices with `sync` scope and nothing else: it cannot read or write memory
 itself.
@@ -858,8 +858,8 @@ itself.
 
 ```json
 {
-  "id": "ek_ecfq6bc4luadka2i",
-  "key": "recall-ek-tqvi2pktd7u6rpc7wwrq57cc5gjupt7mdqdupbcx3wijsjdmxmma",
+  "id": "ak_ecfq6bc4luadka2i",
+  "key": "recall-ak-tqvi2pktd7u6rpc7wwrq57cc5gjupt7mdqdupbcx3wijsjdmxmma",
   "tag": "cloud",
   "ephemeral": true,
   "max_devices": 10,
@@ -869,17 +869,17 @@ itself.
 ```
 
 `key` is shown this once: the server keeps only its SHA-256. It starts with
-`recall-ek-` so one found in a log says what it is, followed by 256 random
+`recall-ak-` so one found in a log says what it is, followed by 256 random
 bits in lowercase base32. The reply is sent with `Cache-Control: no-store`.
 
-## `GET /v1/enroll-keys` and `POST /v1/enroll-keys/{id}/revoke`
+## `GET /v1/authkeys` and `POST /v1/authkeys/{id}/revoke`
 
-Admin. The list is every enrolment key, newest first, expired and revoked
+Admin. The list is every authkey, newest first, expired and revoked
 ones included, each as above without `key` and with `revoked_at` (`null`
 until revoked):
 
 ```json
-{ "enroll_keys": [ { "id": "ek_ecfq6bc4luadka2i", "tag": "cloud", "ephemeral": true, "max_devices": 10, "created_at": "2026-09-23T12:47:29.936Z", "expires_at": "2026-12-22T12:47:29.936Z", "revoked_at": null } ] }
+{ "authkeys": [ { "id": "ak_ecfq6bc4luadka2i", "tag": "cloud", "ephemeral": true, "max_devices": 10, "created_at": "2026-09-23T12:47:29.936Z", "expires_at": "2026-12-22T12:47:29.936Z", "revoked_at": null } ] }
 ```
 
 Revoking one stops it enrolling anything more and answers with the key as it

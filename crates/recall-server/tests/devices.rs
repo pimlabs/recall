@@ -1,5 +1,5 @@
 //! Devices, end to end through the router: enrolling by code and by
-//! enrolment key, signed requests and every way one is refused, the admin
+//! authkey, signed requests and every way one is refused, the admin
 //! scope, the ephemeral sweep, and the legacy bearer token still working
 //! everywhere beside all of it.
 //!
@@ -13,10 +13,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, Request, StatusCode};
 use recall_server::{Config, Server, Store};
-use recall_wire::devices::{self, ENROLL_KEY_PREFIX};
+use recall_wire::devices::{self, AUTHKEY_PREFIX};
 use recall_wire::signature::{self, encode_public_key, fingerprint, SigningKey, Target};
 use recall_wire::{
-    Device, DeviceIdentity, DeviceList, EnrollApproved, EnrollKey, EnrollKeyCreated, EnrollKeyList,
+    Authkey, AuthkeyCreated, AuthkeyList, Device, DeviceIdentity, DeviceList, EnrollApproved,
     EnrollPending, EnrollPollResponse, ErrorResponse, PendingEnrollment, PushResponse,
     SyncResponse,
 };
@@ -283,23 +283,23 @@ impl Harness {
         .await
     }
 
-    async fn create_enroll_key(&self, ephemeral: bool) -> EnrollKeyCreated {
+    async fn create_authkey(&self, ephemeral: bool) -> AuthkeyCreated {
         ok(self
             .call(
                 "POST",
-                devices::ENROLL_KEYS_PATH,
+                devices::AUTHKEYS_PATH,
                 Some(TOKEN),
                 Some(json!({"tag": "cloud", "expires_in_days": 90, "ephemeral": ephemeral})),
             )
             .await)
     }
 
-    async fn enrol_with_key(&self, machine: &Machine, key: &str) -> (StatusCode, Bytes) {
+    async fn enrol_with_authkey(&self, machine: &Machine, key: &str) -> (StatusCode, Bytes) {
         self.call(
             "POST",
             devices::ENROLL_PATH,
             None,
-            Some(json!({"name": "cloud-session", "public_key": machine.public_key(), "agent": "recall/test", "enroll_key": key})),
+            Some(json!({"name": "cloud-session", "public_key": machine.public_key(), "agent": "recall/test", "authkey": key})),
         )
         .await
     }
@@ -748,32 +748,28 @@ async fn a_bad_enrolment_request_is_400_and_nothing_is_stored() {
 }
 
 // ---------------------------------------------------------------------------
-// enrolment keys
+// authkeys
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn an_enrolment_key_enrols_a_sync_device_at_once() {
+async fn an_authkey_enrols_a_sync_device_at_once() {
     let h = harness(|_| {});
-    let created = h.create_enroll_key(true).await;
-    assert!(
-        created.key.starts_with(ENROLL_KEY_PREFIX),
-        "{}",
-        created.key
-    );
-    assert!(created.id.starts_with("ek_"));
+    let created = h.create_authkey(true).await;
+    assert!(created.key.starts_with(AUTHKEY_PREFIX), "{}", created.key);
+    assert!(created.id.starts_with("ak_"));
     assert_eq!((created.tag.as_str(), created.ephemeral), ("cloud", true));
 
     // The list never shows the key again.
     let (status, raw) = h
-        .call("GET", devices::ENROLL_KEYS_PATH, Some(TOKEN), None)
+        .call("GET", devices::AUTHKEYS_PATH, Some(TOKEN), None)
         .await;
     assert_eq!(status, StatusCode::OK);
     assert!(!String::from_utf8_lossy(&raw).contains(&created.key));
-    let list: EnrollKeyList = serde_json::from_slice(&raw).unwrap();
-    assert_eq!(list.enroll_keys.len(), 1);
+    let list: AuthkeyList = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(list.authkeys.len(), 1);
 
     let mut session = Machine::new(6);
-    let approved: EnrollApproved = ok(h.enrol_with_key(&session, &created.key).await);
+    let approved: EnrollApproved = ok(h.enrol_with_authkey(&session, &created.key).await);
     assert_eq!(approved.scope, "sync");
     assert!(approved.ephemeral);
     session.id = approved.device_id;
@@ -788,7 +784,7 @@ async fn an_enrolment_key_enrols_a_sync_device_at_once() {
         .call("GET", devices::DEVICES_PATH, Some(TOKEN), None)
         .await);
     assert_eq!(
-        devices.devices[0].enroll_key_id.as_deref(),
+        devices.devices[0].authkey_id.as_deref(),
         Some(created.id.as_str())
     );
 
@@ -797,7 +793,7 @@ async fn an_enrolment_key_enrols_a_sync_device_at_once() {
     assert_eq!(
         h.signed(
             "POST",
-            devices::ENROLL_KEYS_PATH,
+            devices::AUTHKEYS_PATH,
             Some(json!({"expires_in_days": 1})),
             &s
         )
@@ -808,42 +804,42 @@ async fn an_enrolment_key_enrols_a_sync_device_at_once() {
 }
 
 #[tokio::test]
-async fn an_expired_revoked_or_unknown_enrolment_key_enrols_nothing() {
+async fn an_expired_revoked_or_unknown_authkey_enrols_nothing() {
     let h = harness(|_| {});
     let machine = Machine::new(7);
 
-    let expired = h.create_enroll_key(false).await;
+    let expired = h.create_authkey(false).await;
     h.sql(&format!(
-        "UPDATE enroll_keys SET expires_at = '2020-01-01T00:00:00.000Z' WHERE id = '{}'",
+        "UPDATE authkeys SET expires_at = '2020-01-01T00:00:00.000Z' WHERE id = '{}'",
         expired.id
     ));
     assert_eq!(
-        error_of(h.enrol_with_key(&machine, &expired.key).await),
+        error_of(h.enrol_with_authkey(&machine, &expired.key).await),
         (
             StatusCode::UNAUTHORIZED,
-            "unauthorized: this enrolment key has expired".into()
+            "unauthorized: this authkey has expired".into()
         )
     );
 
-    let revoked = h.create_enroll_key(false).await;
+    let revoked = h.create_authkey(false).await;
     // Revoking stops new enrolments, and leaves a device it already made.
     let mut earlier = Machine::new(8);
-    let approved: EnrollApproved = ok(h.enrol_with_key(&earlier, &revoked.key).await);
+    let approved: EnrollApproved = ok(h.enrol_with_authkey(&earlier, &revoked.key).await);
     earlier.id = approved.device_id;
-    let key: EnrollKey = ok(h
+    let key: Authkey = ok(h
         .call(
             "POST",
-            &devices::revoke_enroll_key_path(&revoked.id),
+            &devices::revoke_authkey_path(&revoked.id),
             Some(TOKEN),
             None,
         )
         .await);
     assert!(key.revoked_at.is_some());
     assert_eq!(
-        error_of(h.enrol_with_key(&machine, &revoked.key).await),
+        error_of(h.enrol_with_authkey(&machine, &revoked.key).await),
         (
             StatusCode::UNAUTHORIZED,
-            "unauthorized: this enrolment key has been revoked".into()
+            "unauthorized: this authkey has been revoked".into()
         )
     );
     let s = Signing::by(&earlier);
@@ -855,12 +851,12 @@ async fn an_expired_revoked_or_unknown_enrolment_key_enrols_nothing() {
 
     assert_eq!(
         error_of(
-            h.enrol_with_key(&machine, "recall-ek-thisisnotakeythisserverissued")
+            h.enrol_with_authkey(&machine, "recall-ak-thisisnotakeythisserverissued")
                 .await
         ),
         (
             StatusCode::UNAUTHORIZED,
-            "unauthorized: this enrolment key is not one this server issued".into()
+            "unauthorized: this authkey is not one this server issued".into()
         )
     );
 
@@ -872,7 +868,7 @@ async fn an_expired_revoked_or_unknown_enrolment_key_enrols_nothing() {
         assert_eq!(
             h.call(
                 "POST",
-                devices::ENROLL_KEYS_PATH,
+                devices::AUTHKEYS_PATH,
                 Some(TOKEN),
                 Some(body.clone())
             )
@@ -1058,7 +1054,7 @@ async fn a_sync_device_cannot_manage_devices_and_an_admin_device_can() {
 
     // Every admin route, the old stats among them: nothing gets a 401, a
     // sync device a 403, and neither reaches the handler.
-    let key = h.create_enroll_key(true).await;
+    let key = h.create_authkey(true).await;
     let forbidden = "forbidden: this needs RECALL_TOKEN or a device with the admin scope";
     for (method, uri, body) in [
         ("GET", "/admin/stats".to_string(), None),
@@ -1075,13 +1071,13 @@ async fn a_sync_device_cannot_manage_devices_and_an_admin_device_can() {
             Some(json!({"user_code": "BCDF-GHJK"})),
         ),
         ("POST", devices::revoke_device_path(&laptop.id), None),
-        ("GET", devices::ENROLL_KEYS_PATH.to_string(), None),
+        ("GET", devices::AUTHKEYS_PATH.to_string(), None),
         (
             "POST",
-            devices::ENROLL_KEYS_PATH.to_string(),
+            devices::AUTHKEYS_PATH.to_string(),
             Some(json!({"expires_in_days": 1})),
         ),
-        ("POST", devices::revoke_enroll_key_path(&key.id), None),
+        ("POST", devices::revoke_authkey_path(&key.id), None),
     ] {
         assert_eq!(
             error_of(h.call(method, &uri, None, body.clone()).await),
@@ -1096,11 +1092,11 @@ async fn a_sync_device_cannot_manage_devices_and_an_admin_device_can() {
         );
     }
     // And nothing was done: the key is not revoked, the laptop is not.
-    let keys: EnrollKeyList = ok(h
-        .call("GET", devices::ENROLL_KEYS_PATH, Some(TOKEN), None)
+    let keys: AuthkeyList = ok(h
+        .call("GET", devices::AUTHKEYS_PATH, Some(TOKEN), None)
         .await);
-    assert!(keys.enroll_keys[0].revoked_at.is_none());
-    assert_eq!(keys.enroll_keys.len(), 1);
+    assert!(keys.authkeys[0].revoked_at.is_none());
+    assert_eq!(keys.authkeys.len(), 1);
 
     // An admin device approves the next machine, with no token involved.
     let mut desktop = Machine::new(13);
@@ -1158,7 +1154,7 @@ async fn the_bearer_token_still_works_everywhere() {
         "/sync?project_key=acme%2Fapp",
         "/admin/stats",
         devices::DEVICES_PATH,
-        devices::ENROLL_KEYS_PATH,
+        devices::AUTHKEYS_PATH,
     ] {
         assert_eq!(
             h.call("GET", uri, Some(TOKEN), None).await.0,
@@ -1176,7 +1172,7 @@ async fn the_bearer_token_still_works_everywhere() {
             "{uri}"
         );
     }
-    let _ = h.create_enroll_key(false).await;
+    let _ = h.create_authkey(false).await;
     assert_eq!(
         h.call(
             "POST",
@@ -1197,9 +1193,9 @@ async fn the_bearer_token_still_works_everywhere() {
 #[tokio::test]
 async fn idle_ephemeral_devices_are_swept_and_others_are_kept() {
     let h = harness(|c| c.ephemeral_device_ttl = Duration::from_secs(3600));
-    let key = h.create_enroll_key(true).await;
+    let key = h.create_authkey(true).await;
     let mut session = Machine::new(15);
-    session.id = ok::<EnrollApproved>(h.enrol_with_key(&session, &key.key).await).device_id;
+    session.id = ok::<EnrollApproved>(h.enrol_with_authkey(&session, &key.key).await).device_id;
     let mut laptop = Machine::new(16);
     h.enrol(&mut laptop, "sync").await;
 
@@ -1296,10 +1292,10 @@ async fn every_device_request_fixture_is_understood() {
         for (name, uri, want, error) in [
             ("enroll_request.json", devices::ENROLL_PATH, 200, None),
             (
-                "enroll_request_with_key.json",
+                "enroll_request_with_authkey.json",
                 devices::ENROLL_PATH,
                 401,
-                Some("unauthorized: this enrolment key is not one this server issued"),
+                Some("unauthorized: this authkey is not one this server issued"),
             ),
             (
                 "enroll_poll_request.json",
@@ -1320,16 +1316,16 @@ async fn every_device_request_fixture_is_understood() {
                 Some("no enrolment is waiting with that code"),
             ),
             (
-                "enroll_key_create_request.json",
-                devices::ENROLL_KEYS_PATH,
+                "authkey_create_request.json",
+                devices::AUTHKEYS_PATH,
                 200,
                 None,
             ),
             (
-                "enroll_key_revoke_request.json",
-                "/v1/enroll-keys/ek_scratch/revoke",
+                "authkey_revoke_request.json",
+                "/v1/authkeys/ak_scratch/revoke",
                 404,
-                Some("no enrolment key has that id"),
+                Some("no authkey has that id"),
             ),
         ] {
             let Ok(body) = std::fs::read(version.join(name)) else {
@@ -1396,7 +1392,7 @@ fn stored_device(h: &Harness, machine: &mut Machine, scope: &str) {
                 scope,
                 agent: "",
                 ephemeral: false,
-                enroll_key_id: None,
+                authkey_id: None,
                 created_at: &recall_server::now(),
             },
             None,
@@ -1681,7 +1677,7 @@ async fn an_approval_can_be_bound_to_the_key_the_approver_saw() {
 }
 
 /// Review finding 4: a name cannot hide characters, two live devices
-/// cannot share one, and a device an enrolment key enrols is named by the
+/// cannot share one, and a device an authkey enrols is named by the
 /// server, not by itself.
 #[tokio::test]
 async fn names_are_plain_unique_and_not_chosen_by_key_enrolments() {
@@ -1753,13 +1749,13 @@ async fn names_are_plain_unique_and_not_chosen_by_key_enrolments() {
         .await);
     let _: Device = ok(approve(second).await);
 
-    let created = h.create_enroll_key(true).await;
+    let created = h.create_authkey(true).await;
     let approved: EnrollApproved = ok(h
         .call(
             "POST",
             devices::ENROLL_PATH,
             None,
-            Some(json!({"name": "laptop", "public_key": Machine::new(44).public_key(), "enroll_key": created.key})),
+            Some(json!({"name": "laptop", "public_key": Machine::new(44).public_key(), "authkey": created.key})),
         )
         .await);
     assert!(
@@ -1966,12 +1962,12 @@ async fn a_signature_from_the_second_of_a_restart_is_not_replayed() {
 /// Review finding 6: a key's devices are ephemeral unless asked, a key can
 /// be capped, and revoking a key can revoke what it enrolled.
 #[tokio::test]
-async fn enrolment_keys_are_ephemeral_by_default_capped_and_revocable_with_their_devices() {
+async fn authkeys_are_ephemeral_by_default_capped_and_revocable_with_their_devices() {
     let h = harness(|_| {});
-    let created: EnrollKeyCreated = ok(h
+    let created: AuthkeyCreated = ok(h
         .call(
             "POST",
-            devices::ENROLL_KEYS_PATH,
+            devices::AUTHKEYS_PATH,
             Some(TOKEN),
             Some(json!({"tag": "ci", "expires_in_days": 7, "max_devices": 1})),
         )
@@ -1980,22 +1976,22 @@ async fn enrolment_keys_are_ephemeral_by_default_capped_and_revocable_with_their
     assert_eq!(created.max_devices, Some(1));
 
     let mut first = Machine::new(46);
-    let approved: EnrollApproved = ok(h.enrol_with_key(&first, &created.key).await);
+    let approved: EnrollApproved = ok(h.enrol_with_authkey(&first, &created.key).await);
     assert!(approved.ephemeral);
     first.id = approved.device_id;
     assert_eq!(
-        error_of(h.enrol_with_key(&Machine::new(47), &created.key).await),
+        error_of(h.enrol_with_authkey(&Machine::new(47), &created.key).await),
         (
             StatusCode::FORBIDDEN,
-            "forbidden: this enrolment key already has its 1 devices; revoke one, or make another key"
+            "forbidden: this authkey already has its 1 devices; revoke one, or make another authkey"
                 .into()
         )
     );
 
-    let _: EnrollKey = ok(h
+    let _: Authkey = ok(h
         .call(
             "POST",
-            &devices::revoke_enroll_key_path(&created.id),
+            &devices::revoke_authkey_path(&created.id),
             Some(TOKEN),
             Some(json!({"revoke_devices": true})),
         )
@@ -2013,7 +2009,7 @@ async fn enrolment_keys_are_ephemeral_by_default_capped_and_revocable_with_their
     assert_eq!(
         h.call(
             "POST",
-            devices::ENROLL_KEYS_PATH,
+            devices::AUTHKEYS_PATH,
             Some(TOKEN),
             Some(json!({"expires_in_days": 7, "max_devices": 0})),
         )
@@ -2027,27 +2023,27 @@ async fn enrolment_keys_are_ephemeral_by_default_capped_and_revocable_with_their
 /// devices until it expired, enough of them, leaked, to fill the nonce
 /// cache for everyone. It now has a limit whether asked for one or not.
 #[tokio::test]
-async fn an_enrolment_key_made_without_a_limit_has_the_default_one() {
+async fn an_authkey_made_without_a_limit_has_the_default_one() {
     let h = harness(|_| {});
-    let created = h.create_enroll_key(true).await;
+    let created = h.create_authkey(true).await;
     assert_eq!(created.max_devices, Some(devices::DEFAULT_MAX_DEVICES));
-    let listed: EnrollKeyList = ok(h
-        .call("GET", devices::ENROLL_KEYS_PATH, Some(TOKEN), None)
+    let listed: AuthkeyList = ok(h
+        .call("GET", devices::AUTHKEYS_PATH, Some(TOKEN), None)
         .await);
     assert_eq!(
-        listed.enroll_keys[0].max_devices,
+        listed.authkeys[0].max_devices,
         Some(devices::DEFAULT_MAX_DEVICES)
     );
 
     for seed in 0..devices::DEFAULT_MAX_DEVICES {
         let machine = Machine::new(100 + seed as u8);
-        let _: EnrollApproved = ok(h.enrol_with_key(&machine, &created.key).await);
+        let _: EnrollApproved = ok(h.enrol_with_authkey(&machine, &created.key).await);
     }
     assert_eq!(
-        error_of(h.enrol_with_key(&Machine::new(200), &created.key).await),
+        error_of(h.enrol_with_authkey(&Machine::new(200), &created.key).await),
         (
             StatusCode::FORBIDDEN,
-            "forbidden: this enrolment key already has its 25 devices; revoke one, or make another key"
+            "forbidden: this authkey already has its 25 devices; revoke one, or make another authkey"
                 .into()
         )
     );

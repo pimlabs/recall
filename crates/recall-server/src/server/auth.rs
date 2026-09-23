@@ -63,7 +63,7 @@ pub(super) enum Caller {
 }
 
 impl Caller {
-    /// Whether this caller may manage devices and enrolment keys, and read
+    /// Whether this caller may manage devices and authkeys, and read
     /// the stats.
     pub(super) fn is_admin(&self) -> bool {
         match self {
@@ -88,7 +88,7 @@ const REPLAY_CAPACITY: usize = 16_384;
 
 /// The most live nonces one device may have, however high the rate limit
 /// is set: a sixty-fourth of the cache. Every device would have to be at
-/// its cap together to fill it, and an enrolment key mints at most
+/// its cap together to fill it, and an authkey mints at most
 /// [`recall_wire::devices::DEFAULT_MAX_DEVICES`] unless its maker asked
 /// for more, so a leaked one cannot mint enough to lock everyone else out.
 pub(super) const MAX_NONCES_PER_DEVICE: usize = REPLAY_CAPACITY / 64;

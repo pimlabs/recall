@@ -224,7 +224,7 @@ curl -s -X POST "${auth[@]}" "${json[@]}" \
   -d "{\"user_code\":\"$CODE\",\"fingerprint\":\"$(field "$WORK/looked.json" fingerprint)\"}" \
   "$URL/v1/devices/approve" >"$WORK/device.json"
 check "approving answers with the device" \
-  'id name scope ephemeral agent fingerprint public_key enroll_key_id created_at last_seen revoked_at' \
+  'id name scope ephemeral agent fingerprint public_key authkey_id created_at last_seen revoked_at' \
   "$(keys "$WORK/device.json")"
 check "approved with sync scope unless asked" 'sync' "$(field "$WORK/device.json" scope)"
 DEVICE=$(field "$WORK/device.json" id)
@@ -274,20 +274,20 @@ check "listing devices" "$DEVICE" \
 import json,sys; print(" ".join(d["id"] for d in json.load(sys.stdin)["devices"]))')"
 
 curl -s -X POST "${auth[@]}" "${json[@]}" -d '{"tag":"cloud","expires_in_days":90}' \
-  "$URL/v1/enroll-keys" >"$WORK/key.json"
-check "an enrolment key is shown once, with its prefix, ephemeral unless asked" 'True True' \
-  "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["key"].startswith("recall-ek-"), d["ephemeral"])' "$WORK/key.json")"
+  "$URL/v1/authkeys" >"$WORK/key.json"
+check "an authkey is shown once, with its prefix, ephemeral unless asked" 'True True' \
+  "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["key"].startswith("recall-ak-"), d["ephemeral"])' "$WORK/key.json")"
 check "a key made without max_devices enrols at most 25" '25' "$(field "$WORK/key.json" max_devices)"
 check "the list never shows it again" 'False' \
-  "$(curl -s "${auth[@]}" "$URL/v1/enroll-keys" | python3 -c '
-import json,sys; print("key" in json.load(sys.stdin)["enroll_keys"][0])')"
-enroll laptop ",\"enroll_key\":\"$(field "$WORK/key.json" key)\"" >"$WORK/approved.json"
+  "$(curl -s "${auth[@]}" "$URL/v1/authkeys" | python3 -c '
+import json,sys; print("key" in json.load(sys.stdin)["authkeys"][0])')"
+enroll laptop ",\"authkey\":\"$(field "$WORK/key.json" key)\"" >"$WORK/approved.json"
 check "enrolling with the key is approved at once, named by the server" 'device_id name scope ephemeral cloud-' \
   "$(keys "$WORK/approved.json") $(field "$WORK/approved.json" name | cut -c1-6)"
 curl -s -X POST "${auth[@]}" "${json[@]}" -d '{"revoke_devices":true}' \
-  "$URL/v1/enroll-keys/$(field "$WORK/key.json" id)/revoke" >/dev/null
-check "a revoked key enrols nothing" '{"error":"unauthorized: this enrolment key has been revoked"}' \
-  "$(enroll cloud ",\"enroll_key\":\"$(field "$WORK/key.json" key)\"")"
+  "$URL/v1/authkeys/$(field "$WORK/key.json" id)/revoke" >/dev/null
+check "a revoked key enrols nothing" '{"error":"unauthorized: this authkey has been revoked"}' \
+  "$(enroll cloud ",\"authkey\":\"$(field "$WORK/key.json" key)\"")"
 check "revoking a key with revoke_devices revokes what it enrolled" 'True' \
   "$(curl -s "${auth[@]}" "$URL/v1/devices" | python3 -c '
 import json,sys
