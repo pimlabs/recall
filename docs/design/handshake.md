@@ -284,7 +284,7 @@ into the binary.
   process plays both roles: every Syncthing node is a peer, and the Vault
   CLI is itself a client of `vault server`. Recall's client never serves.
 
-**Proposal:** two binaries from the same workspace and the same version.
+**Agreed by the owner (2026-09-23):** two binaries from the same workspace and the same version.
 
 - `recall`: the client, without `recall-server` in its dependency tree.
   This is what npm, Homebrew, curl and `cargo install recall` deliver.
