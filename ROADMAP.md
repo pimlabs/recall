@@ -828,4 +828,9 @@ arriving new**, and **it has to stay cheap**.
 - Syncing anything other than auto memory (`CLAUDE.md`, skills, settings, sessions — leave those to git, or to not existing as a problem in the first place).
 - Real-time collaborative editing between two humans.
 - A GUI. This is a backend + a couple of hook scripts.
-- Supporting Windows without WSL, unless it turns out to be trivial.
+- ~~Supporting Windows without WSL, unless it turns out to be trivial.~~
+  Shipped as a native client (`x86_64`/`aarch64-pc-windows-msvc`,
+  `install.ps1`, npm and `recall doctor` updated for it) — see
+  `docs/reference/install.md`'s Windows section. winget, code signing and
+  the server remain out of scope; the project-slug rule for Windows is a
+  documented guess, not yet verified on a real machine.

@@ -42,6 +42,20 @@ fn run(args: &[&str], cwd: &Path, env: &[(&str, &str)], stdin: Option<&str>) -> 
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // env_clear() strips everything, and on Windows that includes the
+    // variables CreateProcess itself needs just to start a process at all —
+    // without `SystemRoot` in particular, spawning can fail before the
+    // binary under test ever runs. These are OS plumbing, never RECALL_* or
+    // anything a test reads, so the "clean environment" property below is
+    // unaffected. Not verified on a real Windows machine; if the windows CI
+    // job's `cargo test -p recall` fails at `spawn()` rather than in an
+    // assertion, this list is the first thing to widen.
+    #[cfg(windows)]
+    for var in ["SystemRoot", "windir", "TEMP", "TMP", "LOCALAPPDATA"] {
+        if let Ok(v) = std::env::var(var) {
+            cmd.env(var, v);
+        }
+    }
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -216,6 +230,14 @@ fn push_ignores_a_malformed_hook_payload() {
 /// rather than replacing the real one: `recall` shells out to `git` to find
 /// the project root, and a test that broke that would pass for the wrong
 /// reason.
+///
+/// Unix only: an extensionless `#!/bin/sh` script made executable with
+/// `chmod` is not something Windows can run by that name at all — it would
+/// need a `.exe`/`.cmd`/`.bat` extension and a completely different
+/// mechanism. The fork this guards against (`Command::new("hostname")` in
+/// `config.rs`) is not itself gated, so this is a gap in the test's own
+/// technique, not a known gap in the behaviour under test.
+#[cfg(unix)]
 fn hostname_shim() -> (tempfile::TempDir, PathBuf, String) {
     use std::os::unix::fs::PermissionsExt;
 
@@ -247,6 +269,7 @@ fn hostname_shim() -> (tempfile::TempDir, PathBuf, String) {
 ///
 /// `RECALL_SOURCE_ENV` is deliberately absent from the environment below: set
 /// it and the fallback never runs, and the test proves nothing.
+#[cfg(unix)]
 #[test]
 fn push_does_not_fork_hostname_before_deciding_a_file_is_not_its_business() {
     let repo = git_repo();

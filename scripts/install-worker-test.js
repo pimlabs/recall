@@ -34,6 +34,15 @@ for (const path of ["/install", "/install.sh"]) {
   check(`${path} body is the upstream script`, await res.text(), SCRIPT);
 }
 
+console.log("\nthe installer (PowerShell)");
+{
+  const res = await get("/install.ps1");
+  check("/install.ps1 status", res.status, 200);
+  check("/install.ps1 content-type", res.headers.get("content-type"), "text/plain; charset=utf-8");
+  check("/install.ps1 nosniff", res.headers.get("x-content-type-options"), "nosniff");
+  check("/install.ps1 body is the upstream script", await res.text(), SCRIPT);
+}
+
 console.log("\nthe hostname's past");
 for (const path of ["/sync", "/health", "/admin", "/admin/stats"]) {
   const res = await get(path, path === "/sync" ? "POST" : "GET");
@@ -44,7 +53,7 @@ for (const path of ["/sync", "/health", "/admin", "/admin/stats"]) {
 }
 
 console.log("\neverything else");
-for (const path of ["/", "/nope", "/install.ps1"]) {
+for (const path of ["/", "/nope", "/install.PS1"]) {
   const res = await get(path);
   check(`${path} is 404`, res.status, 404);
   check(`${path} offers the installer`, (await res.text()).includes("/install"), true);

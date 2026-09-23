@@ -14,6 +14,19 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
+## Unreleased
+
+- **Windows client.** `recall` now ships for `x86_64-pc-windows-msvc` and
+  `aarch64-pc-windows-msvc`. Install with `irm
+  https://recall.pimlabs.id/install.ps1 | iex`, or `npm install -g
+  @pimlabs/recall`, which now supports `win32`. `recall doctor` checks for
+  Git for Windows on Windows — Claude Code runs hook commands through Git
+  Bash there and falls back to PowerShell without it, which cannot run the
+  hooks `recall init` writes — and fails with a clear fix when it is
+  missing. The server remains Linux-only; winget and code signing are not
+  done yet. See `docs/reference/install.md`'s Windows section, including
+  what is a documented guess rather than verified on a real machine.
+
 ## 0.4.0 — 2026-09-23
 
 - **Breaking: the server is its own binary, `recall-server`.** `recall serve`

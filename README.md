@@ -49,10 +49,14 @@ because that is the choice everything else follows from.
 Install the binary, connect it to your server once, and opt each project in:
 
 ```sh
-npm install -g @pimlabs/recall                    # or bun, or pnpm
-brew install pimlabs/tap/recall
-curl -fsSL https://recall.pimlabs.id/install | bash
-cargo install recall
+npm install -g @pimlabs/recall                    # or bun, or pnpm — macOS, Linux, Windows
+brew install pimlabs/tap/recall                    # macOS, Linux
+curl -fsSL https://recall.pimlabs.id/install | bash # macOS, Linux
+cargo install recall                                # anywhere Rust builds
+```
+
+```powershell
+irm https://recall.pimlabs.id/install.ps1 | iex    # Windows
 ```
 
 ```sh
@@ -146,7 +150,7 @@ And the tree:
 | `crates/` | The binary. `recall-wire` (frozen contract) · `recall-hooks` (client, including path derivation) · `recall-server` · `recall` (`main`, for both halves — `serve` included). See ARCHITECTURE's code map. |
 | `deploy/` | The image, and a Compose file per ingress — Cloudflare Tunnel or an existing Traefik. Runs on anything with Docker. |
 | `scripts/` | `compat-check.sh` (the cutover matrix), `api-doc-check.sh`, `trusted-ip-check.sh`, `install-worker-test.js`, `wrangler-check.py`, `release.sh`, and `probes/`. |
-| `npm/`, `Formula/`, `install.sh` | Three of the four install channels. The fourth, `cargo install recall`, needs no file here. |
+| `npm/`, `Formula/`, `install.sh`, `install.ps1` | Four of the five install channels. The fifth, `cargo install recall`, needs no file here. |
 | `fixtures/` | A database the retired Node server actually wrote, so the cutover stays testable without it. |
 
 ## License

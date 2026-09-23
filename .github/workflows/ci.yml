@@ -251,3 +251,50 @@ jobs:
           # which is how the previous health check spent months being
           # impossible without anyone noticing.
           docker run --rm --entrypoint sh recall-server-rel -c 'command -v wget'
+
+  # The client only — recall-server is Linux-only by design (see
+  # deploy/Dockerfile and its own crate docs), so it is excluded rather than
+  # tested and ignored. `recall`'s own integration tests still pull it in as
+  # a dev-dependency (it runs a real server in-process), which is why this
+  # needs a C toolchain: rusqlite's `bundled` feature compiles SQLite from
+  # source, and windows-latest carries the MSVC toolchain cc-rs needs for
+  # that automatically — the same reason release.yml's msvc builds need
+  # nothing extra either.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --exclude recall-server --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --exclude recall-server --locked
+
+      # Parsed rather than run: running it for real means downloading a
+      # release, and no release has been cut yet at the point a PR that
+      # changes it is reviewed. This is the same level of assurance
+      # `bash -n` gives the shell scripts below — syntax only — which is
+      # still enough to catch what a hand-edit is most likely to break.
+      - name: install.ps1 parses
+        shell: pwsh
+        run: |
+          $errors = $null
+          $tokens = $null
+          $null = [System.Management.Automation.Language.Parser]::ParseFile(
+            "install.ps1", [ref]$tokens, [ref]$errors)
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_ }
+            exit 1
+          }
