@@ -61,6 +61,12 @@ break will be described here in full rather than smoothed over.
 - **Three new tables in the database**, `devices`, `device_enrollments`
   and `enroll_keys`, created on start. `memory_files` is untouched, and an
   older server ignores the new tables, so rolling back still works.
+- **winget publishing, set up but not live yet.** Every release can now
+  keep a `PimLabs.Recall` package in `microsoft/winget-pkgs` current, once
+  that package exists. The first version needs a one-time manual
+  submission, so `winget install PimLabs.Recall` does not work yet. See the
+  winget section of `docs/reference/releasing.md` for that submission;
+  `docs/reference/install.md` lists the channel once it is accepted.
 
 ## 0.4.0 — 2026-09-23
 

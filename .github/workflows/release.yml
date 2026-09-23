@@ -211,12 +211,21 @@ jobs:
 
       # A static binary is the promise the image relies on; a dynamic one
       # would build here and fail to start in Alpine.
+      #
+      # Asked of the ELF headers, not of `file`'s wording: `file` says
+      # "static-pie linked" for the amd64 build and "statically linked" for
+      # the arm64 one, and matching only the first is what failed v0.4.0's
+      # first run. A dynamic binary has a program interpreter and names the
+      # libraries it needs; a static one, PIE or not, has neither.
       - name: Package
         run: |
           set -euo pipefail
           bin="target/${{ matrix.target }}/release/recall-server"
           file "$bin"
-          file "$bin" | grep -Eq 'static(-pie)? linked'
+          if readelf -lW "$bin" | grep -q 'INTERP' || readelf -dW "$bin" | grep -q '(NEEDED)'; then
+            echo "::error::$bin is dynamically linked; the image needs a static one"
+            exit 1
+          fi
           "$bin" version
           mkdir -p dist
           cp "$bin" "dist/${{ matrix.asset }}"
@@ -391,6 +400,50 @@ jobs:
             echo "checksums. The rewritten file is attached to this run as the \`formula\`"
             echo "artifact; it lands on \`main\` through a pull request like every other change."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # winget, via vedantmgoyal9/winget-releaser (which drives komac under the
+  # hood). Unlike the homebrew job above, this does not write to this
+  # repository — it opens a pull request against microsoft/winget-pkgs from
+  # a fork of it. That fork, and at least one version of the package already
+  # present in winget-pkgs, are both one-time setup done by hand; this job
+  # cannot create either. See docs/reference/releasing.md.
+  winget:
+    needs: publish
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      # The one credential this job stores: a classic PAT with the
+      # `public_repo` scope (to open the pull request) and, so a workflow
+      # file change upstream in winget-pkgs doesn't fail this job
+      # intermittently, `workflow`. It lives on the `release` environment,
+      # so it is only readable by a job that has already been approved.
+      # Missing is reported, not failed — the first submission and any
+      # later one done by hand still work without it.
+      - name: Is the winget token configured?
+        id: token
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if [ -n "$WINGET_TOKEN" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::WINGET_TOKEN is not set on the release environment, so winget-pkgs was not updated. See docs/reference/releasing.md."
+          fi
+      # The default installers-regex only matches .exe/.msi/.msix/.appx —
+      # release.yml's Windows archives are .zip (see the `build` job's
+      # "Package (Windows)" step), so it has to be widened or the action
+      # finds no installers to publish at all.
+      - name: Publish to winget-pkgs
+        if: steps.token.outputs.configured == 'true'
+        uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: PimLabs.Recall
+          installers-regex: '\.zip$'
+          release-tag: ${{ github.event.inputs.tag || github.ref_name }}
+          token: ${{ secrets.WINGET_TOKEN }}
 
   # The server runs the release that was just published: its image holds
   # the recall-server above, checked against checksums.txt. Not behind the

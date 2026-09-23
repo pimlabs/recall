@@ -447,6 +447,8 @@ Automerge and Yjs merge without conflicts and secsync relays them end to
 end encrypted. But they need the file stored as a CRDT document, and
 Claude Code reads and writes plain Markdown.
 
+**Build plan:** [`part5-plan.md`](part5-plan.md), pull request by pull request.
+
 ## Future idea: memory in claude.ai
 
 Parked by the owner (2026-09-23), recorded so it is not lost. Not planned.
