@@ -44,12 +44,35 @@ fn harness(tweak: impl FnOnce(&mut Config)) -> Harness {
         ..Config::default()
     };
     tweak(&mut cfg);
+    let server = Server::new(cfg, store.clone());
+    // As if it had been up ten minutes: a server refuses every signature
+    // dated in the first few seconds after it started, which only the
+    // restart tests are about.
+    server.backdate_start(600);
+    Harness { server, dir, store }
+}
+
+/// A new process on `h`'s database, just started, as a deploy leaves it.
+fn restarted(h: &Harness) -> Harness {
     Harness {
-        server: Server::new(cfg, store.clone()),
-        dir,
-        store,
+        server: Server::new(
+            Config {
+                token: TOKEN.to_string(),
+                merge_enabled: false,
+                rate_limit_max: 10_000,
+                ..Config::default()
+            },
+            h.store.clone(),
+        ),
+        dir: tempfile::tempdir().unwrap(),
+        store: h.store.clone(),
     }
 }
+
+/// What a server that has just started says to a signature the process
+/// before it could have accepted.
+const TOO_SOON: &str = "unauthorized: signature created before this server started, or too soon \
+                        after; sign the request again in a few seconds";
 
 /// A machine: a key pair, the name it enrols as, and the device id once it
 /// has one.
@@ -1408,16 +1431,19 @@ async fn a_refused_request_does_not_use_up_its_nonce() {
     );
 }
 
-/// M2: the window is sixty seconds either way, not a second more, and the
-/// nonce is remembered for as long as the window accepts its request, so
-/// the request is refused again after the window rather than accepted.
+/// M2: the window is sixty seconds behind and five ahead, not a second
+/// more, and the nonce is remembered for as long as the window accepts its
+/// request, so the request is refused again after the window rather than
+/// accepted.
 #[tokio::test]
 async fn the_window_is_sixty_seconds_and_a_replay_after_it_is_refused() {
     let h = harness(|_| {});
     let mut laptop = Machine::new(32);
     stored_device(&h, &mut laptop, "sync");
 
-    for skew in [61, 62, 63, 64, 65, -61, -62, -63, -64, -65] {
+    // Checked a second or so inside each edge, so a clock that ticks while
+    // the request is in flight cannot move it across.
+    for skew in [7, 8, 30, 60, 61, -62, -63, -64, -65] {
         let s = Signing {
             created: unix_now() + skew,
             ..Signing::by(&laptop)
@@ -1429,15 +1455,17 @@ async fn the_window_is_sixty_seconds_and_a_replay_after_it_is_refused() {
             "skew {skew}: {why}"
         );
     }
-    let s = Signing {
-        created: unix_now() + 60,
-        ..Signing::by(&laptop)
-    };
-    assert_eq!(
-        h.signed("GET", "/sync?project_key=a", None, &s).await.0,
-        StatusCode::OK,
-        "sixty seconds ahead is inside"
-    );
+    for (skew, edge) in [(5, "five seconds ahead"), (-59, "a minute behind")] {
+        let s = Signing {
+            created: unix_now() + skew,
+            ..Signing::by(&laptop)
+        };
+        assert_eq!(
+            h.signed("GET", "/sync?project_key=a", None, &s).await.0,
+            StatusCode::OK,
+            "{edge} is inside"
+        );
+    }
 
     let once = Signing::by(&laptop);
     assert_eq!(
@@ -1537,8 +1565,8 @@ async fn the_enrolment_routes_take_small_bodies_only() {
 /// refused on its own, and the others carry on.
 #[tokio::test]
 async fn a_device_that_signs_too_much_is_refused_alone() {
-    // Two a minute per address: a device may have four nonces live, the
-    // two minutes one lives.
+    // Two a minute per address: a device may have four nonces live, since
+    // the sixty-five seconds one lives span two of the limiter's minutes.
     let h = harness(|c| c.rate_limit_max = 2);
     let mut greedy = Machine::new(36);
     stored_device(&h, &mut greedy, "sync");
@@ -1751,32 +1779,27 @@ async fn a_signature_made_before_a_restart_is_refused() {
     while unix_now() <= before.created {
         std::thread::sleep(Duration::from_millis(50));
     }
-    let restarted = Harness {
-        server: Server::new(
-            Config {
-                token: TOKEN.to_string(),
-                merge_enabled: false,
-                rate_limit_max: 10_000,
-                ..Config::default()
-            },
-            h.store.clone(),
-        ),
-        dir: tempfile::tempdir().unwrap(),
-        store: h.store.clone(),
-    };
+    let restarted = restarted(&h);
+    let started = unix_now();
     assert_eq!(
         error_of(
             restarted
                 .signed("GET", "/sync?project_key=a", None, &before)
                 .await
         ),
-        (
-            StatusCode::UNAUTHORIZED,
-            "unauthorized: signature created before this server started; sign the request again"
-                .into()
-        )
+        (StatusCode::UNAUTHORIZED, TOO_SOON.into())
     );
-    let after = Signing::by(&laptop);
+
+    // Signed again a second later, by a clock as far ahead as it may be,
+    // the request is dated past what the process before could have
+    // accepted, and goes through.
+    while unix_now() <= started {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let after = Signing {
+        created: unix_now() + 5,
+        ..Signing::by(&laptop)
+    };
     assert_eq!(
         restarted
             .signed("GET", "/sync?project_key=a", None, &after)
@@ -1784,6 +1807,92 @@ async fn a_signature_made_before_a_restart_is_refused() {
             .0,
         StatusCode::OK
     );
+}
+
+/// Verification finding N1: a signature dated ahead of the clock outlived
+/// the process that accepted it. One dated thirty seconds ahead was
+/// accepted, and accepted again by a new process started any time in
+/// those thirty seconds, whose nonce cache was empty. Now `created` may be
+/// only five seconds ahead, and a new process refuses everything dated up
+/// to five seconds past its start.
+#[tokio::test]
+async fn a_signature_dated_ahead_is_not_replayed_after_a_restart() {
+    let h = harness(|_| {});
+    let mut laptop = Machine::new(57);
+    stored_device(&h, &mut laptop, "sync");
+
+    let far_ahead = Signing {
+        created: unix_now() + 30,
+        ..Signing::by(&laptop)
+    };
+    let (status, why) = error_of(
+        h.signed("POST", "/sync", Some(push_body("# ahead\n")), &far_ahead)
+            .await,
+    );
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(why.contains("ahead of the server's clock"), "{why}");
+
+    let ahead = Signing {
+        created: unix_now() + 5,
+        ..Signing::by(&laptop)
+    };
+    assert_eq!(
+        h.signed("POST", "/sync", Some(push_body("# ahead\n")), &ahead)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let restarted = restarted(&h);
+    assert_eq!(
+        error_of(
+            restarted
+                .signed("POST", "/sync", Some(push_body("# ahead\n")), &ahead)
+                .await
+        ),
+        (StatusCode::UNAUTHORIZED, TOO_SOON.into())
+    );
+}
+
+/// N1's other half: a signature made in the very second a new process
+/// starts. Refusing only what was made before the start let one that the
+/// process before accepted, in that same second, be accepted again.
+#[tokio::test]
+async fn a_signature_from_the_second_of_a_restart_is_not_replayed() {
+    let h = harness(|_| {});
+    let mut laptop = Machine::new(58);
+    stored_device(&h, &mut laptop, "sync");
+
+    // A slow machine may tick over between the two; a few tries find a
+    // second both land in.
+    for _ in 0..5 {
+        while SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .subsec_millis()
+            > 300
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let once = Signing::by(&laptop);
+        assert_eq!(
+            h.signed("GET", "/sync?project_key=a", None, &once).await.0,
+            StatusCode::OK
+        );
+        let restarted = restarted(&h);
+        let same_second = unix_now() == once.created;
+        assert_eq!(
+            error_of(
+                restarted
+                    .signed("GET", "/sync?project_key=a", None, &once)
+                    .await
+            ),
+            (StatusCode::UNAUTHORIZED, TOO_SOON.into())
+        );
+        if same_second {
+            return;
+        }
+    }
+    panic!("never managed to sign and restart inside one second");
 }
 
 /// Review finding 6: a key's devices are ephemeral unless asked, a key can

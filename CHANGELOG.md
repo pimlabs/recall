@@ -49,9 +49,10 @@ break will be described here in full rather than smoothed over.
   changes for `RECALL_TOKEN`, which is all anything uses today.
 - **Signed requests are checked before their body is read**, the
   enrolment routes take 8 KiB bodies, one address may have five
-  enrolments waiting, and a signature made before the server started is
-  refused, since the nonces that would catch its replay went with the
-  process before.
+  enrolments waiting, and a signature dated up to five seconds after the
+  server started is refused, since the nonces that would catch its replay
+  went with the process before. A signature's `created` may be a minute
+  behind the server's clock but only five seconds ahead of it.
 - **`GET /.well-known/recall` lists `device-sig-v1`** after `bearer` in
   `auth.methods`, and a new `devices` capability.
 - **New setting: `RECALL_EPHEMERAL_DEVICE_TTL_HOURS`** (default 24). An
