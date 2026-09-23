@@ -43,9 +43,9 @@ break will be described here in full rather than smoothed over.
   refused, no two unrevoked devices share a name or names that read alike
   (`Laptop`, or `lаptop` with a Cyrillic `а`, beside `laptop`), and a device an
   enrolment key enrols is named by the server after the key's tag.
-- **Enrolment keys** enrol ephemeral devices unless told otherwise, can be
-  capped with `max_devices`, and can be revoked together with every device
-  they enrolled.
+- **Enrolment keys** enrol ephemeral devices unless told otherwise, enrol
+  at most 25 unrevoked devices unless `max_devices` says otherwise, and can
+  be revoked together with every device they enrolled.
 - **`GET /admin/stats` needs the `admin` scope from a device.** Nothing
   changes for `RECALL_TOKEN`, which is all anything uses today.
 - **Signed requests are checked before their body is read**, the

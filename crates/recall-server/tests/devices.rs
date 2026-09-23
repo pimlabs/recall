@@ -1982,6 +1982,36 @@ async fn enrolment_keys_are_ephemeral_by_default_capped_and_revocable_with_their
     );
 }
 
+/// Verification finding N3: a key made without `max_devices` minted
+/// devices until it expired, enough of them, leaked, to fill the nonce
+/// cache for everyone. It now has a limit whether asked for one or not.
+#[tokio::test]
+async fn an_enrolment_key_made_without_a_limit_has_the_default_one() {
+    let h = harness(|_| {});
+    let created = h.create_enroll_key(true).await;
+    assert_eq!(created.max_devices, Some(devices::DEFAULT_MAX_DEVICES));
+    let listed: EnrollKeyList = ok(h
+        .call("GET", devices::ENROLL_KEYS_PATH, Some(TOKEN), None)
+        .await);
+    assert_eq!(
+        listed.enroll_keys[0].max_devices,
+        Some(devices::DEFAULT_MAX_DEVICES)
+    );
+
+    for seed in 0..devices::DEFAULT_MAX_DEVICES {
+        let machine = Machine::new(100 + seed as u8);
+        let _: EnrollApproved = ok(h.enrol_with_key(&machine, &created.key).await);
+    }
+    assert_eq!(
+        error_of(h.enrol_with_key(&Machine::new(200), &created.key).await),
+        (
+            StatusCode::FORBIDDEN,
+            "forbidden: this enrolment key already has its 25 devices; revoke one, or make another key"
+                .into()
+        )
+    );
+}
+
 /// Review finding 7: one address may have five enrolments waiting, so it
 /// cannot fill the queue and lock the owner's machines out.
 #[tokio::test]

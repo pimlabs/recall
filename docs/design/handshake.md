@@ -205,7 +205,8 @@ A cloud session is a new machine every time and cannot answer a prompt.
 Following Tailscale's auth keys:
 
 - The owner creates an **enrolment key**: reusable, ephemeral, tagged
-  `cloud`, scope `sync` only, with an expiry. It is shown once.
+  `cloud`, scope `sync` only, with an expiry and a limit on how many
+  devices it may have enrolled at once (25 unless asked). It is shown once.
 - It goes in the cloud environment's variables. It can enrol devices; it
   cannot read or write memory.
 - Each session generates its own key pair, enrols with the enrolment key as

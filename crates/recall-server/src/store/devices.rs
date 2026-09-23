@@ -59,8 +59,8 @@ pub(super) const SCHEMA: &str = "
         key_sha256  TEXT NOT NULL UNIQUE,
         tag         TEXT NOT NULL DEFAULT '',
         ephemeral   INTEGER NOT NULL DEFAULT 0,
-        -- The most unrevoked devices it may have enrolled at once; NULL for
-        -- no limit.
+        -- The most unrevoked devices it may have enrolled at once. Always
+        -- stored; NULL would be read as the default, not as no limit.
         max_devices INTEGER,
         created_at  TEXT NOT NULL,
         expires_at  TEXT NOT NULL,

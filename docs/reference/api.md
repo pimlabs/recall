@@ -129,8 +129,10 @@ dated, the longer after each start this lasts. A request signed while a
 deploy is under way, or in the first few seconds after, gets that answer,
 and is signed again a few seconds later. One device may have as many
 nonces live at once as the rate limit lets one address send in 65
-seconds, the longest a nonce lives; a device over it is refused alone,
-and every other device carries on.
+seconds, the longest a nonce lives, and never more than 256, a
+sixty-fourth of the 16,384 the server remembers in all, however high
+`RECALL_RATE_LIMIT_MAX` is set. A device over it is refused alone, and
+every other device carries on.
 
 A `sync` device may use every route but the admin ones; an `admin` device
 may use all of them.
@@ -838,7 +840,7 @@ itself.
 | `tag` | string | no | A label, and the start of the name of every device the key enrols. At most 32 characters, under the rules for a device name. |
 | `expires_in_days` | integer | yes | 1 to 365. There is no key that never expires. |
 | `ephemeral` | bool | no | Whether the devices it enrols are ephemeral. `true` when left out: a key is for machines that come and go. |
-| `max_devices` | integer | no | The most unrevoked devices it may have enrolled at once, 1 or more; no limit when left out. An ephemeral device swept for being idle frees its place. |
+| `max_devices` | integer | no | The most unrevoked devices it may have enrolled at once, 1 or more; **25** when left out, which is a day of cloud sessions. There is no key without a limit, so a leaked one cannot enrol devices without end; ask for more if you need them. An ephemeral device swept for being idle frees its place. |
 
 ```json
 {

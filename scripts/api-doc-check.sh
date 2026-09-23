@@ -262,6 +262,7 @@ curl -s -X POST "${auth[@]}" "${json[@]}" -d '{"tag":"cloud","expires_in_days":9
   "$URL/v1/enroll-keys" >"$WORK/key.json"
 check "an enrolment key is shown once, with its prefix, ephemeral unless asked" 'True True' \
   "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["key"].startswith("recall-ek-"), d["ephemeral"])' "$WORK/key.json")"
+check "a key made without max_devices enrols at most 25" '25' "$(field "$WORK/key.json" max_devices)"
 check "the list never shows it again" 'False' \
   "$(curl -s "${auth[@]}" "$URL/v1/enroll-keys" | python3 -c '
 import json,sys; print("key" in json.load(sys.stdin)["enroll_keys"][0])')"
