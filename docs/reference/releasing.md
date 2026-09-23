@@ -75,8 +75,9 @@ either refuses or resumes; it never moves a tag.
 
 1. **Versions agree** — the tag, `Cargo.toml` and `npm/package.json`, before
    any runner time is spent.
-2. **Build** four targets on native runners, then **create the GitHub
-   Release** with `checksums.txt`. `install.sh` works from this moment.
+2. **Build** the client's targets on native runners, then **create the
+   GitHub Release** with `checksums.txt`. `install.sh` (and, on Windows,
+   `install.ps1`) work from this moment.
 3. **Stop and wait for you.** The `npm`, `crates` and `homebrew` jobs run in
    the `release` environment, whose required reviewer is the owner. GitHub
    notifies you; *Review deployments → Approve* releases all three.
@@ -201,10 +202,10 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-`.github/workflows/release.yml` fires on `v*`. It builds four targets, each on
-a **native runner** — `rusqlite` compiles SQLite from C, so cross-compiling
-would need a C toolchain per target — then writes `checksums.txt` and creates
-the GitHub Release:
+`.github/workflows/release.yml` fires on `v*`. It builds the client for six
+targets, each on a **native runner** — `rusqlite` compiles SQLite from C, so
+cross-compiling would need a C toolchain per target — then writes
+`checksums.txt` and creates the GitHub Release:
 
 | Asset | Runner |
 |---|---|
@@ -212,19 +213,23 @@ the GitHub Release:
 | `recall_darwin_arm64.tar.gz` | `macos-15` |
 | `recall_linux_amd64.tar.gz` | `ubuntu-latest` |
 | `recall_linux_arm64.tar.gz` | `ubuntu-24.04-arm` |
+| `recall_windows_amd64.zip` | `windows-latest` |
+| `recall_windows_arm64.zip` | `windows-11-arm` |
 
-Those names are a contract: `install.sh` and `npm/install.js` both construct
-them from `uname` / `process.platform`. Don't rename them without changing
-both.
+Those names are a contract: `install.sh`/`install.ps1` and `npm/install.js`
+all construct them from `uname` / `PROCESSOR_ARCHITECTURE` / `process.platform`.
+Don't rename them without changing all three. The Windows pair is `.zip`, not
+`.tar.gz` — the same `checksums.txt` covers both shapes, and everything that
+verifies against it filters by exact filename, not extension.
 
 ### When a build job never starts
 
 A retired runner label does not fail — it is simply never served. The job
 sits `queued` with no runner assigned and no error, and because `publish`
-waits for all four, no release is created at all. This happened on the first
-real tag: `macos-13` had been retired, the job queued indefinitely, and
-`release.sh` timed out at step 6 with three green builds and nothing to show
-for them.
+waits for every leg of the matrix, no release is created at all. This
+happened on the first real tag: `macos-13` had been retired, the job queued
+indefinitely, and `release.sh` timed out at step 6 with the other builds
+green and nothing to show for them.
 
 The recovery does **not** involve moving the tag. `workflow_dispatch` takes
 the workflow file from `main` but checks out the ref you name, so fixing the

@@ -117,6 +117,19 @@ break will be described here in full rather than smoothed over.
   two share no protocol. Against a server older than the discovery document
   they report the commit as before. `status --json` gains `server_version`,
   `server_channel`, `server_protocols`, `min_client` and `client_version`.
+- **A Windows client.** `recall` ships for Windows on x64 and arm64.
+  Install it with `irm https://recall.pimlabs.id/install.ps1 | iex`, or with
+  `npm install -g @pimlabs/recall`, which now supports Windows. Git for
+  Windows is required: Claude Code runs hook commands through Git Bash there,
+  and without it falls back to PowerShell, which cannot run the hooks
+  `recall init` writes. `recall doctor` checks for it and says what to do.
+  The server stays Linux-only, and winget is not there yet. See the Windows
+  section of `docs/reference/install.md`, including what is a documented
+  guess rather than verified on a real machine.
+- **npm on macOS and Linux runs the binary directly.** The installer puts
+  the verified binary where npm's `recall` link points, instead of leaving a
+  wrapper script in between, so a hook call through an npm install starts
+  one process rather than two.
 
 ## 0.3.2 — 2026-09-23
 

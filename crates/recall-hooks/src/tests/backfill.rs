@@ -241,6 +241,13 @@ async fn a_refusal_stops_the_run_and_says_what_to_do_about_it() {
 /// would refuse too — must not take the rest of the directory down with it.
 /// `list_memory_files` sorts, so a single bad name would otherwise make every
 /// file after it permanently unsendable, run after run.
+///
+/// Unix only, because the file cannot exist on Windows: every name
+/// `validate_file_path` refuses needs a `:` at byte 1 or a backslash, and
+/// Windows reads the first as a data stream and the second as a separator.
+/// A Windows memory directory can therefore never hold a file the server
+/// refuses on its name, which is the situation this guards.
+#[cfg(unix)]
 #[tokio::test]
 async fn one_file_the_server_will_never_accept_does_not_wedge_the_rest() {
     let fx = Fixture::new().await;

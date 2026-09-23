@@ -299,6 +299,7 @@ fn event_entries_mut<'a>(doc: &'a mut Value, event: &str) -> &'a mut Vec<Value> 
 mod tests {
     /// The committed command runs on machines that have never heard of
     /// Recall. A bare `recall push` there is 127 on every Edit and Write.
+    #[cfg(unix)]
     #[test]
     fn the_wired_command_is_a_no_op_where_recall_is_not_installed() {
         use std::process::Command;
@@ -319,6 +320,59 @@ mod tests {
                  hook error on every edit in the session"
             );
         }
+    }
+
+    /// The Windows half of the test above. Claude Code runs hook commands
+    /// through Git Bash there and falls back to PowerShell without it (which
+    /// cannot run this bash-form command at all), so this exercises the
+    /// exact interpreter Claude Code will actually use — not a stand-in.
+    /// GitHub's `windows-latest` runner ships Git for Windows, which is what
+    /// this looks for; a machine without it is exactly the case
+    /// `recall doctor` warns about, not one this test can drive.
+    #[cfg(windows)]
+    #[test]
+    fn the_wired_command_is_a_no_op_under_git_bash_where_recall_is_not_installed() {
+        use std::process::Command;
+
+        let bash = find_git_bash().expect(
+            "Git Bash not found. windows-latest CI runners ship Git for Windows; \
+             on a machine that does not, this test cannot exercise anything",
+        );
+        for command in [PUSH_COMMAND, PULL_COMMAND] {
+            let status = Command::new(&bash)
+                .arg("-c")
+                .arg(command)
+                .env("PATH", r"C:\nonexistent")
+                .status()
+                .expect("the hook command should at least run");
+            assert!(
+                status.success(),
+                "{command:?} exited {status:?} with recall absent — that is a \
+                 hook error on every edit in the session"
+            );
+        }
+    }
+
+    /// A minimal search, independent of `recall doctor`'s fuller one in the
+    /// `recall` crate (which also checks `CLAUDE_CODE_GIT_BASH_PATH`): this
+    /// only needs to find *a* Git Bash to drive the test above.
+    #[cfg(windows)]
+    fn find_git_bash() -> Option<std::path::PathBuf> {
+        for candidate in [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+        ] {
+            let p = std::path::PathBuf::from(candidate);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+        std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths).find_map(|dir| {
+                let p = dir.join("bash.exe");
+                p.is_file().then_some(p)
+            })
+        })
     }
 
     /// The `env` block is the one part of this file Recall *reads* rather

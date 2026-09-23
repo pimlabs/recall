@@ -18,8 +18,10 @@
 //! there — and `recall status` says which one is in effect.
 //!
 //! Mode `0600` is a Unix guarantee. On Windows the files are written the same
-//! way and nothing restricts them; Windows is not a supported client yet, and
-//! this says so rather than implying a protection that is not there.
+//! way but nothing restricts them — there is no mode-bit equivalent to check
+//! or set — so [`readable_by_others`] always answers `false` there rather
+//! than implying a protection that is not present, and `recall doctor` does
+//! not warn about it on that platform.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -210,11 +212,13 @@ pub struct Home {
     dir: PathBuf,
 }
 
-/// Where `~/.recall` is: `RECALL_HOME`, else `$HOME/.recall`.
+/// Where `~/.recall` is: `RECALL_HOME`, else `$HOME/.recall`, else
+/// `%USERPROFILE%\.recall` on a machine with no `HOME` — Windows does not set
+/// one by default. [`None`] when there is no home directory to put it in.
 ///
 /// Read through the same lookup as every other setting, so a settings file
 /// can point it elsewhere and a test can without touching the process
-/// environment. [`None`] when there is no home directory to put it in.
+/// environment.
 pub fn locate<F>(lookup: F) -> Option<Home>
 where
     F: Fn(&str) -> Option<String>,
@@ -224,6 +228,7 @@ where
     }
     lookup("HOME")
         .filter(|v| !v.is_empty())
+        .or_else(|| lookup("USERPROFILE").filter(|v| !v.is_empty()))
         .map(|h| Home::at(Path::new(&h).join(".recall")))
 }
 
@@ -572,6 +577,31 @@ mod tests {
             Some(Home::at("/h/.recall"))
         );
         assert_eq!(locate(env(&[])), None);
+    }
+
+    /// Windows has no `HOME` by default, so `USERPROFILE` has to stand in.
+    /// Not verified against a real Windows machine — see `claude.rs`.
+    ///
+    /// The expected paths are built with `Path::join` rather than typed as
+    /// `C:\Users\eko\.recall` literals: this test runs on Linux too, where
+    /// `\` is an ordinary filename character, not a separator, so a
+    /// hand-written backslash path would compare a string this crate never
+    /// actually produces against the one it does.
+    #[test]
+    fn home_falls_back_to_userprofile_when_home_is_unset() {
+        let want = Home::at(Path::new(r"C:\Users\eko").join(".recall"));
+        assert_eq!(locate(env(&[("USERPROFILE", r"C:\Users\eko")])), Some(want));
+        let want = Home::at(Path::new(r"C:\Users\eko").join(".recall"));
+        assert_eq!(
+            locate(env(&[("HOME", ""), ("USERPROFILE", r"C:\Users\eko")])),
+            Some(want),
+            "HOME declared empty reads as unset, same as everywhere else"
+        );
+        assert_eq!(
+            locate(env(&[("HOME", "/h"), ("USERPROFILE", r"C:\Users\eko")])),
+            Some(Home::at("/h/.recall")),
+            "HOME wins when both are set"
+        );
     }
 
     /// Three spellings of one server have to be one key, or a token saved
