@@ -88,9 +88,14 @@ async fn run(args: Args) -> Step<()> {
     };
 
     // Before any prompt, so a file this cannot read stops things before the
-    // user has typed a secret — and so it is never overwritten.
-    let (creds, config) = match load_both(&h) {
-        Ok(both) => both,
+    // user has typed a secret — and so it is never overwritten. The device
+    // keys too: one that cannot be read may hold this server's key, and
+    // enrolling anyway would approve a device whose key could then not be
+    // saved beside it.
+    let (creds, config, devices) = match load_both(&h)
+        .and_then(|(creds, config)| Ok((creds, config, h.load_devices()?.unwrap_or_default())))
+    {
+        Ok(all) => all,
         Err(e) => {
             return refuse(
                 &e.to_string(),
@@ -134,11 +139,7 @@ async fn run(args: Args) -> Step<()> {
     // told `--yes` may enrol and wait for someone to approve it. Decided
     // before the network is touched.
     let saved = creds.token_for(&url).map(str::to_string);
-    let saved_device = h
-        .load_devices()
-        .ok()
-        .flatten()
-        .and_then(|d| d.for_url(&url).cloned());
+    let saved_device = devices.for_url(&url).cloned();
     if saved.is_none() && saved_device.is_none() && !interactive && !args.yes {
         return refuse(
             "needs a terminal to ask for the token.",
@@ -163,18 +164,22 @@ async fn run(args: Args) -> Step<()> {
         url: &url,
         interactive,
     };
-    let name = if enrols {
+    // A machine with a device key here is checked as one whatever the
+    // discovery document said: what it says can be wrong, a proxy in the
+    // way say, and taking it at its word would send the shared token and
+    // save it again for a server this machine had enrolled with.
+    let name = if enrols || saved_device.is_some() {
         match setup
-            .enroll(creds, config, saved.clone(), saved_device)
+            .enroll(&config, saved.clone(), saved_device, enrols)
             .await?
         {
             Some(name) => name,
             // Kept on the token: enrolling needs a confirmation, and
             // there is nobody to give it.
-            None => setup.with_token(load_both_or_stop(&h)?, saved).await?,
+            None => setup.with_token(&config, saved).await?,
         }
     } else {
-        setup.with_token((creds, config), saved).await?
+        setup.with_token(&config, saved).await?
     };
 
     // Resolved again, so what follows reads what was just saved — the way
@@ -226,11 +231,9 @@ enum Approval {
 impl Setup<'_> {
     /// The shared token, as before devices: asked for or checked, then
     /// saved. What happens against a server that does not enrol devices.
-    async fn with_token(
-        &self,
-        (mut creds, mut config): (home::Credentials, home::Config),
-        saved: Option<String>,
-    ) -> Step<String> {
+    /// `config` is what the machine's name is suggested from; both files are
+    /// read again before anything is written.
+    async fn with_token(&self, config: &home::Config, saved: Option<String>) -> Step<String> {
         let url = self.url;
         if saved.is_none() && !self.interactive {
             return refuse(
@@ -252,8 +255,25 @@ impl Setup<'_> {
             None => ask_token(url).await?,
         };
 
-        let name = machine_name(self.args, &config, self.here, self.interactive)?;
+        let name = machine_name(self.args, config, self.here, self.interactive)?;
 
+        // Never beside a device key for the same server: that machine signs
+        // its requests, and a token saved for it is a copy of the shared
+        // secret it enrolled to stop keeping.
+        let has_device = match self.home.load_devices() {
+            Ok(devices) => devices.is_some_and(|d| d.for_url(url).is_some()),
+            Err(e) => return refuse(&e.to_string(), "Nothing was saved."),
+        };
+        if has_device {
+            return refuse(
+                &format!("this machine has a device key for {url}, so no token is saved for it."),
+                "Nothing was saved. Run recall connect again to check the device.",
+            );
+        }
+        // Read again rather than written back as they were read at the
+        // start: a person typing a token can take a while, and whatever
+        // changed the files meanwhile must survive this.
+        let (mut creds, mut config) = load_both_or_stop(self.home)?;
         creds.insert(url, &token);
         config.server = Some(url.to_string());
         config.machine.name = Some(name.clone());
@@ -277,13 +297,15 @@ impl Setup<'_> {
     /// Makes this machine a device of a server that enrols them, or
     /// confirms it already is one. The machine's name, when it is set up;
     /// [`None`] when it should stay on the token, because enrolling needs a
-    /// confirmation nobody is there to give.
+    /// confirmation nobody is there to give. `enrols` is what the server's
+    /// discovery document said, which a machine with a device key is
+    /// checked in spite of.
     async fn enroll(
         &self,
-        creds: home::Credentials,
-        config: home::Config,
+        config: &home::Config,
         saved: Option<String>,
         saved_device: Option<home::DeviceEntry>,
+        enrols: bool,
     ) -> Step<Option<String>> {
         let url = self.url;
 
@@ -298,14 +320,24 @@ impl Setup<'_> {
                         ephemeral: me.ephemeral,
                         ..entry
                     };
-                    let name = machine_name(self.args, &config, self.here, self.interactive)?;
-                    self.save_enrolled(creds, config, entry, &name)?;
+                    let name = machine_name(self.args, config, self.here, self.interactive)?;
+                    self.save_enrolled(entry, &name)?;
                     return Ok(Some(name));
+                }
+                None if !enrols => {
+                    return refuse(
+                        "the server refused this machine's device key, and does not say it \
+                         enrols devices.",
+                        "Nothing was changed. Check the server's URL and version.",
+                    )
                 }
                 None => {
                     // Gone for good: revoked, or unknown to the server. The
-                    // old key is dropped and a new one enrolled.
-                    let _ = self.home.forget_device(url);
+                    // old key is dropped and a new one enrolled, which is
+                    // this command's to decide, as a hook's it is not.
+                    if let Err(e) = self.home.forget_device(url) {
+                        return refuse(&e.to_string(), "Nothing was changed.");
+                    }
                 }
             }
         }
@@ -318,7 +350,7 @@ impl Setup<'_> {
             Some(approval) => approval,
             None => return Ok(None),
         };
-        let name = machine_name(self.args, &config, self.here, self.interactive)?;
+        let name = machine_name(self.args, config, self.here, self.interactive)?;
 
         let key = match DeviceKey::generate() {
             Ok(key) => key,
@@ -395,7 +427,7 @@ impl Setup<'_> {
         };
 
         let entry = key.entry(&approved.device_id, &name, &approved.scope, false);
-        self.save_enrolled(creds, config, entry, &name)?;
+        self.save_enrolled(entry, &name)?;
         Ok(Some(name))
     }
 
@@ -475,13 +507,12 @@ impl Setup<'_> {
     ///
     /// The key is saved first: an approval is the one thing here that
     /// cannot simply be done again.
-    fn save_enrolled(
-        &self,
-        mut creds: home::Credentials,
-        mut config: home::Config,
-        entry: home::DeviceEntry,
-        name: &str,
-    ) -> Step<()> {
+    ///
+    /// Both files are read again here rather than written back as they were
+    /// read at the start: waiting for an approval can take fifteen minutes,
+    /// and anything that changed them meanwhile, another `recall connect` or
+    /// a `recall disconnect`, must survive this one.
+    fn save_enrolled(&self, entry: home::DeviceEntry, name: &str) -> Step<()> {
         let url = self.url;
         let (device, scope) = (entry.name.clone(), entry.scope.clone());
         if let Err(e) = self.home.save_device(url, entry) {
@@ -490,6 +521,15 @@ impl Setup<'_> {
                 &format!("On an admin device: recall devices revoke {device}, then run recall connect again."),
             );
         }
+        let (mut creds, mut config) = match load_both(self.home) {
+            Ok(both) => both,
+            Err(e) => {
+                return refuse(
+                    &format!("the device key is saved, but {e}"),
+                    "Fix or move that file aside and run recall connect again.",
+                )
+            }
+        };
         config.server = Some(url.to_string());
         config.machine.name = Some(name.to_string());
         if let Err(e) = self.home.save_config(&config) {
@@ -663,7 +703,7 @@ async fn wait_for_approval(client: &Client, pending: &EnrollPending) -> Step<Enr
     }
 }
 
-/// Both files again, for a flow that changed its mind about enrolling.
+/// Both files again, read just before they are written.
 fn load_both_or_stop(h: &Home) -> Step<(home::Credentials, home::Config)> {
     load_both(h).or_else(|e| refuse(&e.to_string(), "Nothing was changed."))
 }
@@ -686,14 +726,22 @@ fn check_url(url: &str) -> Step<()> {
 /// Then the discovery document, for whether the server enrols devices:
 /// `true` when it does, and `false` for one that does not or is too old to
 /// say, which is then connected with the token as before.
+///
+/// Too old to say is a `404` and nothing else. Any other failure is the
+/// server not answering properly, which is no reason to believe it does not
+/// enrol devices and send it the shared token.
 async fn reach(url: &str) -> Step<bool> {
     let spinner = spin(&format!("Connecting to {}", host(url)));
     let result = match Client::new(url, "") {
         Ok(client) => match client.health().await {
-            Ok(_) => Ok(match client.discover().await {
-                Ok(Some(doc)) => doc.accepts(AUTH_DEVICE_SIG) && doc.devices().is_some(),
-                _ => false,
-            }),
+            Ok(_) => match client.discover().await {
+                Ok(Some(doc)) => Ok(doc.accepts(AUTH_DEVICE_SIG) && doc.devices().is_some()),
+                Ok(None) => Ok(false),
+                Err(e) => Err(format!(
+                    "it answered /health but not {}: {e}",
+                    recall_wire::DISCOVERY_PATH
+                )),
+            },
             Err(e) => Err(e.to_string()),
         },
         Err(e) => Err(e.to_string()),
@@ -1185,7 +1233,7 @@ pub fn disconnect(url: Option<&str>) -> anyhow::Result<i32> {
             return Ok(exit::CONFIG);
         }
     };
-    let mut devices = match h.load_devices() {
+    let devices = match h.load_devices() {
         Ok(d) => d.unwrap_or_default(),
         Err(e) => {
             eprintln!("recall disconnect: {e}");
@@ -1225,8 +1273,9 @@ pub fn disconnect(url: Option<&str>) -> anyhow::Result<i32> {
             // The device key first, and on its own: removing it is the one
             // part that changes how this machine appears to the server.
             if let Some(device) = devices.for_url(&target).cloned() {
-                devices.remove(&target);
-                if let Err(e) = h.save_devices(&devices) {
+                // Under the device lock, read afresh: a hook may be saving
+                // another server's key at this moment.
+                if let Err(e) = h.forget_device(&target) {
                     eprintln!("recall disconnect: {e}");
                     return Ok(exit::CONFIG);
                 }

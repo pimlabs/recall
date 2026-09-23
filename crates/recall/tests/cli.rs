@@ -3090,6 +3090,348 @@ fn release_before_devices(seen: &Seen) -> (u16, serde_json::Value) {
     }
 }
 
+/// A server that enrols devices, answering as the stand-in is told for
+/// discovery and for `GET /v1/devices/me`. `RECALL_TOKEN` is `right`; an
+/// enrolment is pending until its first poll, which approves it as admin.
+fn device_era(seen: &Seen, discovery: u16, me: u16) -> (u16, serde_json::Value) {
+    let operator = seen.authorization.as_deref() == Some("Bearer right");
+    match (seen.method.as_str(), seen.path.as_str()) {
+        ("GET", "/health") => (
+            200,
+            serde_json::to_value(recall_wire::Health {
+                status: "ok".into(),
+                ..Default::default()
+            })
+            .unwrap(),
+        ),
+        ("GET", "/.well-known/recall") if discovery == 200 => (
+            200,
+            serde_json::json!({
+                "protocol": { "current": 1, "supported": [1] },
+                "server": { "version": "0.4.1", "build": { "channel": "release" } },
+                "min_client": "0.1.0",
+                "auth": { "methods": ["bearer", "device-sig-v1"] },
+                "capabilities": { "devices": {
+                    "enroll_path": "/v1/devices/enroll", "code_ttl_seconds": 900,
+                    "poll_interval_seconds": 1, "signature_window_seconds": 60
+                } }
+            }),
+        ),
+        ("GET", "/.well-known/recall") => (discovery, serde_json::json!({ "error": "no" })),
+        ("GET", "/admin/stats") if operator => (200, serde_json::json!({})),
+        ("POST", "/v1/devices/approve") if operator => (
+            200,
+            serde_json::to_value(recall_wire::Device {
+                id: "dev_fake".into(),
+                name: "jarvis".into(),
+                scope: "admin".into(),
+                ..Default::default()
+            })
+            .unwrap(),
+        ),
+        (_, "/admin/stats" | "/v1/devices/approve") => {
+            (401, serde_json::json!({ "error": "unauthorized" }))
+        }
+        ("POST", "/v1/devices/enroll") => (
+            200,
+            serde_json::to_value(recall_wire::EnrollPending {
+                enrollment_id: "enr_fake".into(),
+                user_code: "WDJB-MJHT".into(),
+                expires_in: 900,
+                interval: 1,
+            })
+            .unwrap(),
+        ),
+        ("POST", "/v1/devices/enroll/poll") => (
+            200,
+            serde_json::to_value(recall_wire::EnrollPollResponse {
+                device_id: "dev_fake".into(),
+                scope: "admin".into(),
+            })
+            .unwrap(),
+        ),
+        ("GET", "/v1/devices/me") if me == 200 && seen.signed => (
+            200,
+            serde_json::to_value(recall_wire::DeviceIdentity {
+                device_id: "dev_x".into(),
+                name: "jarvis".into(),
+                scope: "admin".into(),
+                ephemeral: false,
+            })
+            .unwrap(),
+        ),
+        ("GET", "/v1/devices/me") => (me, serde_json::json!({ "error": "no" })),
+        _ => (404, serde_json::json!({ "error": "not found" })),
+    }
+}
+
+fn devices_server(seen: &Seen) -> (u16, serde_json::Value) {
+    device_era(seen, 200, 200)
+}
+
+/// The same server, answering a device's check of itself with a `500`.
+fn devices_server_failing_me(seen: &Seen) -> (u16, serde_json::Value) {
+    device_era(seen, 200, 500)
+}
+
+/// The same server, whose discovery document fails with a `500`.
+fn devices_server_failing_discovery(seen: &Seen) -> (u16, serde_json::Value) {
+    device_era(seen, 500, 200)
+}
+
+/// The same server, with no discovery document at all, as one too old to
+/// publish it answers.
+fn devices_server_without_discovery(seen: &Seen) -> (u16, serde_json::Value) {
+    device_era(seen, 404, 200)
+}
+
+/// Whether any request the stand-in saw carried `token` as a bearer.
+fn sent_token(fake: &FakeServer, token: &str) -> bool {
+    let bearer = format!("Bearer {token}");
+    fake.seen()
+        .iter()
+        .any(|s| s.authorization.as_deref() == Some(bearer.as_str()))
+}
+
+/// Approving this machine with the operator's token names the fingerprint
+/// it showed, so the server approves exactly the key that was enrolled.
+#[test]
+fn connect_approves_its_own_key_by_the_fingerprint_it_showed() {
+    let fake = fake_server(devices_server);
+    let repo = git_repo();
+    let home = recall_home_with(&[(&fake.url, "right")], &fake.url);
+    let home_str = home.path().to_string_lossy().to_string();
+
+    let r = run(
+        &["connect", "--yes", "--name", "jarvis"],
+        repo.path(),
+        &[("RECALL_HOME", &home_str)],
+        None,
+    );
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+
+    let saved = saved_device(home.path(), &fake.url).expect("the key is saved");
+    let fingerprint = recall_hooks::device::DeviceKey::from_saved(&saved.private_key)
+        .unwrap()
+        .fingerprint();
+    let seen = fake.seen();
+    let approve = seen
+        .iter()
+        .find(|s| s.path == "/v1/devices/approve")
+        .expect("it approved itself");
+    assert_eq!(approve.authorization.as_deref(), Some("Bearer right"));
+    let sent: recall_wire::ApproveRequest = serde_json::from_str(&approve.body).unwrap();
+    assert_eq!(sent.user_code, "WDJB-MJHT");
+    assert_eq!(sent.scope, "admin");
+    assert_eq!(sent.fingerprint.as_deref(), Some(fingerprint.as_str()));
+    assert!(
+        r.stderr.contains(&format!("Fingerprint  {fingerprint}")),
+        "the one it showed: {}",
+        r.stderr
+    );
+}
+
+/// `RECALL_TOKEN` in the environment belongs to the server `RECALL_URL`
+/// names. Connecting to another server never sends it there, not even to
+/// ask whether it works: that server enrols this machine and waits for it
+/// to be approved from elsewhere.
+#[test]
+fn connect_never_sends_one_servers_token_to_another() {
+    let other = fake_server(devices_server);
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+
+    let r = run(
+        &["connect", &other.url, "--yes", "--name", "jarvis"],
+        repo.path(),
+        &[
+            ("RECALL_HOME", &home_str),
+            ("RECALL_URL", "https://a.example.com"),
+            ("RECALL_TOKEN", "token-for-a"),
+        ],
+        None,
+    );
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(!sent_token(&other, "token-for-a"), "{:?}", other.seen());
+    assert!(
+        other
+            .seen()
+            .iter()
+            .any(|s| s.path == "/v1/devices/enroll/poll"),
+        "approved elsewhere: {:?}",
+        other.seen()
+    );
+    assert!(saved_device(home.path(), &other.url).is_some());
+}
+
+/// Enrolling stops keeping this server's token, and only this server's:
+/// one saved for another server is still there.
+#[test]
+fn connect_removes_only_this_servers_token() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let elsewhere = "https://other.example.com";
+    let home = recall_home_with(
+        &[(&server.url, "right"), (elsewhere, "other-token")],
+        &server.url,
+    );
+    let home_str = home.path().to_string_lossy().to_string();
+
+    let r = run(
+        &["connect", "--yes", "--name", "jarvis"],
+        repo.path(),
+        &[("RECALL_HOME", &home_str)],
+        None,
+    );
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let creds = recall_hooks::home::Home::at(home.path())
+        .load_credentials()
+        .unwrap()
+        .expect("another server's token is still kept");
+    assert_eq!(creds.token_for(&server.url), None);
+    assert_eq!(creds.token_for(elsewhere), Some("other-token"));
+}
+
+/// A device key the server could not be asked about is neither dropped nor
+/// replaced: a `500` says nothing about the device either way.
+#[test]
+fn connect_keeps_a_device_key_it_could_not_check() {
+    let fake = fake_server(devices_server_failing_me);
+    let repo = git_repo();
+    let home = recall_home_with(&[], &fake.url);
+    let home_str = home.path().to_string_lossy().to_string();
+    let entry = made_up_device("dev_x", "jarvis", false);
+    recall_hooks::home::Home::at(home.path())
+        .save_device(&fake.url, entry.clone())
+        .unwrap();
+
+    let r = run(
+        &["connect", "--yes"],
+        repo.path(),
+        &[("RECALL_HOME", &home_str)],
+        None,
+    );
+    assert_eq!(r.code, 1, "stderr: {}", r.stderr);
+    assert!(
+        r.stderr
+            .contains("could not check this machine's device key"),
+        "stderr: {}",
+        r.stderr
+    );
+    assert_eq!(saved_device(home.path(), &fake.url).as_ref(), Some(&entry));
+    assert!(
+        fake.seen()
+            .iter()
+            .all(|s| !s.path.starts_with("/v1/devices/enroll")),
+        "nothing enrolled: {:?}",
+        fake.seen()
+    );
+}
+
+/// A machine with a device key is checked as one whatever the discovery
+/// document says, and the shared token is neither sent nor saved again. A
+/// discovery document that fails is the server not answering properly,
+/// which stops `connect`; one that is missing, as on a server too old to
+/// publish it, still leaves the device to be checked.
+#[test]
+fn connect_with_a_device_key_never_falls_back_to_the_token() {
+    let repo = git_repo();
+    let entry = made_up_device("dev_x", "jarvis", false);
+
+    let failing = fake_server(devices_server_failing_discovery);
+    let home = recall_home_with(&[(&failing.url, "right")], &failing.url);
+    let home_str = home.path().to_string_lossy().to_string();
+    recall_hooks::home::Home::at(home.path())
+        .save_device(&failing.url, entry.clone())
+        .unwrap();
+    let creds = std::fs::read_to_string(home.path().join("credentials.toml")).unwrap();
+    let r = run(
+        &["connect", "--yes"],
+        repo.path(),
+        &[("RECALL_HOME", &home_str)],
+        None,
+    );
+    assert_eq!(r.code, 1, "stderr: {}", r.stderr);
+    assert!(
+        r.stderr.contains("/.well-known/recall"),
+        "stderr: {}",
+        r.stderr
+    );
+    assert!(!sent_token(&failing, "right"), "{:?}", failing.seen());
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("credentials.toml")).unwrap(),
+        creds
+    );
+    assert_eq!(
+        saved_device(home.path(), &failing.url).as_ref(),
+        Some(&entry)
+    );
+
+    let missing = fake_server(devices_server_without_discovery);
+    let home = recall_home_with(&[(&missing.url, "right")], &missing.url);
+    let home_str = home.path().to_string_lossy().to_string();
+    recall_hooks::home::Home::at(home.path())
+        .save_device(&missing.url, entry.clone())
+        .unwrap();
+    let r = run(
+        &["connect", "--yes"],
+        repo.path(),
+        &[("RECALL_HOME", &home_str)],
+        None,
+    );
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(
+        r.stderr.contains("Enrolled as jarvis (admin)"),
+        "stderr: {}",
+        r.stderr
+    );
+    assert!(!sent_token(&missing, "right"), "{:?}", missing.seen());
+    assert!(
+        missing
+            .seen()
+            .iter()
+            .any(|s| s.path == "/v1/devices/me" && s.signed),
+        "{:?}",
+        missing.seen()
+    );
+    let saved = recall_hooks::home::Home::at(home.path())
+        .load_credentials()
+        .unwrap()
+        .and_then(|c| c.token_for(&missing.url).map(str::to_string));
+    assert_eq!(saved, None, "the token is not saved again");
+}
+
+/// `connect` refuses at once when `device.key` cannot be read: before the
+/// server is asked anything, so no device is approved whose key could then
+/// not be saved.
+#[test]
+fn connect_refuses_when_the_device_key_file_cannot_be_read() {
+    let fake = fake_server(devices_server);
+    let repo = git_repo();
+    let home = recall_home_with(&[(&fake.url, "right")], &fake.url);
+    let home_str = home.path().to_string_lossy().to_string();
+    std::fs::write(home.path().join("device.key"), "servers = [").unwrap();
+
+    let r = run(
+        &["connect", "--yes", "--name", "jarvis"],
+        repo.path(),
+        &[("RECALL_HOME", &home_str)],
+        None,
+    );
+    assert_eq!(r.code, 1, "stderr: {}", r.stderr);
+    assert!(
+        r.stderr.contains("device.key") && r.stderr.contains("Nothing was changed"),
+        "stderr: {}",
+        r.stderr
+    );
+    assert!(fake.seen().is_empty(), "{:?}", fake.seen());
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("device.key")).unwrap(),
+        "servers = ["
+    );
+}
+
 #[test]
 fn against_a_server_without_devices_everything_stays_on_the_token() {
     let fake = fake_server(release_before_devices);

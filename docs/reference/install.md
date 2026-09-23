@@ -275,9 +275,12 @@ two things rule a keychain out: macOS can stop the hook with an
 authorisation dialog when the binary changes, which every upgrade does, and
 a hook has nobody to answer it; and a keychain library would add over a
 megabyte to a 3 MB client while a cloud container has no keychain at all.
-On Windows the file is in `%USERPROFILE%\.recall`, which Windows restricts
-to you, SYSTEM and administrators. The reasoning and the measurements are
-in [`../design/handshake.md`](../design/handshake.md).
+A hook that finds the file readable by other users narrows it to `0600`
+and says so, since a copy may already have been taken. On Windows the file
+is in `%USERPROFILE%\.recall`, which Windows restricts to you, SYSTEM and
+administrators; with `RECALL_HOME` outside your profile, `recall doctor`
+does not claim that protection. The reasoning and the measurements are in
+[`../design/handshake.md`](../design/handshake.md).
 
 ### The owner's commands: `recall devices` and `recall authkey`
 
@@ -326,12 +329,20 @@ The key is shown once. Put it in the cloud environment's variables as
 start, `recall pull` finds no device key, enrols the session with the
 authkey (approved at once, `sync` scope, named `cloud-…`), keeps the
 key in the container, and pulls. Nothing is typed. The device is ephemeral:
-the server removes it after a day without a request. If the server has
-revoked or removed it, the next hook enrols again once and carries on.
-Revoking the authkey (`recall authkey revoke <id>`) stops
-new sessions without touching any laptop. If enrolling fails, the hook says
-why in one line and falls back to `RECALL_TOKEN` when the environment still
-has it; a session always starts.
+the server removes it after a day without a request, and if a session
+outlives that, its next hook enrols again once and carries on. Hooks that
+start at once enrol one device between them.
+
+A **revoked** device is different: no hook enrols again after a
+revocation, with an authkey or without one, and the key is left where it
+is. That is what makes `recall devices revoke` cut a machine off, a laptop
+that happens to have `RECALL_AUTHKEY` set included; the hook says so and
+the session still starts. A new cloud session enrols afresh, so to stop
+those too, revoke the authkey (`recall authkey revoke <id>`), which touches
+no laptop. If enrolling fails, the hook says why in one line and falls back
+to `RECALL_TOKEN` when the environment still has it; a session always
+starts. A `device.key` that cannot be read is the exception: nothing is
+sent until it is fixed or moved aside, not even the token.
 
 ## When the derived project key is wrong
 

@@ -204,7 +204,8 @@ operator's token after asking, as an admin device, and removing the token
 it had saved; every request is then signed with `recall_wire::signature`,
 and a machine with no device key sends the token exactly as before. `recall
 pull` enrols a cloud session with `RECALL_AUTHKEY`, and a hook refused as
-"unknown device" or "revoked" enrols once more when that key is set.
+"unknown device" with an ephemeral key enrols once more when that key is
+set; one refused as "revoked" never does, so a revocation holds.
 `recall devices` has the owner commands below; `approve` looks the code up
 first and approves with the fingerprint it showed. `doctor` checks the
 device with `GET /v1/devices/me` and warns while a machine that could enrol

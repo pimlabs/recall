@@ -29,16 +29,33 @@ break will be described here in full rather than smoothed over.
 - **The device key is a file, `~/.recall/device.key`**, created readable by
   you only, one key per server. Not the OS keychain: a hook runs on every
   memory write and must never stop for a keychain dialog, which macOS shows
-  after an upgrade. `recall disconnect` removes it too.
+  after an upgrade. `recall disconnect` removes it too. A hook that finds
+  it readable by other users makes it yours alone and says so, and a write
+  to `~/.recall` narrows the directory to `0700` if it was wider.
+- **A `device.key` that cannot be read stops the hooks** with a line
+  saying so, rather than sending `RECALL_TOKEN` in its place; `recall
+  connect` refuses until it is fixed or moved aside, and `recall doctor`
+  fails it.
 - **Cloud sessions enrol themselves with `RECALL_AUTHKEY`.** Set an
   authkey on the cloud environment instead of `RECALL_TOKEN`, and
   each session's first `recall pull` enrols it (approved at once,
   ephemeral) and carries on. Nothing is typed, and a failure falls back to
   `RECALL_TOKEN` or leaves memory untouched, as a pull always has.
-- **A revoked or swept device enrols again by itself** when
-  `RECALL_AUTHKEY` is set: the hook that is refused enrols once and
-  retries. Without it, the hook says to run `recall connect`, and the
-  session still starts.
+- **A swept cloud session enrols again by itself** when `RECALL_AUTHKEY`
+  is set: a hook refused as "unknown device" with an ephemeral key enrols
+  once, replacing that server's key only, and retries. Hooks that start at
+  once enrol one device between them. **A revoked device is never enrolled
+  again by a hook**, authkey or not: the hook says so, keeps the key, and
+  the session still starts, so revoking a device cuts that machine off.
+  A lasting device the server does not know, and any machine without an
+  authkey, is told to run `recall connect`.
+- **`recall connect` checks a device key it holds** with the server
+  whatever the discovery document says, and never falls back to saving
+  `RECALL_TOKEN` for a server it has a device key for; a discovery
+  document that fails, other than with a `404`, stops it as unreachable.
+- **Redirects are not followed.** A `3xx` from the server is reported as
+  "the server redirected to …; update RECALL_URL", and nothing, the body
+  included, is sent where it pointed.
 - **New command: `recall devices`.** `list` (scope, ephemeral, last seen,
   agent), `approve <code>` (shows the machine's name, agent and fingerprint
   and asks first; `--fingerprint` refuses a key with any other, `--admin`
@@ -55,8 +72,10 @@ break will be described here in full rather than smoothed over.
 - **`recall status --json` gains** `auth` (`device`, `bearer` or `none`),
   `device` (id, name, scope, ephemeral, key storage and file, and whether
   the server confirmed it), `device_file`, `device_error`,
-  `device_file_exposed`, `enroll_key_set` and `server_devices`. Every
-  existing field is unchanged.
+  `device_file_exposed`, `authkey_set` and `server_devices`. Every
+  existing field is unchanged: a device key that cannot be used is
+  reported in `device_error`, and `server_ok` still says only whether
+  `GET /health` answered.
 
 - **The server enrols devices.** A machine can now be enrolled with a key
   pair of its own and sign its requests (RFC 9421, Ed25519) instead of
