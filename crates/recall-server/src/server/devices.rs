@@ -76,7 +76,7 @@ fn small_body(bytes: Result<Bytes, BytesRejection>) -> Result<Bytes, Refusal> {
 
 /// A reply that carries a secret, which RFC 6749 §5.1 says no cache may
 /// keep.
-fn no_store(mut resp: Response) -> Response {
+pub(super) fn no_store(mut resp: Response) -> Response {
     resp.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     resp
@@ -510,6 +510,13 @@ pub(super) async fn handle_me(Extension(caller): Extension<Caller>) -> Response 
         Caller::Operator => error(
             StatusCode::NOT_FOUND,
             "not a device: this request was authenticated with RECALL_TOKEN",
+        ),
+        // Unreachable: this route never accepts the admin session. Answered
+        // anyway, so a change to that shows up as a wrong answer, not a
+        // panic.
+        Caller::Owner { .. } => error(
+            StatusCode::NOT_FOUND,
+            "not a device: this request was authenticated with an admin session",
         ),
     }
 }

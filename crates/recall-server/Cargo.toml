@@ -14,6 +14,14 @@ description = "Recall's sync server: SQLite persistence, LLM-assisted merge, and
 name = "recall-server"
 path = "src/main.rs"
 
+[features]
+default = ["passkeys"]
+# Passkey (WebAuthn) sign-in for the /admin page. A feature only so that the
+# client's tests, which start a server in-process, need not build OpenSSL on
+# every platform the client is tested on (Windows among them). Every server
+# build, the release's and the image's, has it.
+passkeys = ["dep:webauthn-rs", "dep:openssl"]
+
 [dependencies]
 recall-wire.workspace = true
 
@@ -24,12 +32,39 @@ getrandom.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# The admin session's token hash, and the admin page's CSP hashes.
+sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true
 # io-util is needed to stream the merge prompt into the CLI's stdin.
 tokio = { workspace = true, features = ["io-util"] }
 
+# Passkey sign-in for /admin. Pinned exactly: the discoverable (usernameless)
+# flow is behind `conditional-ui`, a preview feature whose API may change in
+# any release.
+webauthn-rs = { version = "=0.5.5", features = ["conditional-ui"], optional = true }
+# The trade-off, stated once: this is where OpenSSL enters the codebase.
+# webauthn-rs-core verifies signatures and attestation with it and cannot be
+# built without it. `vendored` compiles it from source into the binary, so
+# the server stays one static musl file with no system OpenSSL to find or
+# keep patched separately, at the cost of about 4.5 MiB, a slower clean
+# build, and perl and make in the build environment. It is named here, as a
+# direct dependency, so that feature unification vendors the copy
+# webauthn-rs-core uses too. Only the server has it: the client stays on
+# rustls, and `cargo tree -p recall -e normal | grep -i openssl` prints
+# nothing.
+openssl = { version = "0.10", features = ["vendored"], optional = true }
+
 [dev-dependencies]
 tempfile.workspace = true
 # Only to drive the Router in tests without binding a real socket.
 tower = { version = "0.5", features = ["util"] }
+# A software authenticator and WebAuthn client, so the passkey ceremonies
+# are tested end to end against the real verifier without a browser.
+passkey-authenticator = "0.5"
+passkey-client = "0.5"
+passkey-types = "0.5"
+# passkey-authenticator's user-verification trait is an async_trait.
+async-trait = "0.1"
+coset = "0.3"
+url = "2"

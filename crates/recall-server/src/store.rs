@@ -16,8 +16,12 @@ use rusqlite::{Connection, OptionalExtension};
 
 use crate::now;
 
+mod admin;
 mod devices;
 
+pub use admin::{
+    AddedCredential, AdminCredential, AdminSession, NewAdminCredential, RemovedCredential,
+};
 pub use devices::{
     Created, Decision, Inserted, NewDevice, NewEnrollKey, NewEnrollment, Poll, Waiting,
 };
@@ -116,6 +120,7 @@ impl Store {
         // simply never looks at them: rolling back stays a matter of
         // starting the older image.
         conn.execute_batch(devices::SCHEMA)?;
+        conn.execute_batch(admin::SCHEMA)?;
         Ok(())
     }
 

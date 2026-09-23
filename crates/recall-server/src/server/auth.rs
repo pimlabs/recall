@@ -55,6 +55,12 @@ pub(super) enum Caller {
         /// Whether it is removed once idle.
         ephemeral: bool,
     },
+    /// Signed in to the admin page with a passkey: the owner, on the routes
+    /// that manage devices and nowhere else.
+    Owner {
+        /// The passkey the session signed in with.
+        credential_id: String,
+    },
 }
 
 impl Caller {
@@ -62,7 +68,7 @@ impl Caller {
     /// the stats.
     pub(super) fn is_admin(&self) -> bool {
         match self {
-            Caller::Operator => true,
+            Caller::Operator | Caller::Owner { .. } => true,
             Caller::Device { scope, .. } => scope == SCOPE_ADMIN,
         }
     }
@@ -497,6 +503,10 @@ mod tests {
             ephemeral: false,
         };
         assert!(Caller::Operator.is_admin());
+        assert!(Caller::Owner {
+            credential_id: "c".into()
+        }
+        .is_admin());
         assert!(device("admin").is_admin());
         assert!(!device("sync").is_admin());
     }
