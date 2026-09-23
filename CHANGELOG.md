@@ -69,6 +69,30 @@ break will be described here in full rather than smoothed over.
 - **Three new tables in the database**, `devices`, `device_enrollments`
   and `authkeys`, created on start. `memory_files` is untouched, and an
   older server ignores the new tables, so rolling back still works.
+- **`recall-server admin`: rename, remove or restore a project from the
+  server's host.** `list` shows every project key with its files, tombstones
+  and last update (or one key's files, or what a backup holds, with
+  `--backup`); `rename <from> <to>`, `remove <key>` and `restore
+  <backup-file> <key>` replace the hand-written SQL in `deploy/README.md`.
+  Each change names its keys exactly, is confirmed by typing each key back,
+  a rename's target included (or `--yes`), takes a backup first into
+  `backups/admin/` (never rotated) and checks it holds the rows shown, and
+  runs in one transaction that commits only if exactly the rows it showed
+  changed; `--dry-run` shows the change and makes none. A rename refuses a
+  target key that holds any rows, and points to the safe way to fold one key
+  into another; `remove` warns how many files hold content no other key has.
+  A restore never overwrites a differing row without `--overwrite`, and never
+  turns a live file into a tombstone without `--restore-deletions` as well.
+  It runs with the server up: after committing, it waits out the server's
+  merge window and checks that no push already in flight partly undid the
+  change, and says what to run if one did (exit status 3). In Docker:
+  `docker exec -it -u node recall-server recall-server admin list`. There is
+  still no HTTP route that can delete or move a project: the commands open no
+  listener and need no token. A backup that fails part way, the server's
+  periodic ones included, is now deleted instead of left as a partial file
+  among the good ones.
+  Nothing else about the server changed, and `recall-server` with no
+  arguments still serves.
 - **`recall-server` can terminate TLS itself now**, for a machine with no
   ingress in front of it: `RECALL_TLS_CERT`/`RECALL_TLS_KEY` for a
   certificate already on disk, or `RECALL_TLS_ACME_DOMAINS`/
