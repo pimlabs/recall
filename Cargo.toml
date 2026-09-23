@@ -35,12 +35,21 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # or RECALL_TLS_ACME_DOMAINS is set). `ring`, not the default `aws-lc-rs`:
 # aws-lc-rs needs cmake and a C++ toolchain to build its own copy of
 # BoringSSL, and the server's release build is static musl, cross-compiled
-# with nothing but musl-gcc (release.yml) — see CLAUDE.md's crypto rule.
+# with nothing but musl-gcc (release.yml). Nothing may bring aws-lc-rs or
+# OpenSSL back in: `cargo tree -p recall-server -e normal | grep -iE "aws|openssl"`
+# must print nothing.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 rustls-acme = { version = "0.15", default-features = false, features = ["ring", "tokio", "axum", "tls12", "webpki-roots"] }
 # Only for AcmeState::next(), which drives certificate issuance/renewal.
 futures-util = { version = "0.3", default-features = false }
+# Named directly only to configure the connection timeouts axum-server's
+# builder takes (TokioTimer, and the auto builder's type), and to wrap the
+# per-connection service and response body; all three are already in the
+# tree through axum and axum-server, at these versions.
+hyper-util = { version = "0.1", default-features = false, features = ["tokio", "server-auto"] }
+tower-service = "0.3"
+http-body = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 clap = { version = "4", features = ["derive"] }
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }

@@ -134,3 +134,30 @@ fn trusted_ip_header_with_tls_refuses_to_start() {
         );
     }
 }
+
+/// `docker-compose.direct.yml` sets `RECALL_TLS_REQUIRED=true` and publishes
+/// its port to the internet, so if its certificate variables ever arrive
+/// empty the process must exit rather than serve the bearer token over
+/// plain HTTP. Proved against the real binary: the refusal happens before
+/// anything binds a port.
+#[test]
+fn tls_required_without_tls_refuses_to_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("x.db");
+    let db = db.to_string_lossy();
+    let out = run(
+        &[],
+        &[
+            ("RECALL_TOKEN", "t"),
+            ("RECALL_DB_PATH", &db),
+            ("RECALL_TLS_REQUIRED", "true"),
+            ("RECALL_TLS_ACME_DOMAINS", ""),
+            ("RECALL_TLS_ACME_EMAIL", ""),
+            ("RECALL_TRUSTED_IP_HEADER", ""),
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+    assert!(stderr.contains("RECALL_TLS_REQUIRED"), "stderr: {stderr}");
+    assert!(!stderr.contains("listening"), "stderr: {stderr}");
+}

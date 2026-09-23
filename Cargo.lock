@@ -1584,6 +1584,9 @@ dependencies = [
  "axum",
  "axum-server",
  "futures-util",
+ "http-body",
+ "hyper-util",
+ "rcgen",
  "recall-wire",
  "rusqlite",
  "rustls",
@@ -1594,7 +1597,9 @@ dependencies = [
  "thiserror 2.0.20",
  "time",
  "tokio",
+ "tokio-rustls",
  "tower",
+ "tower-service",
 ]
 
 [[package]]

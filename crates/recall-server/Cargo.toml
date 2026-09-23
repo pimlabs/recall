@@ -34,8 +34,16 @@ rustls.workspace = true
 axum-server.workspace = true
 rustls-acme.workspace = true
 futures-util.workspace = true
+hyper-util.workspace = true
+tower-service.workspace = true
+http-body.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 # Only to drive the Router in tests without binding a real socket.
 tower = { version = "0.5", features = ["util"] }
+# Only for server/tls.rs's tests: a self-signed certificate to serve, and a
+# TLS client to hold connections open against it. Both already in the tree
+# (through rustls-acme and axum-server), and both with aws-lc-rs left out.
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+tokio-rustls = { version = "0.26", default-features = false }

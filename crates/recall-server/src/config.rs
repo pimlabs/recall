@@ -37,11 +37,50 @@ pub enum ConfigError {
     /// read, a way for a client to buy itself an unlimited number of token
     /// guesses by rotating whatever header it names, so refusing to start
     /// beats silently ignoring the setting.
+    ///
+    /// An explicitly *empty* value is the one exception: it means "trust no
+    /// header", which is exactly what TLS forces anyway, so
+    /// `deploy/docker-compose.direct.yml` sets it that way as a second
+    /// guard, in case its TLS variables ever go missing and the server
+    /// comes up as plain HTTP instead.
     #[error(
-        "RECALL_TRUSTED_IP_HEADER must not be set while TLS is on; with direct TLS there is no \
-         ingress, so the client IP always comes from the socket's peer address"
+        "RECALL_TRUSTED_IP_HEADER must be unset or empty while TLS is on; with direct TLS there \
+         is no ingress, so the client IP always comes from the socket's peer address"
     )]
     TrustedIpHeaderWithTls,
+    /// `RECALL_TLS_REQUIRED` is set, but neither TLS mode is configured.
+    /// A deployment that publishes its port straight to the internet
+    /// (`deploy/docker-compose.direct.yml`) must never come up as plain
+    /// HTTP just because its certificate variables went missing or empty:
+    /// that would put the bearer token on the wire in clear text.
+    #[error(
+        "RECALL_TLS_REQUIRED is set, but no TLS mode is configured; set RECALL_TLS_CERT and \
+         RECALL_TLS_KEY, or RECALL_TLS_ACME_DOMAINS and RECALL_TLS_ACME_EMAIL"
+    )]
+    TlsRequired,
+    /// `RECALL_TLS_ACME_DOMAINS` was set but named no domain at all (only
+    /// commas or whitespace). There is nothing to ask a certificate for,
+    /// and a server with no certificate fails every handshake.
+    #[error("RECALL_TLS_ACME_DOMAINS names no domain")]
+    NoAcmeDomains,
+    /// TLS-ALPN-01, the only challenge this server answers, cannot prove
+    /// control of a wildcard name (Let's Encrypt requires DNS-01 for
+    /// those), so an order for one could only ever fail, over and over, on
+    /// the ACME directory's rate limit.
+    #[error("RECALL_TLS_ACME_DOMAINS: {0:?} is a wildcard, which TLS-ALPN-01 cannot validate")]
+    WildcardAcmeDomain(String),
+    /// A yes/no setting whose value is neither. Unlike the numeric
+    /// tunables, which fall back to a default on a typo, these two decide
+    /// whether the server may run without TLS and which certificate
+    /// authority it trusts, so guessing either way would be wrong
+    /// somewhere.
+    #[error("{var}={value:?} is not a yes/no value; use true/false, 1/0 or yes/no")]
+    InvalidFlag {
+        /// The variable's name.
+        var: &'static str,
+        /// What it was set to.
+        value: String,
+    },
 }
 
 /// What `recall-server` needs.
@@ -66,6 +105,10 @@ pub enum ConfigError {
 /// | [`claude_bin`] | `RECALL_CLAUDE_BIN` | `claude` |
 /// | [`claude_status_interval`] | `RECALL_CLAUDE_STATUS_INTERVAL_MS` | 30m |
 /// | [`tls`] | `RECALL_TLS_CERT`/`RECALL_TLS_KEY`, or `RECALL_TLS_ACME_DOMAINS`/`RECALL_TLS_ACME_EMAIL`/`RECALL_TLS_ACME_DIR`/`RECALL_TLS_ACME_STAGING` | off |
+/// | [`tls_max_connections`] | `RECALL_TLS_MAX_CONNECTIONS` | 512 |
+///
+/// `RECALL_TLS_REQUIRED` is read but not stored: when it is true, a
+/// config with [`tls`] off refuses to start ([`ConfigError::TlsRequired`]).
 ///
 /// [`addr`]: Config::addr
 /// [`token`]: Config::token
@@ -82,6 +125,7 @@ pub enum ConfigError {
 /// [`claude_bin`]: Config::claude_bin
 /// [`claude_status_interval`]: Config::claude_status_interval
 /// [`tls`]: Config::tls
+/// [`tls_max_connections`]: Config::tls_max_connections
 #[derive(Debug, Clone)]
 pub struct Config {
     /// The socket to bind, assembled from host and port.
@@ -147,6 +191,17 @@ pub struct Config {
     /// `docker-compose.traefik.yml`) put an ingress in front instead, and
     /// that stays the default. See [`TlsMode`].
     pub tls: TlsMode,
+    /// How many connections the direct-TLS listener holds open at once,
+    /// counting ones still in their TLS handshake. Ignored with TLS off,
+    /// where the ingress in front owns this problem.
+    ///
+    /// With no ingress, every idle or half-open socket an attacker opens
+    /// costs this process a file descriptor and a task; this bound turns
+    /// "exhaust the process's descriptors" into "fill these slots until
+    /// the timeouts in `server/tls.rs` close them". A single owner's
+    /// machines need a handful; the default leaves generous room below the
+    /// `nofile` limit `docker-compose.direct.yml` sets.
+    pub tls_max_connections: usize,
 }
 
 /// Whether, and how, `recall-server` terminates TLS itself rather than
@@ -214,7 +269,28 @@ impl Default for Config {
             claude_bin: "claude".to_string(),
             claude_status_interval: Duration::from_secs(30 * 60),
             tls: TlsMode::Off,
+            tls_max_connections: DEFAULT_TLS_MAX_CONNECTIONS,
         }
+    }
+}
+
+/// See [`Config::tls_max_connections`].
+const DEFAULT_TLS_MAX_CONNECTIONS: usize = 512;
+
+/// Reads a yes/no variable: unset or empty is `false`; `true`/`1`/`yes`
+/// and `false`/`0`/`no` in any case are what they say; anything else is
+/// refused rather than guessed (see [`ConfigError::InvalidFlag`]).
+fn flag<F>(lookup: &F, var: &'static str) -> Result<bool, ConfigError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let Some(raw) = lookup(var) else {
+        return Ok(false);
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "false" | "0" | "no" => Ok(false),
+        "true" | "1" | "yes" => Ok(true),
+        _ => Err(ConfigError::InvalidFlag { var, value: raw }),
     }
 }
 
@@ -253,17 +329,31 @@ impl Config {
             _ => return Err(ConfigError::PartialTlsFiles),
         };
         let acme_tls = match (get("RECALL_TLS_ACME_DOMAINS"), get("RECALL_TLS_ACME_EMAIL")) {
-            (Some(domains), Some(email)) => Some(TlsMode::Acme {
-                domains: domains
+            (Some(domains), Some(email)) => {
+                let domains: Vec<String> = domains
                     .split(',')
                     .map(str::trim)
                     .filter(|d| !d.is_empty())
                     .map(str::to_string)
-                    .collect(),
-                email,
-                cache_dir: or("RECALL_TLS_ACME_DIR", "/data/acme"),
-                staging: get("RECALL_TLS_ACME_STAGING").as_deref() == Some("true"),
-            }),
+                    .collect();
+                if domains.is_empty() {
+                    return Err(ConfigError::NoAcmeDomains);
+                }
+                if let Some(wildcard) = domains.iter().find(|d| d.contains('*')) {
+                    return Err(ConfigError::WildcardAcmeDomain(wildcard.clone()));
+                }
+                Some(TlsMode::Acme {
+                    domains,
+                    email,
+                    cache_dir: or("RECALL_TLS_ACME_DIR", "/data/acme"),
+                    // A typo here used to mean production, silently; now
+                    // it refuses to start instead, since "I asked for
+                    // staging and burned the production rate limit" and
+                    // "I asked for production and got an untrusted
+                    // certificate" are both worse than a clear error.
+                    staging: flag(&lookup, "RECALL_TLS_ACME_STAGING")?,
+                })
+            }
             (None, None) => None,
             _ => return Err(ConfigError::PartialTlsAcme),
         };
@@ -278,8 +368,17 @@ impl Config {
         // its own rate-limit bucket by supplying whatever header it names.
         // Refusing to start beats silently ignoring a value left over from
         // moving a deployment from behind an ingress to direct TLS.
-        if tls.is_enabled() && lookup("RECALL_TRUSTED_IP_HEADER").is_some() {
+        // An explicitly empty value is allowed: it says "trust no header",
+        // which is what TLS forces anyway, and it is what lets the direct
+        // compose file pin the header off even if it ever came up without
+        // TLS.
+        if tls.is_enabled()
+            && lookup("RECALL_TRUSTED_IP_HEADER").is_some_and(|v| !v.trim().is_empty())
+        {
             return Err(ConfigError::TrustedIpHeaderWithTls);
+        }
+        if !tls.is_enabled() && flag(&lookup, "RECALL_TLS_REQUIRED")? {
+            return Err(ConfigError::TlsRequired);
         }
 
         let mut cfg = Config {
@@ -300,8 +399,8 @@ impl Config {
             // Lowercased because HeaderMap lookups are case-insensitive but
             // this is compared as a plain string. Forced empty under TLS
             // regardless of this default: the check above already refused
-            // to start if the variable was set explicitly, and with no
-            // ingress in front, no header is safe to trust at all.
+            // to start if the variable named a header, and with no ingress
+            // in front, no header is safe to trust at all.
             trusted_ip_header: if tls.is_enabled() {
                 String::new()
             } else {
@@ -319,6 +418,10 @@ impl Config {
                 30 * 60_000,
             )),
             tls,
+            tls_max_connections: num(
+                "RECALL_TLS_MAX_CONNECTIONS",
+                DEFAULT_TLS_MAX_CONNECTIONS as u64,
+            ) as usize,
         };
         if cfg.token.is_empty() {
             return Err(ConfigError::MissingToken);
@@ -340,6 +443,11 @@ impl Config {
         // at the typo responsible.
         if cfg.merge_timeout.is_zero() {
             cfg.merge_timeout = Duration::from_millis(45_000);
+        }
+        // Zero connections would refuse every client, the TLS-mode
+        // equivalent of an expired merge timeout.
+        if cfg.tls_max_connections == 0 {
+            cfg.tls_max_connections = DEFAULT_TLS_MAX_CONNECTIONS;
         }
         Ok(cfg)
     }
@@ -585,9 +693,10 @@ mod tests {
     /// The mandatory security rule: behind an ingress the trusted header is
     /// how the rate limiter learns the real client address, but direct TLS
     /// has no ingress to set it, so a client that could still choose the
-    /// value would buy itself unlimited token guesses. Setting the
-    /// variable at all alongside TLS is refused outright, matching
-    /// `scripts/trusted-ip-check.sh`'s socket-level proof of the same rule.
+    /// value would buy itself unlimited token guesses. Naming a header
+    /// alongside TLS is refused outright, matching
+    /// `scripts/tls-trusted-ip-check.sh`'s socket-level proof of the same
+    /// rule.
     #[test]
     fn trusted_ip_header_with_tls_refuses_to_start() {
         for tls_pairs in [
@@ -600,10 +709,7 @@ mod tests {
             let mut pairs = vec![("RECALL_TOKEN", "t")];
             pairs.extend_from_slice(tls_pairs);
 
-            // Even an explicit empty value, which would mean the same thing
-            // TLS mode forces anyway, is refused: the point is that this
-            // variable is not this deployment's business to set at all.
-            for header_value in ["x-real-ip", "cf-connecting-ip", ""] {
+            for header_value in ["x-real-ip", "cf-connecting-ip", " X-Real-IP "] {
                 let mut pairs = pairs.clone();
                 pairs.push(("RECALL_TRUSTED_IP_HEADER", header_value));
                 assert!(
@@ -615,10 +721,161 @@ mod tests {
                 );
             }
 
-            // Unset is the only value that is allowed, and it forces the
-            // empty string, not the plain-HTTP default of cf-connecting-ip.
-            let cfg = Config::from_lookup(env(&pairs)).unwrap();
-            assert_eq!(cfg.trusted_ip_header, "");
+            // Unset, or explicitly empty (what docker-compose.direct.yml
+            // sets, as a second guard should TLS ever be missing), are the
+            // only values allowed, and both force the empty string, not the
+            // plain-HTTP default of cf-connecting-ip.
+            for header in [None, Some(""), Some("  ")] {
+                let mut pairs = pairs.clone();
+                if let Some(value) = header {
+                    pairs.push(("RECALL_TRUSTED_IP_HEADER", value));
+                }
+                let cfg = Config::from_lookup(env(&pairs)).unwrap();
+                assert_eq!(cfg.trusted_ip_header, "", "{pairs:?}");
+            }
+        }
+    }
+
+    /// The direct compose file's fail-closed switch: with
+    /// `RECALL_TLS_REQUIRED` on, a config whose TLS variables are missing
+    /// or empty refuses to start instead of coming up as plain HTTP with
+    /// the port published to the internet.
+    #[test]
+    fn tls_required_without_tls_refuses_to_start() {
+        for required in ["true", "TRUE", "1", "yes", "Yes"] {
+            for tls_pairs in [
+                &[][..],
+                // Empty is unset, so this is still no TLS at all.
+                &[("RECALL_TLS_CERT", ""), ("RECALL_TLS_KEY", "")][..],
+                &[
+                    ("RECALL_TLS_ACME_DOMAINS", ""),
+                    ("RECALL_TLS_ACME_EMAIL", ""),
+                ][..],
+            ] {
+                let mut pairs = vec![("RECALL_TOKEN", "t"), ("RECALL_TLS_REQUIRED", required)];
+                pairs.extend_from_slice(tls_pairs);
+                assert!(
+                    matches!(
+                        Config::from_lookup(env(&pairs)),
+                        Err(ConfigError::TlsRequired)
+                    ),
+                    "{pairs:?}"
+                );
+            }
+        }
+
+        // With TLS configured it starts, and off or unset it changes
+        // nothing about plain HTTP.
+        let cfg = Config::from_lookup(env(&[
+            ("RECALL_TOKEN", "t"),
+            ("RECALL_TLS_REQUIRED", "true"),
+            ("RECALL_TLS_CERT", "/c.pem"),
+            ("RECALL_TLS_KEY", "/k.pem"),
+        ]))
+        .unwrap();
+        assert!(cfg.tls.is_enabled());
+        for off in ["", "false", "0", "no", "NO"] {
+            let cfg =
+                Config::from_lookup(env(&[("RECALL_TOKEN", "t"), ("RECALL_TLS_REQUIRED", off)]))
+                    .unwrap();
+            assert_eq!(cfg.tls, TlsMode::Off, "{off:?}");
+        }
+
+        // A typo is refused rather than read as "not required".
+        assert!(matches!(
+            Config::from_lookup(env(&[
+                ("RECALL_TOKEN", "t"),
+                ("RECALL_TLS_REQUIRED", "ture"),
+            ])),
+            Err(ConfigError::InvalidFlag {
+                var: "RECALL_TLS_REQUIRED",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn tls_acme_refuses_an_empty_domain_list_and_wildcards() {
+        for domains in [",", " , ,", " "] {
+            let result = Config::from_lookup(env(&[
+                ("RECALL_TOKEN", "t"),
+                ("RECALL_TLS_ACME_DOMAINS", domains),
+                ("RECALL_TLS_ACME_EMAIL", "me@example.com"),
+            ]));
+            assert!(
+                matches!(result, Err(ConfigError::NoAcmeDomains)),
+                "{domains:?}: {result:?}"
+            );
+        }
+        for domains in ["*.example.com", "example.com, *.example.com"] {
+            let result = Config::from_lookup(env(&[
+                ("RECALL_TOKEN", "t"),
+                ("RECALL_TLS_ACME_DOMAINS", domains),
+                ("RECALL_TLS_ACME_EMAIL", "me@example.com"),
+            ]));
+            assert!(
+                matches!(&result, Err(ConfigError::WildcardAcmeDomain(d)) if d == "*.example.com"),
+                "{domains:?}: {result:?}"
+            );
+        }
+    }
+
+    /// Staging used to be on only for the literal `true`, so `TRUE` or
+    /// `1` silently meant production. Now every common spelling of yes
+    /// works, and anything unrecognised refuses to start.
+    #[test]
+    fn tls_acme_staging_accepts_common_spellings_and_refuses_the_rest() {
+        let acme = |staging: &'static str| {
+            Config::from_lookup(env(&[
+                ("RECALL_TOKEN", "t"),
+                ("RECALL_TLS_ACME_DOMAINS", "example.com"),
+                ("RECALL_TLS_ACME_EMAIL", "me@example.com"),
+                ("RECALL_TLS_ACME_STAGING", staging),
+            ]))
+        };
+        for (value, want) in [
+            ("true", true),
+            ("TRUE", true),
+            ("1", true),
+            ("yes", true),
+            ("false", false),
+            ("0", false),
+            ("No", false),
+            ("", false),
+        ] {
+            let TlsMode::Acme { staging, .. } = acme(value).unwrap().tls else {
+                panic!("expected TlsMode::Acme");
+            };
+            assert_eq!(staging, want, "RECALL_TLS_ACME_STAGING={value:?}");
+        }
+        for value in ["staging", "ture", "on?"] {
+            assert!(
+                matches!(
+                    acme(value),
+                    Err(ConfigError::InvalidFlag {
+                        var: "RECALL_TLS_ACME_STAGING",
+                        ..
+                    })
+                ),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tls_max_connections_falls_back_to_its_default() {
+        let read = |value: &'static str| {
+            Config::from_lookup(env(&[
+                ("RECALL_TOKEN", "t"),
+                ("RECALL_TLS_MAX_CONNECTIONS", value),
+            ]))
+            .unwrap()
+            .tls_max_connections
+        };
+        assert_eq!(Config::default().tls_max_connections, 512);
+        assert_eq!(read("64"), 64);
+        for fallback in ["0", "", "lots", "-1"] {
+            assert_eq!(read(fallback), 512, "{fallback:?}");
         }
     }
 }
