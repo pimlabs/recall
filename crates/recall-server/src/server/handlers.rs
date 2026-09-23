@@ -422,7 +422,10 @@ pub(super) async fn handle_discovery(State(state): State<Arc<AppState>>) -> Resp
     // Stale pushes can be queued for a worker, and the job routes exist.
     // Listed whether or not a worker is enrolled now: it says what this
     // server can do, and a worker needs it before it enrols.
-    capabilities.insert("merge_queue".to_string(), serde_json::json!({}));
+    capabilities.insert(
+        discovery::CAPABILITY_MERGE_QUEUE.to_string(),
+        serde_json::json!({}),
+    );
     capabilities.insert(
         "scopes".to_string(),
         serde_json::json!({ "kinds": ["project", "global", "machine"] }),

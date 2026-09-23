@@ -74,10 +74,24 @@ break will be described here in full rather than smoothed over.
   device with a new `worker` scope, which claims conflicting pushes from
   a queue, merges them with its own `claude` CLI, and posts the result
   back. The `claude` login then lives on the worker's volume, not in the
-  container the internet reaches. Nothing changes until you approve the
-  worker's code with `"scope": "worker"`; see "The merge worker" in
-  `deploy/README.md`. Without an approved worker the server merges inline
-  exactly as before.
+  container the internet reaches. The service is opt-in: it starts only
+  with `COMPOSE_PROFILES=worker` in `deploy/.env`, and even then nothing
+  changes until you approve its code with `"scope": "worker"`; see "The
+  merge worker" in `deploy/README.md`. Without an approved worker the
+  server merges inline exactly as before.
+- **`recall-worker` is told its server by `RECALL_WORKER_SERVER`**, and
+  never reads the client's `RECALL_URL`; with only that set it refuses to
+  start. `RECALL_WORKER_DIR` (the image sets `/data`) is required too. It
+  asks for `/.well-known/recall` first and works only for a server that
+  lists `merge_queue`, records that server in its identity file and refuses
+  any other, and treats a refusal no retry will change (a `404` on
+  enrolment among them) as final: it says why once and idles, rather than
+  exiting into a restart loop.
+- **Every merge, the server's inline one included, runs `claude` with no
+  tools, one turn and no saved session** (`--tools "" --max-turns 1
+  --no-session-persistence`), and both images pin the CLI to 2.1.280, the
+  version those flags were checked against, rather than whatever npm
+  resolves on the day of the build.
 - **With a worker, a conflicting push is answered at once.** It is stored
   as sent, `merged: false`, with a new `merge_job` field naming the queued
   job, and the merged file arrives with the next pull. A merge is written
@@ -101,7 +115,9 @@ break will be described here in full rather than smoothed over.
   worker`.
 - **Two database changes, both made on start:** a `jobs` table, and the
   `devices` table rebuilt so its scope may be `worker`, keeping every row.
-  An older server ignores `jobs` and reads a worker as an ordinary device.
+  An older server ignores `jobs`, but reads a worker as an ordinary `sync`
+  device, one that may pull and push memory: **revoke the worker before
+  rolling back** past this release.
 - **Releases publish `recall-worker`** for Linux amd64 and arm64, static,
   beside `recall-server`, in the same `checksums.txt`, and on crates.io.
 - **`recall-server admin`: rename, remove or restore a project from the

@@ -45,6 +45,20 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --locked
 
+      # recall-server uses recall-worker's merge with the worker's `client`
+      # feature off, so the process that faces the internet carries no HTTP
+      # client. Only the feature keeps it out, and a dependency that turned
+      # it on would put it back without a word, so the server's normal
+      # dependency tree is asked directly. The tests' own dev-dependency on
+      # the client is not in that tree.
+      - name: The server carries no HTTP client
+        run: |
+          if cargo tree -p recall-server -e normal --locked -i reqwest 2>/dev/null | grep -q reqwest; then
+            cargo tree -p recall-server -e normal --locked -i reqwest
+            echo "::error::reqwest is in recall-server's normal dependency tree"
+            exit 1
+          fi
+
       # The same tests again with TMPDIR behind a symlink, which is what
       # macOS has by default: its per-user temporary directory lives under
       # /var, a symlink to /private/var. The binary finds its project root
@@ -273,6 +287,17 @@ jobs:
                --build-arg RECALL_RELEASES_URL=http://127.0.0.1:8765 \
                -t recall-server-bad . ; then
             echo "::error::the image built from an archive that does not match its checksum"
+            exit 1
+          fi
+          # The worker's binary comes from its own stage, fetched and
+          # checked separately, so a check that holds for the server says
+          # nothing about it.
+          if docker build -f deploy/Dockerfile --network host --target worker \
+               --no-cache-filter release-worker \
+               --build-arg RECALL_VERSION=0.0.0-ci \
+               --build-arg RECALL_RELEASES_URL=http://127.0.0.1:8765 \
+               -t recall-worker-bad . ; then
+            echo "::error::the worker image built from an archive that does not match its checksum"
             exit 1
           fi
 

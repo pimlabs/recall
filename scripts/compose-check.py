@@ -5,11 +5,13 @@ Run from the repository root:  python3 scripts/compose-check.py
 `recall-worker` holds a device key that can claim every conflict, and the
 `claude` login merges run on. It is safe beside the server only while it is
 unreachable and separate: no published or exposed port, no ingress labels,
-no ingress network, and no volume shared with the server, whose database
-and backups the internet-facing process holds. Each of those is one line in
-a YAML file that a later edit could add without anyone noticing, so each is
-asserted here, for both compose files, the way wrangler-check.py asserts
-the installer's config.
+no ingress network, no volume any other service mounts, and nothing that
+reaches past its own container (the Docker socket, `privileged`, the host's
+process or network namespace). It is also opt-in, behind the `worker`
+profile, and reads its server from `RECALL_WORKER_SERVER`, never the
+client's `RECALL_URL`. Each of those is one line in a YAML file that a later
+edit could add without anyone noticing, so each is asserted here, for both
+compose files, the way wrangler-check.py asserts the installer's config.
 
 The checks are also run against copies of each file with one of those lines
 added, and each copy must fail: a check that can never fail is not one.
@@ -30,6 +32,9 @@ FILES = {
     'deploy/docker-compose.traefik.yml': 'traefik',
 }
 SERVER, WORKER, BACKEND = 'recall-server', 'recall-worker', 'backend'
+PROFILE = 'worker'
+# Each of these reaches past the worker's own container.
+ESCAPES = ('privileged', 'pid', 'ipc', 'network_mode', 'cap_add', 'devices')
 
 
 def load(path):
@@ -40,9 +45,11 @@ def load(path):
     if yaml is not None:
         with open(os.path.join(ROOT, path)) as f:
             return yaml.safe_load(f)
+    # The worker's profile is named, so a compose that leaves out services
+    # whose profile is not active still shows the worker.
     out = subprocess.run(
-        ['docker', 'compose', '-f', os.path.join(ROOT, path), 'config',
-         '--format', 'json', '--no-interpolate'],
+        ['docker', 'compose', '-f', os.path.join(ROOT, path), '--profile', PROFILE,
+         'config', '--format', 'json', '--no-interpolate'],
         check=True, capture_output=True, text=True,
     )
     return json.loads(out.stdout)
@@ -68,6 +75,14 @@ def volume_sources(service):
     return out
 
 
+def environment(service):
+    """A service's environment as a mapping, whichever form it is written in."""
+    env = service.get('environment') or {}
+    if isinstance(env, list):
+        env = dict(e.split('=', 1) if '=' in e else (e, None) for e in env)
+    return env
+
+
 def problems(doc, ingress):
     """Everything wrong with one compose file; empty when it is right."""
     found = []
@@ -79,14 +94,25 @@ def problems(doc, ingress):
     for key in ('ports', 'expose', 'labels'):
         if worker.get(key):
             found.append(f'{WORKER} has {key}; it must open nothing')
+    for key in ESCAPES:
+        if worker.get(key):
+            found.append(f'{WORKER} has {key}; it must stay inside its own container')
+    if any('docker.sock' in str(v) for v in volume_sources(worker)):
+        found.append(f'{WORKER} mounts the Docker socket, which is root on the host')
+    if worker.get('init') is not True:
+        found.append(f'{WORKER} runs with init: true, so the CLI processes it starts are reaped')
+    if list(worker.get('profiles') or []) != [PROFILE]:
+        found.append(f'{WORKER} is opt-in: profiles: ["{PROFILE}"], and no other')
     build = worker.get('build') or {}
     if not isinstance(build, dict) or build.get('target') != 'worker':
         found.append(f'{WORKER} is built from the Dockerfile\'s worker target')
-    env = worker.get('environment') or {}
-    if isinstance(env, list):
-        env = dict(e.split('=', 1) for e in env if '=' in e)
-    if env.get('RECALL_URL') != f'http://{SERVER}:8787':
-        found.append(f'{WORKER} reaches the server directly, at http://{SERVER}:8787')
+    env = environment(worker)
+    if env.get('RECALL_WORKER_SERVER') != f'http://{SERVER}:8787':
+        found.append(f'{WORKER} reaches the server directly: '
+                     f'RECALL_WORKER_SERVER is http://{SERVER}:8787')
+    if 'RECALL_URL' in env:
+        found.append(f'{WORKER} is not given RECALL_URL, the client\'s variable; '
+                     'it reads RECALL_WORKER_SERVER only')
 
     worker_nets = names(worker.get('networks'))
     if worker_nets != {BACKEND}:
@@ -104,6 +130,14 @@ def problems(doc, ingress):
     shared = volume_sources(worker) & volume_sources(server)
     if shared:
         found.append(f'{WORKER} shares no volume with {SERVER}, not {sorted(shared)}')
+    # The worker's own volume holds its key and the login: nothing else
+    # mounts it, read-only or not.
+    for name, other in services.items():
+        if name == WORKER:
+            continue
+        mounted = volume_sources(worker) & volume_sources(other)
+        if mounted:
+            found.append(f'{name} mounts none of {WORKER}\'s volumes, not {sorted(mounted)}')
 
     if server.get('ports'):
         found.append(f'{SERVER} uses expose, never ports')
@@ -133,6 +167,23 @@ def mutations(doc, ingress):
     def another_on_backend(_, d):
         add_network(BACKEND)(d['services']['sqlite-web'], d)
 
+    def another_mounts_worker_volume(w, d):
+        d['services']['sqlite-web'].setdefault('volumes', []).append(
+            f'{sorted(volume_sources(w))[0]}:/worker:ro')
+
+    def docker_socket(w, _):
+        w.setdefault('volumes', []).append('/var/run/docker.sock:/var/run/docker.sock')
+
+    def set_env(key, value):
+        def change(w, _):
+            env = environment(w)
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = value
+            w['environment'] = env
+        return change
+
     return [
         changed('a published port', lambda w, _: w.__setitem__('ports', ['127.0.0.1:9000:9000'])),
         changed('an exposed port', lambda w, _: w.__setitem__('expose', ['8787'])),
@@ -140,6 +191,17 @@ def mutations(doc, ingress):
         changed('the ingress network', add_network(ingress)),
         changed('the server\'s volume', share_volume),
         changed('another service on backend', another_on_backend),
+        changed('another service mounting the worker\'s volume', another_mounts_worker_volume),
+        changed('the Docker socket', docker_socket),
+        changed('privileged', lambda w, _: w.__setitem__('privileged', True)),
+        changed('the host\'s process namespace', lambda w, _: w.__setitem__('pid', 'host')),
+        changed('the host\'s network', lambda w, _: w.__setitem__('network_mode', 'host')),
+        changed('no init', lambda w, _: w.pop('init')),
+        changed('no profile', lambda w, _: w.pop('profiles')),
+        changed('another profile', lambda w, _: w.__setitem__('profiles', ['worker', 'default'])),
+        changed('the client\'s RECALL_URL', set_env('RECALL_URL', 'https://recall.example.com')),
+        changed('no RECALL_WORKER_SERVER', set_env('RECALL_WORKER_SERVER', None)),
+        changed('the public server', set_env('RECALL_WORKER_SERVER', 'https://recall.example.com')),
         changed('the server image', lambda w, _: w.__setitem__('build', {'context': '..'})),
     ]
 

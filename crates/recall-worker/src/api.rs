@@ -1,6 +1,7 @@
 //! The worker's side of the HTTP API: JSON requests, signed as a device
-//! signs them (`recall_wire::signature`, RFC 9421), or unsigned for the two
-//! enrolment routes, which a machine calls before it has an identity.
+//! signs them (`recall_wire::signature`, RFC 9421), or unsigned for the
+//! discovery document and the two enrolment routes, which a machine calls
+//! before it has an identity.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -81,6 +82,11 @@ impl Api {
         let http = reqwest::Client::builder()
             .user_agent(crate::user_agent())
             .connect_timeout(Duration::from_secs(10))
+            // Never followed. A redirect would send a signed request, or
+            // the answer to a claim, somewhere RECALL_WORKER_SERVER does not
+            // name, and nothing the worker calls ever answers with one: a
+            // 3xx is an error to report, like any other status.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| ApiError::Transport(e.to_string()))?;
         Ok(Self {
@@ -89,6 +95,23 @@ impl Api {
             authority,
             prefix: parsed.path().trim_end_matches('/').to_string(),
         })
+    }
+
+    /// Gets `path` unsigned, for the discovery document.
+    pub async fn get<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        timeout: Duration,
+    ) -> Result<T, ApiError> {
+        let req = self
+            .http
+            .get(format!("{}{path}", self.base))
+            .timeout(timeout)
+            .header(
+                recall_wire::PROTOCOL_HEADER,
+                recall_wire::PROTOCOL.to_string(),
+            );
+        answer(req).await
     }
 
     /// Posts `body` unsigned, for enrolling.
@@ -152,33 +175,37 @@ impl Api {
                 .header(signature::SIGNATURE_INPUT_HEADER, signed.signature_input)
                 .header(signature::SIGNATURE_HEADER, signed.signature);
         }
-        let resp = req
-            .body(bytes)
-            .send()
-            .await
-            .map_err(|e| ApiError::Transport(describe(&e)))?;
-        let status = resp.status();
-        let retry_after = resp
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().parse().ok());
-        let text = resp
-            .bytes()
-            .await
-            .map_err(|e| ApiError::Transport(describe(&e)))?;
-        if !status.is_success() {
-            let message = serde_json::from_slice::<ErrorResponse>(&text)
-                .map(|e| e.error)
-                .unwrap_or_else(|_| String::from_utf8_lossy(&text).trim().to_string());
-            return Err(ApiError::Status {
-                status,
-                message,
-                retry_after,
-            });
-        }
-        serde_json::from_slice(&text).map_err(|e| ApiError::Body(e.to_string()))
+        answer(req.body(bytes)).await
     }
+}
+
+/// Sends `req`, and reads its answer as `T` or as the error it carries.
+async fn answer<T: DeserializeOwned>(req: reqwest::RequestBuilder) -> Result<T, ApiError> {
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(describe(&e)))?;
+    let status = resp.status();
+    let retry_after = resp
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse().ok());
+    let text = resp
+        .bytes()
+        .await
+        .map_err(|e| ApiError::Transport(describe(&e)))?;
+    if !status.is_success() {
+        let message = serde_json::from_slice::<ErrorResponse>(&text)
+            .map(|e| e.error)
+            .unwrap_or_else(|_| String::from_utf8_lossy(&text).trim().to_string());
+        return Err(ApiError::Status {
+            status,
+            message,
+            retry_after,
+        });
+    }
+    serde_json::from_slice(&text).map_err(|e| ApiError::Body(e.to_string()))
 }
 
 /// A reqwest error with its causes, which its own `Display` leaves out.

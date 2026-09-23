@@ -857,10 +857,12 @@ Recommended: the same compose file, as a second service.
 
 ```yaml
   recall-worker:
+    profiles: ["worker"]           # opt-in: COMPOSE_PROFILES=worker in deploy/.env
     build: { context: .., dockerfile: deploy/Dockerfile, target: worker }
     restart: unless-stopped
+    init: true
     environment:
-      RECALL_URL: http://recall-server:8787
+      RECALL_WORKER_SERVER: http://recall-server:8787   # never the client's RECALL_URL
     volumes:
       - recall-worker-data:/data   # its keys and the claude login; not the server's volume
     networks:
@@ -877,13 +879,13 @@ a bucket of its own. The long-poll claim costs about three requests a minute.
 The Dockerfile gains a `worker` target carrying Node, the `claude` CLI and
 `recall-worker`; after PR 5 the API image carries neither Node nor the CLI.
 `claude setup-token` moves to
-`docker compose exec -it recall-worker claude setup-token`.
+`docker compose exec -it -u node recall-worker claude setup-token`.
 `scripts/compose-check.py` asserts, as `wrangler-check.py` does for the
 installer's config, that the worker has no `ports`, `expose` or labels, is on
 no ingress network, and shares no volume with the server.
 
-The stronger option is another host, with `RECALL_URL` set to the public
-address and requests going through Traefik like any client's. That takes the
+The stronger option is another host, with `RECALL_WORKER_SERVER` set to the
+public address and requests going through Traefik like any client's. That takes the
 key off the machine the internet reaches, at the cost of a second machine; see
 open decision 2.
 

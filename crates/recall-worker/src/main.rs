@@ -4,6 +4,11 @@
 //! [`recall_worker::config::Config`]. It opens no port. On first start it
 //! makes a key in its data directory, enrols, and prints a code for the
 //! owner to approve with the `worker` scope; from then on it claims jobs.
+//!
+//! When it stops for something only a person can fix, it says why once and
+//! then idles until it is stopped, rather than exiting: under a restart
+//! policy an exit is started again at once, and every start would ask the
+//! server the same question and print the same error.
 
 use std::process::ExitCode;
 
@@ -17,7 +22,8 @@ https://github.com/pimlabs/recall/blob/main/deploy/README.md
 Usage: recall-worker [version | --version | -V | help | --help | -h]
 
 With no argument it enrols (the first time) and then works until stopped.
-RECALL_URL is required.";
+RECALL_WORKER_SERVER (the server) and RECALL_WORKER_DIR (where its key is
+kept) are required. RECALL_URL, the recall client's setting, is never read.";
 
 fn version_line() -> String {
     let version = env!("CARGO_PKG_VERSION");
@@ -54,7 +60,7 @@ fn main() -> ExitCode {
         }
     }
 
-    let run = async {
+    let work = async {
         let cfg = Config::from_env().map_err(|e| e.to_string())?;
         let worker = Worker::new(cfg).map_err(|e| e.to_string())?;
         worker
@@ -62,13 +68,25 @@ fn main() -> ExitCode {
             .await
             .map_err(|e| e.to_string())
     };
-    let result = tokio::runtime::Builder::new_multi_thread()
+    let run = async {
+        match work.await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("recall-worker: {err}");
+                eprintln!(
+                    "recall-worker: stopped. Idle until stopped, so a restart policy does not \
+                     run this again and again; fix the above, then restart it"
+                );
+                shutdown_signal().await;
+                ExitCode::FAILURE
+            }
+        }
+    };
+    match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .map_err(|e| e.to_string())
-        .and_then(|rt| rt.block_on(run));
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
+    {
+        Ok(rt) => rt.block_on(run),
         Err(err) => {
             eprintln!("recall-worker: {err}");
             ExitCode::FAILURE

@@ -22,6 +22,14 @@
 # publishes recall-worker.
 ARG RECALL_SOURCE=release
 
+# The `claude` CLI both images carry, pinned, so a rebuild installs the
+# version the merge's flags were checked against rather than whatever npm
+# resolves that day. The merge passes `--tools ""` and `--max-turns 1`
+# (recall-worker's merge.rs), both checked against this version; move the
+# pin only after checking them again against the new one's `claude --help`
+# (`--max-turns` is a hidden option there, so search the CLI for it).
+ARG CLAUDE_CODE_VERSION=2.1.280
+
 # ---- source: build the binary from this checkout.
 FROM rust:1-alpine AS source
 
@@ -93,7 +101,8 @@ RUN apk add --no-cache su-exec
 # The CLI the merge shells out to. Like the server's, it needs a one-time
 # `claude setup-token`, run against this container; see deploy/README.md.
 # Until then the worker takes no jobs, and they wait in the queue.
-RUN npm install -g @anthropic-ai/claude-code
+ARG CLAUDE_CODE_VERSION
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
 COPY --from=worker-binary /out/recall-worker /usr/local/bin/recall-worker
 COPY deploy/docker-entrypoint.sh /usr/local/bin/
@@ -130,7 +139,8 @@ RUN apk add --no-cache su-exec
 # `claude setup-token` run against the running container — see
 # deploy/README.md. Until then the server still runs and syncs; merge just
 # degrades to last-write-wins, visible at GET /health.
-RUN npm install -g @anthropic-ai/claude-code
+ARG CLAUDE_CODE_VERSION
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
 COPY --from=binary /out/recall-server /usr/local/bin/recall-server
 COPY deploy/docker-entrypoint.sh /usr/local/bin/

@@ -158,10 +158,22 @@ impl Merger {
             .args(["--system-prompt", SYSTEM_PROMPT])
             .arg("--exclude-dynamic-system-prompt-sections")
             .arg("--strict-mcp-config")
+            // No tools, and one turn: a merge is text in and text out, so a
+            // model moved by something in the notes it was handed to act on
+            // them has nothing to act with, and stops there. Both flags were
+            // checked against the CLI version deploy/Dockerfile pins
+            // (CLAUDE_CODE_VERSION); `--max-turns` is a hidden option in
+            // its `--help`, so check the CLI itself before moving the pin.
+            .args(["--tools", ""])
+            .args(["--max-turns", "1"])
+            // Nothing kept in the CLI's session history: every merge holds
+            // two versions of a note, which have no business piling up
+            // beside the login.
+            .arg("--no-session-persistence")
             // A neutral working directory: nothing here should read, or be
             // influenced by, whatever project happens to be on disk. Along
-            // with the two flags above this is the difference between a
-            // ~$0.01 and a ~$0.19 merge call.
+            // with the system prompt and MCP flags above this is the
+            // difference between a ~$0.01 and a ~$0.19 merge call.
             .current_dir(std::env::temp_dir())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -376,6 +388,60 @@ mod tests {
             .merge("a", "b")
             .await;
         assert!(matches!(err, Err(Error::NonJson(_))), "got {err:?}");
+    }
+
+    /// The flags that keep a merge cheap and inert reach the CLI: no tools,
+    /// one turn, nothing persisted, and the prompt on stdin rather than in
+    /// the arguments.
+    #[tokio::test]
+    async fn the_merge_runs_with_no_tools_and_one_turn() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let args = dir.path().join("args");
+        let path = dir.path().join("claude");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "#!/bin/sh").unwrap();
+        writeln!(
+            f,
+            "for a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{}'",
+            args.display()
+        )
+        .unwrap();
+        writeln!(f, "cat > /dev/null").unwrap();
+        writeln!(f, r#"printf '%s' '{{"is_error":false,"result":"merged"}}'"#).unwrap();
+        drop(f);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        settle(&path);
+
+        Merger::new(path.to_str().unwrap(), Duration::from_secs(10))
+            .merge("old notes", "new notes")
+            .await
+            .unwrap();
+        let passed = std::fs::read_to_string(&args).unwrap();
+        let passed: Vec<&str> = passed.lines().collect();
+        let after = |flag: &str| {
+            passed
+                .iter()
+                .position(|a| *a == flag)
+                .and_then(|i| passed.get(i + 1).copied())
+        };
+        assert_eq!(after("--tools"), Some(""), "{passed:?}");
+        assert_eq!(after("--max-turns"), Some("1"), "{passed:?}");
+        assert_eq!(after("--output-format"), Some("json"), "{passed:?}");
+        for flag in [
+            "-p",
+            "--no-session-persistence",
+            "--strict-mcp-config",
+            "--exclude-dynamic-system-prompt-sections",
+        ] {
+            assert!(passed.contains(&flag), "{flag} missing from {passed:?}");
+        }
+        assert!(
+            !passed.iter().any(|a| a.contains("old notes")),
+            "the notes go on stdin, not in the arguments"
+        );
     }
 
     #[tokio::test]

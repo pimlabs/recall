@@ -82,10 +82,12 @@ services:
   # reaches the server directly on `backend` and signs every request with
   # its own key, kept on its own volume, never the server's.
   #
-  # On first start it prints a code to approve with the `worker` scope; see
-  # "The merge worker" in deploy/README.md. Until one is approved the server
-  # merges inline, exactly as before.
+  # Off unless asked for: it starts only with COMPOSE_PROFILES=worker in
+  # deploy/.env. On first start it prints a code to approve with the `worker`
+  # scope; see "The merge worker" in deploy/README.md. Until one is approved
+  # the server merges inline, exactly as before.
   recall-worker:
+    profiles: ["worker"]
     build:
       context: ..
       dockerfile: deploy/Dockerfile
@@ -96,8 +98,13 @@ services:
         GIT_COMMIT: ${GIT_COMMIT:-}
     container_name: recall-worker
     restart: unless-stopped
+    # A small init as PID 1, so the `claude` processes a merge starts are
+    # reaped rather than left as zombies.
+    init: true
     environment:
-      RECALL_URL: http://recall-server:8787
+      # Its own variable, never RECALL_URL: that one is the client's, and a
+      # machine with Recall set up has it pointing at the public server.
+      RECALL_WORKER_SERVER: http://recall-server:8787
     volumes:
       - recall-worker-data:/data
     depends_on:

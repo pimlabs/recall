@@ -602,8 +602,8 @@ from the same Dockerfile (`target: worker`), with:
 
 - **no port at all**: no `ports`, no `expose`, no Traefik labels, and no
   ingress network. It reaches the server directly over a `backend` network
-  the two share, at `http://recall-server:8787`, and asks it for work;
-  nothing asks it anything.
+  the two share, at `http://recall-server:8787` (its
+  `RECALL_WORKER_SERVER`), and asks it for work; nothing asks it anything.
 - **its own volume**, `recall-worker-data`, holding its device key and its
   `claude` login. It shares no volume with the server, so the server's
   container never holds either.
@@ -611,6 +611,10 @@ from the same Dockerfile (`target: worker`), with:
   listed with the other devices, and it can be revoked. Its `worker` scope
   lets it claim merge jobs and post their results, and nothing else: it
   cannot pull or push memory itself.
+
+It is also **off unless you turn it on**: the service is in the compose
+files behind a profile, `worker`, and `docker compose up` leaves it alone
+until `deploy/.env` names that profile (step 1).
 
 `scripts/compose-check.py` asserts each of those in both compose files, and
 CI runs it.
@@ -629,11 +633,20 @@ a conflicting push is stored as sent and answered at once, and the merged
 file arrives with the next pull (see "Jobs" in
 [`docs/reference/api.md`](../docs/reference/api.md#jobs)).
 
-### 1. Start it, and approve it
+### 1. Turn it on, start it, and approve it
 
-`docker compose up -d --build` (with your `-f` files) starts it along with
-the server. On first start it makes its key and asks to enrol, and prints
-a code and the key's fingerprint:
+Name its profile in `deploy/.env`, beside `RECALL_TOKEN`:
+
+```sh
+COMPOSE_PROFILES=worker
+```
+
+Then `docker compose up -d --build` (with your `-f` files) starts it along
+with the server, and every later `up` keeps it running. Before anything
+else it asks the server for `/.well-known/recall`, and goes no further
+unless the server lists the merge queue: pointed at anything else, it says
+so and stops there. Then, on first start, it makes its key, asks to enrol,
+and prints a code and the key's fingerprint, once per code:
 
 ```sh
 docker compose logs recall-worker
@@ -649,11 +662,16 @@ curl -sS -X POST "https://recall.yourdomain.com/v1/devices/approve" \
   -d '{"user_code":"WDJB-MJHT","scope":"worker","fingerprint":"SHA256:…"}'
 ```
 
-Within a few seconds its log says `enrolled as dev_…; waiting for jobs`. A
-code not approved within fifteen minutes expires, and the worker asks for a
-new one by itself. An authkey cannot make a worker: authkeys enrol
-`sync` devices only, so a leaked one cannot mint something that sees every
-conflict.
+It asks whether the code is approved every 5 seconds for the first minute,
+then every 30 seconds, so within half a minute of approving it its log says
+`enrolled as dev_…; waiting for jobs`. A code not approved within fifteen
+minutes expires, and the worker asks for a new one by itself. An authkey
+cannot make a worker: authkeys enrol `sync` devices only, so a leaked one
+cannot mint something that sees every conflict.
+
+Its key is kept in `/data/worker-identity.json` with the server it was made
+for, and the worker never offers it to another: changed to name some other
+server, it stops and says so.
 
 ### 2. Log its CLI in
 
@@ -694,6 +712,14 @@ minutes) is marked failed and kept; `GET /v1/jobs?state=failed` lists them
 and `POST /v1/jobs/{id}/retry` queues one again, both with the operator
 token.
 
+### When it stops by itself
+
+Something only you can fix (the server has no merge queue, the enrolment
+was denied, the worker was revoked, a setting is wrong) is said once in its
+log, and then the worker idles rather than exiting, so the restart policy
+does not start it again and again. `docker compose logs recall-worker`
+says what to do; once it is done, `docker compose restart recall-worker`.
+
 ### Settings
 
 In the worker's `environment:` if you need them; the merge ones have the
@@ -701,23 +727,27 @@ names the server uses.
 
 | Variable | Default | |
 |---|---|---|
-| `RECALL_URL` | set by the compose file | The server. Another host's public URL works too. |
+| `RECALL_WORKER_SERVER` | set by the compose file | The server. Another host's public URL works too; over `http://` to anything but loopback or a compose service it warns, since jobs carry your notes. `RECALL_URL`, the client's setting, is never read, and the worker refuses to start with only that set. |
+| `RECALL_WORKER_DIR` | set by the image, `/data` | Where its key is kept. Required: run outside the image, it has no default. |
 | `RECALL_WORKER_NAME` | `worker` | The device name it enrols as. |
-| `RECALL_MERGE_TIMEOUT_MS` | 45000 | One merge, before it is reported as an error and retried later. |
+| `RECALL_MERGE_TIMEOUT_MS` | 45000 | One merge, before it is reported as an error and retried later. At most 585000, so a merge always ends inside the longest lease (600 seconds) with 15 to spare; more is refused. |
 | `RECALL_CLAUDE_BIN` | `claude` | The CLI. Never the Anthropic API. |
-| `RECALL_CLAUDE_STATUS_INTERVAL_MS` | 30 minutes | How often it re-checks a logged-in CLI. |
+| `RECALL_CLAUDE_STATUS_INTERVAL_MS` | 30 minutes | How often it re-checks a logged-in CLI. It also re-checks at once after any merge fails. |
 | `RECALL_WORKER_LEASE_SECONDS` | 120 | How long a claimed job is its own; always at least the merge timeout plus 15 seconds. |
 
 ### Revoking it, or enrolling it again
 
 Revoking the worker (`POST /v1/devices/{id}/revoke`) puts merging back in
-the server at once; the worker then stops and says why. To enrol it again,
-delete its identity and restart it:
+the server at once; the worker then says why in its log, and idles. To
+enrol it again, delete its identity and restart it:
 
 ```sh
-docker compose exec recall-worker rm /data/worker-identity.json
+docker compose exec -u node recall-worker rm /data/worker-identity.json
 docker compose restart recall-worker
 ```
+
+To stop running a worker at all, revoke it, remove `worker` from
+`COMPOSE_PROFILES`, and `docker compose up -d --remove-orphans`.
 
 Once the worker merges, the server's own CLI login (step "Enabling real
 merge" above) is used only if the worker is revoked. Leaving it in place
@@ -726,10 +756,13 @@ keeps that fallback; removing it
 takes the login off the container the internet reaches, at the cost of the
 fallback degrading to last-write-wins.
 
-Rolling back to a release from before the worker leaves its container
-running with no service to belong to: `docker compose up -d --remove-orphans`
-stops it. The older server ignores the queue's table, and reads the worker
-as an ordinary device.
+Rolling back to a release from before the worker: **revoke the worker
+first**, on the newer server, before starting the older one. The older
+server has no `worker` scope, and reads a worker as an ordinary `sync`
+device, which may pull and push every project's memory; revoked, it may do
+nothing on either. Then roll back, and `docker compose up -d
+--remove-orphans` stops the worker's container, which the older compose
+file has no service for. The older server ignores the queue's table.
 
 ## Renaming, removing or restoring a project
 

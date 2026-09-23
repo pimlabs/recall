@@ -87,8 +87,13 @@ pub(super) const SCHEMA: &str = concat!(
 /// copied, the old table dropped and the new one renamed, in one
 /// transaction, so a crash leaves either the old table or the new one and
 /// never neither. The rows are untouched, so an older server reading the
-/// rebuilt table sees exactly what it wrote; a `worker` row reads to it as
-/// a device without admin rights, which the owner approved.
+/// rebuilt table sees exactly what it wrote.
+///
+/// A `worker` row is the exception to that, and why a rollback revokes the
+/// worker first (`deploy/README.md`): a server from before the scope knows
+/// only `admin` and everything else, and treats everything else as `sync`.
+/// To it, an unrevoked worker is a device that may pull and push every
+/// project's memory. A revoked one may do nothing on either.
 ///
 /// Guarded by the table's own definition rather than `PRAGMA
 /// user_version`: whether the constraint allows `worker` is exactly the

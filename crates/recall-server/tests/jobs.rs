@@ -1001,7 +1001,7 @@ async fn end_to_end_a_conflicts_merge_arrives_with_the_next_pull() {
 
     let worker_dir = tempfile::tempdir().unwrap();
     let cfg = recall_worker::config::Config {
-        url: url.clone(),
+        server: url.clone(),
         data_dir: worker_dir.path().to_path_buf(),
         claude_bin: bin,
         wait_seconds: 2,
@@ -1017,8 +1017,8 @@ async fn end_to_end_a_conflicts_merge_arrives_with_the_next_pull() {
     // in its identity file.
     let deadline = Instant::now() + Duration::from_secs(20);
     let code = loop {
-        let id = recall_worker::identity::Identity::load_or_create(worker_dir.path()).unwrap();
-        if let Some(code) = id.user_code {
+        let id = recall_worker::identity::Identity::load(worker_dir.path()).unwrap();
+        if let Some(code) = id.and_then(|id| id.user_code) {
             break code;
         }
         assert!(Instant::now() < deadline, "the worker never enrolled");

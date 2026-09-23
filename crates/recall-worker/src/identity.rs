@@ -6,6 +6,10 @@
 //! claim jobs and so read the two versions of every conflicting file, so
 //! it lives on the worker's own volume and is never mounted into the API
 //! container.
+//!
+//! It also records the server it was made for. A key enrolled with one
+//! server is never offered to another: pointed elsewhere, the worker stops
+//! and says so rather than asking a second server to approve it.
 
 use std::fs;
 use std::io::Write;
@@ -23,6 +27,9 @@ pub const FILE_NAME: &str = "worker-identity.json";
 #[derive(Clone)]
 pub struct Identity {
     key: SigningKey,
+    /// The server it was made for, as `RECALL_WORKER_SERVER` named it.
+    /// [`None`] only in a file an earlier build wrote.
+    pub server: Option<String>,
     /// `dev_…`, once approved.
     pub device_id: Option<String>,
     /// The enrolment waiting for approval, so a restart keeps polling the
@@ -37,6 +44,7 @@ impl std::fmt::Debug for Identity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Identity")
             .field("fingerprint", &self.fingerprint())
+            .field("server", &self.server)
             .field("device_id", &self.device_id)
             .field("enrollment_id", &self.enrollment_id.as_ref().map(|_| "…"))
             .field("user_code", &self.user_code)
@@ -49,6 +57,8 @@ impl std::fmt::Debug for Identity {
 struct Stored {
     /// The Ed25519 seed, 32 bytes, base64url without padding.
     private_key: String,
+    #[serde(default)]
+    server: Option<String>,
     #[serde(default)]
     device_id: Option<String>,
     #[serde(default)]
@@ -69,6 +79,7 @@ impl Identity {
     pub fn from_seed(seed: [u8; 32]) -> Self {
         Self {
             key: SigningKey::from_bytes(&seed),
+            server: None,
             device_id: None,
             enrollment_id: None,
             user_code: None,
@@ -80,24 +91,36 @@ impl Identity {
         dir.join(FILE_NAME)
     }
 
-    /// Reads the identity in `dir`, or makes and saves a new one when
-    /// there is none. A file that exists but does not read is an error,
-    /// never silently replaced: replacing it would enrol a second worker
-    /// and orphan the first.
-    pub fn load_or_create(dir: &Path) -> std::io::Result<Self> {
+    /// Reads the identity in `dir`, or makes and saves a new one for
+    /// `server` when there is none. A file that exists but does not read is
+    /// an error, never silently replaced: replacing it would enrol a second
+    /// worker and orphan the first.
+    ///
+    /// An identity that exists is answered as it is, whatever server it was
+    /// made for; comparing that with the one configured is the caller's.
+    pub fn load_or_create(dir: &Path, server: &str) -> std::io::Result<Self> {
+        match Self::load(dir)? {
+            Some(id) => Ok(id),
+            None => {
+                let mut id = Self::generate()?;
+                id.server = Some(server.to_string());
+                id.save(dir)?;
+                Ok(id)
+            }
+        }
+    }
+
+    /// Reads the identity in `dir`: [`None`] when there is none yet.
+    pub fn load(dir: &Path) -> std::io::Result<Option<Self>> {
         let path = Self::path(dir);
         match fs::read(&path) {
-            Ok(bytes) => Self::parse(&bytes).map_err(|why| {
+            Ok(bytes) => Self::parse(&bytes).map(Some).map_err(|why| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!("{} does not read: {why}", path.display()),
                 )
             }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let id = Self::generate()?;
-                id.save(dir)?;
-                Ok(id)
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
     }
@@ -111,6 +134,7 @@ impl Identity {
             .try_into()
             .map_err(|_| "private_key is not 32 bytes".to_string())?;
         Ok(Self {
+            server: stored.server,
             device_id: stored.device_id,
             enrollment_id: stored.enrollment_id,
             user_code: stored.user_code,
@@ -125,6 +149,7 @@ impl Identity {
         fs::create_dir_all(dir)?;
         let stored = Stored {
             private_key: URL_SAFE_NO_PAD.encode(self.key.to_bytes()),
+            server: self.server.clone(),
             device_id: self.device_id.clone(),
             enrollment_id: self.enrollment_id.clone(),
             user_code: self.user_code.clone(),
@@ -167,19 +192,40 @@ impl Identity {
 mod tests {
     use super::*;
 
+    const S: &str = "http://recall-server:8787";
+
     #[test]
     fn a_new_identity_is_saved_and_read_back_the_same() {
         let dir = tempfile::tempdir().unwrap();
-        let first = Identity::load_or_create(dir.path()).unwrap();
-        let mut again = Identity::load_or_create(dir.path()).unwrap();
+        let first = Identity::load_or_create(dir.path(), S).unwrap();
+        let mut again = Identity::load_or_create(dir.path(), S).unwrap();
         assert_eq!(first.public_key(), again.public_key());
         assert_eq!(again.device_id, None);
 
         again.device_id = Some("dev_a".into());
         again.save(dir.path()).unwrap();
-        let third = Identity::load_or_create(dir.path()).unwrap();
+        let third = Identity::load_or_create(dir.path(), S).unwrap();
         assert_eq!(third.device_id.as_deref(), Some("dev_a"));
         assert_eq!(third.public_key(), first.public_key());
+    }
+
+    /// The server a key was made for is kept with it, and asking for the
+    /// identity with another server named does not rebind it.
+    #[test]
+    fn an_identity_remembers_its_server() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(Identity::load(dir.path()).unwrap().is_none());
+        Identity::load_or_create(dir.path(), S).unwrap();
+        let again = Identity::load_or_create(dir.path(), "https://elsewhere.example.com").unwrap();
+        assert_eq!(again.server.as_deref(), Some(S));
+        assert_eq!(
+            Identity::load(dir.path())
+                .unwrap()
+                .unwrap()
+                .server
+                .as_deref(),
+            Some(S)
+        );
     }
 
     #[cfg(unix)]
@@ -187,7 +233,7 @@ mod tests {
     fn only_its_owner_can_read_it() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        Identity::load_or_create(dir.path()).unwrap();
+        Identity::load_or_create(dir.path(), S).unwrap();
         let mode = fs::metadata(Identity::path(dir.path()))
             .unwrap()
             .permissions()
@@ -200,7 +246,7 @@ mod tests {
     fn a_file_that_does_not_read_is_an_error_not_a_new_identity() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(Identity::path(dir.path()), "{").unwrap();
-        assert!(Identity::load_or_create(dir.path()).is_err());
+        assert!(Identity::load_or_create(dir.path(), S).is_err());
     }
 
     #[test]
