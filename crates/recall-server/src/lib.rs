@@ -8,6 +8,7 @@
 
 #![deny(missing_docs)]
 
+pub mod admin;
 pub mod config;
 pub mod merge;
 pub mod server;
