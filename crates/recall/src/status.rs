@@ -234,9 +234,9 @@ pub struct Report {
     pub device_error: Option<String>,
     /// Whether anyone but its owner can read the device key file.
     pub device_file_exposed: bool,
-    /// Whether `RECALL_ENROLL_KEY` is set, with which a session enrols
+    /// Whether `RECALL_AUTHKEY` is set, with which a session enrols
     /// itself at its first pull.
-    pub enroll_key_set: bool,
+    pub authkey_set: bool,
     /// Whether the server enrols devices and accepts their signatures, per
     /// its discovery document. Absent when it did not say: unreachable, or
     /// older than the document.
@@ -402,7 +402,7 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
             .device_file
             .as_deref()
             .is_some_and(recall_hooks::home::readable_by_others),
-        enroll_key_set: cfg.enroll_key.is_some(),
+        authkey_set: cfg.authkey.is_some(),
         server_devices: None,
         machine_source: cfg.machine_source,
         config_problems: cfg.config_problems.clone(),
@@ -772,8 +772,8 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
             if d.ephemeral { ", ephemeral" } else { "" },
             d.key_file
         );
-    } else if rep.enroll_key_set {
-        field!("device       : none yet, RECALL_ENROLL_KEY enrols one at the next pull");
+    } else if rep.authkey_set {
+        field!("device       : none yet, RECALL_AUTHKEY enrols one at the next pull");
     }
     if let Some(err) = &rep.device_error {
         field!("device       : UNREADABLE ({err})");

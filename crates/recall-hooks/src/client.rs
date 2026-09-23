@@ -82,7 +82,7 @@ impl Error {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(untagged)]
 pub enum Enrolled {
-    /// Approved at once, with an enrolment key.
+    /// Approved at once, with an authkey.
     Approved(EnrollApproved),
     /// Waiting for someone to approve the code.
     Pending(EnrollPending),
@@ -221,7 +221,7 @@ impl Client {
     }
 
     /// Starts enrolling this machine: `POST /v1/devices/enroll`.
-    /// Unauthenticated; with an enrolment key the answer is an approved
+    /// Unauthenticated; with an authkey the answer is an approved
     /// device, and without one a code for someone to approve.
     pub async fn enroll(&self, req: &EnrollRequest) -> Result<Enrolled, Error> {
         self.send(self.post_json(wire_devices::ENROLL_PATH, req)?)
@@ -294,18 +294,15 @@ impl Client {
             .await
     }
 
-    /// Makes an enrolment key. Admin; the key is in the answer and nowhere
+    /// Makes an authkey. Admin; the key is in the answer and nowhere
     /// else.
-    pub async fn create_enroll_key(
-        &self,
-        req: &EnrollKeyRequest,
-    ) -> Result<EnrollKeyCreated, Error> {
+    pub async fn create_authkey(&self, req: &EnrollKeyRequest) -> Result<EnrollKeyCreated, Error> {
         self.send(self.post_json(wire_devices::ENROLL_KEYS_PATH, req)?)
             .await
     }
 
-    /// Every enrolment key, without the keys themselves. Admin.
-    pub async fn enroll_keys(&self) -> Result<EnrollKeyList, Error> {
+    /// Every authkey, without the keys themselves. Admin.
+    pub async fn authkeys(&self) -> Result<EnrollKeyList, Error> {
         let request = self.http.get(format!(
             "{}{}",
             self.base_url,
@@ -314,13 +311,9 @@ impl Client {
         self.send(request).await
     }
 
-    /// Stops an enrolment key enrolling anything more, and with
+    /// Stops an authkey enrolling anything more, and with
     /// `revoke_devices` revokes what it already enrolled. Admin.
-    pub async fn revoke_enroll_key(
-        &self,
-        id: &str,
-        revoke_devices: bool,
-    ) -> Result<EnrollKey, Error> {
+    pub async fn revoke_authkey(&self, id: &str, revoke_devices: bool) -> Result<EnrollKey, Error> {
         let path = wire_devices::revoke_enroll_key_path(id);
         self.send(self.post_json(&path, &EnrollKeyRevokeRequest { revoke_devices })?)
             .await

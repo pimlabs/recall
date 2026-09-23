@@ -183,7 +183,7 @@ impl Resolved {
         })
     }
 
-    /// Enrols this machine with `RECALL_ENROLL_KEY` when it has no device
+    /// Enrols this machine with `RECALL_AUTHKEY` when it has no device
     /// key for the server in effect: a cloud session's first hook.
     ///
     /// Never an error, because it runs inside a hook. What happened is one
@@ -191,20 +191,20 @@ impl Resolved {
     /// back either holding the new device or as it was, in which case the
     /// token, if there is one, is used as before.
     pub async fn enroll_if_needed(&self, mut cfg: ClientConfig, hook: &str) -> ClientConfig {
-        let Some(enroll_key) = cfg.enroll_key.clone() else {
+        let Some(authkey) = cfg.authkey.clone() else {
             return cfg;
         };
         if cfg.device.is_some() || cfg.url.is_empty() {
             return cfg;
         }
         let Some(h) = home::locate(self.env.lookup()) else {
-            eprintln!("{hook}: RECALL_ENROLL_KEY is set, but there is no home directory to keep a device key in");
+            eprintln!("{hook}: RECALL_AUTHKEY is set, but there is no home directory to keep a device key in");
             return cfg;
         };
-        match device::enroll_with_key(&h, &cfg.url, &enroll_key, &cfg.source_env).await {
+        match device::enrol_with_authkey(&h, &cfg.url, &authkey, &cfg.source_env).await {
             Ok(entry) => {
                 eprintln!(
-                    "{hook}: enrolled this session as device {} with RECALL_ENROLL_KEY",
+                    "{hook}: enrolled this session as device {} with RECALL_AUTHKEY",
                     entry.name
                 );
                 cfg.device = Some(entry);
@@ -216,7 +216,7 @@ impl Resolved {
                     ", using RECALL_TOKEN instead"
                 };
                 eprintln!(
-                    "{hook}: could not enrol with RECALL_ENROLL_KEY ({}){fallback}",
+                    "{hook}: could not enrol with RECALL_AUTHKEY ({}){fallback}",
                     enroll_failure(&e)
                 );
             }
@@ -225,7 +225,7 @@ impl Resolved {
     }
 
     /// After the server refused this machine's device as unknown or
-    /// revoked: enrols afresh when `RECALL_ENROLL_KEY` allows it, and
+    /// revoked: enrols afresh when `RECALL_AUTHKEY` allows it, and
     /// otherwise says what to do. [`Some`] with the new configuration only
     /// when there is something worth retrying with.
     pub async fn reenroll(
@@ -234,11 +234,11 @@ impl Resolved {
         hook: &str,
         why: &str,
     ) -> Option<ClientConfig> {
-        if cfg.enroll_key.is_none() {
+        if cfg.authkey.is_none() {
             eprintln!("{hook}: the server no longer accepts this machine's device key ({why})");
             eprintln!(
                 "{hook}:   run recall connect to enrol this machine again, or set \
-                 RECALL_ENROLL_KEY to have a cloud session do it by itself"
+                 RECALL_AUTHKEY to have a cloud session do it by itself"
             );
             return None;
         }
@@ -256,7 +256,7 @@ impl Resolved {
     }
 }
 
-/// Why an enrolment with an enrolment key failed, in a line.
+/// Why an enrolment with an authkey failed, in a line.
 fn enroll_failure(e: &device::Error) -> String {
     match e {
         device::Error::Client(recall_hooks::client::Error::Status { code: 404, .. }) => {

@@ -77,10 +77,10 @@ pub struct ClientConfig {
     pub device: Option<home::DeviceEntry>,
     /// Why `device.key` could not be used, when it exists and could not.
     pub device_error: Option<String>,
-    /// `RECALL_ENROLL_KEY`: an enrolment key, with which a machine that has
+    /// `RECALL_AUTHKEY`: an authkey, with which a machine that has
     /// no device key yet enrols itself, approved at once. What a cloud
     /// environment holds instead of `RECALL_TOKEN`.
-    pub enroll_key: Option<String>,
+    pub authkey: Option<String>,
     /// Why a file in `~/.recall` could not be used, when one exists and
     /// could not. Not an error here, for the reason nothing in this type is:
     /// a broken file must not stop `recall status` from saying so.
@@ -163,7 +163,7 @@ pub const VARS: &[&str] = &[
     "RECALL_PROJECT_KEY",
     "RECALL_GLOBAL_KEY",
     "RECALL_MACHINE_KEY",
-    crate::device::ENROLL_KEY_VAR,
+    crate::device::AUTHKEY_VAR,
     // Where `recall connect` keeps credentials. Read only when the
     // environment leaves the URL or the token unset.
     home::HOME_VAR,
@@ -282,7 +282,7 @@ impl ClientConfig {
             device_file: saved.home.as_ref().map(home::Home::device_path),
             device,
             device_error: saved.device_error,
-            enroll_key: var(&lookup, crate::device::ENROLL_KEY_VAR)
+            authkey: var(&lookup, crate::device::AUTHKEY_VAR)
                 .map(|k| k.trim().to_string())
                 .filter(|k| !k.is_empty()),
             credentials_error: saved.error,
@@ -312,13 +312,13 @@ impl ClientConfig {
     /// server.
     ///
     /// Either credential will do: a device key, or the token. So will an
-    /// enrolment key, which the hooks turn into a device key before they
+    /// authkey, which the hooks turn into a device key before they
     /// need one.
     pub fn require(&self) -> Result<(), ConfigError> {
         if self.url.is_empty() {
             return Err(ConfigError::MissingUrl);
         }
-        if self.token.is_empty() && self.device.is_none() && self.enroll_key.is_none() {
+        if self.token.is_empty() && self.device.is_none() && self.authkey.is_none() {
             return Err(ConfigError::MissingToken);
         }
         Ok(())

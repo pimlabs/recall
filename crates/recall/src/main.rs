@@ -122,10 +122,13 @@ enum Cmd {
         #[arg(long, short)]
         yes: bool,
     },
-    /// List, approve and revoke the machines enrolled on the server, and
-    /// the enrolment keys cloud sessions use
+    /// List, approve and revoke the machines enrolled on the server
     #[command(subcommand)]
     Devices(devices::Cmd),
+    /// Make, list and revoke authkeys, with which cloud sessions enrol
+    /// themselves
+    #[command(subcommand)]
+    Authkey(devices::KeyCmd),
     /// Remove a saved token, and this machine's device key
     Disconnect {
         /// The server; defaults to the one most recently connected
@@ -200,6 +203,7 @@ fn main() {
         }
         Cmd::Disconnect { url } => connect::disconnect(url.as_deref()),
         Cmd::Devices(cmd) => block_on_current(devices::run(cmd)),
+        Cmd::Authkey(cmd) => block_on_current(devices::run_authkey(cmd)),
         Cmd::Status { json } => block_on_current(status::run(json)),
         Cmd::Doctor { json } => block_on_current(doctor::run(json)),
         Cmd::Push => block_on_current(hook::push()),

@@ -2283,7 +2283,7 @@ fn devices_approve_refuses_a_key_whose_fingerprint_is_not_the_one_given() {
     }
 }
 
-/// A cloud session holds `RECALL_ENROLL_KEY` and nothing else. Its first
+/// A cloud session holds `RECALL_AUTHKEY` and nothing else. Its first
 /// pull enrols it, approved at once and ephemeral, with nothing typed; its
 /// later hooks sign as that device; and it cannot do anything an admin can.
 #[test]
@@ -2291,7 +2291,7 @@ fn a_cloud_session_enrolls_itself_at_its_first_pull_with_an_enrolment_key() {
     let server = live_server("right");
     let repo = git_repo();
     let key = block_on(
-        operator(&server).create_enroll_key(&recall_wire::EnrollKeyRequest {
+        operator(&server).create_authkey(&recall_wire::EnrollKeyRequest {
             tag: "cloud".into(),
             expires_in_days: 1,
             ephemeral: true,
@@ -2304,7 +2304,7 @@ fn a_cloud_session_enrolls_itself_at_its_first_pull_with_an_enrolment_key() {
     let env = [
         ("RECALL_HOME", home_str.as_str()),
         ("RECALL_URL", server.url.as_str()),
-        ("RECALL_ENROLL_KEY", key.key.as_str()),
+        ("RECALL_AUTHKEY", key.key.as_str()),
     ];
 
     let r = run(&["pull"], repo.path(), &env, None);
@@ -2348,14 +2348,14 @@ fn a_cloud_session_enrolls_itself_at_its_first_pull_with_an_enrolment_key() {
 }
 
 /// A revoked device, and one the server swept away after it sat idle, are
-/// both refused as gone. A session holding `RECALL_ENROLL_KEY` enrols
+/// both refused as gone. A session holding `RECALL_AUTHKEY` enrols
 /// again, once, and the hook that noticed still does its work.
 #[test]
 fn a_cloud_session_enrolls_again_after_its_device_is_revoked_or_swept() {
     let server = live_server("right");
     let repo = git_repo();
     let key = block_on(
-        operator(&server).create_enroll_key(&recall_wire::EnrollKeyRequest {
+        operator(&server).create_authkey(&recall_wire::EnrollKeyRequest {
             tag: "cloud".into(),
             expires_in_days: 1,
             ephemeral: true,
@@ -2368,7 +2368,7 @@ fn a_cloud_session_enrolls_again_after_its_device_is_revoked_or_swept() {
     let env = [
         ("RECALL_HOME", home_str.as_str()),
         ("RECALL_URL", server.url.as_str()),
-        ("RECALL_ENROLL_KEY", key.key.as_str()),
+        ("RECALL_AUTHKEY", key.key.as_str()),
     ];
     assert_eq!(run(&["pull"], repo.path(), &env, None).code, 0);
     let first = saved_device(home.path(), &server.url).unwrap();
@@ -2408,7 +2408,7 @@ fn a_cloud_session_enrolls_again_after_its_device_is_revoked_or_swept() {
     assert_ne!(third.device_id, second.device_id);
 }
 
-/// A laptop's revoked device, with no enrolment key: the session still
+/// A laptop's revoked device, with no authkey: the session still
 /// starts, the hook says what to do, doctor fails it, and `connect`
 /// enrols it afresh, approved this time from another machine by code.
 #[test]
@@ -2640,7 +2640,7 @@ fn devices_approve_binds_the_approval_to_the_fingerprint_it_showed() {
 /// A 0.4.0 server: discovery lists only the token, and there are no
 /// device routes. Against it nothing changes: connect saves the token,
 /// no key is made, every request carries the token and none a signature,
-/// and an enrolment key set anyway falls back to the token with a line.
+/// and an authkey set anyway falls back to the token with a line.
 fn release_before_devices(seen: &Seen) -> (u16, serde_json::Value) {
     let authorized = seen.authorization.as_deref() == Some("Bearer right");
     match (seen.method.as_str(), seen.path.as_str()) {
@@ -2701,7 +2701,7 @@ fn against_a_server_without_devices_everything_stays_on_the_token() {
 
     let env = [
         ("RECALL_HOME", home_str.as_str()),
-        ("RECALL_ENROLL_KEY", "recall-ek-notfromthisserver"),
+        ("RECALL_AUTHKEY", "recall-ek-notfromthisserver"),
     ];
     let r = push_memory(&repo, &env, "fact.md", "A fact.\n");
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);

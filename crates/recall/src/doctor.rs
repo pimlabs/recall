@@ -110,10 +110,10 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
             "RECALL_TOKEN",
             "not needed, this machine signs its requests with its device key",
         ));
-    } else if rep.enroll_key_set {
+    } else if rep.authkey_set {
         out.push(ok(
             "RECALL_TOKEN",
-            "not needed, RECALL_ENROLL_KEY enrols this session as a device",
+            "not needed, RECALL_AUTHKEY enrols this session as a device",
         ));
     } else {
         out.push(fail("RECALL_TOKEN", "not set anywhere", WHERE_TO_SET));
@@ -281,16 +281,16 @@ fn device_findings(rep: &Report, out: &mut Vec<Finding>) {
 
     let Some(d) = &rep.device else {
         match (rep.server_devices, rep.remote_session) {
-            (Some(true), true) if rep.enroll_key_set => out.push(warn(
+            (Some(true), true) if rep.authkey_set => out.push(warn(
                 "device",
-                "RECALL_ENROLL_KEY is set, but this session has not enrolled yet",
+                "RECALL_AUTHKEY is set, but this session has not enrolled yet",
                 "recall pull enrols it, and says why when it cannot",
             )),
             (Some(true), true) if rep.token_set => out.push(warn(
                 "device",
                 "this session uses the shared RECALL_TOKEN",
-                "on an admin device: recall devices enroll-key create --tag cloud --expires 90d, \
-                 then set RECALL_ENROLL_KEY on the cloud environment and remove RECALL_TOKEN",
+                "on an admin device: recall authkey create --tag cloud --expires 90d, \
+                 then set RECALL_AUTHKEY on the cloud environment and remove RECALL_TOKEN",
             )),
             (Some(true), false) if rep.token_set => out.push(warn(
                 "device",
@@ -312,8 +312,8 @@ fn device_findings(rep: &Report, out: &mut Vec<Finding>) {
         d.scope,
         if d.ephemeral { ", ephemeral" } else { "" }
     );
-    let reenroll = if rep.remote_session && rep.enroll_key_set {
-        "the next session start enrols again with RECALL_ENROLL_KEY"
+    let reenroll = if rep.remote_session && rep.authkey_set {
+        "the next session start enrols again with RECALL_AUTHKEY"
     } else {
         "recall connect"
     };
@@ -923,7 +923,7 @@ mod tests {
             device_file: Some("/h/.recall/device.key".into()),
             device_error: None,
             device_file_exposed: false,
-            enroll_key_set: false,
+            authkey_set: false,
             // A server too old to say: the case that must raise nothing.
             server_devices: None,
             config_file: Some("/h/.recall/config.toml".into()),

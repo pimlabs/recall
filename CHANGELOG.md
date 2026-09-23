@@ -30,26 +30,28 @@ break will be described here in full rather than smoothed over.
   you only, one key per server. Not the OS keychain: a hook runs on every
   memory write and must never stop for a keychain dialog, which macOS shows
   after an upgrade. `recall disconnect` removes it too.
-- **Cloud sessions enrol themselves with `RECALL_ENROLL_KEY`.** Set an
-  enrolment key on the cloud environment instead of `RECALL_TOKEN`, and
+- **Cloud sessions enrol themselves with `RECALL_AUTHKEY`.** Set an
+  authkey on the cloud environment instead of `RECALL_TOKEN`, and
   each session's first `recall pull` enrols it (approved at once,
   ephemeral) and carries on. Nothing is typed, and a failure falls back to
   `RECALL_TOKEN` or leaves memory untouched, as a pull always has.
 - **A revoked or swept device enrols again by itself** when
-  `RECALL_ENROLL_KEY` is set: the hook that is refused enrols once and
+  `RECALL_AUTHKEY` is set: the hook that is refused enrols once and
   retries. Without it, the hook says to run `recall connect`, and the
   session still starts.
 - **New command: `recall devices`.** `list` (scope, ephemeral, last seen,
   agent), `approve <code>` (shows the machine's name, agent and fingerprint
   and asks first; `--fingerprint` refuses a key with any other, `--admin`
-  gives the admin scope), `revoke <name>`, and `enroll-key create --tag
-  cloud --expires 90d` (shown once), `enroll-key list` and `enroll-key
-  revoke <id>`. `--yes` and `--json` for scripts.
+  gives the admin scope) and `revoke <name>`. `--yes` and `--json` for
+  scripts.
+- **New command: `recall authkey`.** `create --tag cloud --expires 90d`
+  (the key is shown once), `list` and `revoke <id>` (`--revoke-devices`
+  revokes what it enrolled too), with `--json`.
 - **`recall doctor` reports the device**: its name, scope and where its
   key lives, checked with the server. It warns while a machine the server
   could enrol still uses the shared token, and while a token is kept that
   an enrolled machine no longer sends. `RECALL_TOKEN` unset is no longer a
-  failure on a machine with a device key or `RECALL_ENROLL_KEY`.
+  failure on a machine with a device key or `RECALL_AUTHKEY`.
 - **`recall status --json` gains** `auth` (`device`, `bearer` or `none`),
   `device` (id, name, scope, ephemeral, key storage and file, and whether
   the server confirmed it), `device_file`, `device_error`,

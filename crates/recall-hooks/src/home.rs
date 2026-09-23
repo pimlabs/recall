@@ -237,7 +237,7 @@ pub struct DeviceEntry {
     /// `sync` or `admin`, as the server said when it was approved.
     pub scope: String,
     /// Whether the server removes it once idle: a cloud session enrolled
-    /// with an enrolment key.
+    /// with an authkey.
     #[serde(default)]
     pub ephemeral: bool,
     /// The Ed25519 private key's 32-byte seed, base64url without padding.

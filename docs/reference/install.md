@@ -271,7 +271,7 @@ On Windows the file is in `%USERPROFILE%\.recall`, which Windows restricts
 to you, SYSTEM and administrators. The reasoning and the measurements are
 in [`../design/handshake.md`](../design/handshake.md).
 
-### The owner's commands: `recall devices`
+### The owner's commands: `recall devices` and `recall authkey`
 
 On a machine enrolled as admin (or with `RECALL_TOKEN` set):
 
@@ -280,9 +280,9 @@ recall devices list                          # name, scope, ephemeral, last seen
 recall devices approve WDJB-MJHT             # shows name, agent, fingerprint; asks first
 recall devices approve WDJB-MJHT --admin     # an admin device, which can approve others
 recall devices revoke old-laptop             # its requests are refused from now on
-recall devices enroll-key create --tag cloud --expires 90d
-recall devices enroll-key list
-recall devices enroll-key revoke ek_ecfq6bc4luadka2i
+recall authkey create --tag cloud --expires 90d
+recall authkey list
+recall authkey revoke ak_ecfq6bc4luadka2i
 ```
 
 `approve` looks the code up first and shows the machine's name, agent and
@@ -303,24 +303,24 @@ machine still uses the shared token, and when a token is left behind that
 it no longer needs. See `token-setup.md` for generating the token and for
 what a cloud environment needs.
 
-### Cloud sessions: `RECALL_ENROLL_KEY`
+### Cloud sessions: `RECALL_AUTHKEY`
 
 A cloud session is a new machine every time and cannot wait for anyone to
-approve a code. Give its environment an **enrolment key** instead of the
+approve a code. Give its environment an **authkey** instead of the
 token:
 
 ```sh
-recall devices enroll-key create --tag cloud --expires 90d
+recall authkey create --tag cloud --expires 90d
 ```
 
 The key is shown once. Put it in the cloud environment's variables as
-`RECALL_ENROLL_KEY`, and remove `RECALL_TOKEN` from them. At each session's
+`RECALL_AUTHKEY`, and remove `RECALL_TOKEN` from them. At each session's
 start, `recall pull` finds no device key, enrols the session with the
-enrolment key (approved at once, `sync` scope, named `cloud-…`), keeps the
+authkey (approved at once, `sync` scope, named `cloud-…`), keeps the
 key in the container, and pulls. Nothing is typed. The device is ephemeral:
 the server removes it after a day without a request. If the server has
 revoked or removed it, the next hook enrols again once and carries on.
-Revoking the enrolment key (`recall devices enroll-key revoke <id>`) stops
+Revoking the authkey (`recall authkey revoke <id>`) stops
 new sessions without touching any laptop. If enrolling fails, the hook says
 why in one line and falls back to `RECALL_TOKEN` when the environment still
 has it; a session always starts.
@@ -787,7 +787,7 @@ red when memory stops syncing.
 A claude.ai cloud session runs the hooks from the repo it cloned, but
 `recall` itself has to already be on `PATH` there — it isn't part of the
 repo. Install it as part of that environment's setup, the same one-time
-place you set `RECALL_ENROLL_KEY` (or `RECALL_TOKEN`) and
+place you set `RECALL_AUTHKEY` (or `RECALL_TOKEN`) and
 `CLAUDE_CODE_REMOTE_MEMORY_DIR`:
 
 ```sh

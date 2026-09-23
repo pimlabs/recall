@@ -68,7 +68,7 @@ async fn run(args: Args) -> Step<()> {
     if proj::remote_session() {
         return refuse(
             "this is a remote session, so nothing saved here would last.",
-            "Set RECALL_URL and RECALL_ENROLL_KEY (or RECALL_TOKEN) on the cloud environment \
+            "Set RECALL_URL and RECALL_AUTHKEY (or RECALL_TOKEN) on the cloud environment \
              instead.",
         );
     }
@@ -334,7 +334,7 @@ impl Setup<'_> {
             Ok(Enrolled::Approved(_)) => {
                 return refuse(
                     "the server approved this machine without anyone approving it.",
-                    "Nothing was saved. That should not happen without an enrolment key.",
+                    "Nothing was saved. That should not happen without an authkey.",
                 )
             }
             Err(e @ client::Error::Status { code: 409, .. }) => {

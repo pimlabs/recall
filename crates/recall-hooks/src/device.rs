@@ -19,10 +19,10 @@ use recall_wire::signature::{self, SigningKey};
 use crate::client::{self, Client, Enrolled};
 use crate::home::{DeviceEntry, Home};
 
-/// The variable a cloud environment holds an enrolment key in. With it, a
+/// The variable a cloud environment holds an authkey in. With it, a
 /// session that has no device key enrols itself at its first pull, and is
 /// approved at once.
-pub const ENROLL_KEY_VAR: &str = "RECALL_ENROLL_KEY";
+pub const AUTHKEY_VAR: &str = "RECALL_AUTHKEY";
 
 /// Why a device key could not be made or used.
 #[derive(Debug, thiserror::Error)]
@@ -36,9 +36,9 @@ pub enum Error {
     /// The server refused, or could not be reached.
     #[error(transparent)]
     Client(#[from] client::Error),
-    /// The server answered an enrolment key with something other than an
+    /// The server answered an authkey with something other than an
     /// approved device.
-    #[error("the server did not approve the enrolment key at once, which it always should")]
+    #[error("the server did not approve the authkey at once, which it always should")]
     NotApproved,
     /// Saving the key failed.
     #[error(transparent)]
@@ -97,12 +97,12 @@ impl DeviceKey {
     }
 
     /// The enrolment request for this key.
-    pub fn enroll_request(&self, name: &str, enroll_key: Option<&str>) -> EnrollRequest {
+    pub fn enroll_request(&self, name: &str, authkey: Option<&str>) -> EnrollRequest {
         EnrollRequest {
             name: name.to_string(),
             public_key: self.public_key(),
             agent: recall_wire::discovery::user_agent(),
-            enroll_key: enroll_key.map(str::to_string),
+            enroll_key: authkey.map(str::to_string),
         }
     }
 
@@ -148,7 +148,7 @@ impl Signer {
 
 /// The name a machine asks to enrol as, when nobody chose one: what it
 /// labels its pushes with, when the server would accept that, else a plain
-/// one. The server names a device enrolled with an enrolment key itself and
+/// one. The server names a device enrolled with an authkey itself and
 /// ignores this, but still checks it.
 pub fn enroll_name(label: &str) -> String {
     let label = label.trim();
@@ -161,22 +161,22 @@ pub fn enroll_name(label: &str) -> String {
     }
 }
 
-/// Enrols this machine at `url` with an enrolment key, and saves the key
+/// Enrols this machine at `url` with an authkey, and saves the key
 /// the server approved.
 ///
 /// A cloud session's way in: no code to show and nobody to approve it, so
 /// the server approves it at once (Tailscale's `preauthorized`). A fresh key
 /// every time, never an old one, so a revoked or swept device is never
 /// brought back.
-pub async fn enroll_with_key(
+pub async fn enrol_with_authkey(
     home: &Home,
     url: &str,
-    enroll_key: &str,
+    authkey: &str,
     label: &str,
 ) -> Result<DeviceEntry, Error> {
     let key = DeviceKey::generate()?;
     let client = Client::new(url, "")?;
-    let req = key.enroll_request(&enroll_name(label), Some(enroll_key.trim()));
+    let req = key.enroll_request(&enroll_name(label), Some(authkey.trim()));
     let approved = match client.enroll(&req).await? {
         Enrolled::Approved(approved) => approved,
         Enrolled::Pending(_) => return Err(Error::NotApproved),

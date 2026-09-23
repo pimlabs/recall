@@ -76,22 +76,22 @@ dialog):
 | Name | Value |
 |---|---|
 | `RECALL_URL` | the same as step 2 |
-| `RECALL_ENROLL_KEY` | an enrolment key, below; or `RECALL_TOKEN`, the same as step 2, against a server older than 0.4.1 |
+| `RECALL_AUTHKEY` | an authkey, below; or `RECALL_TOKEN`, the same as step 2, against a server older than 0.4.1 |
 | `CLAUDE_CODE_REMOTE_MEMORY_DIR` | `/home/user/.claude` |
 | `RECALL_GLOBAL_KEY` | the same as step 2, or leave it out entirely |
 
-**`RECALL_ENROLL_KEY` rather than the token**, from 0.4.1. Make one on a
+**`RECALL_AUTHKEY` rather than the token**, from 0.4.1. Make one on a
 machine enrolled as admin:
 
 ```sh
-recall devices enroll-key create --tag cloud --expires 90d
+recall authkey create --tag cloud --expires 90d
 ```
 
 It is shown once. It can only enrol `sync` devices, never read or write
 memory itself, and it expires. Each session's first `recall pull` uses it to
 enrol that session as an ephemeral device, `cloud-…`, which then signs its
 requests; the server removes the device a day after its last request. A
-leaked key is `recall devices enroll-key revoke <id>` (add
+leaked key is `recall authkey revoke <id>` (add
 `--revoke-devices` to cut off what it already enrolled), and no laptop has
 to change. The token in the environment's variables, by contrast, is the
 whole server's secret. Once sessions enrol, remove `RECALL_TOKEN` from

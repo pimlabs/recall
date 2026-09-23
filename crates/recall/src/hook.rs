@@ -88,10 +88,10 @@ pub async fn pull() -> anyhow::Result<i32> {
     // An unconfigured or unreachable server warns on stderr and exits 0,
     // leaving whatever is already on disk alone.
     let here = project::resolve();
-    // A cloud session with RECALL_ENROLL_KEY and no device key yet becomes
+    // A cloud session with RECALL_AUTHKEY and no device key yet becomes
     // a device here, before its first request, with nobody asked anything.
     let cfg = here.enroll_if_needed(here.config(), "recall-pull").await;
-    if cfg.device.is_none() && cfg.token.is_empty() && cfg.enroll_key.is_some() {
+    if cfg.device.is_none() && cfg.token.is_empty() && cfg.authkey.is_some() {
         eprintln!("recall-pull: no device key and no RECALL_TOKEN, leaving local memory untouched");
         return Ok(exit::OK);
     }

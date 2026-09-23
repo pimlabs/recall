@@ -1,6 +1,7 @@
-//! `recall devices` — the owner's commands for the machines enrolled on a
-//! server: list them, approve a new one by the code it shows, revoke one,
-//! and make or revoke the enrolment keys cloud sessions enrol with.
+//! `recall devices` and `recall authkey` — the owner's commands for the
+//! machines enrolled on a server: list them, approve a new one by the code
+//! it shows, revoke one; and make, list or revoke the authkeys cloud
+//! sessions enrol with (Tailscale's name, for the same thing).
 //!
 //! Everything here is an admin request, so it needs a device enrolled with
 //! the `admin` scope or the operator's `RECALL_TOKEN`. The first device
@@ -61,15 +62,12 @@ pub enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Enrolment keys, which let cloud sessions enrol themselves
-    #[command(name = "enroll-key", subcommand)]
-    EnrollKey(KeyCmd),
 }
 
-/// `recall devices enroll-key …`.
+/// `recall authkey …`.
 #[derive(Subcommand)]
 pub enum KeyCmd {
-    /// Make an enrolment key. It is shown once
+    /// Make an authkey. It is shown once
     Create {
         /// A label, and the start of the name of every device it enrols
         #[arg(long)]
@@ -87,15 +85,15 @@ pub enum KeyCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Every enrolment key, without the keys themselves
+    /// Every authkey, without the keys themselves
     List {
         /// Machine-readable output, for scripts
         #[arg(long)]
         json: bool,
     },
-    /// Stop an enrolment key enrolling anything more
+    /// Stop an authkey enrolling anything more
     Revoke {
-        /// The key's id (ek_…), from recall devices enroll-key list
+        /// The key's id, from recall authkey list
         id: String,
         /// Revoke every device it enrolled as well, for a key that leaked
         #[arg(long)]
@@ -123,13 +121,25 @@ pub async fn run(cmd: Cmd) -> anyhow::Result<i32> {
             json,
         } => approve(&client, &code, admin, fingerprint.as_deref(), yes, json).await,
         Cmd::Revoke { name, yes, json } => revoke(&cfg, &client, &name, yes, json).await,
-        Cmd::EnrollKey(KeyCmd::Create {
+    };
+    Ok(finish(result))
+}
+
+/// Runs one `recall authkey` command.
+pub async fn run_authkey(cmd: KeyCmd) -> anyhow::Result<i32> {
+    let cfg = proj::resolve().config();
+    let client = match admin_client(&cfg) {
+        Ok(client) => client,
+        Err(why) => return Ok(refuse(&why, "")),
+    };
+    let result = match cmd {
+        KeyCmd::Create {
             tag,
             expires,
             max_devices,
             persistent,
             json,
-        }) => {
+        } => {
             create_key(
                 &client,
                 tag.unwrap_or_default(),
@@ -140,19 +150,24 @@ pub async fn run(cmd: Cmd) -> anyhow::Result<i32> {
             )
             .await
         }
-        Cmd::EnrollKey(KeyCmd::List { json }) => list_keys(&client, json).await,
-        Cmd::EnrollKey(KeyCmd::Revoke {
+        KeyCmd::List { json } => list_keys(&client, json).await,
+        KeyCmd::Revoke {
             id,
             revoke_devices,
             json,
-        }) => revoke_key(&client, &id, revoke_devices, json).await,
+        } => revoke_key(&client, &id, revoke_devices, json).await,
     };
-    Ok(match result {
+    Ok(finish(result))
+}
+
+/// The exit code, having said what went wrong when something did.
+fn finish(result: Done) -> i32 {
+    match result {
         Ok(code) => code,
         Err(Failed::Refused(code)) => code,
         Err(Failed::Server(e)) => server_error(&e),
         Err(Failed::Json(e)) => refuse(&format!("could not write JSON: {e}"), ""),
-    })
+    }
 }
 
 /// Why a command stopped.
@@ -447,7 +462,7 @@ async fn create_key(
         );
     };
     let created = client
-        .create_enroll_key(&EnrollKeyRequest {
+        .create_authkey(&EnrollKeyRequest {
             tag,
             expires_in_days: days,
             ephemeral: !persistent,
@@ -459,7 +474,7 @@ async fn create_key(
         return Ok(exit::OK);
     }
     println!(
-        "Enrolment key {}{}, expires {}",
+        "Authkey {}{}, expires {}",
         created.id,
         if created.tag.is_empty() {
             String::new()
@@ -472,23 +487,23 @@ async fn create_key(
     println!("  {}", created.key);
     println!();
     println!("This is the only time it is shown: the server keeps only its hash.");
-    println!("Put it in your cloud environment's variables as RECALL_ENROLL_KEY.");
+    println!("Put it in your cloud environment's variables as RECALL_AUTHKEY.");
     println!(
         "Anyone holding it can enrol a machine that reads and writes your memory, until it \
-         expires or: recall devices enroll-key revoke {}",
+         expires or: recall authkey revoke {}",
         created.id
     );
     Ok(exit::OK)
 }
 
 async fn list_keys(client: &Client, json: bool) -> Done {
-    let list = client.enroll_keys().await?;
+    let list = client.authkeys().await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&list)?);
         return Ok(exit::OK);
     }
     if list.enroll_keys.is_empty() {
-        println!("No enrolment keys. recall devices enroll-key create --tag cloud --expires 90d makes one.");
+        println!("No authkeys. recall authkey create --tag cloud --expires 90d makes one.");
         return Ok(exit::OK);
     }
     let rows: Vec<[String; 6]> = list
@@ -512,12 +527,12 @@ async fn list_keys(client: &Client, json: bool) -> Done {
 }
 
 async fn revoke_key(client: &Client, id: &str, revoke_devices: bool, json: bool) -> Done {
-    let key = client.revoke_enroll_key(id.trim(), revoke_devices).await?;
+    let key = client.revoke_authkey(id.trim(), revoke_devices).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&key)?);
         return Ok(exit::OK);
     }
-    println!("Revoked enrolment key {}: it enrols nothing more.", key.id);
+    println!("Revoked authkey {}: it enrols nothing more.", key.id);
     if revoke_devices {
         println!("Every device it enrolled is revoked too.");
     } else {
