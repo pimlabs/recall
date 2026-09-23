@@ -243,10 +243,7 @@ impl Store {
             return Ok(RemovedCredential::Last);
         }
         tx.execute("DELETE FROM admin_credentials WHERE id = ?1", (id,))?;
-        tx.execute(
-            "DELETE FROM admin_sessions WHERE credential_id = ?1",
-            (id,),
-        )?;
+        tx.execute("DELETE FROM admin_sessions WHERE credential_id = ?1", (id,))?;
         tx.commit()?;
         Ok(RemovedCredential::Removed(credential))
     }
@@ -368,11 +365,13 @@ mod tests {
             AddedCredential::NotFirst
         );
         assert_eq!(
-            st.add_admin_credential(&credential("a", T0), false).unwrap(),
+            st.add_admin_credential(&credential("a", T0), false)
+                .unwrap(),
             AddedCredential::Duplicate
         );
         assert_eq!(
-            st.add_admin_credential(&credential("b", T1), false).unwrap(),
+            st.add_admin_credential(&credential("b", T1), false)
+                .unwrap(),
             AddedCredential::Added
         );
         let ids: Vec<String> = st
@@ -413,7 +412,8 @@ mod tests {
             st.remove_admin_credential("a").unwrap(),
             RemovedCredential::Last
         );
-        st.add_admin_credential(&credential("b", T1), false).unwrap();
+        st.add_admin_credential(&credential("b", T1), false)
+            .unwrap();
         assert!(st.create_admin_session("s1", "a", T1, T1).unwrap());
         assert!(st.create_admin_session("s2", "b", T1, T1).unwrap());
         assert!(matches!(
@@ -441,7 +441,11 @@ mod tests {
         st.create_admin_session("old", "a", T1, T1).unwrap();
         st.create_admin_session("fine", "a", T1, "2026-10-23T10:00:00.000Z")
             .unwrap();
-        assert_eq!(st.sweep_admin_sessions(T1, "2026-09-23T10:30:00.000Z").unwrap(), 2);
+        assert_eq!(
+            st.sweep_admin_sessions(T1, "2026-09-23T10:30:00.000Z")
+                .unwrap(),
+            2
+        );
         assert!(st.admin_session("fine").unwrap().is_some());
         assert_eq!(st.reset_admin_credentials().unwrap(), 1);
         assert_eq!(st.admin_session("fine").unwrap(), None);

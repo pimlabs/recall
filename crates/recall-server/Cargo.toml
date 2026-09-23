@@ -67,4 +67,6 @@ passkey-types = "0.5"
 # passkey-authenticator's user-verification trait is an async_trait.
 async-trait = "0.1"
 coset = "0.3"
+# Named only to spell the client's type; passkey-client already uses it.
+public-suffix = "0.1"
 url = "2"

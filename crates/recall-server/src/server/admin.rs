@@ -406,13 +406,22 @@ mod tests {
         assert!(!csp.contains("unsafe"), "{csp}");
         assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
         let want = STANDARD.encode(Sha256::digest(scripts[0]));
-        assert!(csp.contains(&format!("script-src 'sha256-{want}'")), "{csp}");
+        assert!(
+            csp.contains(&format!("script-src 'sha256-{want}'")),
+            "{csp}"
+        );
         // Anything the hashes do not cover would be blocked, and the page
         // would break in a way no Rust test sees: no script from elsewhere,
         // no inline handlers, no style attributes.
         assert!(!ADMIN_HTML.contains("<script src"));
         assert!(!ADMIN_HTML.contains(" style=\""));
-        for handler in [" onclick=", " onload=", " onsubmit=", " oninput=", " onchange="] {
+        for handler in [
+            " onclick=",
+            " onload=",
+            " onsubmit=",
+            " oninput=",
+            " onchange=",
+        ] {
             assert!(!ADMIN_HTML.contains(handler), "{handler}");
         }
     }
@@ -423,7 +432,9 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert(
             header::COOKIE,
-            format!("theme=dark; {SESSION_COOKIE}={token}; x=y").parse().unwrap(),
+            format!("theme=dark; {SESSION_COOKIE}={token}; x=y")
+                .parse()
+                .unwrap(),
         );
         assert_eq!(session_token(&h), Some(token.as_str()));
         assert!(has_session_cookie(&h));
@@ -456,7 +467,13 @@ mod tests {
     fn the_cookie_has_every_attribute_it_needs() {
         let c = session_cookie(&"a".repeat(43), SESSION_LIMIT);
         let c = c.to_str().unwrap();
-        for attr in ["HttpOnly", "Secure", "SameSite=Strict", "Path=/", "Max-Age=2592000"] {
+        for attr in [
+            "HttpOnly",
+            "Secure",
+            "SameSite=Strict",
+            "Path=/",
+            "Max-Age=2592000",
+        ] {
             assert!(c.contains(attr), "{c}");
         }
         assert!(c.starts_with("__Host-recall_admin="));

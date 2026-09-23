@@ -32,14 +32,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
 use webauthn_rs::prelude::{
-    DiscoverableAuthentication, DiscoverableKey, Passkey, PasskeyRegistration,
-    PublicKeyCredential, RegisterPublicKeyCredential, Url, Uuid, Webauthn, WebauthnBuilder,
-    WebauthnError,
+    DiscoverableAuthentication, DiscoverableKey, Passkey, PasskeyRegistration, PublicKeyCredential,
+    RegisterPublicKeyCredential, Url, Uuid, Webauthn, WebauthnBuilder, WebauthnError,
 };
 
 use super::admin::{
-    cleared_cookie, csrf_token, no_store, session_cookie, OwnerSession, PasskeyStatus,
-    SessionView, SESSION_IDLE, SESSION_LIMIT,
+    cleared_cookie, csrf_token, no_store, session_cookie, OwnerSession, PasskeyStatus, SessionView,
+    SESSION_IDLE, SESSION_LIMIT,
 };
 use super::auth::Caller;
 use super::middleware::ClientIp;
@@ -112,10 +111,12 @@ impl Passkeys {
     /// reason, when it names none.
     pub(super) fn new(public_url: &str) -> Self {
         let site = if public_url.is_empty() {
-            Err("RECALL_PUBLIC_URL is not set on the server, so passkey sign-in is off. \
+            Err(
+                "RECALL_PUBLIC_URL is not set on the server, so passkey sign-in is off. \
                  Set it to the address this page is served from, such as \
                  https://recall.example.com, and restart the server."
-                .to_string())
+                    .to_string(),
+            )
         } else {
             site(public_url).map_err(|why| {
                 let why = format!(
@@ -157,7 +158,9 @@ impl Passkeys {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Ceremony>> {
-        self.ceremonies.lock().unwrap_or_else(PoisonError::into_inner)
+        self.ceremonies
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Forgets every ceremony whose time is up. Answers how many went.
@@ -307,12 +310,8 @@ struct FinishSignIn {
 }
 
 fn parse<T: serde::de::DeserializeOwned>(bytes: &Bytes) -> Result<T, Refusal> {
-    serde_json::from_slice(bytes).map_err(|e| {
-        Refusal::new(
-            StatusCode::BAD_REQUEST,
-            format!("invalid json body: {e}"),
-        )
-    })
+    serde_json::from_slice(bytes)
+        .map_err(|e| Refusal::new(StatusCode::BAD_REQUEST, format!("invalid json body: {e}")))
 }
 
 fn started(ceremony_id: String, options: Value) -> Response {
@@ -342,13 +341,14 @@ fn registration_options(
     user_handle: Uuid,
     exclude: Vec<Passkey>,
 ) -> Result<(Value, PasskeyRegistration), Refusal> {
-    let exclude = (!exclude.is_empty()).then(|| exclude.iter().map(|p| p.cred_id().clone()).collect());
+    let exclude =
+        (!exclude.is_empty()).then(|| exclude.iter().map(|p| p.cred_id().clone()).collect());
     let (challenge, registration) = site
         .webauthn
         .start_passkey_registration(user_handle, USER_NAME, USER_DISPLAY_NAME, exclude)
         .map_err(|e| Refusal::internal(anyhow::anyhow!("starting a registration: {e}")))?;
-    let mut options = serde_json::to_value(challenge)
-        .map_err(|e| Refusal::internal(anyhow::anyhow!("{e}")))?;
+    let mut options =
+        serde_json::to_value(challenge).map_err(|e| Refusal::internal(anyhow::anyhow!("{e}")))?;
     if let Some(selection) = options.pointer_mut("/publicKey/authenticatorSelection") {
         if let Some(selection) = selection.as_object_mut() {
             selection.insert("residentKey".into(), Value::from("required"));
@@ -411,8 +411,8 @@ fn register(
         .webauthn
         .finish_passkey_registration(&finish.credential, registration)
         .map_err(not_registered)?;
-    let passkey_json = serde_json::to_string(&passkey)
-        .map_err(|e| Refusal::internal(anyhow::anyhow!("{e}")))?;
+    let passkey_json =
+        serde_json::to_string(&passkey).map_err(|e| Refusal::internal(anyhow::anyhow!("{e}")))?;
     let id = credential_id(&passkey);
     let (_, now) = now_at(state);
     let added = state
@@ -600,8 +600,8 @@ fn sign_in(state: &AppState, finish: &FinishSignIn) -> Result<(String, SessionVi
             e => refused_sign_in(&format!("the passkey's answer did not verify: {e}")),
         })?;
     passkey.update_credential(&result);
-    let passkey_json = serde_json::to_string(&passkey)
-        .map_err(|e| Refusal::internal(anyhow::anyhow!("{e}")))?;
+    let passkey_json =
+        serde_json::to_string(&passkey).map_err(|e| Refusal::internal(anyhow::anyhow!("{e}")))?;
     let (at, now) = now_at(state);
     let recorded = state
         .store
@@ -781,7 +781,10 @@ mod tests {
         let ok = site("https://recall.example.com").ok().unwrap();
         assert_eq!(ok.origin, "https://recall.example.com");
         assert_eq!(
-            site("https://recall.example.com:8443/").ok().unwrap().origin,
+            site("https://recall.example.com:8443/")
+                .ok()
+                .unwrap()
+                .origin,
             "https://recall.example.com:8443"
         );
         assert!(site("http://localhost:8787").is_ok(), "trying it locally");
@@ -803,7 +806,10 @@ mod tests {
         let off = Passkeys::new("");
         let status = off.status();
         assert!(!status.enabled);
-        assert!(status.reason.unwrap().contains("RECALL_PUBLIC_URL is not set"));
+        assert!(status
+            .reason
+            .unwrap()
+            .contains("RECALL_PUBLIC_URL is not set"));
         let bad = Passkeys::new("http://recall.example.com");
         assert!(bad.status().reason.unwrap().contains("https://"));
         assert!(Passkeys::new("https://recall.example.com").status().enabled);
