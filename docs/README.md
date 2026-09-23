@@ -61,6 +61,16 @@ for why its path derivation looks the way it does. That is the value of not
 maintaining them — a comment can point at what was known *then*, and the
 answer stays put.
 
+## Design — proposals under discussion
+
+| Document | What it proposes |
+|---|---|
+| [`design/handshake.md`](design/handshake.md) | Version discovery (`/.well-known/recall`), server identity for release-based deploys, and per-device keys in place of the one shared token. Not built. |
+
+A proposal is neither kept true nor a record yet. When one is built, the
+reference docs become the authority for what shipped and the proposal moves
+to `history/`.
+
 ## Neither — the shape of the thing
 
 | Document | Read it when |
