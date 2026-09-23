@@ -289,8 +289,10 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --exclude recall-server --all-targets --locked -- -D warnings
 
+      # --no-fail-fast: a Windows failure in one crate otherwise hides every
+      # failure in the crates after it, and each round trip is a CI run.
       - name: cargo test
-        run: cargo test --workspace --exclude recall-server --locked
+        run: cargo test --workspace --exclude recall-server --locked --no-fail-fast
 
       # Parsed rather than run: running it for real means downloading a
       # release, and no release has been cut yet at the point a PR that
