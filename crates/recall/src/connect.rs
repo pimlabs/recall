@@ -589,6 +589,18 @@ async fn self_approve(url: &str, token: &str, code: &str, fingerprint: &str) -> 
             spinner.stop("Approved as an admin device");
             Ok(())
         }
+        // The server says a name is taken only when a code is approved,
+        // never to whoever merely asks to enrol.
+        Err(e @ client::Error::Status { code: 409, .. })
+            if e.reason().contains("already exists") =>
+        {
+            spinner.error("Approval failed");
+            refuse(
+                &format!("could not approve this machine: {}", e.reason()),
+                "Nothing was saved. Revoke the old device first (recall devices revoke <name>), \
+                 or enrol under another name: recall connect --name <another-name>",
+            )
+        }
         Err(e) => {
             spinner.error("Approval failed");
             refuse(

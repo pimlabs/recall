@@ -5,7 +5,7 @@
 //! decide a client's rate-limit bucket — both are asserted by the tests
 //! below and by `scripts/trusted-ip-check.sh` against a real socket.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -210,16 +210,42 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// using `expose` rather than `ports`, so the origin has no published port
 /// to be addressed directly. If that ever changes, this setting is wrong and
 /// the limiter is decorative.
+///
+/// The answer is a bucket rather than an address: see [`bucket`].
 fn client_ip(req: &Request, trusted_header: &str) -> String {
     if !trusted_header.is_empty() {
         if let Some(ip) = header_str(req.headers(), trusted_header) {
-            return ip.to_string();
+            return bucket(ip);
         }
     }
     req.extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(addr)| addr.ip().to_string())
+        .map(|ConnectInfo(addr)| bucket(&addr.ip().to_string()))
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// What one client is counted as, for the rate limit and for the cap on
+/// enrolments waiting from one address.
+///
+/// An IPv6 address counts as its /64. That is the least a provider hands
+/// one subscriber, and every address in it is theirs to send from, so
+/// counting each address alone would give one machine eighteen quintillion
+/// buckets, enough to take every waiting enrolment and never meet the rate
+/// limit. An IPv4 address sent as IPv6 (`::ffff:198.51.100.4`) counts as
+/// the IPv4 address it is. Anything that is not an address is counted as
+/// it came.
+fn bucket(ip: &str) -> String {
+    match ip.parse::<IpAddr>() {
+        Ok(IpAddr::V4(v4)) => v4.to_string(),
+        Ok(IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let s = v6.segments();
+                format!("{}/64", Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+            }
+        },
+        Err(_) => ip.to_string(),
+    }
 }
 
 fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -292,6 +318,37 @@ mod tests {
             ),
             "127.0.0.1"
         );
+    }
+
+    /// Verification finding N4: every address in an IPv6 /64 is one
+    /// client's, so they are one bucket; an IPv4 address written as IPv6
+    /// is that IPv4 address.
+    #[test]
+    fn an_ipv6_client_is_counted_by_its_64() {
+        for (ip, want) in [
+            ("2001:db8:1:2::1", "2001:db8:1:2::/64"),
+            ("2001:db8:1:2:ffff:ffff:ffff:ffff", "2001:db8:1:2::/64"),
+            ("2001:DB8:1:2:0:0:0:9", "2001:db8:1:2::/64"),
+            ("2001:db8:1:3::1", "2001:db8:1:3::/64"),
+            ("::ffff:198.51.100.4", "198.51.100.4"),
+            ("198.51.100.4", "198.51.100.4"),
+            ("not an address", "not an address"),
+        ] {
+            assert_eq!(bucket(ip), want, "{ip}");
+        }
+        assert_eq!(
+            client_ip(
+                &request_with(vec![("x-real-ip", "2001:db8::abcd")]),
+                "x-real-ip"
+            ),
+            "2001:db8::/64"
+        );
+        let mut req = request_with(vec![]);
+        req.extensions_mut().insert(ConnectInfo(SocketAddr::from((
+            [0x2001, 0xdb8, 0, 7, 1, 2, 3, 4],
+            1234,
+        ))));
+        assert_eq!(client_ip(&req, ""), "2001:db8:0:7::/64");
     }
 
     /// The reason this is configurable at all.

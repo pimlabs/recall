@@ -682,9 +682,9 @@ mod tests {
         let url = "https://a.example.com";
         let authkey = ClientConfig::from_lookup(env(&[
             ("RECALL_URL", url),
-            ("RECALL_AUTHKEY", " recall-ek-abc "),
+            ("RECALL_AUTHKEY", " recall-ak-abc "),
         ]));
-        assert_eq!(authkey.authkey.as_deref(), Some("recall-ek-abc"));
+        assert_eq!(authkey.authkey.as_deref(), Some("recall-ak-abc"));
         assert_eq!(authkey.require(), Ok(()));
 
         let dir = saved(&[], Some(url), None);

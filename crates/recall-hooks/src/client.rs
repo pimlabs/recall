@@ -5,8 +5,8 @@ use std::time::Duration;
 use recall_wire::devices::{self as wire_devices, EnrollPollRequest, EnrollRequest};
 use recall_wire::signature::{self, SignatureError, Target};
 use recall_wire::{
-    discovery, ApproveRequest, Device, DeviceIdentity, DeviceList, Discovery, EnrollApproved,
-    EnrollKey, EnrollKeyCreated, EnrollKeyList, EnrollKeyRequest, EnrollKeyRevokeRequest,
+    discovery, ApproveRequest, Authkey, AuthkeyCreated, AuthkeyList, AuthkeyRequest,
+    AuthkeyRevokeRequest, Device, DeviceIdentity, DeviceList, Discovery, EnrollApproved,
     EnrollPending, EnrollPollResponse, ErrorResponse, Health, PendingEnrollment, PushRequest,
     PushResponse, SyncResponse, ValidationError, DISCOVERY_PATH, PROTOCOL, PROTOCOL_HEADER,
 };
@@ -306,26 +306,24 @@ impl Client {
 
     /// Makes an authkey. Admin; the key is in the answer and nowhere
     /// else.
-    pub async fn create_authkey(&self, req: &EnrollKeyRequest) -> Result<EnrollKeyCreated, Error> {
-        self.send(self.post_json(wire_devices::ENROLL_KEYS_PATH, req)?)
+    pub async fn create_authkey(&self, req: &AuthkeyRequest) -> Result<AuthkeyCreated, Error> {
+        self.send(self.post_json(wire_devices::AUTHKEYS_PATH, req)?)
             .await
     }
 
     /// Every authkey, without the keys themselves. Admin.
-    pub async fn authkeys(&self) -> Result<EnrollKeyList, Error> {
-        let request = self.http.get(format!(
-            "{}{}",
-            self.base_url,
-            wire_devices::ENROLL_KEYS_PATH
-        ));
+    pub async fn authkeys(&self) -> Result<AuthkeyList, Error> {
+        let request = self
+            .http
+            .get(format!("{}{}", self.base_url, wire_devices::AUTHKEYS_PATH));
         self.send(request).await
     }
 
     /// Stops an authkey enrolling anything more, and with
     /// `revoke_devices` revokes what it already enrolled. Admin.
-    pub async fn revoke_authkey(&self, id: &str, revoke_devices: bool) -> Result<EnrollKey, Error> {
-        let path = wire_devices::revoke_enroll_key_path(id);
-        self.send(self.post_json(&path, &EnrollKeyRevokeRequest { revoke_devices })?)
+    pub async fn revoke_authkey(&self, id: &str, revoke_devices: bool) -> Result<Authkey, Error> {
+        let path = wire_devices::revoke_authkey_path(id);
+        self.send(self.post_json(&path, &AuthkeyRevokeRequest { revoke_devices })?)
             .await
     }
 
@@ -378,11 +376,12 @@ impl Client {
 /// it started is signed again, and how long apart. Together they cover the
 /// server's whole refusal: it refuses signatures dated up to
 /// [`signature::MAX_AHEAD_SECONDS`] after its start, and three waits of two
-/// seconds date the last attempt past that from any moment it could have
-/// started. A deploy is the only time this happens, and a hook waiting a few
-/// seconds then is better than one that fails.
+/// and a half seconds date the last attempt past that from any moment it
+/// could have started, with two seconds to spare for this machine's clock
+/// running behind. A deploy is the only time this happens, and a hook
+/// waiting a few seconds then is better than one that drops a push.
 const RESTART_RETRIES: usize = 3;
-const RESTART_WAIT: Duration = Duration::from_secs(2);
+const RESTART_WAIT: Duration = Duration::from_millis(2500);
 
 /// A response read into `T`, or into [`Error::Status`] when it is not a
 /// success.

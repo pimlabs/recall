@@ -19,8 +19,8 @@ use std::io::{self, IsTerminal};
 use clap::Subcommand;
 use recall_hooks::client::{self, Client};
 use recall_hooks::{exit, ClientConfig};
-use recall_wire::devices::{normalize_user_code, MAX_ENROLL_KEY_DAYS, SCOPE_ADMIN, SCOPE_SYNC};
-use recall_wire::{ApproveRequest, Device, EnrollKeyRequest};
+use recall_wire::devices::{normalize_user_code, MAX_AUTHKEY_DAYS, SCOPE_ADMIN, SCOPE_SYNC};
+use recall_wire::{ApproveRequest, AuthkeyRequest, Device};
 
 use crate::project as proj;
 
@@ -228,6 +228,10 @@ fn server_error(e: &client::Error) -> i32 {
              server's RECALL_TOKEN set."
         }
         _ if e.device_gone() => "Run recall connect to enrol this machine again.",
+        client::Error::Status { code: 409, .. } if e.reason().contains("already exists") => {
+            "Nothing was approved. Revoke the device with that name first (recall devices \
+             revoke <name>), or have the machine enrol under another name."
+        }
         client::Error::Transport(_) => "Check the server is up: recall doctor",
         _ => "",
     };
@@ -458,11 +462,11 @@ async fn create_key(
     let Some(days) = days(expires) else {
         return refused(
             &format!("--expires {expires} is not a length of time Recall reads."),
-            &format!("Use days or weeks, such as 90d or 12w, at most {MAX_ENROLL_KEY_DAYS} days."),
+            &format!("Use days or weeks, such as 90d or 12w, at most {MAX_AUTHKEY_DAYS} days."),
         );
     };
     let created = client
-        .create_authkey(&EnrollKeyRequest {
+        .create_authkey(&AuthkeyRequest {
             tag,
             expires_in_days: days,
             ephemeral: !persistent,
@@ -502,12 +506,12 @@ async fn list_keys(client: &Client, json: bool) -> Done {
         println!("{}", serde_json::to_string_pretty(&list)?);
         return Ok(exit::OK);
     }
-    if list.enroll_keys.is_empty() {
+    if list.authkeys.is_empty() {
         println!("No authkeys. recall authkey create --tag cloud --expires 90d makes one.");
         return Ok(exit::OK);
     }
     let rows: Vec<[String; 6]> = list
-        .enroll_keys
+        .authkeys
         .iter()
         .map(|k| {
             [
@@ -552,7 +556,7 @@ fn days(text: &str) -> Option<u32> {
         _ => (text.as_str(), 1),
     };
     let days = number.trim().parse::<u32>().ok()?.checked_mul(unit)?;
-    (1..=MAX_ENROLL_KEY_DAYS).contains(&days).then_some(days)
+    (1..=MAX_AUTHKEY_DAYS).contains(&days).then_some(days)
 }
 
 /// `2026-09-23`: the date part of the API's timestamps, which is all a

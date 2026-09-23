@@ -1729,6 +1729,18 @@ impl Drop for LiveServer {
 }
 
 fn live_server(token: &str) -> LiveServer {
+    live_server_started(token, true)
+}
+
+/// A server that has only just started, so for its first few seconds it
+/// refuses every signature, as a deployed one does after each deploy.
+fn live_server_just_started(token: &str) -> LiveServer {
+    live_server_started(token, false)
+}
+
+/// Every other test's server acts as if it started a minute ago, so that
+/// requests are signed and accepted at once.
+fn live_server_started(token: &str, a_minute_ago: bool) -> LiveServer {
     let db = tempfile::tempdir().unwrap();
     let cfg = recall_server::Config {
         token: token.to_string(),
@@ -1749,7 +1761,11 @@ fn live_server(token: &str) -> LiveServer {
             .unwrap()
             .block_on(async move {
                 let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-                recall_server::Server::new(cfg, store)
+                let server = recall_server::Server::new(cfg, store);
+                if a_minute_ago {
+                    server.backdate_start(60);
+                }
+                server
                     .serve_with_shutdown(listener, async {
                         let _ = stopped.await;
                     })
@@ -2291,7 +2307,7 @@ fn a_cloud_session_enrolls_itself_at_its_first_pull_with_an_enrolment_key() {
     let server = live_server("right");
     let repo = git_repo();
     let key = block_on(
-        operator(&server).create_authkey(&recall_wire::EnrollKeyRequest {
+        operator(&server).create_authkey(&recall_wire::AuthkeyRequest {
             tag: "cloud".into(),
             expires_in_days: 1,
             ephemeral: true,
@@ -2355,7 +2371,7 @@ fn a_cloud_session_enrolls_again_after_its_device_is_revoked_or_swept() {
     let server = live_server("right");
     let repo = git_repo();
     let key = block_on(
-        operator(&server).create_authkey(&recall_wire::EnrollKeyRequest {
+        operator(&server).create_authkey(&recall_wire::AuthkeyRequest {
             tag: "cloud".into(),
             expires_in_days: 1,
             ephemeral: true,
@@ -2701,7 +2717,7 @@ fn against_a_server_without_devices_everything_stays_on_the_token() {
 
     let env = [
         ("RECALL_HOME", home_str.as_str()),
-        ("RECALL_AUTHKEY", "recall-ek-notfromthisserver"),
+        ("RECALL_AUTHKEY", "recall-ak-notfromthisserver"),
     ];
     let r = push_memory(&repo, &env, "fact.md", "A fact.\n");
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
@@ -2727,4 +2743,49 @@ fn against_a_server_without_devices_everything_stays_on_the_token() {
         assert!(!s.signed, "{s:?}");
     }
     assert!(seen.iter().all(|s| !s.signed), "{seen:?}");
+}
+
+/// A deploy restarts the server, and for a few seconds after it refuses
+/// every signature, since the nonces that would catch a replay went with
+/// the process before. A hook firing then signs again a moment later
+/// rather than dropping the push or the pull.
+#[test]
+fn a_signed_request_refused_just_after_a_server_start_is_signed_again() {
+    let server = live_server_just_started("right");
+    let started = std::time::Instant::now();
+    let repo = git_repo();
+    let key = block_on(
+        operator(&server).create_authkey(&recall_wire::AuthkeyRequest {
+            tag: "cloud".into(),
+            expires_in_days: 1,
+            ephemeral: true,
+            max_devices: None,
+        }),
+    )
+    .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [
+        ("RECALL_HOME", home_str.as_str()),
+        ("RECALL_URL", server.url.as_str()),
+        ("RECALL_AUTHKEY", key.key.as_str()),
+    ];
+
+    // Enrolling is unsigned; the pull after it is the first signature.
+    let r = run(&["pull"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(
+        r.stderr.contains("enrolled this session"),
+        "stderr: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains("leaving local memory untouched"),
+        "the pull went through: {}",
+        r.stderr
+    );
+    assert!(
+        started.elapsed() >= std::time::Duration::from_secs(2),
+        "a signature this soon after the start is refused, so it waited and signed again"
+    );
 }

@@ -102,7 +102,7 @@ impl DeviceKey {
             name: name.to_string(),
             public_key: self.public_key(),
             agent: recall_wire::discovery::user_agent(),
-            enroll_key: authkey.map(str::to_string),
+            authkey: authkey.map(str::to_string),
         }
     }
 

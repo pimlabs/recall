@@ -63,7 +63,7 @@ pub(super) enum Caller {
 }
 
 impl Caller {
-    /// Whether this caller may manage devices and enrolment keys, and read
+    /// Whether this caller may manage devices and authkeys, and read
     /// the stats.
     pub(super) fn is_admin(&self) -> bool {
         match self {
@@ -86,6 +86,13 @@ pub(super) fn is_signed(headers: &HeaderMap) -> bool {
 /// full cache is a few megabytes.
 const REPLAY_CAPACITY: usize = 16_384;
 
+/// The most live nonces one device may have, however high the rate limit
+/// is set: a sixty-fourth of the cache. Every device would have to be at
+/// its cap together to fill it, and an authkey mints at most
+/// [`recall_wire::devices::DEFAULT_MAX_DEVICES`] unless its maker asked
+/// for more, so a leaked one cannot mint enough to lock everyone else out.
+pub(super) const MAX_NONCES_PER_DEVICE: usize = REPLAY_CAPACITY / 64;
+
 /// `last_seen` is written at most this often per device: every request
 /// would be a write, and "seen in the last minute" is all a person reading
 /// the device list, or the ephemeral sweep, needs.
@@ -107,8 +114,8 @@ fn rejected(why: &dyn std::fmt::Display) -> Refusal {
 /// first: they parse; the device is known and not revoked; the signature
 /// meets Recall's profile, `created` inside the window; it was not made so
 /// early that the process before this one could have accepted it; the
-/// signature verifies; and its nonce has
-/// not been seen. Nothing here reads the body or records anything.
+/// signature verifies; and its nonce has not been seen. Nothing here reads
+/// the body or records anything.
 pub(super) fn check_headers(state: &AppState, parts: &Parts) -> Result<Checked, Refusal> {
     let field = |name: &str| joined(&parts.headers, name);
 
@@ -285,6 +292,9 @@ struct ReplayState {
     /// How many live entries each device has.
     per_device: HashMap<String, usize>,
     last_sweep: i64,
+    /// How many sweeps there have been, for the tests that count them.
+    #[cfg(test)]
+    sweeps: usize,
 }
 
 /// What recording a nonce came to.
@@ -304,16 +314,23 @@ pub(super) enum Recorded {
 
 impl ReplayCache {
     /// A cache for signatures checked against `window`, holding at most
-    /// `per_device` live nonces for any one device.
+    /// `per_device` live nonces for any one device, and never more than
+    /// [`MAX_NONCES_PER_DEVICE`].
     ///
     /// A nonce is live for up to [`NONCE_LIFETIME`], since `created` may be
     /// a few seconds ahead of the clock. The server sizes `per_device` from the
     /// rate limit: as many requests as one address may send in that time,
     /// which a device keeping to the limit never reaches. So one device
     /// that does, from many addresses, is refused on its own, and cannot
-    /// fill the cache and lock every other device out.
+    /// fill the cache and lock every other device out. The ceiling keeps
+    /// that true when the rate limit is set high: without it, a few dozen
+    /// devices at their share would fill the cache.
     pub(super) fn new(window: u64, per_device: usize) -> Self {
-        Self::with_capacity(window, REPLAY_CAPACITY, per_device)
+        Self::with_capacity(
+            window,
+            REPLAY_CAPACITY,
+            per_device.min(MAX_NONCES_PER_DEVICE),
+        )
     }
 
     fn with_capacity(window: u64, capacity: usize, per_device: usize) -> Self {
@@ -325,6 +342,8 @@ impl ReplayCache {
                 seen: HashMap::new(),
                 per_device: HashMap::new(),
                 last_sweep: 0,
+                #[cfg(test)]
+                sweeps: 0,
             }),
         }
     }
@@ -346,10 +365,11 @@ impl ReplayCache {
     ///
     /// Reading it under the lock is what makes this safe against a request
     /// and its replay arriving together. Entries are swept by the clock,
-    /// and the clock only moves forward between one holder of the lock and
-    /// the next; so a nonce swept away had a window that closed before now,
-    /// and its replay is refused as [`Recorded::Stale`] here rather than
-    /// recorded afresh.
+    /// and the time this judges by never goes back past the last sweep,
+    /// even when the system clock is stepped backwards: it is the later of
+    /// the clock and the last sweep. So a nonce swept away had a window
+    /// that closed before now, and its replay is refused as
+    /// [`Recorded::Stale`] here rather than recorded afresh.
     ///
     /// When the cache is full it refuses rather than forgetting a live
     /// nonce: forgetting one would let that request be replayed.
@@ -362,14 +382,17 @@ impl ReplayCache {
     ) -> Recorded {
         let until = created.saturating_add(self.window);
         let mut state = self.lock();
-        let now = clock();
+        let now = clock().max(state.last_sweep);
         let device_count = state.per_device.get(keyid).copied().unwrap_or(0);
+        let crowded = state.seen.len() >= self.capacity || device_count >= self.per_device;
         // Swept on the way through, as the rate limiter is: no task of its
         // own, and no entry outlives its window by more than one window.
-        if now - state.last_sweep >= self.window
-            || state.seen.len() >= self.capacity
-            || device_count >= self.per_device
-        {
+        // A full cache, or a device at its share, asks for a sweep sooner,
+        // but at most once a second: a sweep walks every entry under the
+        // lock, and a second sweep in the same second finds nothing the
+        // first did not, so a device sending over its share would only be
+        // making every other request wait.
+        if now - state.last_sweep >= self.window || (crowded && now > state.last_sweep) {
             sweep(&mut state, now);
         }
         if until < now {
@@ -392,6 +415,10 @@ impl ReplayCache {
 }
 
 fn sweep(state: &mut ReplayState, now: i64) {
+    #[cfg(test)]
+    {
+        state.sweeps += 1;
+    }
     state.last_sweep = now;
     state.seen.retain(|_, until| *until >= now);
     state.per_device.clear();
@@ -473,6 +500,26 @@ mod tests {
         );
     }
 
+    /// Verification finding N3: with the rate limit set high, a device's
+    /// share was high too, and ~137 devices at it filled the cache. It is
+    /// now a sixty-fourth of the cache at most, whatever the limit.
+    #[test]
+    fn a_devices_share_is_capped_however_high_the_rate_limit() {
+        assert_eq!(ReplayCache::new(60, usize::MAX).per_device, 256);
+        assert_eq!(ReplayCache::new(60, 120).per_device, 120);
+        let cache = ReplayCache::new(60, usize::MAX);
+        for n in 0..256 {
+            assert_eq!(
+                cache.first_use("greedy", &n.to_string(), 1000, &at(1000)),
+                Recorded::Fresh
+            );
+        }
+        assert_eq!(
+            cache.first_use("greedy", "one more", 1000, &at(1000)),
+            Recorded::DeviceFull
+        );
+    }
+
     /// The race the review found: a sweep by one request removing the
     /// nonce of another that passed its clock check a moment earlier. The
     /// second is refused, because its window is judged by the clock read
@@ -488,6 +535,44 @@ mod tests {
         // The replay, checked against a clock that still said 100, reaches
         // the cache after the sweep.
         assert_eq!(cache.first_use("d", "n", 40, &at(101)), Recorded::Stale);
+    }
+
+    /// Verification finding N6: the system clock can be stepped
+    /// backwards. A nonce swept away must not be recorded afresh when the
+    /// clock, stepped back, says its window is open again.
+    #[test]
+    fn a_clock_stepped_back_does_not_bring_a_swept_nonce_back() {
+        let cache = ReplayCache::new(60, 100);
+        assert_eq!(cache.first_use("d", "n", 40, &at(100)), Recorded::Fresh);
+        // A request at 161 sweeps it away.
+        assert_eq!(cache.first_use("e", "m", 101, &at(161)), Recorded::Fresh);
+        // Then the clock is stepped back to 90, inside the first one's
+        // window, and its replay arrives.
+        assert_eq!(cache.first_use("d", "n", 40, &at(90)), Recorded::Stale);
+    }
+
+    /// Verification finding N5: a device over its share made every one of
+    /// its requests sweep the whole cache under the lock. It sweeps at most
+    /// once a second now.
+    #[test]
+    fn a_crowded_cache_is_swept_at_most_once_a_second() {
+        let cache = ReplayCache::new(60, 2);
+        for n in ["a", "b"] {
+            assert_eq!(cache.first_use("d", n, 1000, &at(1000)), Recorded::Fresh);
+        }
+        let swept = cache.lock().sweeps;
+        for n in 0..100 {
+            assert_eq!(
+                cache.first_use("d", &n.to_string(), 1000, &at(1000)),
+                Recorded::DeviceFull
+            );
+        }
+        assert_eq!(cache.lock().sweeps, swept, "no sweep in the same second");
+        assert_eq!(
+            cache.first_use("d", "c", 1001, &at(1001)),
+            Recorded::DeviceFull
+        );
+        assert_eq!(cache.lock().sweeps, swept + 1, "one in the next");
     }
 
     #[test]
