@@ -66,6 +66,16 @@ impl Error {
         }
     }
 
+    /// Whether the server refused a signature for being dated before it
+    /// started or in the few seconds after, which it does to every
+    /// signature then, and which signing again a little later mends.
+    pub fn signed_too_soon(&self) -> bool {
+        matches!(self, Error::Status { code: 401, .. })
+            && self
+                .reason()
+                .starts_with("unauthorized: signature created before this server started")
+    }
+
     /// The server's own words, when it answered with an error body, and
     /// this error's otherwise: what a person reads.
     pub fn reason(&self) -> String {
@@ -337,29 +347,59 @@ impl Client {
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<T, Error> {
-        let request = match &self.signer {
-            Some(signer) => {
-                let mut request = request.build()?;
-                sign(signer, &mut request)?;
-                request
-            }
-            None => request.bearer_auth(&self.token).build()?,
+        let Some(signer) = &self.signer else {
+            let request = request.bearer_auth(&self.token).build()?;
+            return read(self.http.execute(request).await?).await;
         };
-        let response = self.http.execute(request).await?;
-        let status = response.status();
-        // Read as bytes rather than text: the body is only ever decoded as
-        // JSON, and this keeps the client off reqwest's optional charset
-        // feature.
-        let body = response.bytes().await?;
-
-        if !status.is_success() {
-            return Err(Error::Status {
-                code: status.as_u16(),
-                body: String::from_utf8_lossy(&body).trim().to_string(),
-            });
+        let mut next = request.build()?;
+        let mut retries = 0;
+        loop {
+            // Kept unsigned for another attempt. Every body here is bytes,
+            // which clone; one that did not would be sent once, unretried.
+            let spare = next.try_clone();
+            let mut request = next;
+            sign(signer, &mut request)?;
+            match read(self.http.execute(request).await?).await {
+                Err(e) if e.signed_too_soon() && retries < RESTART_RETRIES => match spare {
+                    Some(spare) => {
+                        next = spare;
+                        retries += 1;
+                        tokio::time::sleep(RESTART_WAIT).await;
+                    }
+                    None => return Err(e),
+                },
+                other => return other,
+            }
         }
-        Ok(serde_json::from_slice(&body)?)
     }
+}
+
+/// How often a request the server refused for being signed too soon after
+/// it started is signed again, and how long apart. Together they cover the
+/// server's whole refusal: it refuses signatures dated up to
+/// [`signature::MAX_AHEAD_SECONDS`] after its start, and three waits of two
+/// seconds date the last attempt past that from any moment it could have
+/// started. A deploy is the only time this happens, and a hook waiting a few
+/// seconds then is better than one that fails.
+const RESTART_RETRIES: usize = 3;
+const RESTART_WAIT: Duration = Duration::from_secs(2);
+
+/// A response read into `T`, or into [`Error::Status`] when it is not a
+/// success.
+async fn read<T: DeserializeOwned>(response: reqwest::Response) -> Result<T, Error> {
+    let status = response.status();
+    // Read as bytes rather than text: the body is only ever decoded as
+    // JSON, and this keeps the client off reqwest's optional charset
+    // feature.
+    let body = response.bytes().await?;
+
+    if !status.is_success() {
+        return Err(Error::Status {
+            code: status.as_u16(),
+            body: String::from_utf8_lossy(&body).trim().to_string(),
+        });
+    }
+    Ok(serde_json::from_slice(&body)?)
 }
 
 /// Signs `request` as `signer`'s device, the way
