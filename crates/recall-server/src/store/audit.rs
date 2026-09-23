@@ -38,7 +38,7 @@ pub(super) const SCHEMA: &str = "
     END;
 ";
 
-/// Every `leaf_hash`, in `seq` order — what [`crate::audit::merkle::Frontier::rebuild`]
+/// Every `leaf_hash`, in `seq` order — what [`crate::audit::merkle::Tree::rebuild`]
 /// needs to bring the in-memory tree back after a restart.
 pub(super) fn leaf_hashes(conn: &Connection) -> Result<Vec<Hash>> {
     let mut stmt = conn.prepare("SELECT leaf_hash FROM audit_log ORDER BY seq")?;
@@ -189,8 +189,7 @@ impl Store {
         if second > state.audit.size() {
             return Ok(Err(ConsistencyError::SecondBeyondTreeSize));
         }
-        let hashes = leaf_hashes(&state.conn)?;
-        Ok(Ok(merkle::consistency(first, second, &hashes)))
+        Ok(Ok(state.audit.consistency(first, second)))
     }
 
     /// Every leaf, in order — what `recall audit export` and the

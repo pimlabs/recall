@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use recall_wire::{AdminTotals, File, ProjectStats};
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::audit::merkle::Frontier;
+use crate::audit::merkle::Tree;
 use crate::now;
 
 mod audit;
@@ -50,8 +50,9 @@ pub struct Existing {
 }
 
 /// The connection, plus the one piece of in-memory state built from it: the
-/// audit log's [`Frontier`], rebuilt at open from `audit_log.leaf_hash` so
-/// an append costs O(log n) hashes rather than replaying the whole table.
+/// audit log's [`Tree`], rebuilt at open from `audit_log`, so an append, a
+/// checkpoint and a consistency proof each cost a few hashes rather than a
+/// pass over the whole table.
 ///
 /// [`std::ops::Deref`] and [`std::ops::DerefMut`] to [`Connection`] mean
 /// every existing call site — `conn.execute(...)`, `conn.transaction()` —
@@ -59,7 +60,7 @@ pub struct Existing {
 /// pull request reaches `audit` directly.
 struct StoreState {
     conn: Connection,
-    audit: Frontier,
+    audit: Tree,
 }
 
 impl std::ops::Deref for StoreState {
@@ -99,7 +100,7 @@ impl Store {
         let store = Self {
             state: Mutex::new(StoreState {
                 conn,
-                audit: Frontier::new(),
+                audit: Tree::new(),
             }),
         };
         store.migrate()?;
@@ -111,7 +112,7 @@ impl Store {
         let store = Self {
             state: Mutex::new(StoreState {
                 conn: Connection::open_in_memory()?,
-                audit: Frontier::new(),
+                audit: Tree::new(),
             }),
         };
         store.migrate()?;
@@ -157,7 +158,7 @@ impl Store {
         state.conn.execute_batch(audit::SCHEMA)?;
 
         let hashes = audit::leaf_hashes(&state.conn)?;
-        state.audit = Frontier::rebuild(&hashes);
+        state.audit = Tree::rebuild(hashes);
         Ok(())
     }
 

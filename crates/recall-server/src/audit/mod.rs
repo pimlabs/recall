@@ -5,7 +5,7 @@
 //! [`merkle`] is the pure hash tree (RFC 9162 §2.1), with no knowledge of
 //! Recall's own shapes. [`leaf`] is the canonical, versioned encoding of one
 //! entry — what gets hashed and stored. Persistence — the `audit_log`
-//! table, the in-memory [`merkle::Frontier`] it is rebuilt into at start,
+//! table, the in-memory [`merkle::Tree`] it is rebuilt into at start,
 //! and the single transaction a leaf commits in alongside the state change
 //! it records — lives in [`crate::store`], which is where the two meet.
 

@@ -18,6 +18,15 @@
 //! tree.AppendData(testonly.LeafInputs()...)
 //! tree.ConsistencyProof(6, 8) // etc.
 //! ```
+//!
+//! `consistency_probes.json` is that repository's `testdata/consistency/`
+//! at the same commit, every file, gathered into one: the good and bad
+//! proofs its own verifier is tested with.
+//!
+//! What these pin is the production code itself. A mutation — the two
+//! prefixes swapped, the split taken at `n / 2`, a check dropped from the
+//! verifier — changes a root or a verdict here, so no test reimplements a
+//! mutated function to show that the mutation would differ.
 
 use super::*;
 
@@ -196,52 +205,93 @@ fn inclusion_proofs_match_the_reference_implementation() {
     }
 }
 
-/// The [`Frontier`]'s incremental root must agree with the plain O(n)
+/// The [`Tree`]'s root, and its proofs, must agree with the plain O(n)
 /// recomputation at every size along the way, not just at the end.
 #[test]
-fn the_frontier_matches_recomputation_at_every_size() {
-    let hashes: Vec<Hash> = LEAVES.iter().map(|l| hash_leaf(l)).collect();
-    let mut frontier = Frontier::new();
+fn the_tree_matches_recomputation_at_every_size() {
+    let hashes: Vec<Hash> = (0u32..64).map(|i| hash_leaf(&i.to_be_bytes())).collect();
+    let mut tree = Tree::new();
+    assert_eq!(tree.root(), empty_root());
     for (i, h) in hashes.iter().enumerate() {
-        frontier.append(*h);
-        assert_eq!(frontier.size(), i as u64 + 1);
-        assert_eq!(frontier.root(), root(&hashes[..=i]), "size {}", i + 1);
+        tree.append(*h);
+        assert_eq!(tree.size(), i as u64 + 1);
+        assert_eq!(tree.root(), root(&hashes[..=i]), "size {}", i + 1);
     }
-    assert_eq!(Frontier::rebuild(&hashes).root(), frontier.root());
+    let rebuilt = Tree::rebuild(hashes.iter().copied());
+    assert_eq!(rebuilt.root(), tree.root());
+    for second in 0..=hashes.len() as u64 {
+        assert_eq!(
+            tree.root_at(second),
+            root(&hashes[..second as usize]),
+            "root_at({second})"
+        );
+        for first in 0..=second {
+            assert_eq!(
+                tree.consistency(first, second),
+                consistency(first, second, &hashes),
+                "consistency({first}, {second})"
+            );
+        }
+    }
 }
 
-/// The append-only property itself: a tree whose leaf 2 was rewritten
-/// after a checkpoint was taken at size 4 can extend to any size it likes,
-/// but no proof built from its own (tampered) leaves ever verifies against
-/// the checkpoint's root — the only way to satisfy [`verify_consistency`]
-/// is to have actually kept every leaf the checkpoint was taken over.
+/// The known-answer vectors, served from the [`Tree`] rather than the
+/// reference walk.
 #[test]
-fn a_rewritten_leaf_breaks_consistency_with_an_earlier_checkpoint() {
-    let hashes: Vec<Hash> = (0u32..8).map(|i| hash_leaf(&i.to_be_bytes())).collect();
-    let honest_root_at_4 = root(&hashes[..4]);
+fn the_tree_serves_the_reference_implementations_proofs() {
+    let tree = Tree::rebuild(LEAVES.iter().map(|l| hash_leaf(l)));
+    assert_eq!(tree.root(), roots()[8]);
+    for (first, second, want) in consistency_vectors() {
+        assert_eq!(tree.consistency(first, second), want, "({first}, {second})");
+    }
+}
 
-    // The same tree, but leaf 2 was rewritten after that checkpoint.
-    let mut tampered = hashes.clone();
-    tampered[2] = hash_leaf(b"not what was there before");
-    let tampered_root_at_8 = root(&tampered);
+thread_local! {
+    /// How many times [`hash_children`] ran on this thread.
+    static NODE_HASHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
-    let forged_proof = consistency(4, 8, &tampered);
-    assert!(
-        !verify_consistency(4, &honest_root_at_4, 8, &tampered_root_at_8, &forged_proof),
-        "a rewrite must not produce a tree that extends the honest checkpoint"
-    );
+/// Counts one [`hash_children`] call, for the test below.
+pub(super) fn count_node_hash() {
+    NODE_HASHES.with(|c| c.set(c.get() + 1));
+}
 
-    // The honest continuation — nothing before size 4 touched — still
-    // verifies, which is what confirms the failure above is about the
-    // rewrite and not some unrelated bug.
-    let honest_proof = consistency(4, 8, &hashes);
-    assert!(verify_consistency(
-        4,
-        &honest_root_at_4,
-        8,
-        &root(&hashes),
-        &honest_proof
-    ));
+fn node_hashes() -> u64 {
+    NODE_HASHES.with(std::cell::Cell::get)
+}
+
+/// A proof, and the roots either side of it, cost a few hundred hashes at
+/// most however long the log is — the reason `/v1/audit/consistency` no
+/// longer reads every `leaf_hash` under the store's lock. Counted rather
+/// than timed, so it cannot flake: the walk it replaced hashed every leaf,
+/// about `n` node hashes here.
+#[test]
+fn a_proof_costs_log_squared_hashes_not_one_per_leaf() {
+    let n: u64 = (1 << 17) + 12_345;
+    let leaves: Vec<Hash> = (0..n).map(|i| hash_leaf(&i.to_be_bytes())).collect();
+    let tree = Tree::rebuild(leaves.iter().copied());
+    for (first, second) in [(3, n), (n - 1, n), (n / 2 + 1, n), (1 << 16, n - 7)] {
+        let before = node_hashes();
+        let proof = tree.consistency(first, second);
+        let first_root = tree.root_at(first);
+        let second_root = tree.root_at(second);
+        let cost = node_hashes() - before;
+        assert!(
+            cost <= 18 * 18 * 2,
+            "consistency({first}, {second}) cost {cost} hashes"
+        );
+        assert!(verify_consistency(
+            first,
+            &first_root,
+            second,
+            &second_root,
+            &proof
+        ));
+        if first == 3 {
+            // Once, against the O(n) reference walk.
+            assert_eq!(proof, consistency(first, second, &leaves));
+        }
+    }
 }
 
 /// Every consistency proof between sizes up to 64 verifies, over an
@@ -263,98 +313,141 @@ fn every_consistency_proof_up_to_64_leaves_verifies() {
     }
 }
 
-/// Every inclusion proof up to 64 leaves verifies.
+/// The append-only property itself, exhaustively to 64 leaves: for every
+/// pair of sizes, rewrite any one leaf of the first tree and build the
+/// proof honestly from the rewritten tree. It must not verify against the
+/// checkpoint taken before the rewrite — the one thing a consistency proof
+/// exists to refuse.
+///
+/// This is the test the first verifier failed: it rebuilt only the second
+/// root, used `first_root` only when `first` was a power of two, and so
+/// accepted 4805 of these 5456 rewrites up to size 32.
 #[test]
-fn every_inclusion_proof_up_to_64_leaves_verifies() {
+fn a_rewritten_leaf_breaks_every_proof_from_an_earlier_checkpoint() {
+    let honest: Vec<Hash> = (0u32..64).map(|i| hash_leaf(&i.to_be_bytes())).collect();
+    let honest_tree = Tree::rebuild(honest.iter().copied());
+    let mut checked = 0u32;
+    for rewritten in 0..honest.len() {
+        let mut leaves = honest.clone();
+        leaves[rewritten] = hash_leaf(b"not what was there before");
+        let tampered = Tree::rebuild(leaves);
+        // The rewrite is inside the first tree when first > rewritten.
+        for first in rewritten as u64 + 1..honest.len() as u64 {
+            let checkpoint = honest_tree.root_at(first);
+            for second in first + 1..=honest.len() as u64 {
+                let forged = tampered.consistency(first, second);
+                assert!(
+                    !verify_consistency(
+                        first,
+                        &checkpoint,
+                        second,
+                        &tampered.root_at(second),
+                        &forged
+                    ),
+                    "leaf {rewritten} rewritten: consistency({first}, {second}) still verified"
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(checked, (1..64u32).map(|f| f * (64 - f)).sum::<u32>());
+}
+
+/// The honest proof checked against a wrong `first_root` fails for every
+/// pair of sizes — including the ones that are not a power of two, where
+/// the first verifier never looked at `first_root` at all (it accepted
+/// `[0; 32]` for `first` = 3).
+#[test]
+fn a_wrong_first_root_fails_at_every_size() {
     let hashes: Vec<Hash> = (0u32..64).map(|i| hash_leaf(&i.to_be_bytes())).collect();
-    for size in 1..=hashes.len() as u64 {
-        for index in 0..size {
-            let proof = inclusion(index, &hashes[..size as usize]);
-            let want_root = root(&hashes[..size as usize]);
-            assert!(
-                verify_inclusion(index, size, &hashes[index as usize], &proof, &want_root),
-                "inclusion({index}, {size}) failed to verify"
-            );
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// The mutations the spec's Tests table names, applied and reverted by hand:
-// swap the two domain-separation prefixes, and split at n/2 instead of the
-// largest power of two below n. Both must break the known-answer vectors.
-// ---------------------------------------------------------------------------
-
-fn hash_leaf_with_prefix(leaf: &[u8], prefix: u8) -> Hash {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update([prefix]);
-    h.update(leaf);
-    h.finalize().into()
-}
-
-fn hash_children_with_prefix(left: &Hash, right: &Hash, prefix: u8) -> Hash {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update([prefix]);
-    h.update(left);
-    h.update(right);
-    h.finalize().into()
-}
-
-/// Swapping the `0x00`/`0x01` prefixes must produce a different root than
-/// the known-answer vector — pinning that the prefixes are load-bearing,
-/// not decorative.
-#[test]
-fn swapping_the_leaf_and_node_prefixes_breaks_the_vectors() {
-    // Leaves hashed with the node prefix, nodes with the leaf prefix: the
-    // opposite of `hash_leaf`/`hash_children`.
-    fn root_swapped(leaves: &[&[u8]]) -> Hash {
-        let hashes: Vec<Hash> = leaves
-            .iter()
-            .map(|l| hash_leaf_with_prefix(l, 0x01))
-            .collect();
-        fn go(leaves: &[Hash]) -> Hash {
-            match leaves.len() {
-                0 => {
-                    use sha2::{Digest, Sha256};
-                    Sha256::digest([]).into()
-                }
-                1 => leaves[0],
-                n => {
-                    let k = split_point(n as u64) as usize;
-                    hash_children_with_prefix(&go(&leaves[..k]), &go(&leaves[k..]), 0x00)
-                }
-            }
-        }
-        go(&hashes)
-    }
-    assert_ne!(root_swapped(LEAVES), roots()[8], "the swap must be caught");
-}
-
-/// Splitting at `n / 2` instead of the largest power of two below `n` must
-/// also produce a different root for a non-power-of-two size.
-#[test]
-fn splitting_at_half_instead_of_the_largest_power_of_two_breaks_the_vectors() {
-    fn root_half_split(leaves: &[Hash]) -> Hash {
-        match leaves.len() {
-            0 => empty_root(),
-            1 => leaves[0],
-            n => {
-                let k = n / 2; // wrong: RFC 9162 wants the largest power of two below n
-                hash_children(
-                    &root_half_split(&leaves[..k]),
-                    &root_half_split(&leaves[k..]),
-                )
+    let tree = Tree::rebuild(hashes.iter().copied());
+    for second in 2..=hashes.len() as u64 {
+        for first in 1..second {
+            let proof = tree.consistency(first, second);
+            let second_root = tree.root_at(second);
+            for wrong in [[0u8; 32], [0xff; 32], tree.root_at(first - 1)] {
+                assert!(
+                    !verify_consistency(first, &wrong, second, &second_root, &proof),
+                    "consistency({first}, {second}) accepted a wrong first root"
+                );
             }
         }
     }
-    let hashes: Vec<Hash> = LEAVES.iter().map(|l| hash_leaf(l)).collect();
-    // Size 8 is itself a power of two, where n/2 and the real split point
-    // agree; size 7 is where they diverge.
-    assert_ne!(
-        root_half_split(&hashes[..7]),
-        roots()[7],
-        "the split bug must be caught"
-    );
+}
+
+/// Every single node of every honest proof, corrupted in turn, and every
+/// proof with a node dropped or one added, fails.
+#[test]
+fn a_corrupted_truncated_or_padded_proof_fails() {
+    let hashes: Vec<Hash> = (0u32..40).map(|i| hash_leaf(&i.to_be_bytes())).collect();
+    let tree = Tree::rebuild(hashes.iter().copied());
+    for second in 2..=hashes.len() as u64 {
+        for first in 1..second {
+            let (r1, r2) = (tree.root_at(first), tree.root_at(second));
+            let proof = tree.consistency(first, second);
+            for i in 0..proof.len() {
+                let mut bad = proof.clone();
+                bad[i][0] ^= 1;
+                assert!(!verify_consistency(first, &r1, second, &r2, &bad));
+                let mut short = proof.clone();
+                short.remove(i);
+                assert!(!verify_consistency(first, &r1, second, &r2, &short));
+            }
+            let mut long = proof.clone();
+            long.push(r1);
+            assert!(!verify_consistency(first, &r1, second, &r2, &long));
+            let mut long = proof.clone();
+            long.insert(0, r2);
+            assert!(!verify_consistency(first, &r1, second, &r2, &long));
+        }
+    }
+}
+
+/// transparency-dev/merkle's own probes for its `VerifyConsistency`, every
+/// one (see `consistency_probes.json` for the commit): its happy paths must
+/// verify here, and each of its bad proofs — a flipped bit, a node too many
+/// or too few, a size off by one, the roots swapped, sizes out of order —
+/// must not.
+///
+/// A few probes use byte strings that are not 32 bytes — `"don't care"` for
+/// a root that only has to equal itself, `""` for garbage around a proof.
+/// `&[Hash]` cannot hold those, so each is read as its SHA-256 instead:
+/// equal strings stay equal and different ones different, which is all
+/// such a probe depends on.
+#[test]
+fn transparency_devs_consistency_probes_agree() {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+
+    let doc: serde_json::Value =
+        serde_json::from_str(include_str!("consistency_probes.json")).unwrap();
+    let probes = doc["probes"].as_array().unwrap();
+    assert_eq!(probes.len(), 98, "every file under testdata/consistency/");
+    let hash = |v: &serde_json::Value| -> Hash {
+        let bytes = STANDARD.decode(v.as_str().unwrap()).unwrap();
+        bytes
+            .clone()
+            .try_into()
+            .unwrap_or_else(|_| sha2::Sha256::digest(&bytes).into())
+    };
+    let (mut verified, mut refused) = (0, 0);
+    for p in probes {
+        let name = p["file"].as_str().unwrap();
+        let want_ok = !p["want_err"].as_bool().unwrap();
+        let proof: Vec<Hash> = p["proof"].as_array().unwrap().iter().map(hash).collect();
+        let got_ok = verify_consistency(
+            p["size1"].as_u64().unwrap(),
+            &hash(&p["root1"]),
+            p["size2"].as_u64().unwrap(),
+            &hash(&p["root2"]),
+            &proof,
+        );
+        assert_eq!(got_ok, want_ok, "{name}");
+        if got_ok {
+            verified += 1;
+        } else {
+            refused += 1;
+        }
+    }
+    assert_eq!((verified, refused), (6, 92));
 }

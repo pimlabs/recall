@@ -11,17 +11,20 @@
 //! the same bytes as `L` would collide.
 //!
 //! Every function here is a pure computation over hashes already in memory;
-//! nothing touches the database. [`Frontier`] is the one piece of state:
-//! the O(log n) per level rather than the O(n) leaves, so an append costs
-//! O(log n) hashes instead of replaying the whole tree.
+//! nothing touches the database. The free functions ([`root`],
+//! [`consistency`], [`inclusion`]) walk a slice of leaf hashes and cost O(n):
+//! they are the plain statement of the RFC, and the reference the tests
+//! hold [`Tree`] to. [`Tree`] is what the server keeps: the hash of every
+//! complete subtree, so an append, a root and a consistency proof each cost
+//! a handful of hashes rather than a pass over every leaf.
 //!
-//! Known-answer vectors are in `tests.rs`, from
-//! `transparency-dev/merkle` (`testonly/constants.go`, commit
-//! `fbbcd741c3d1c69d8498487baa8edc9e5824847c`) — the reference
-//! implementation RFC 9162 §2.1 itself points to via RFC 6962. rfc-editor.org
-//! was not reachable from where this was written; the algorithm below was
-//! checked against `google/certificate-transparency-rfcs`'s text of RFC 9162
-//! on GitHub.
+//! Known-answer vectors are in `merkle_tests.rs`, from
+//! `transparency-dev/merkle` (`testonly/constants.go` and
+//! `testdata/consistency/`, commit `fbbcd741c3d1c69d8498487baa8edc9e5824847c`)
+//! — the reference implementation RFC 9162 §2.1 itself points to via RFC
+//! 6962. rfc-editor.org was not reachable from where this was written; the
+//! algorithm below was checked against `google/certificate-transparency-rfcs`'s
+//! text of RFC 9162 on GitHub.
 
 use sha2::{Digest, Sha256};
 
@@ -43,6 +46,8 @@ pub fn hash_leaf(leaf: &[u8]) -> Hash {
 
 /// `SHA-256(0x01 || left || right)`.
 pub fn hash_children(left: &Hash, right: &Hash) -> Hash {
+    #[cfg(test)]
+    tests::count_node_hash();
     let mut h = Sha256::new();
     h.update([NODE_PREFIX]);
     h.update(left);
@@ -66,9 +71,9 @@ fn split_point(n: u64) -> u64 {
 
 /// `MTH(D[n])`: the root over `leaves`, already hashed with [`hash_leaf`].
 ///
-/// A plain recursive walk of the split rule. It costs O(n) hashes, so it is
-/// used for a tree freshly rebuilt from storage and for the on-demand proofs
-/// below — not for every append, which is what [`Frontier`] is for.
+/// A plain recursive walk of the split rule, O(n) hashes: the reference
+/// [`Tree::root`] is tested against, and what an offline verifier that
+/// holds every leaf computes.
 pub fn root(leaves: &[Hash]) -> Hash {
     match leaves.len() {
         0 => empty_root(),
@@ -145,10 +150,8 @@ pub fn verify_inclusion(
 /// which for an append-only tree is simply a prefix of every leaf it has
 /// ever held.
 ///
-/// Computed fresh from `leaves` on every call. For one owner's log this is
-/// fast enough not to cache — the design's own call, made once the
-/// `Frontier` above existed as the alternative and was judged unnecessary
-/// here.
+/// O(n) hashes: the reference [`Tree::consistency`] is held to, not what
+/// the server runs.
 pub fn consistency(first: u64, second: u64, leaves: &[Hash]) -> Vec<Hash> {
     assert!(first <= second && second as usize <= leaves.len());
     if first == 0 || first == second {
@@ -179,17 +182,24 @@ fn subproof(m: u64, leaves: &[Hash], b: bool) -> Vec<Hash> {
 
 /// Whether `proof` shows that a tree with root `second_root` at size
 /// `second` really is the tree with root `first_root` at the earlier size
-/// `first`, with only appends between them (RFC 9162 §2.1.4's verification
-/// algorithm).
+/// `first`, with only appends between them (RFC 9162 §2.1.4's verification).
 ///
-/// This mirrors `subproof`'s own recursion exactly — the same `m <= k` /
-/// `m > k` decisions, made from `first` and `second` alone, in the same
-/// order — rather than a separately-derived folding algorithm: since
-/// `subproof` appends each level's sibling *after* recursing, walking the
-/// proof forward while making the identical recursive calls consumes it in
-/// exactly the order it was produced. A verifier that is structurally the
-/// mirror image of the generator is correct because the generator is,
-/// rather than for a reason of its own that could disagree with it.
+/// It walks the recursion [`consistency`] builds a proof with — the same
+/// `m <= k` / `m > k` decisions of RFC 9162's `SUBPROOF`, made from `first`
+/// and `second` alone — consuming the proof in
+/// the order it was produced, and rebuilds **two** roots from it at once:
+/// the old tree's and the new one's. Every proof node is a subtree both
+/// trees share, or part of the new tree only; which, is fixed by the sizes.
+/// The proof is accepted only when the old root it rebuilds is `first_root`
+/// and the new one is `second_root`, with no node left over.
+///
+/// Both halves of that are the point. Rebuilding only the new root checks
+/// that the proof is *a* proof for `second_root`; it says nothing about
+/// `first_root`, which enters the recursion only when `first` is a power of
+/// two. The version this replaced did exactly that, and so accepted a proof
+/// cut from a tree whose first `first` leaves had been rewritten, against
+/// the honest checkpoint — the one thing a consistency proof exists to
+/// refuse.
 pub fn verify_consistency(
     first: u64,
     first_root: &Hash,
@@ -204,104 +214,167 @@ pub fn verify_consistency(
         return proof.is_empty() && first_root == second_root;
     }
     let mut cursor = proof.iter();
-    let Some(got) = reconstruct(first, second, true, first_root, &mut cursor) else {
+    let Some((old, new)) = reconstruct(first, second, true, first_root, &mut cursor) else {
         return false;
     };
-    cursor.next().is_none() && &got == second_root
+    cursor.next().is_none() && &old == first_root && &new == second_root
 }
 
-/// The mirror image of [`subproof`]: reconstructs `MTH(D[n])` given `m`,
-/// `n`, `b`, the trusted `first_root` (`MTH(D[m])`, used exactly where
-/// [`subproof`]'s base case `m == n, b` needed nothing from the proof), and
-/// the remaining proof elements in production order. [`None`] if the proof
-/// runs out before the recursion does.
+/// The mirror image of [`subproof`]: from `m`, `n`, `b` and the proof nodes
+/// still to come, `(MTH(D[m]), MTH(D[n]))` for this subtree — its first `m`
+/// leaves, which the old tree also had, and all `n` of them.
+///
+/// Where [`subproof`]'s base case (`m == n` with `b`) put nothing in the
+/// proof, the subtree is the whole old tree, a complete one on the left
+/// edge, and its hash is `first_root` itself; [`verify_consistency`] still
+/// compares the old root rebuilt against `first_root`, which in that case
+/// holds by construction. [`None`] if the proof runs out before the
+/// recursion does.
 fn reconstruct(
     m: u64,
     n: u64,
     b: bool,
     first_root: &Hash,
     proof: &mut std::slice::Iter<'_, Hash>,
-) -> Option<Hash> {
+) -> Option<(Hash, Hash)> {
     if m == n {
-        return Some(if b { *first_root } else { *proof.next()? });
+        let node = if b { *first_root } else { *proof.next()? };
+        return Some((node, node));
     }
     let k = split_point(n);
     if m <= k {
-        let left = reconstruct(m, k, b, first_root, proof)?;
-        Some(hash_children(&left, proof.next()?))
+        // The old tree ends inside the left subtree: whatever it rebuilds
+        // for the old tree is the answer here too, and the right subtree,
+        // new leaves only, is one node of the proof.
+        let (old, new_left) = reconstruct(m, k, b, first_root, proof)?;
+        Some((old, hash_children(&new_left, proof.next()?)))
     } else {
-        let right = reconstruct(m - k, n - k, false, first_root, proof)?;
-        Some(hash_children(proof.next()?, &right))
+        // The old tree holds the whole left subtree and part of the right:
+        // both roots share the left node, and differ on the right.
+        let (old_right, new_right) = reconstruct(m - k, n - k, false, first_root, proof)?;
+        let left = proof.next()?;
+        Some((
+            hash_children(left, &old_right),
+            hash_children(left, &new_right),
+        ))
     }
 }
 
-/// The RFC 9162 §2.1.2 stack of complete-subtree hashes: `levels[i]` is the
-/// hash of the perfect subtree of `2^i` leaves at that position, or [`None`]
-/// while no such subtree is complete yet. Isomorphic to a binary counter —
-/// an append is exactly incrementing it, carrying (hashing two children
-/// together) at every level whose bit was already set.
+/// The tree the server keeps in memory: the hash of every complete
+/// (power-of-two, aligned) subtree, level by level. `levels[0]` is every
+/// leaf hash; `levels[l][i]` is the root of leaves `i·2^l` to
+/// `(i+1)·2^l - 1`, present once all of those exist.
 ///
-/// This is what makes an append O(log n): the root after each one is folded
-/// from at most `log2(size)` stored hashes rather than recomputed over every
-/// leaf.
+/// Any subtree RFC 9162's split rule ever asks about starts at a multiple of
+/// the largest power of two it holds, so it is at most `log2(n)` of these
+/// nodes hashed together. That makes a root O(log n) hashes and a
+/// consistency proof O(log² n) — about 400 at a million leaves — without a
+/// pass over the leaves or a read of the database. The cost is memory: two
+/// hashes per leaf, 64 bytes, 64 MB for a million leaves.
 #[derive(Debug, Clone, Default)]
-pub struct Frontier {
-    levels: Vec<Option<Hash>>,
-    size: u64,
+pub struct Tree {
+    levels: Vec<Vec<Hash>>,
 }
 
-impl Frontier {
-    /// An empty frontier.
+impl Tree {
+    /// An empty tree.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Rebuilds the frontier from every leaf hash a tree has, in order —
-    /// what the server does at start, from `audit_log.leaf_hash`.
-    pub fn rebuild(leaf_hashes: &[Hash]) -> Self {
-        let mut f = Self::new();
+    /// Builds the tree from every leaf hash it has, in order — what the
+    /// server does at start.
+    pub fn rebuild(leaf_hashes: impl IntoIterator<Item = Hash>) -> Self {
+        let mut tree = Self::new();
         for h in leaf_hashes {
-            f.append(*h);
+            tree.append(h);
         }
-        f
+        tree
     }
 
     /// How many leaves have been appended.
     pub fn size(&self) -> u64 {
-        self.size
+        self.levels.first().map_or(0, |leaves| leaves.len() as u64)
     }
 
-    /// Appends one more leaf hash, carrying up the levels it completes.
+    /// Appends one more leaf hash, and the hash of every subtree it
+    /// completes: one per level whose count it makes even.
     pub fn append(&mut self, leaf_hash: Hash) {
-        let mut hash = leaf_hash;
-        let mut level = 0usize;
-        while (self.size >> level) & 1 == 1 {
-            let left = self.levels[level].take().expect("bit set implies a hash");
-            hash = hash_children(&left, &hash);
+        if self.levels.is_empty() {
+            self.levels.push(Vec::new());
+        }
+        self.levels[0].push(leaf_hash);
+        let mut level = 0;
+        while self.levels[level].len() % 2 == 0 {
+            let nodes = &self.levels[level];
+            let parent = hash_children(&nodes[nodes.len() - 2], &nodes[nodes.len() - 1]);
+            if self.levels.len() == level + 1 {
+                self.levels.push(Vec::new());
+            }
+            self.levels[level + 1].push(parent);
             level += 1;
         }
-        if level == self.levels.len() {
-            self.levels.push(None);
-        }
-        self.levels[level] = Some(hash);
-        self.size += 1;
     }
 
     /// The root over every leaf appended so far.
-    ///
-    /// Folds the complete-subtree hashes from smallest to largest, which is
-    /// RFC 9162's split rule read the other way: the largest chunk is the
-    /// leftmost, so each larger chunk folded in becomes the new left side of
-    /// everything smaller than it.
     pub fn root(&self) -> Hash {
-        let mut acc: Option<Hash> = None;
-        for h in self.levels.iter().flatten() {
-            acc = Some(match acc {
-                None => *h,
-                Some(prev) => hash_children(h, &prev),
-            });
+        match self.size() {
+            0 => empty_root(),
+            n => self.subtree(0, n),
         }
-        acc.unwrap_or_else(empty_root)
+    }
+
+    /// The root over the first `size` leaves: the tree as it was when it
+    /// had that many.
+    pub fn root_at(&self, size: u64) -> Hash {
+        assert!(size <= self.size());
+        match size {
+            0 => empty_root(),
+            n => self.subtree(0, n),
+        }
+    }
+
+    /// [`consistency`], from the stored subtrees rather than every leaf.
+    /// `first` and `second` as there; `second` must not be past the tree's
+    /// size.
+    pub fn consistency(&self, first: u64, second: u64) -> Vec<Hash> {
+        assert!(first <= second && second <= self.size());
+        let mut proof = Vec::new();
+        if first != 0 && first != second {
+            self.subproof(first, 0, second, true, &mut proof);
+        }
+        proof
+    }
+
+    /// [`subproof`], for the `n` leaves from `start`.
+    fn subproof(&self, m: u64, start: u64, n: u64, b: bool, proof: &mut Vec<Hash>) {
+        if m == n {
+            if !b {
+                proof.push(self.subtree(start, n));
+            }
+            return;
+        }
+        let k = split_point(n);
+        if m <= k {
+            self.subproof(m, start, k, b, proof);
+            proof.push(self.subtree(start + k, n - k));
+        } else {
+            self.subproof(m - k, start + k, n - k, false, proof);
+            proof.push(self.subtree(start, k));
+        }
+    }
+
+    /// `MTH` of the `n` leaves from `start`, which must be a subtree the
+    /// split rule produces: `start` a multiple of the largest power of two
+    /// no greater than `n`, and every leaf in it appended.
+    fn subtree(&self, start: u64, n: u64) -> Hash {
+        if n.is_power_of_two() {
+            let level = n.trailing_zeros() as usize;
+            debug_assert_eq!(start % n, 0, "a complete subtree is aligned");
+            return self.levels[level][(start >> level) as usize];
+        }
+        let k = split_point(n);
+        hash_children(&self.subtree(start, k), &self.subtree(start + k, n - k))
     }
 }
 
