@@ -256,8 +256,8 @@
       </section>
 
       <section class="card">
-        <h2>Enrolment keys</h2>
-        <p class="muted">A key lets cloud sessions enrol themselves with the sync scope. Put it in the cloud environment's variables as RECALL_ENROLL_KEY.</p>
+        <h2>Authkeys</h2>
+        <p class="muted">An authkey lets cloud sessions enrol themselves with the sync scope. Put it in the cloud environment's variables as RECALL_ENROLL_KEY.</p>
         <label for="key-tag">Tag</label>
         <input type="text" id="key-tag" value="cloud" maxlength="32" autocomplete="off">
         <label for="key-days">Expires in (days, 1 to 365)</label>
@@ -265,9 +265,9 @@
         <label for="key-max">Most devices at once (empty for no limit)</label>
         <input type="number" id="key-max" min="1" inputmode="numeric">
         <label class="check"><input type="checkbox" id="key-ephemeral" checked> Ephemeral: remove its devices once idle</label>
-        <div class="row"><button id="key-create" type="button">Create key</button></div>
+        <div class="row"><button id="key-create" type="button">Create authkey</button></div>
         <div id="key-shown" hidden>
-          <p class="warn">This key is shown once. Copy it now: it cannot be shown again. Anyone holding it can enrol devices until it expires or is revoked.</p>
+          <p class="warn">This authkey is shown once. Copy it now: it cannot be shown again. Anyone holding it can enrol devices until it expires or is revoked.</p>
           <p class="secret" id="key-secret"></p>
           <div class="row"><button class="secondary" id="key-copy" type="button">Copy</button><button class="secondary" id="key-done" type="button">Done</button></div>
         </div>
@@ -649,7 +649,7 @@
     });
   }
 
-  // ---- Enrolment keys.
+  // ---- Authkeys.
   function loadKeys() {
     return api("GET", "/v1/enroll-keys").then(function (r) {
       if (!r.ok) { say($("keys-error"), failure(r)); return; }
@@ -676,7 +676,7 @@
   }
 
   function revokeKey(k, button) {
-    if (!window.confirm("Revoke the " + (k.tag || "untagged") + " key? No new device will enrol with it.")) return;
+    if (!window.confirm("Revoke the " + (k.tag || "untagged") + " authkey? No new device will enrol with it.")) return;
     var enrolled = devicesCache.filter(function (d) { return d.enroll_key_id === k.id && !d.revoked_at; }).length;
     var also = enrolled > 0 && window.confirm("Also revoke the " + enrolled + " device(s) it enrolled?");
     button.disabled = true;

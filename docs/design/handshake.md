@@ -196,8 +196,9 @@ body on a GET, so no request is signed without its body.
 (`signature`, `devices`) and the server's enrolment, approval, revocation,
 enrolment keys, signature checks and ephemeral sweep, documented in
 [`../reference/api.md`](../reference/api.md), which is now the authority for
-them. The client (`recall connect`, `recall devices`, the keychain), the
-admin page's Devices tab and passkeys are not built yet.
+them. The admin page's Devices tab and its passkey sign-in followed (see
+"Without a terminal" below). The client (`recall connect`, `recall
+devices`, the keychain) is not built yet.
 
 ### Cloud sessions
 
@@ -236,6 +237,33 @@ Setting up cloud sessions from a phone is then: open `/admin`, create an
 enrolment key, paste it into the cloud environment's variables as
 `RECALL_ENROLL_KEY`. That is the same one step as pasting `RECALL_TOKEN`
 today.
+
+**As built (server, 0.4.1):** the page has the Devices tab and signs in
+with a passkey through `webauthn-rs` (usernameless, user verification
+required). What the sketch left open was settled this way:
+
+- The site a passkey is bound to is configured, as `RECALL_PUBLIC_URL`,
+  since behind Traefik the server cannot learn it from a request. Unset,
+  passkeys are off, the page says why, and the token still works.
+- The bootstrap is `POST /admin/bootstrap/register` with `RECALL_TOKEN`,
+  and it refuses in code once any passkey exists, whatever token it is
+  shown. More passkeys are added only from a signed-in session. So the
+  bootstrap secret need not be disabled for a leak of it to stop mattering
+  here; recovering from losing every passkey is `recall-server
+  reset-passkeys`, which needs a shell on the server.
+- A session is a `__Host-` cookie, `HttpOnly`, `Secure`,
+  `SameSite=Strict`, of which the server keeps only the SHA-256: 12 hours
+  idle, 30 days at most. Every state-changing request also carries a CSRF
+  token in a header. It is a third credential on the device routes only,
+  never on `/sync`.
+- The signature counter is checked and moved forward in one statement, so
+  a cloned authenticator racing the real one is caught.
+- The page's script is inline, allowed by its hash in a CSP with no
+  `unsafe-inline` or `unsafe-eval`.
+- This is where OpenSSL enters the codebase (webauthn-rs-core needs it),
+  vendored into the server binary only; the client stays on rustls.
+
+[`../reference/api.md`](../reference/api.md) describes the routes.
 
 ### Owner commands
 

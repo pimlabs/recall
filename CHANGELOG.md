@@ -61,6 +61,37 @@ break will be described here in full rather than smoothed over.
 - **Three new tables in the database**, `devices`, `device_enrollments`
   and `enroll_keys`, created on start. `memory_files` is untouched, and an
   older server ignores the new tables, so rolling back still works.
+- **The `/admin` page manages devices, and signs in with a passkey.** A new
+  Devices tab approves a machine by its code (showing its name, agent and
+  key fingerprint first), lists and revokes devices, and makes and revokes
+  authkeys, so an owner with only a phone can do everything
+  `RECALL_TOKEN` could. The page signs in with a passkey; the token still
+  works on it as before.
+- **New setting: `RECALL_PUBLIC_URL`**, such as
+  `https://recall.example.com`. Passkeys are bound to that address. Unset,
+  passkey sign-in is off and the page says why; nothing else changes. Both
+  compose files pass it through from `deploy/.env`.
+- **The first passkey is registered with `RECALL_TOKEN`, once.** After
+  that the token cannot register another, whatever token is shown;
+  further passkeys are added from a signed-in session. Lost every passkey?
+  `recall-server reset-passkeys`, run on the server, clears them. See
+  step 6 of `deploy/README.md`.
+- **New routes** under `/admin`: `GET /admin/session`,
+  `POST /admin/bootstrap/register` and `…/finish`, `POST /admin/login/start`
+  and `…/finish`, `POST /admin/logout`, `GET /admin/passkeys`,
+  `POST /admin/passkeys/register` and `…/finish`, and
+  `POST /admin/passkeys/{id}/remove`. The device routes that took
+  `RECALL_TOKEN` or an admin device also take the page's session (with its
+  `X-Recall-CSRF` header on a `POST`); `/sync` never does.
+- **`GET /admin` is served with a stricter CSP**: the page's inline script
+  and stylesheet are allowed by hash rather than `'unsafe-inline'`, plus
+  `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`.
+- **Two more tables**, `admin_credentials` and `admin_sessions`, created on
+  start. An older server ignores them.
+- **The server binary is about 4.5 MiB larger**: it now carries OpenSSL,
+  built in, which the passkey verification needs. The client does not.
+  Building the server from source needs perl and make as well as a C
+  compiler, and Rust 1.88.
 - **winget publishing, set up but not live yet.** Every release can now
   keep a `PimLabs.Recall` package in `microsoft/winget-pkgs` current, once
   that package exists. The first version needs a one-time manual
