@@ -1,7 +1,7 @@
 //! Enrolling, then the job loop: claim, merge, report, again.
 //!
 //! The worker enrols by the device flow, like any machine, and never with
-//! an enrolment key: a key enrols `sync` devices only, so a leaked one
+//! an authkey: an authkey enrols `sync` devices only, so a leaked one
 //! cannot mint a worker. The owner approves its code with the `worker`
 //! scope, after comparing the fingerprint the worker prints.
 //!
@@ -267,7 +267,7 @@ impl Worker {
             name: self.cfg.name.clone(),
             public_key: self.id.public_key(),
             agent: crate::user_agent(),
-            enroll_key: None,
+            authkey: None,
         };
         let mut backoff = Duration::from_secs(1);
         let pending: EnrollPending = loop {

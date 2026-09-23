@@ -20,7 +20,7 @@ mod devices;
 mod jobs;
 
 pub use devices::{
-    Created, Decision, Inserted, NewDevice, NewEnrollKey, NewEnrollment, Poll, Waiting,
+    plain_name, Created, Decision, Inserted, NewAuthkey, NewDevice, NewEnrollment, Poll, Waiting,
 };
 pub use jobs::{Queued, Retried, Settled, Settlement, MAX_ATTEMPTS, MAX_LINKS, MAX_OPEN_JOBS};
 

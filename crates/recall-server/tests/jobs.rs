@@ -84,8 +84,12 @@ fn harness(tweak: impl FnOnce(&mut Config)) -> Harness {
         ..Config::default()
     };
     tweak(&mut cfg);
+    let server = Server::new(cfg, store.clone());
+    // As if it had been up ten minutes: a server refuses every signature
+    // dated in the first few seconds after it started.
+    server.backdate_start(600);
     Harness {
-        server: Server::new(cfg, store.clone()),
+        server,
         dir,
         _store: store,
         _claude: None,
@@ -747,7 +751,7 @@ async fn a_worker_can_do_nothing_but_its_jobs() {
         ),
         (
             "POST",
-            devices::ENROLL_KEYS_PATH,
+            devices::AUTHKEYS_PATH,
             Some(json!({"expires_in_days": 1})),
         ),
         ("GET", wire_jobs::JOBS_PATH, None),
@@ -811,15 +815,15 @@ async fn only_a_worker_may_claim_or_post_a_result() {
     );
 }
 
-/// An enrolment key makes sync devices only, so a leaked one cannot mint a
+/// An authkey makes sync devices only, so a leaked one cannot mint a
 /// worker; and approving takes the worker scope by name only.
 #[tokio::test]
 async fn a_worker_is_made_only_by_an_approval_that_names_it() {
     let h = harness(|_| {});
-    let key: recall_wire::EnrollKeyCreated = ok(h
+    let key: recall_wire::AuthkeyCreated = ok(h
         .call(
             "POST",
-            devices::ENROLL_KEYS_PATH,
+            devices::AUTHKEYS_PATH,
             Some(TOKEN),
             Some(json!({"tag": "cloud", "expires_in_days": 1})),
         )
@@ -830,7 +834,7 @@ async fn a_worker_is_made_only_by_an_approval_that_names_it() {
             "POST",
             devices::ENROLL_PATH,
             None,
-            Some(json!({"name": "worker", "public_key": encode_public_key(&m.key.verifying_key()), "enroll_key": key.key})),
+            Some(json!({"name": "worker", "public_key": encode_public_key(&m.key.verifying_key()), "authkey": key.key})),
         )
         .await);
     assert_eq!(approved.scope, "sync");
@@ -981,6 +985,7 @@ async fn end_to_end_a_conflicts_merge_arrives_with_the_next_pull() {
         },
         store,
     );
+    server.backdate_start(600);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (stop_server, server_stopped) = tokio::sync::oneshot::channel::<()>();

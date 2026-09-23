@@ -129,7 +129,7 @@ fi
 # through, so each response is a real one from the step before. The public
 # key is RFC 9421's test-key-ed25519 (Appendix B.1.4): a valid key whose
 # private half is published, so nothing here is anyone's secret, and the
-# ids and the enrolment key come from a scratch database deleted on exit.
+# ids and the authkey come from a scratch database deleted on exit.
 if curl -s "$URL/.well-known/recall" | grep -q '"devices"'; then
   KEY=JrQLj5P_89iXES9-vFgrIy29clF9CC_oPPsw3c5D0bs
   JSON="Content-Type: application/json"
@@ -211,22 +211,22 @@ if curl -s "$URL/.well-known/recall" | grep -q '"devices"'; then
   keep device_deny_response.json deny
 
   fetch key -X POST -H "$AUTH" -H "$JSON" -d '{"tag":"cloud","expires_in_days":90,"ephemeral":true,"max_devices":10}' \
-    "$URL/v1/enroll-keys"
-  keep enroll_key_create_response.json key
+    "$URL/v1/authkeys"
+  keep authkey_create_response.json key
 
   fetch approved -X POST -H "$JSON" \
-    -d "{\"name\":\"cloud-session\",\"public_key\":\"$KEY\",\"agent\":\"$AGENT\",\"enroll_key\":\"$(field key key)\"}" \
+    -d "{\"name\":\"cloud-session\",\"public_key\":\"$KEY\",\"agent\":\"$AGENT\",\"authkey\":\"$(field key key)\"}" \
     "$URL/v1/devices/enroll"
   keep enroll_response_approved.json approved
 
   fetch devices -H "$AUTH" "$URL/v1/devices"
   keep device_list_response.json devices
-  fetch keys -H "$AUTH" "$URL/v1/enroll-keys"
-  keep enroll_key_list_response.json keys
+  fetch keys -H "$AUTH" "$URL/v1/authkeys"
+  keep authkey_list_response.json keys
 
   fetch key_revoked -X POST -H "$AUTH" -H "$JSON" -d '{"revoke_devices":false}' \
-    "$URL/v1/enroll-keys/$(field key id)/revoke"
-  keep enroll_key_revoke_response.json key_revoked
+    "$URL/v1/authkeys/$(field key id)/revoke"
+  keep authkey_revoke_response.json key_revoked
   fetch device_revoked -X POST -H "$AUTH" "$URL/v1/devices/$(field approve id)/revoke"
   keep device_revoke_response.json device_revoked
 fi
@@ -252,6 +252,9 @@ if curl -s "$URL/.well-known/recall" | grep -q '"merge_queue"' && command -v ope
   printf '%s\n' '-----BEGIN PRIVATE KEY-----' \
     'MC4CAQAwBQYDK2VwBCIEIJ+DYvh6SEqVTm50DFtMDoQikTmiCqirVv9mWG9qfSnF' \
     '-----END PRIVATE KEY-----' >"$WORK/key.pem"
+  # A server refuses signatures dated in its first five seconds, since the
+  # process before it may have accepted them; the worker signs below.
+  sleep 6
 
   fetch wenroll -X POST -H "$JSON" \
     -d "{\"name\":\"worker\",\"public_key\":\"$KEY\",\"agent\":\"recall-worker/$VERSION (linux-x86_64)\"}" \

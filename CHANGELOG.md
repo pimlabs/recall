@@ -21,7 +21,7 @@ break will be described here in full rather than smoothed over.
   sending `RECALL_TOKEN`: it asks `POST /v1/devices/enroll` for a short
   code, the owner approves the code, and the machine is a device that can
   be listed and revoked on its own. Cloud sessions can enrol with an
-  expiring enrolment key instead of a code. This release is the server
+  expiring authkey instead of a code. This release is the server
   half; the client does not enrol yet, so nothing changes for a machine
   until it does. See "Devices" in `docs/reference/api.md`.
 - **`RECALL_TOKEN` works exactly as before**, on every route, and is how
@@ -36,29 +36,38 @@ break will be described here in full rather than smoothed over.
   approve, name and key fingerprint, before approving it),
   `POST /v1/devices/approve` (which can name the fingerprint it expects),
   `POST /v1/devices/deny`, `GET /v1/devices`, `POST /v1/devices/{id}/revoke`,
-  `POST /v1/enroll-keys`, `GET /v1/enroll-keys` and
-  `POST /v1/enroll-keys/{id}/revoke`.
+  `POST /v1/authkeys`, `GET /v1/authkeys` and
+  `POST /v1/authkeys/{id}/revoke`.
 - **Device names are plain and unique.** A name with control, format or
   invisible characters (a zero-width space, a right-to-left override) is
-  refused, no two unrevoked devices share a name, and a device an
-  enrolment key enrols is named by the server after the key's tag.
-- **Enrolment keys** enrol ephemeral devices unless told otherwise, can be
-  capped with `max_devices`, and can be revoked together with every device
-  they enrolled.
+  refused, no two unrevoked devices share a name or names that read alike
+  (`Laptop`, or `lаptop` with a Cyrillic `а`, beside `laptop`), and a
+  device an authkey enrols is named by the server after the key's
+  tag. A name already taken is refused when its code is approved, not when
+  the machine enrols, so the unauthenticated enrol route says nothing about
+  which names exist.
+- **Authkeys** enrol ephemeral devices unless told otherwise, enrol
+  at most 25 unrevoked devices unless `max_devices` says otherwise, and can
+  be revoked together with every device they enrolled.
 - **`GET /admin/stats` needs the `admin` scope from a device.** Nothing
   changes for `RECALL_TOKEN`, which is all anything uses today.
 - **Signed requests are checked before their body is read**, the
   enrolment routes take 8 KiB bodies, one address may have five
-  enrolments waiting, and a signature made before the server started is
-  refused, since the nonces that would catch its replay went with the
-  process before.
+  enrolments waiting, and a signature dated up to five seconds after the
+  server started is refused, since the nonces that would catch its replay
+  went with the process before. A signature's `created` may be a minute
+  behind the server's clock but only five seconds ahead of it.
+- **The rate limit counts an IPv6 client by its /64**, on every route,
+  `/sync` included, rather than address by address, so one machine
+  cannot give itself a fresh bucket per request. An IPv4 address written
+  as IPv6 counts as the IPv4 address. Clients on IPv4 see no change.
 - **`GET /.well-known/recall` lists `device-sig-v1`** after `bearer` in
   `auth.methods`, and a new `devices` capability.
 - **New setting: `RECALL_EPHEMERAL_DEVICE_TTL_HOURS`** (default 24). An
   ephemeral device, one a cloud session enrolled with an ephemeral
-  enrolment key, is removed after that long without a signed request.
+  authkey, is removed after that long without a signed request.
 - **Three new tables in the database**, `devices`, `device_enrollments`
-  and `enroll_keys`, created on start. `memory_files` is untouched, and an
+  and `authkeys`, created on start. `memory_files` is untouched, and an
   older server ignores the new tables, so rolling back still works.
 - **Merging can move out of the server, into `recall-worker`.** A new
   binary and a second compose service with no port at all: an enrolled
@@ -79,7 +88,7 @@ break will be described here in full rather than smoothed over.
   the worker (a worker device only, not even `RECALL_TOKEN`), and
   `GET /v1/jobs` and `POST /v1/jobs/{id}/retry` for the owner. A worker
   device can use nothing else: it cannot pull or push memory, and an
-  enrolment key never makes one.
+  authkey never makes one.
 - **`/health`'s `merge` gains `worker` and `queue`** while a worker is
   enrolled, and `claude_cli` is then the worker's CLI. Discovery lists a
   new `merge_queue` capability.
@@ -165,6 +174,24 @@ break will be described here in full rather than smoothed over.
   the verified binary where npm's `recall` link points, instead of leaving a
   wrapper script in between, so a hook call through an npm install starts
   one process rather than two.
+- **winget publishing, set up but not live yet.** Every release can now
+  keep a `PimLabs.Recall` package in `microsoft/winget-pkgs` current, once
+  that package exists. The first version needs a one-time manual
+  submission, so `winget install PimLabs.Recall` does not work yet. See the
+  winget section of `docs/reference/releasing.md` for that submission;
+  `docs/reference/install.md` lists the channel once it is accepted.
+- **`deploy/backup-offbox.sh init` sets up the off-box backup.** It asks for
+  a provider (S3-compatible, Cloudflare R2, Backblaze B2 through S3, or an
+  existing remote you already configured) and its credentials, creates the
+  raw and `crypt` remotes non-interactively, generates and shows the crypt
+  password(s) once, runs an encrypted write-read-delete round-trip test, runs
+  the first real copy, and installs the cron line for the user actually
+  running it. It refuses, with an explanation, if `rclone config` and
+  `crontab` would end up belonging to different users, such as under `sudo`.
+  Every answer can also come from a flag or an environment variable, and
+  without a terminal it never prompts: anything missing stops it before any
+  remote is created, and names what to pass. Re-running it is safe. See
+  "Off-box" in `deploy/README.md`.
 
 ## 0.3.2 — 2026-09-23
 

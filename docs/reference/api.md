@@ -42,9 +42,9 @@ assert what this page says about them.
 | [`POST /v1/devices/deny`](#post-v1devicesapprove-and-post-v1devicesdeny) | admin | Refuse one |
 | [`GET /v1/devices`](#get-v1devices) | admin | Every device |
 | [`POST /v1/devices/{id}/revoke`](#post-v1devicesidrevoke) | admin | Revoke one |
-| [`POST /v1/enroll-keys`](#post-v1enroll-keys) | admin | Make an enrolment key, for cloud sessions |
-| [`GET /v1/enroll-keys`](#get-v1enroll-keys-and-post-v1enroll-keysidrevoke) | admin | Every enrolment key |
-| [`POST /v1/enroll-keys/{id}/revoke`](#get-v1enroll-keys-and-post-v1enroll-keysidrevoke) | admin | Stop one enrolling anything more |
+| [`POST /v1/authkeys`](#post-v1authkeys) | admin | Make an authkey, for cloud sessions |
+| [`GET /v1/authkeys`](#get-v1authkeys-and-post-v1authkeysidrevoke) | admin | Every authkey |
+| [`POST /v1/authkeys/{id}/revoke`](#get-v1authkeys-and-post-v1authkeysidrevoke) | admin | Stop one enrolling anything more |
 | [`POST /v1/jobs/claim`](#post-v1jobsclaim) | worker | Wait for a merge job, and lease it |
 | [`POST /v1/jobs/{id}/result`](#post-v1jobsidresult) | worker | Hand back a merge, or the error it met |
 | [`GET /v1/jobs`](#get-v1jobs-and-post-v1jobsidretry) | admin | Jobs, newest first, without file content |
@@ -102,7 +102,7 @@ Signature: sig1=:…:
 |---|---|
 | `Content-Digest` | SHA-256 of the body, as a structured-field byte sequence. Always sent: a `GET` sends the digest of an empty body, the value above. |
 | Covered components | All six, in any order: `@method`, `@authority` (host and port, lowercased, without `:443` or `:80`), `@path`, `@query` (`?` and the query as sent, or `?` alone), and the `Content-Digest` and `Recall-Protocol` headers. |
-| `created` | UNIX seconds. Must be within **60 seconds** of the server's clock, either way. |
+| `created` | UNIX seconds. At most **60 seconds** behind the server's clock, and at most **5 seconds** ahead of it. |
 | `keyid` | The device id. |
 | `nonce` | A random string, 1 to 128 characters, never reused. |
 | `alg` | `"ed25519"`, or left out. |
@@ -118,8 +118,8 @@ its tests reproduce RFC 9421's own Ed25519 example (Appendix B.2.6) byte
 for byte.
 
 The server checks the headers first, in this order: the device exists and
-is not revoked; `created` is inside the window; `created` is not earlier
-than the moment the server started; `Content-Digest` has a sha-256 value;
+is not revoked; `created` is inside the window; `created` is more than 5
+seconds after the moment the server started; `Content-Digest` has a sha-256 value;
 the signature verifies with the device's key; the nonce has not been seen
 from that device inside the window. The signature covers the
 `Content-Digest` header rather than the body, so all of that is settled
@@ -131,11 +131,18 @@ up a nonce the real device has yet to send. Last, the server notes the
 device's `last_seen`, to within a minute.
 
 The nonces are kept in memory, so a restart forgets them. That is why a
-signature made before the server started is refused: the process before it
-may already have accepted it. A request signed in the second or so a deploy
-takes gets that answer, and is signed again. One device may have as many
-nonces live at once as the rate limit lets one address send in two
-minutes, the longest a nonce lives; a device over it is refused alone, and
+signature the process before could have accepted is refused. That process
+took `created` up to 5 seconds ahead of its clock, and stopped before this
+one started, so everything dated up to 5 seconds after the server started
+is refused, the very second it started included. It is also why `created`
+may be only a few seconds ahead: the further ahead a signature may be
+dated, the longer after each start this lasts. A request signed while a
+deploy is under way, or in the first few seconds after, gets that answer,
+and is signed again a few seconds later. One device may have as many
+nonces live at once as the rate limit lets one address send in 65
+seconds, the longest a nonce lives, and never more than 256, a
+sixty-fourth of the 16,384 the server remembers in all, however high
+`RECALL_RATE_LIMIT_MAX` is set. A device over it is refused alone, and
 every other device carries on.
 
 A `sync` device may use every route but the admin ones and the job routes;
@@ -162,8 +169,9 @@ always.
 | Only one of `Signature-Input` and `Signature` | `401` | `{"error":"unauthorized: a signed request needs both signature-input and signature"}` |
 | A `keyid` no device has | `401` | `{"error":"unauthorized: unknown device"}` |
 | A revoked device | `401` | `{"error":"unauthorized: this device has been revoked"}` |
-| `created` too far from the server's clock | `401` | `{"error":"unauthorized: signature created 75 seconds from the server's clock, more than the 60 allowed; check this machine's clock"}` |
-| `created` earlier than the server's start | `401` | `{"error":"unauthorized: signature created before this server started; sign the request again"}` |
+| `created` too far behind the server's clock | `401` | `{"error":"unauthorized: signature created 75 seconds from the server's clock, more than the 60 allowed; check this machine's clock"}` |
+| `created` too far ahead of the server's clock | `401` | `{"error":"unauthorized: signature created 30 seconds ahead of the server's clock, more than the 5 allowed; check this machine's clock"}` |
+| `created` earlier than 5 seconds after the server's start | `401` | `{"error":"unauthorized: signature created before this server started, or too soon after; sign the request again in a few seconds"}` |
 | The body is not what `Content-Digest` says | `401` | `{"error":"unauthorized: content-digest does not match the body"}` |
 | The signature does not verify | `401` | `{"error":"unauthorized: the signature does not verify"}` |
 | The same request a second time | `401` | `{"error":"unauthorized: this request was already received once"}` |
@@ -198,6 +206,12 @@ server is willing to read from an untrusted client is something that client
 can choose, and choosing your own bucket defeats the limit. It is trustworthy
 only because the container has no published port, so every request really
 does arrive through that ingress.
+
+An IPv6 address is counted as its /64, the least a provider gives one
+subscriber: every address in it is one client's to send from, so counting
+each alone would hand one machine as many buckets as it liked. An IPv4
+address written as IPv6 (`::ffff:198.51.100.4`) is counted as the IPv4
+address. The cap on enrolments waiting from one address counts the same way.
 
 ## Protocol and client identity
 
@@ -491,7 +505,7 @@ server at all, and what the server can do.
 | `capabilities.devices.enroll_path` | Where enrolment starts, [`/v1/devices/enroll`](#post-v1devicesenroll). |
 | `capabilities.devices.code_ttl_seconds` | How long a user code can be approved: 900. |
 | `capabilities.devices.poll_interval_seconds` | How long to wait between polls: 5. |
-| `capabilities.devices.signature_window_seconds` | How far a signature's `created` may be from the server's clock, either way: 60. |
+| `capabilities.devices.signature_window_seconds` | How far a signature's `created` may be behind the server's clock: 60. Ahead of it, `created` may be only 5 seconds, whatever this says. |
 | `capabilities.limits` | `max_body_bytes`, and `rate_limit`'s `max` requests per `window_seconds`. |
 | `capabilities.merge_base` | The server reads `base_sha256` on a push. |
 | `capabilities.merge_queue` | The server can queue a stale push for a [worker](#jobs), and has the job routes. Listed whether or not a worker is enrolled now. |
@@ -638,11 +652,11 @@ OAuth device authorization
 grant](https://www.rfc-editor.org/rfc/rfc8628): the machine asks for a
 short code, the owner approves the code from somewhere already trusted, and
 the machine polls until it is approved. A cloud session, which cannot wait
-for anyone, enrols with an [enrolment key](#post-v1enroll-keys) instead
+for anyone, enrols with an [authkey](#post-v1authkeys) instead
 and is approved at once.
 
 A device has a **scope**: `sync` may use every route except the admin ones;
-`admin` may also approve, list and revoke devices and enrolment keys;
+`admin` may also approve, list and revoke devices and authkeys;
 `worker` may claim merge jobs and post their results and nothing else (see
 [Jobs](#jobs)). The
 operator's `RECALL_TOKEN` can do everything an `admin` device can, which is
@@ -667,14 +681,14 @@ Unauthenticated, and rate limited like every other route.
 
 | Field | Type | Required | Notes |
 |---|---|:---:|---|
-| `name` | string | yes | What the owner sees the machine as. At most 64 characters, and none that hide what the name says: no control or format characters (Unicode categories Cc and Cf, which include the bidirectional overrides and the zero-width characters), no line or paragraph separators, no other invisible ones. No two unrevoked devices share a name, compared without case; a revoked device's name is free again. Ignored with `enroll_key`: see below. |
+| `name` | string | yes | What the owner sees the machine as. At most 64 characters, and none that hide what the name says: no control or format characters (Unicode categories Cc and Cf, which include the bidirectional overrides and the zero-width characters), no line or paragraph separators, no other invisible ones. Stored trimmed and in Unicode's composed form (NFC). No two unrevoked devices share a name, or names a person would read as one: they are compared after NFKC, without case, and by their Unicode confusable skeletons (UTS #39), so `Laptop`, `lаptop` with a Cyrillic `а`, and `1aptop` are all `laptop`, and `Straße` is `STRASSE`. A revoked device's name is free again. Ignored with `authkey`: see below. |
 | `public_key` | string | yes | The Ed25519 public key: the raw 32 bytes, base64url, no padding. A key of small order is refused. |
 | `agent` | string | no | The client's `User-Agent`, shown in the device list. At most 256 characters, under the same rules as `name`. |
-| `enroll_key` | string | no | An [enrolment key](#post-v1enroll-keys). With a valid one the device is approved at once. |
+| `authkey` | string | no | An [authkey](#post-v1authkeys). With a valid one the device is approved at once. |
 
 ### Response: waiting for approval
 
-Without `enroll_key`, RFC 8628 §3.2's device authorization response, the
+Without `authkey`, RFC 8628 §3.2's device authorization response, the
 enrolment id standing where the RFC has its `device_code`:
 
 ```json
@@ -697,7 +711,16 @@ The machine should show the code, and its key's fingerprint, so the owner
 can check the device list shows the same one. The fingerprint is `SHA256:`
 and the unpadded base64 of the SHA-256 of the raw 32-byte key.
 
-### Response: approved with an enrolment key
+The answer is the same whether or not a device already has the name.
+Anyone may call this route, so an answer that said the name was taken
+would tell anyone the names of the owner's devices, one question at a
+time; asked this way, every question is an enrolment waiting for the
+owner, and counts against its address's five. The name is checked when
+the code is approved: approving one whose name is taken is a `409`, and
+the owner can deny the code, so the machine hears `access_denied` and can
+enrol again under another name.
+
+### Response: approved with an authkey
 
 ```json
 { "device_id": "dev_7e3jth4xgnksqm7hyx5z5j4quq", "name": "cloud-7e3jth4x", "scope": "sync", "ephemeral": true }
@@ -716,11 +739,10 @@ device is removed once it has made no signed request for
 |:---:|---|
 | `200` | Either response above. |
 | `400` | Bad JSON, or a field that breaks the rules above, with the rule as the error. |
-| `401` | `{"error":"unauthorized: this enrolment key is not one this server issued"}`, `…has expired` or `…has been revoked`. |
-| `403` | The enrolment key already has as many unrevoked devices as its `max_devices`. |
-| `409` | An unrevoked device already has the name: `{"error":"a device named laptop already exists; revoke it first, or enrol with another name"}`. |
+| `401` | `{"error":"unauthorized: this authkey is not one this server issued"}`, `…has expired` or `…has been revoked`. |
+| `403` | The authkey already has as many unrevoked devices as its `max_devices`. |
 | `413` | A body over 8 KiB. |
-| `429` | Rate limited; or five enrolments from this address are already waiting: `{"error":"too many enrolments from this address are waiting for approval; approve or deny them, or let them expire"}`. The address is the one the rate limiter uses. |
+| `429` | Rate limited; or five enrolments from this address are already waiting: `{"error":"too many enrolments from this address are waiting for approval; approve or deny them, or let them expire"}`. The address is counted as the rate limiter counts it, an IPv6 one by its /64. |
 | `503` | A thousand enrolments are already waiting for approval: `{"error":"too many enrolments are waiting for approval, try again later"}`. |
 
 ## `POST /v1/devices/enroll/poll`
@@ -826,7 +848,7 @@ refused:
 | `400` | Bad JSON, a `scope` other than `sync`, `admin` or `worker` (`{"error":"scope must be sync, admin or worker"}`), or a `user_code` that is not eight letters of the alphabet: `{"error":"user_code must be the 8 letters the device shows, such as WDJB-MJHT"}`. |
 | `401`, `403` | See [Authentication](#authentication). |
 | `404` | `{"error":"no enrolment is waiting with that code"}` |
-| `409` | `{"error":"that code was already approved or denied"}`; or, with `fingerprint`, `{"error":"that code's key does not have the fingerprint given; nothing was approved"}`; or an unrevoked device already has the name the machine asked for. |
+| `409` | `{"error":"that code was already approved or denied"}`; or, with `fingerprint`, `{"error":"that code's key does not have the fingerprint given; nothing was approved"}`; or an unrevoked device already has the name the machine asked for, or one that reads as it: `{"error":"a device named laptop already exists; revoke it first, or enrol with another name"}`. Nothing is approved; deny the code, and the machine hears `access_denied`. |
 | `410` | `{"error":"that code has expired; start the enrolment again"}` |
 
 ## `GET /v1/devices`
@@ -844,7 +866,7 @@ Admin. Every device, newest first, revoked ones included.
       "agent": "recall/0.4.1 (macos-aarch64)",
       "fingerprint": "SHA256:sWwtG+rRJiY5dk/bDuTTd0WZM2vUk0BM2ksRNsWfIGI",
       "public_key": "JrQLj5P_89iXES9-vFgrIy29clF9CC_oPPsw3c5D0bs",
-      "enroll_key_id": null,
+      "authkey_id": null,
       "created_at": "2026-09-23T12:04:54.311Z",
       "last_seen": "2026-09-23T12:31:02.118Z",
       "revoked_at": null
@@ -862,7 +884,7 @@ Admin. Every device, newest first, revoked ones included.
 | `agent` | The `agent` it enrolled with. |
 | `fingerprint` | Its key's fingerprint, as the machine showed it. |
 | `public_key` | Its key, base64url. |
-| `enroll_key_id` | The enrolment key it came in with, or `null` when a person approved it. |
+| `authkey_id` | The authkey it came in with, or `null` when a person approved it. |
 | `created_at` | When it was approved. |
 | `last_seen` | Its latest signed request, to within a minute, or `null` before its first. |
 | `revoked_at` | When it was revoked, or `null`. |
@@ -874,9 +896,9 @@ with `revoked_at` set, and the answer is the device as it now stands.
 Revoking one already revoked keeps the first time. `404` with `{"error":"no
 device has that id"}` for an id that is not there.
 
-## `POST /v1/enroll-keys`
+## `POST /v1/authkeys`
 
-Admin. Makes an **enrolment key**: a credential for machines that cannot
+Admin. Makes an **authkey**: a credential for machines that cannot
 wait for someone to approve a code, such as cloud sessions. It enrols
 devices with `sync` scope and nothing else: it cannot read or write memory
 itself.
@@ -890,12 +912,12 @@ itself.
 | `tag` | string | no | A label, and the start of the name of every device the key enrols. At most 32 characters, under the rules for a device name. |
 | `expires_in_days` | integer | yes | 1 to 365. There is no key that never expires. |
 | `ephemeral` | bool | no | Whether the devices it enrols are ephemeral. `true` when left out: a key is for machines that come and go. |
-| `max_devices` | integer | no | The most unrevoked devices it may have enrolled at once, 1 or more; no limit when left out. An ephemeral device swept for being idle frees its place. |
+| `max_devices` | integer | no | The most unrevoked devices it may have enrolled at once, 1 or more; **25** when left out, which is a day of cloud sessions. There is no key without a limit, so a leaked one cannot enrol devices without end; ask for more if you need them. An ephemeral device swept for being idle frees its place. |
 
 ```json
 {
-  "id": "ek_ecfq6bc4luadka2i",
-  "key": "recall-ek-tqvi2pktd7u6rpc7wwrq57cc5gjupt7mdqdupbcx3wijsjdmxmma",
+  "id": "ak_ecfq6bc4luadka2i",
+  "key": "recall-ak-tqvi2pktd7u6rpc7wwrq57cc5gjupt7mdqdupbcx3wijsjdmxmma",
   "tag": "cloud",
   "ephemeral": true,
   "max_devices": 10,
@@ -905,17 +927,17 @@ itself.
 ```
 
 `key` is shown this once: the server keeps only its SHA-256. It starts with
-`recall-ek-` so one found in a log says what it is, followed by 256 random
+`recall-ak-` so one found in a log says what it is, followed by 256 random
 bits in lowercase base32. The reply is sent with `Cache-Control: no-store`.
 
-## `GET /v1/enroll-keys` and `POST /v1/enroll-keys/{id}/revoke`
+## `GET /v1/authkeys` and `POST /v1/authkeys/{id}/revoke`
 
-Admin. The list is every enrolment key, newest first, expired and revoked
+Admin. The list is every authkey, newest first, expired and revoked
 ones included, each as above without `key` and with `revoked_at` (`null`
 until revoked):
 
 ```json
-{ "enroll_keys": [ { "id": "ek_ecfq6bc4luadka2i", "tag": "cloud", "ephemeral": true, "max_devices": 10, "created_at": "2026-09-23T12:47:29.936Z", "expires_at": "2026-12-22T12:47:29.936Z", "revoked_at": null } ] }
+{ "authkeys": [ { "id": "ak_ecfq6bc4luadka2i", "tag": "cloud", "ephemeral": true, "max_devices": 10, "created_at": "2026-09-23T12:47:29.936Z", "expires_at": "2026-12-22T12:47:29.936Z", "revoked_at": null } ] }
 ```
 
 Revoking one stops it enrolling anything more and answers with the key as it

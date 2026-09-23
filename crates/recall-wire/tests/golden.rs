@@ -22,9 +22,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use recall_wire::{
-    AdminStats, ApproveRequest, ClaimRequest, ClaimResponse, DenyRequest, DenyResponse, Device,
-    DeviceIdentity, DeviceList, Discovery, EnrollApproved, EnrollKey, EnrollKeyCreated,
-    EnrollKeyList, EnrollKeyRequest, EnrollKeyRevokeRequest, EnrollPending, EnrollPollRequest,
+    AdminStats, ApproveRequest, Authkey, AuthkeyCreated, AuthkeyList, AuthkeyRequest,
+    AuthkeyRevokeRequest, ClaimRequest, ClaimResponse, DenyRequest, DenyResponse, Device,
+    DeviceIdentity, DeviceList, Discovery, EnrollApproved, EnrollPending, EnrollPollRequest,
     EnrollPollResponse, EnrollRequest, ErrorResponse, Health, JobList, PendingEnrollment,
     PushRequest, PushResponse, ResultRequest, ResultResponse, SyncResponse,
 };
@@ -87,7 +87,7 @@ fn round_trip(kind: &str, bytes: &[u8]) -> Result<Value, String> {
             }
             serde_json::to_value(doc).map_err(|e| e.to_string())
         }
-        "enroll_request" | "enroll_request_with_key" => {
+        "enroll_request" | "enroll_request_with_authkey" => {
             let req: EnrollRequest = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
             req.validate().map_err(|e| e.to_string())?;
             serde_json::to_value(req).map_err(|e| e.to_string())
@@ -102,14 +102,14 @@ fn round_trip(kind: &str, bytes: &[u8]) -> Result<Value, String> {
         "device_approve_response" | "device_revoke_response" => go::<Device>(bytes),
         "device_pending_response" => go::<PendingEnrollment>(bytes),
         "device_me_response" => go::<DeviceIdentity>(bytes),
-        "enroll_key_revoke_request" => go::<EnrollKeyRevokeRequest>(bytes),
+        "authkey_revoke_request" => go::<AuthkeyRevokeRequest>(bytes),
         "device_deny_request" => go::<DenyRequest>(bytes),
         "device_deny_response" => go::<DenyResponse>(bytes),
         "device_list_response" => go::<DeviceList>(bytes),
-        "enroll_key_create_request" => go::<EnrollKeyRequest>(bytes),
-        "enroll_key_create_response" => go::<EnrollKeyCreated>(bytes),
-        "enroll_key_list_response" => go::<EnrollKeyList>(bytes),
-        "enroll_key_revoke_response" => go::<EnrollKey>(bytes),
+        "authkey_create_request" => go::<AuthkeyRequest>(bytes),
+        "authkey_create_response" => go::<AuthkeyCreated>(bytes),
+        "authkey_list_response" => go::<AuthkeyList>(bytes),
+        "authkey_revoke_response" => go::<Authkey>(bytes),
         "job_claim_request" => go::<ClaimRequest>(bytes),
         "job_claim_response" | "job_claim_response_empty" => go::<ClaimResponse>(bytes),
         "job_result_request" | "job_result_request_error" => {
@@ -197,7 +197,7 @@ fn every_kind_has_a_fixture() {
         "error",
         "discovery",
         "enroll_request",
-        "enroll_request_with_key",
+        "enroll_request_with_authkey",
         "enroll_response_pending",
         "enroll_response_approved",
         "enroll_poll_request",
@@ -207,15 +207,15 @@ fn every_kind_has_a_fixture() {
         "device_approve_response",
         "device_pending_response",
         "device_me_response",
-        "enroll_key_revoke_request",
+        "authkey_revoke_request",
         "device_deny_request",
         "device_deny_response",
         "device_list_response",
         "device_revoke_response",
-        "enroll_key_create_request",
-        "enroll_key_create_response",
-        "enroll_key_list_response",
-        "enroll_key_revoke_response",
+        "authkey_create_request",
+        "authkey_create_response",
+        "authkey_list_response",
+        "authkey_revoke_response",
         "job_claim_request",
         "job_claim_response",
         "job_claim_response_empty",

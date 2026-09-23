@@ -1,4 +1,4 @@
-//! Devices, the enrolments waiting for approval, and enrolment keys.
+//! Devices, the enrolments waiting for approval, and authkeys.
 //!
 //! Every timestamp is stored in [`crate::now`]'s format. That is the format
 //! the API answers in, and, being fixed-width, it compares correctly as a
@@ -8,9 +8,10 @@ use std::time::Duration;
 
 use anyhow::Result;
 use recall_wire::signature::{fingerprint, parse_public_key};
-use recall_wire::{Device, EnrollKey};
+use recall_wire::{Authkey, Device};
 use rusqlite::{Connection, OptionalExtension, Row};
 use time::OffsetDateTime;
+use unicode_normalization::UnicodeNormalization;
 
 use super::Store;
 use crate::{format_timestamp, parse_timestamp};
@@ -29,7 +30,7 @@ macro_rules! devices_columns {
         scope         TEXT NOT NULL CHECK (scope IN ('sync', 'admin', 'worker')),
         agent         TEXT NOT NULL DEFAULT '',
         ephemeral     INTEGER NOT NULL DEFAULT 0,
-        enroll_key_id TEXT,
+        authkey_id    TEXT,
         created_at    TEXT NOT NULL,
         last_seen     TEXT,
         revoked_at    TEXT
@@ -62,15 +63,15 @@ pub(super) const SCHEMA: &str = concat!(
     );
     CREATE INDEX IF NOT EXISTS device_enrollments_user_code
         ON device_enrollments (user_code);
-    CREATE TABLE IF NOT EXISTS enroll_keys (
+    CREATE TABLE IF NOT EXISTS authkeys (
         id          TEXT PRIMARY KEY,
         -- The key itself is never stored: it is shown once, and a copy of
         -- the database is not a copy of it.
         key_sha256  TEXT NOT NULL UNIQUE,
         tag         TEXT NOT NULL DEFAULT '',
         ephemeral   INTEGER NOT NULL DEFAULT 0,
-        -- The most unrevoked devices it may have enrolled at once; NULL for
-        -- no limit.
+        -- The most unrevoked devices it may have enrolled at once. Always
+        -- stored; NULL would be read as the default, not as no limit.
         max_devices INTEGER,
         created_at  TEXT NOT NULL,
         expires_at  TEXT NOT NULL,
@@ -109,9 +110,9 @@ pub(super) fn allow_worker_scope(conn: &Connection) -> Result<()> {
         devices_columns!(),
         ";
          INSERT INTO devices_rebuilt
-             (id, owner_id, name, public_key, scope, agent, ephemeral, enroll_key_id,
+             (id, owner_id, name, public_key, scope, agent, ephemeral, authkey_id,
               created_at, last_seen, revoked_at)
-         SELECT id, owner_id, name, public_key, scope, agent, ephemeral, enroll_key_id,
+         SELECT id, owner_id, name, public_key, scope, agent, ephemeral, authkey_id,
                 created_at, last_seen, revoked_at
          FROM devices;
          DROP TABLE devices;
@@ -121,11 +122,10 @@ pub(super) fn allow_worker_scope(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-const DEVICE_COLUMNS: &str = "id, name, scope, ephemeral, agent, public_key, enroll_key_id, \
+const DEVICE_COLUMNS: &str = "id, name, scope, ephemeral, agent, public_key, authkey_id, \
      created_at, last_seen, revoked_at";
 
-const ENROLL_KEY_COLUMNS: &str =
-    "id, tag, ephemeral, max_devices, created_at, expires_at, revoked_at";
+const AUTHKEY_COLUMNS: &str = "id, tag, ephemeral, max_devices, created_at, expires_at, revoked_at";
 
 fn device_from(r: &Row<'_>) -> rusqlite::Result<Device> {
     let public_key: String = r.get(5)?;
@@ -140,15 +140,15 @@ fn device_from(r: &Row<'_>) -> rusqlite::Result<Device> {
             .map(|k| fingerprint(&k))
             .unwrap_or_default(),
         public_key,
-        enroll_key_id: r.get(6)?,
+        authkey_id: r.get(6)?,
         created_at: r.get(7)?,
         last_seen: r.get(8)?,
         revoked_at: r.get(9)?,
     })
 }
 
-fn enroll_key_from(r: &Row<'_>) -> rusqlite::Result<EnrollKey> {
-    Ok(EnrollKey {
+fn authkey_from(r: &Row<'_>) -> rusqlite::Result<Authkey> {
+    Ok(Authkey {
         id: r.get(0)?,
         tag: r.get(1)?,
         ephemeral: r.get::<_, i64>(2)? != 0,
@@ -159,15 +159,44 @@ fn enroll_key_from(r: &Row<'_>) -> rusqlite::Result<EnrollKey> {
     })
 }
 
-/// Whether an unrevoked device already has `name`, compared without case,
-/// so `Laptop` cannot stand beside `laptop`. A revoked device's name is
-/// free again.
+/// A device name, or an authkey's tag, as it is stored: trimmed, and
+/// in Unicode's composed form (NFC), so the same letters typed as one
+/// character or as a letter and its accent are stored alike.
+pub fn plain_name(name: &str) -> String {
+    name.trim().nfc().collect()
+}
+
+/// What a name is compared by: two keys, and two names are the same name
+/// when either key is.
+///
+/// Both begin with NFKC, so a name typed decomposed, or with a ligature or
+/// a full-width letter, is the name typed plainly. Then each takes the
+/// name in one case and reduces it to its confusable skeleton (UTS #39),
+/// which maps every character to the one it can be mistaken for, so
+/// `lаptop` with a Cyrillic `а`, or `1aptop`, is `laptop`. It takes two
+/// because a pair can look alike in one case and not the other: Cyrillic
+/// `к` does not look like `k`, but `К` looks like `K`; and lowercasing
+/// keeps `ß` apart from `ss`, where uppercasing makes it `SS`, so
+/// `Straße` is `STRASSE`.
+fn name_keys(name: &str) -> [String; 2] {
+    let plain: String = name.trim().nfkc().collect();
+    let skeleton = |s: String| unicode_security::skeleton(&s).collect::<String>();
+    [
+        skeleton(plain.to_lowercase()),
+        skeleton(plain.to_uppercase()),
+    ]
+}
+
+/// Whether an unrevoked device already has `name`, or one a person would
+/// read as it (see [`name_keys`]), so neither `Laptop` nor `lаptop` can
+/// stand beside `laptop`. A revoked device's name is free again.
 fn name_taken(conn: &Connection, name: &str) -> Result<bool> {
-    let wanted = name.to_lowercase();
+    let [lower, upper] = name_keys(name);
     let mut stmt = conn.prepare("SELECT name FROM devices WHERE revoked_at IS NULL")?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
-        if row.get::<_, String>(0)?.to_lowercase() == wanted {
+        let [their_lower, their_upper] = name_keys(&row.get::<_, String>(0)?);
+        if lower == their_lower || upper == their_upper {
             return Ok(true);
         }
     }
@@ -184,12 +213,12 @@ fn get_device(conn: &Connection, id: &str) -> Result<Option<Device>> {
         .optional()?)
 }
 
-fn get_enroll_key(conn: &Connection, column: &str, value: &str) -> Result<Option<EnrollKey>> {
+fn get_authkey(conn: &Connection, column: &str, value: &str) -> Result<Option<Authkey>> {
     Ok(conn
         .query_row(
-            &format!("SELECT {ENROLL_KEY_COLUMNS} FROM enroll_keys WHERE {column} = ?1"),
+            &format!("SELECT {AUTHKEY_COLUMNS} FROM authkeys WHERE {column} = ?1"),
             (value,),
-            enroll_key_from,
+            authkey_from,
         )
         .optional()?)
 }
@@ -209,8 +238,8 @@ pub struct NewDevice<'a> {
     pub agent: &'a str,
     /// Removed once idle, when true.
     pub ephemeral: bool,
-    /// The enrolment key it came in with, if any.
-    pub enroll_key_id: Option<&'a str>,
+    /// The authkey it came in with, if any.
+    pub authkey_id: Option<&'a str>,
     /// Now.
     pub created_at: &'a str,
 }
@@ -256,14 +285,14 @@ pub enum Inserted {
     Done(Box<Device>),
     /// An unrevoked device already has that name.
     NameTaken,
-    /// Its enrolment key already has as many unrevoked devices as it may.
+    /// Its authkey already has as many unrevoked devices as it may.
     KeyFull,
 }
 
-/// An enrolment key about to be stored.
+/// An authkey about to be stored.
 #[derive(Debug, Clone)]
-pub struct NewEnrollKey<'a> {
-    /// `ek_…`.
+pub struct NewAuthkey<'a> {
+    /// `ak_…`.
     pub id: &'a str,
     /// SHA-256 of the key, lowercase hex.
     pub key_sha256: &'a str,
@@ -534,7 +563,7 @@ impl Store {
                 scope,
                 agent: &agent,
                 ephemeral: false,
-                enroll_key_id: None,
+                authkey_id: None,
                 created_at: now,
             },
         )?;
@@ -594,16 +623,16 @@ impl Store {
     }
 
     /// Stores a device, unless an unrevoked one has its name or, when
-    /// `max_for_key` is given, its enrolment key already has that many
+    /// `max_for_key` is given, its authkey already has that many
     /// unrevoked devices. Both are checked under the lock the insert holds.
     pub fn insert_device(&self, d: &NewDevice<'_>, max_for_key: Option<u32>) -> Result<Inserted> {
         let conn = self.lock();
         if name_taken(&conn, d.name)? {
             return Ok(Inserted::NameTaken);
         }
-        if let (Some(max), Some(key)) = (max_for_key, d.enroll_key_id) {
+        if let (Some(max), Some(key)) = (max_for_key, d.authkey_id) {
             let live: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM devices WHERE enroll_key_id = ?1 AND revoked_at IS NULL",
+                "SELECT COUNT(*) FROM devices WHERE authkey_id = ?1 AND revoked_at IS NULL",
                 (key,),
                 |r| r.get(0),
             )?;
@@ -615,11 +644,6 @@ impl Store {
         Ok(Inserted::Done(Box::new(
             get_device(&conn, d.id)?.expect("inserted above"),
         )))
-    }
-
-    /// Whether an unrevoked device already has `name`, without case.
-    pub fn name_in_use(&self, name: &str) -> Result<bool> {
-        name_taken(&self.lock(), name)
     }
 
     /// One device, revoked or not.
@@ -672,11 +696,11 @@ impl Store {
         Ok(())
     }
 
-    /// Stores an enrolment key's hash and details.
-    pub fn insert_enroll_key(&self, k: &NewEnrollKey<'_>) -> Result<EnrollKey> {
+    /// Stores an authkey's hash and details.
+    pub fn insert_authkey(&self, k: &NewAuthkey<'_>) -> Result<Authkey> {
         let conn = self.lock();
         conn.execute(
-            "INSERT INTO enroll_keys
+            "INSERT INTO authkeys
                  (id, key_sha256, tag, ephemeral, max_devices, created_at, expires_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             (
@@ -689,47 +713,42 @@ impl Store {
                 k.expires_at,
             ),
         )?;
-        Ok(get_enroll_key(&conn, "id", k.id)?.expect("inserted above"))
+        Ok(get_authkey(&conn, "id", k.id)?.expect("inserted above"))
     }
 
-    /// The enrolment key whose SHA-256 is `key_sha256`, in any state.
-    pub fn enroll_key_by_hash(&self, key_sha256: &str) -> Result<Option<EnrollKey>> {
-        get_enroll_key(&self.lock(), "key_sha256", key_sha256)
+    /// The authkey whose SHA-256 is `key_sha256`, in any state.
+    pub fn authkey_by_hash(&self, key_sha256: &str) -> Result<Option<Authkey>> {
+        get_authkey(&self.lock(), "key_sha256", key_sha256)
     }
 
-    /// Every enrolment key, newest first.
-    pub fn enroll_keys(&self) -> Result<Vec<EnrollKey>> {
+    /// Every authkey, newest first.
+    pub fn authkeys(&self) -> Result<Vec<Authkey>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(&format!(
-            "SELECT {ENROLL_KEY_COLUMNS} FROM enroll_keys ORDER BY created_at DESC, id"
+            "SELECT {AUTHKEY_COLUMNS} FROM authkeys ORDER BY created_at DESC, id"
         ))?;
-        let rows = stmt.query_map([], enroll_key_from)?;
+        let rows = stmt.query_map([], authkey_from)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Revokes an enrolment key, keeping the first time if it already
+    /// Revokes an authkey, keeping the first time if it already
     /// was, and with `devices` every device it enrolled too; without it
     /// they are untouched. [`None`] when there is no such key.
-    pub fn revoke_enroll_key(
-        &self,
-        id: &str,
-        now: &str,
-        devices: bool,
-    ) -> Result<Option<EnrollKey>> {
+    pub fn revoke_authkey(&self, id: &str, now: &str, devices: bool) -> Result<Option<Authkey>> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         tx.execute(
-            "UPDATE enroll_keys SET revoked_at = COALESCE(revoked_at, ?1) WHERE id = ?2",
+            "UPDATE authkeys SET revoked_at = COALESCE(revoked_at, ?1) WHERE id = ?2",
             (now, id),
         )?;
         if devices {
             tx.execute(
-                "UPDATE devices SET revoked_at = COALESCE(revoked_at, ?1) WHERE enroll_key_id = ?2",
+                "UPDATE devices SET revoked_at = COALESCE(revoked_at, ?1) WHERE authkey_id = ?2",
                 (now, id),
             )?;
         }
         tx.commit()?;
-        get_enroll_key(&conn, "id", id)
+        get_authkey(&conn, "id", id)
     }
 
     /// Removes ephemeral devices last seen (or, never seen, created)
@@ -752,7 +771,7 @@ impl Store {
 fn insert_device(conn: &Connection, d: &NewDevice<'_>) -> Result<()> {
     conn.execute(
         "INSERT INTO devices
-             (id, name, public_key, scope, agent, ephemeral, enroll_key_id, created_at)
+             (id, name, public_key, scope, agent, ephemeral, authkey_id, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         (
             d.id,
@@ -761,7 +780,7 @@ fn insert_device(conn: &Connection, d: &NewDevice<'_>) -> Result<()> {
             d.scope,
             d.agent,
             d.ephemeral as i64,
-            d.enroll_key_id,
+            d.authkey_id,
             d.created_at,
         ),
     )?;
@@ -814,7 +833,7 @@ mod tests {
             scope: "sync",
             agent: "",
             ephemeral: false,
-            enroll_key_id: key,
+            authkey_id: key,
             created_at: "2026-09-23T00:00:00.000Z",
         }
     }
@@ -1073,7 +1092,6 @@ mod tests {
                 .unwrap(),
             Inserted::NameTaken
         );
-        assert!(st.name_in_use("LAPTOP").unwrap());
 
         enroll(&st, "enr_a", "BCDF-GHJK", 0);
         assert_eq!(
@@ -1083,12 +1101,57 @@ mod tests {
         );
 
         st.revoke_device("dev_1", &ts(2)).unwrap();
-        assert!(!st.name_in_use("laptop").unwrap());
         assert!(matches!(
             st.approve_enrollment("BCDF-GHJK", "dev_2", "sync", &ts(3), None)
                 .unwrap(),
             Decision::Done(_)
         ));
+    }
+
+    /// Verification finding N2: names a person reads as one name are one
+    /// name, whatever characters spell them, in either order.
+    #[test]
+    fn names_that_look_alike_are_one_name() {
+        for (a, b) in [
+            // A Cyrillic а.
+            ("laptop", "l\u{0430}ptop"),
+            // é as one character, and as e and a combining accent.
+            ("caf\u{00E9}", "cafe\u{0301}"),
+            ("STRASSE", "Stra\u{00DF}e"),
+            ("laptop", "LAPTOP"),
+            ("laptop", "1aptop"),
+            // A Cyrillic К, which looks like K only as a capital.
+            ("Kiosk", "\u{041A}iosk"),
+            // A ligature, and full-width letters.
+            ("file", "\u{FB01}le"),
+            ("desk", "\u{FF44}\u{FF45}\u{FF53}\u{FF4B}"),
+        ] {
+            for (taken, wanted) in [(a, b), (b, a)] {
+                let st = Store::open_in_memory().unwrap();
+                inserted(&st, &device("dev_1", taken, None));
+                assert_eq!(
+                    st.insert_device(&device("dev_2", wanted, None), None)
+                        .unwrap(),
+                    Inserted::NameTaken,
+                    "{wanted:?} beside {taken:?}"
+                );
+            }
+        }
+
+        // Names that merely share letters are still two names.
+        let st = Store::open_in_memory().unwrap();
+        for (i, name) in ["laptop", "laptops", "lapdog", "desk", "desk-2"]
+            .into_iter()
+            .enumerate()
+        {
+            inserted(&st, &device(&format!("dev_{i}"), name, None));
+        }
+    }
+
+    #[test]
+    fn a_name_is_stored_composed_and_trimmed() {
+        assert_eq!(plain_name("  cafe\u{0301} "), "caf\u{00E9}");
+        assert_eq!(plain_name("laptop"), "laptop");
     }
 
     #[test]
@@ -1132,8 +1195,8 @@ mod tests {
     }
 
     fn key(st: &Store, max_devices: Option<u32>) {
-        st.insert_enroll_key(&NewEnrollKey {
-            id: "ek_1",
+        st.insert_authkey(&NewAuthkey {
+            id: "ak_1",
             key_sha256: "abc",
             tag: "cloud",
             ephemeral: true,
@@ -1145,28 +1208,25 @@ mod tests {
     }
 
     #[test]
-    fn enrolment_keys_are_found_by_hash_and_revoked_once() {
+    fn authkeys_are_found_by_hash_and_revoked_once() {
         let st = Store::open_in_memory().unwrap();
         key(&st, None);
-        let found = st.enroll_key_by_hash("abc").unwrap().unwrap();
+        let found = st.authkey_by_hash("abc").unwrap().unwrap();
         assert_eq!(
             (found.id.as_str(), found.ephemeral, found.max_devices),
-            ("ek_1", true, None)
+            ("ak_1", true, None)
         );
-        assert!(st.enroll_key_by_hash("abd").unwrap().is_none());
-        let revoked = st
-            .revoke_enroll_key("ek_1", &ts(1), false)
-            .unwrap()
-            .unwrap();
+        assert!(st.authkey_by_hash("abd").unwrap().is_none());
+        let revoked = st.revoke_authkey("ak_1", &ts(1), false).unwrap().unwrap();
         assert_eq!(revoked.revoked_at, Some(ts(1)));
         assert_eq!(
-            st.revoke_enroll_key("ek_1", &ts(2), false)
+            st.revoke_authkey("ak_1", &ts(2), false)
                 .unwrap()
                 .unwrap()
                 .revoked_at,
             Some(ts(1))
         );
-        assert_eq!(st.enroll_keys().unwrap().len(), 1);
+        assert_eq!(st.authkeys().unwrap().len(), 1);
     }
 
     /// A key's device cap counts the devices it enrolled that are still
@@ -1176,20 +1236,20 @@ mod tests {
     fn a_key_enrols_no_more_than_its_cap() {
         let st = Store::open_in_memory().unwrap();
         key(&st, Some(2));
-        inserted(&st, &device("dev_1", "cloud-1", Some("ek_1")));
+        inserted(&st, &device("dev_1", "cloud-1", Some("ak_1")));
         assert!(matches!(
-            st.insert_device(&device("dev_2", "cloud-2", Some("ek_1")), Some(2))
+            st.insert_device(&device("dev_2", "cloud-2", Some("ak_1")), Some(2))
                 .unwrap(),
             Inserted::Done(_)
         ));
         assert_eq!(
-            st.insert_device(&device("dev_3", "cloud-3", Some("ek_1")), Some(2))
+            st.insert_device(&device("dev_3", "cloud-3", Some("ak_1")), Some(2))
                 .unwrap(),
             Inserted::KeyFull
         );
         st.revoke_device("dev_1", &ts(1)).unwrap();
         assert!(matches!(
-            st.insert_device(&device("dev_3", "cloud-3", Some("ek_1")), Some(2))
+            st.insert_device(&device("dev_3", "cloud-3", Some("ak_1")), Some(2))
                 .unwrap(),
             Inserted::Done(_)
         ));
@@ -1199,9 +1259,9 @@ mod tests {
     fn revoking_a_key_can_revoke_what_it_enrolled() {
         let st = Store::open_in_memory().unwrap();
         key(&st, None);
-        inserted(&st, &device("dev_1", "cloud-1", Some("ek_1")));
+        inserted(&st, &device("dev_1", "cloud-1", Some("ak_1")));
         inserted(&st, &device("dev_2", "laptop", None));
-        st.revoke_enroll_key("ek_1", &ts(1), true).unwrap();
+        st.revoke_authkey("ak_1", &ts(1), true).unwrap();
         let revoked: Vec<(String, bool)> = st
             .devices()
             .unwrap()

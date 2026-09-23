@@ -403,35 +403,75 @@ RECALL_BACKUP_REMOTE=recall-crypt: ./deploy/backup-offbox.sh
 
 It copies every `recall-*.db` in `deploy/backups/` to an [rclone][] remote
 and then verifies the copy. Run it from the deployment directory on the VPS,
-as a user that can read `deploy/backups/` — and pick that user once, because
-the rclone config and the crontab below both belong to whoever you choose.
-Note that the snapshots are written from inside the container, so they are
-owned by its uid rather than by the user running the compose stack; readable
-is what matters here, not owned.
+as a user that can read `deploy/backups/`. Note that the snapshots are
+written from inside the container, so they are owned by its uid rather than
+by the user running the compose stack; readable is what matters here, not
+owned.
 
 [rclone]: https://rclone.org/
 
-### Set up the remote, encrypted
-
-The database holds memory written about you and your work, so it does not
-leave this machine in the clear. `rclone config` twice: once for the bucket,
-once for a `crypt` remote that wraps it.
+### Set it up: `backup-offbox.sh init`
 
 ```sh
-rclone config    # 1. new remote, type s3 / b2, name it e.g. recall-bucket
-rclone config    # 2. new remote, type crypt, remote = recall-bucket:recall
-                 #    — set a password, and keep it somewhere you will still
-                 #      have it when this machine is gone
+./deploy/backup-offbox.sh init
 ```
 
-Then `RECALL_BACKUP_REMOTE=recall-crypt:`. Filenames are encrypted too, so
-the bucket shows neither the contents nor the timestamps of your snapshots.
+Run as the user that should own this deployment's backups. `init` walks the
+whole one-time setup in one go: it asks for a provider and its credentials,
+creates the raw remote and a `crypt` remote wrapping it, generates the crypt
+password(s) and shows them to you once, runs a write-read-delete test through
+the encrypted remote, does the first real copy, and installs the cron line,
+all for the user actually running it.
 
-**The crypt password is now part of your backup.** A copy you cannot decrypt
-is not a copy. Store it where it survives the loss of this VPS and of the
-laptop that configured it.
+Supported providers:
+
+| `--provider` | What it is | Also needs |
+| --- | --- | --- |
+| `s3` | Any S3-compatible bucket | `--bucket`, `--endpoint`, `--access-key-id`, `--secret-access-key` |
+| `r2` | Cloudflare R2 | `--account-id`, `--bucket`, `--access-key-id`, `--secret-access-key` |
+| `b2` | Backblaze B2, through its S3-compatible endpoint | `--region` (e.g. `us-west-002`, from the bucket's S3 endpoint), `--bucket`, `--access-key-id`, `--secret-access-key` |
+| `existing` | A remote you already configured with `rclone config`, for anything not listed above | `--raw-remote` (its name) |
+
+Every value can also come from an environment variable of the same shape
+(`--access-key-id` is `RECALL_BACKUP_INIT_ACCESS_KEY_ID`, and so on), which
+is what makes this scriptable:
+
+```sh
+RECALL_BACKUP_INIT_PROVIDER=r2 \
+RECALL_BACKUP_INIT_ACCOUNT_ID=... \
+RECALL_BACKUP_INIT_BUCKET=recall-backups \
+RECALL_BACKUP_INIT_ACCESS_KEY_ID=... \
+RECALL_BACKUP_INIT_SECRET_ACCESS_KEY=... \
+RECALL_BACKUP_INIT_CONFIRM=yes \
+./deploy/backup-offbox.sh init
+```
+
+On a real terminal, missing values are prompted for, including a final
+"type yes" once the crypt password(s) are shown, since there is no other way
+to confirm you actually stored them. Without a terminal, `init` never
+prompts: anything missing, including that confirmation, stops it before any
+remote is created, and names exactly what to pass. **The crypt password(s)
+are shown once.** A copy you cannot decrypt is not a copy: store them
+somewhere that survives losing this VPS and the laptop that configured it,
+before you do anything else.
+
+Running `init` again is safe. If the crypt remote it would create already
+exists, it leaves the remotes and password alone and just re-runs the
+round-trip test, the first copy, and the cron install, which is why the cron
+line never gets duplicated by a re-run.
+
+**`rclone config` and `crontab` must belong to the same user.** `init`
+refuses outright, with an explanation, if it detects they would not, for
+example under `sudo`. `rclone` reads `~/.config/rclone/rclone.conf` for
+whoever's `$HOME` is in effect, while `crontab` acts on whoever the effective
+user is; those can quietly stop matching under `sudo`, and the result is a
+cron job that fails every night with "didn't find section in config file",
+into a mailbox nobody reads. Log in as the user this should run as and run
+`init` directly, without `sudo`.
 
 ### On a schedule, via cron
+
+`init` installs this for you. By hand, or to change it:
 
 ```sh
 crontab -e
@@ -440,13 +480,6 @@ crontab -e
 ```
 17 */6 * * * cd /path/to/recall/deploy && RECALL_BACKUP_REMOTE=recall-crypt: /usr/bin/flock -n /tmp/recall-backup.lock ./backup-offbox.sh
 ```
-
-Install it as the user that owns the deployment — both halves of this are
-per-user, and splitting them is the failure that hides longest. `rclone`
-reads `~/.config/rclone/rclone.conf`, so a remote configured as one user does
-not exist for another; the job then fails every night with "didn't find
-section in config file", into a mailbox nobody reads, and you learn about it
-when you go looking for a restore.
 
 **Run it more often than the server snapshots — not once a day.** The obvious
 reading of `RECALL_BACKUP_INTERVAL_HOURS=24` is one snapshot per day, which a
@@ -485,6 +518,39 @@ that did not.
 It also refuses to treat an empty source as a clean run. Nothing to copy is
 not the same as nothing to do, and the difference is how you find out the
 directory moved before you need a restore rather than after.
+
+The one exception is `init`'s own round-trip test: it writes a single object
+through the crypt remote, reads it back, and deletes only that object, to
+prove the remote is reachable and decryptable before anything real is copied
+to it. `scripts/backup-offbox-check.sh` checks this too: that the delete it
+issues names only its own test object, never anything else.
+
+### Setting it up by hand
+
+`init` covers S3-compatible storage, Cloudflare R2, Backblaze B2, and
+reusing a remote you already configured yourself. For anything else, or to
+see exactly what `init` automates, the underlying steps:
+
+```sh
+rclone config    # 1. new remote, type s3 / b2 / whatever your provider is
+rclone config    # 2. new remote, type crypt, remote = recall-bucket:recall
+                 #    — set a password, and keep it somewhere you will still
+                 #      have it when this machine is gone
+```
+
+Then `RECALL_BACKUP_REMOTE=recall-crypt:`. Filenames are encrypted too, so
+the bucket shows neither the contents nor the timestamps of your snapshots.
+**The crypt password is part of your backup.** A copy you cannot decrypt is
+not a copy. Store it where it survives the loss of this VPS and of the
+laptop that configured it.
+
+Install the cron line yourself with `crontab -e` (see above), as the same
+user that ran `rclone config`. That pairing is per-user, and splitting it is
+the failure that hides longest: a remote configured as one user does not
+exist for another, so the job fails every night with "didn't find section in
+config file", into a mailbox nobody reads, and you learn about it when you go
+looking for a restore. `init` refuses to let this happen; doing it by hand,
+nothing stops you from getting it wrong.
 
 ## Enabling real merge (Phase 2)
 
@@ -579,7 +645,7 @@ curl -sS -X POST "https://recall.yourdomain.com/v1/devices/approve" \
 
 Within a few seconds its log says `enrolled as dev_…; waiting for jobs`. A
 code not approved within fifteen minutes expires, and the worker asks for a
-new one by itself. An enrolment key cannot make a worker: those enrol
+new one by itself. An authkey cannot make a worker: authkeys enrol
 `sync` devices only, so a leaked one cannot mint something that sees every
 conflict.
 
