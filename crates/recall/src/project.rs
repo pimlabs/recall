@@ -202,13 +202,14 @@ impl Resolved {
         let Some(path) = cfg.device_file.as_deref() else {
             return;
         };
-        let shown = crate::ui::tilde(&path.display().to_string());
+        let shown = || crate::ui::tilde(&path.display().to_string());
         match home::restrict_to_owner(path) {
             Ok(false) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Ok(true) => {
                 eprintln!(
-                    "{hook}: {shown} was readable by other users; it is now readable by you only"
+                    "{hook}: {} was readable by other users; it is now readable by you only",
+                    shown()
                 );
                 eprintln!(
                     "{hook}:   if anyone else can log in to this machine, revoke its device \
@@ -216,7 +217,8 @@ impl Resolved {
                 );
             }
             Err(e) => eprintln!(
-                "{hook}: {shown} is readable by other users, and making it yours alone failed: {e}"
+                "{hook}: could not make sure {} is readable by you only: {e}",
+                shown()
             ),
         }
     }
