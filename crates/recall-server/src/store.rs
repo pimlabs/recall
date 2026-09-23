@@ -319,6 +319,12 @@ fn nullable(s: &str) -> Option<&str> {
     }
 }
 
+// What `recall-server admin` does to a database. A child module so it can
+// share the one connection type and `Store::backup` without widening what
+// `Store` exposes; crate-private, because nothing but that subcommand, and
+// nothing reachable from the HTTP router, may call it.
+pub(crate) mod admin;
+
 #[cfg(test)]
 mod tests {
     use super::*;

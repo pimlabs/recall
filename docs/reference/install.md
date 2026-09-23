@@ -687,6 +687,16 @@ existing Traefik, one compose file each. See
 [`deploy/README.md`](../../deploy/README.md), which also covers backups and
 the one-time `claude setup-token` step that enables semantic merge.
 
+The same binary carries the owner's admin commands, `recall-server admin
+list | rename | remove | restore`, for moving or deleting what is stored under
+a project key, or putting one key back from a backup. They run beside the
+serving process, against the same `RECALL_DB_PATH`, take a backup into
+`RECALL_BACKUP_DIR` before any change, and need no token because they open no
+listener; `recall-server admin help` lists them. In Docker, run them as the
+server's own user, as
+[`deploy/README.md`](../../deploy/README.md#renaming-removing-or-restoring-a-project)
+shows.
+
 ## Releases
 
 Binaries are published by a GitHub Actions workflow when a `v*` tag is

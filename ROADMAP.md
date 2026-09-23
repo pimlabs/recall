@@ -653,8 +653,19 @@ arriving new**, and **it has to stay cheap**.
       runtime where it is. If a platform without cron ever matters, the answer
       is a sidecar container with its own `env_file`, not code in the server.
 
-- [ ] **The admin surface can read but not write, and the write path is forty
-      lines of hand-written SQL.** `GET /admin` serves a page that asks for a
+- [x] **The admin surface can read but not write, and the write path is forty
+      lines of hand-written SQL.** *Built as `recall-server admin list |
+      rename | remove | restore`, see CHANGELOG, "Renaming, removing or
+      restoring a project" in `deploy/README.md`, and "Admin commands" in
+      `ARCHITECTURE.md`. One departure from the design below: subcommands of
+      the server binary, run in its container, instead of a second listener
+      on `127.0.0.1`. They open no socket at all, so no credential guards
+      them and none can leak, and reaching them already takes the access that
+      could open the database file directly. Everything else is as written,
+      plus a re-check inside the transaction, a typed confirmation, and a
+      `--dry-run`; a rename refuses any occupied target, with no `--merge`,
+      because folding two projects is the server's merge to do. Each safety
+      check was mutated to confirm a test fails without it.* `GET /admin` serves a page that asks for a
       token and fetches `/admin/stats`; sqlite-web mounts the volume read-only
       on `127.0.0.1`. Both are read-only **on purpose** — `ARCHITECTURE.md`
       names the absence of an admin write surface as a security property, so

@@ -68,7 +68,7 @@ before the name could acquire dependents.
 |---|---|---|
 | `recall-wire` | Request/response shapes and the validation both sides apply | These rules were once written twice — JavaScript and bash — and drifted. One definition is the whole point. |
 | `recall-hooks` | `push`, `pull`, `backfill`, the baseline, the HTTP client, the settings merge — and the derivations they run on: Claude Code's memory paths, `project_key`, scopes, client config | The whole client half. The derivations track *someone else's* implementation, so when the CLI changes there is one place to fix; they live here rather than in their own crate because nothing outside this crate and the binary ever reads them. |
-| `recall-server` | SQLite store, `claude -p` merge, the axum API | Everything that runs on the host. Never depends on `recall-hooks`. |
+| `recall-server` | SQLite store, `claude -p` merge, the axum API, and the `admin` subcommands the API cannot reach | Everything that runs on the host. Never depends on `recall-hooks`. |
 | `recall` | Argument parsing and one module per command — `serve` among them, so this is where the server process starts too | Thin. Each command's *failure policy* is documented beside the command it governs. Shipped as `recall-sync` through v0.1.0, because `recall-cli` and `recall` were both taken on crates.io when that preflight ran. |
 
 The generated API docs (`cargo doc --workspace --open`) are the reference;
@@ -243,7 +243,7 @@ Deliberately boring. Two endpoints do the work and three exist to look at it. Th
 - `POST /sync` — one memory file, or one delete. Runs merge (see below) against the stored version and persists the result. `content` is omitted only when `deleted: true` — see "Deletes are tombstones, not row removal" below.
 - `GET /sync?project_key=...` — the current merged set for that project, tombstones included, so a puller can remove local copies.
 - `GET /health` — unauthenticated, and the only way a silently-degraded merge becomes visible from outside.
-- `GET /admin/stats` and `GET /admin` — read-only. There is deliberately no admin *write* surface, so a leaked token cannot quietly destroy history through it.
+- `GET /admin/stats` and `GET /admin` — read-only. There is deliberately no admin *write* route for memory, on this listener or any other: nothing over HTTP renames, removes or restores a project, so a leaked token cannot quietly destroy history through the server. Renaming, removing and restoring a project are `recall-server admin` subcommands, which open no listener at all; see "Admin commands" below.
 
 Storage: whatever's simplest to self-host and keep running — a single SQLite file behind a small server process is enough for one user's data; don't reach for a distributed database for this. Auth: one bearer token, generated once, stored as an env var on every environment (never committed to the repo).
 
@@ -315,6 +315,68 @@ read as "everything was deleted" and tombstone the project's whole history.
 behind. That matters most on a machine that has never had one, which is
 exactly the machine `backfill` is for: until the first one is written, a
 delete is indistinguishable from a file that was never there.
+
+### Admin commands: a subcommand, not a listener
+
+`recall-server admin list | rename | remove | restore` is how the owner moves,
+deletes or puts back what is stored under a project key. It is run inside the
+server's container, `docker compose exec -u node recall-server recall-server
+admin …`, and the procedure is in [`deploy/README.md`](deploy/README.md).
+
+The absence of an admin write surface on the public listener is a security
+property, and the shape was chosen to keep it without qualification. The
+obvious design was a second HTTP listener bound to `127.0.0.1`, the way
+sqlite-web is bound, reached over an SSH tunnel. A subcommand is stricter and
+simpler, so it won:
+
+- **What it takes to reach it.** A loopback listener can be reached by any
+  process that can open a socket on that host: another local user, a
+  container on host networking, a request forgery in anything else running
+  there. So it needs authentication of its own, which is one more credential
+  to leak. A subcommand opens no socket. Reaching it takes an exec into the
+  container, which is control of the Docker daemon, root-equivalent on the
+  host and already enough to open the database file directly. It gives an
+  attacker nothing they did not have, and holds no credential to leak;
+  `RECALL_TOKEN` plays no part in it.
+- **What it adds to the half that faces the internet.** A listener is a
+  second router, a second auth path and a second set of request shapes, each
+  of which must be kept off the public listener forever, by review. The
+  subcommand is code the router cannot call: `recall_server::admin` and the
+  store's `admin` module are reached only from `main`, and
+  `crates/recall-server/tests/admin.rs` asserts that no route renames, removes
+  or restores anything, whatever the credential.
+- **What it costs.** A shell on the host, which the hand-written SQL it
+  replaced needed too, and nothing that works from a phone. For something run
+  rarely, at a moment when something is already wrong, that is the right
+  trade.
+
+What each change does, in order, is what the SQL procedure used to ask a
+person to remember: name the key exactly (never a prefix or a pattern) and
+confirm it by typing it back, or by `--yes`, which prints it instead; take a
+backup with `Store::backup` into `backups/admin/`, which the server's
+rotation never prunes; then one transaction, which reads the rows again,
+refuses if they differ from what was shown, and commits only if `changes()`
+equals the number of rows it named. `--dry-run` opens the database read-only
+and stops before the backup. A rename refuses a target key that holds any
+rows at all, because the primary key is `(project_key, file_path)` and
+folding two projects together is a merge, which belongs to `POST /sync`. A
+restore never overwrites a differing live row without `--overwrite`, and
+never deletes one.
+
+It runs beside a live server, not instead of one. The store uses SQLite's
+default rollback journal (`journal_mode=delete`), and rusqlite gives every
+connection a 5-second busy timeout, which the admin connection states
+explicitly rather than inherits. The server's statements are each their own
+transaction. A change's transaction begins with `BEGIN IMMEDIATE`, so it
+holds the write lock before it re-reads anything: it waits behind a push in
+flight, a push waits behind it, and neither can deadlock the other. A lock that never comes, such
+as a reader that will not let the commit through, rolls the change back and
+says so. The journal mode itself is left alone: switching a shared production
+file to WAL is a change with consequences of its own, sqlite-web's read-only
+mount among them, and nothing here needs it. The commands refuse journal
+modes that cannot roll back (`off`, `memory`), and refuse to write as any
+user but the database file's owner, since `docker compose exec` defaults to
+root and a root-owned journal left by a crash is one the server cannot open.
 
 ## Merge strategy
 

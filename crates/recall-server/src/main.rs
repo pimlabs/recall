@@ -21,8 +21,11 @@ Recall's sync server. Configured by environment variables; see
 https://github.com/pimlabs/recall/blob/main/docs/reference/install.md
 
 Usage: recall-server [version | --version | -V | help | --help | -h]
+       recall-server admin <list | rename | remove | restore> ...
 
-With no argument it serves until stopped. RECALL_TOKEN is required.";
+With no argument it serves until stopped. RECALL_TOKEN is required.
+`recall-server admin help` describes the admin commands, which change stored
+memory from a shell on the host and open no listener.";
 
 /// What `recall-server version` prints: the same shape as `recall
 /// version`, so one reading of either tells the same story.
@@ -52,6 +55,10 @@ fn main() -> ExitCode {
             println!("{USAGE}");
             return ExitCode::SUCCESS;
         }
+        // Handled before anything the server needs is read: an admin
+        // command runs beside a server, never as one, so it reads no token
+        // and binds nothing.
+        ["admin", ..] => return recall_server::admin::main(&args[1..]),
         _ => {
             eprintln!(
                 "recall-server: unexpected arguments: {}\n\n{USAGE}",

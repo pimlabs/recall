@@ -426,9 +426,12 @@ Authenticated. What the owner is storing, per project.
 `last_backup_at` is omitted when backups are off.
 
 Read-only, and only `GET` is routed — a `POST` here is a `404`. There is no
-admin *write* surface at all, deliberately: nothing on this route can delete a
+admin *write* route for memory at all, deliberately: nothing in this API can delete a
 project or edit a note, so a leaked token cannot be used to quietly destroy
-history through it.
+history through it. Renaming, removing and restoring a project are
+`recall-server admin` commands, run in a shell on the server's host; they open
+no listener, so they are not part of this API. See
+[`deploy/README.md`](../../deploy/README.md#renaming-removing-or-restoring-a-project).
 
 ## `GET /admin`
 

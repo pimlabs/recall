@@ -14,6 +14,24 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
+## Unreleased
+
+- **`recall-server admin`: rename, remove or restore a project from the
+  server's host.** `list` shows every project key with its files, tombstones
+  and last update (or one key's files, or what a backup holds, with
+  `--backup`); `rename <from> <to>`, `remove <key>` and `restore
+  <backup-file> <key>` replace the hand-written SQL in `deploy/README.md`.
+  Each change names its key exactly, is confirmed by typing the key back (or
+  `--yes`), takes a backup first into `backups/admin/` (never rotated), and
+  runs in one transaction that commits only if exactly the rows it showed
+  changed; `--dry-run` shows the change and makes none. A rename refuses a
+  target key that holds any rows, and a restore never overwrites a differing
+  row without `--overwrite`. Safe with the server running. In Docker:
+  `docker compose exec -u node recall-server recall-server admin list`. There
+  is still no HTTP route that can delete or move a project: the commands open
+  no listener and need no token. Nothing else about the server changed, and
+  `recall-server` with no arguments still serves.
+
 ## 0.4.0 — 2026-09-23
 
 - **Breaking: the server is its own binary, `recall-server`.** `recall serve`
