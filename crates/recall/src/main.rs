@@ -80,8 +80,18 @@ struct Cli {
 /// The `recall <version>` prefix is load-bearing beyond taste:
 /// `scripts/release.sh` matches on it to confirm the binary it just built is
 /// the one being tagged.
+///
+/// A build that is not a release says so after the commit, and gives the
+/// version it reports to servers, which is a pre-release of the next patch.
 fn version_line() -> String {
-    format!("recall {VERSION} ({})", COMMIT.unwrap_or("unknown"))
+    let commit = COMMIT.unwrap_or("unknown");
+    match recall_wire::discovery::channel() {
+        recall_wire::discovery::CHANNEL_RELEASE => format!("recall {VERSION} ({commit})"),
+        _ => format!(
+            "recall {VERSION} ({commit}, dev build {})",
+            recall_wire::discovery::version()
+        ),
+    }
 }
 
 #[derive(Subcommand)]

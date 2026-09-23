@@ -40,7 +40,8 @@ mod middleware;
 mod respond;
 
 use handlers::{
-    handle_admin_page, handle_admin_stats, handle_health, handle_pull, handle_push, not_found,
+    handle_admin_page, handle_admin_stats, handle_discovery, handle_health, handle_pull,
+    handle_push, not_found,
 };
 use limit::RateLimiter;
 use middleware::guard;
@@ -119,6 +120,10 @@ impl Server {
             // rate limited and authenticated.
             .route_layer(from_fn_with_state(state.clone(), guard))
             .route("/health", get(handle_health).fallback(not_found))
+            .route(
+                recall_wire::DISCOVERY_PATH,
+                get(handle_discovery).fallback(not_found),
+            )
             .route("/admin", get(handle_admin_page).fallback(not_found))
             .fallback(not_found)
             .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))

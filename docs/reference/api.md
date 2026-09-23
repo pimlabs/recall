@@ -1,7 +1,8 @@
 # HTTP API
 
-Recall's server exposes five routes. Two carry memory files, two are for
-looking at the deployment, and one is a browser page.
+Recall's server exposes six routes. Two carry memory files, two are for
+looking at the deployment, one says what the server is and speaks, and one is
+a browser page.
 
 This is a **frozen** surface: field names, field order, and the difference
 between `null` and `""` are compatibility guarantees, not style. The shape was
@@ -22,6 +23,7 @@ handler changes and this document doesn't, that script fails.
 | [`POST /sync`](#post-sync) | yes | Send one memory file, or one delete |
 | [`GET /sync`](#get-sync) | yes | Fetch every file held for one project |
 | [`GET /health`](#get-health) | **no** | Liveness, and whether merge actually works |
+| [`GET /.well-known/recall`](#get-well-knownrecall) | **no** | Which protocol and release this server is, and what it can do |
 | [`GET /admin/stats`](#get-adminstats) | yes | What is stored, per project |
 | [`GET /admin`](#get-admin) | **no** | An HTML page rendering the above |
 
@@ -69,6 +71,25 @@ server is willing to read from an untrusted client is something that client
 can choose, and choosing your own bucket defeats the limit. It is trustworthy
 only because the container has no published port, so every request really
 does arrive through that ingress.
+
+## Protocol and client identity
+
+Every request the `recall` client sends names the protocol it speaks and the
+build that sent it:
+
+```
+Recall-Protocol: 1
+User-Agent: recall/0.3.3 (macos-aarch64)
+```
+
+A request without `Recall-Protocol` is protocol 1, which is what every client
+before the header spoke. On the authenticated routes, a protocol the server
+does not speak is refused after the rate limit and before the token is
+checked, because the fix is an upgrade, not a login:
+
+| Failure | Status | Body |
+|---|:---:|---|
+| `Recall-Protocol` names a version the server does not speak | `400` | `{"error":"this server speaks Recall protocol 1, and the request asked for 2. Upgrade whichever side is older; GET /.well-known/recall says what this server supports"}` |
 
 ## Errors
 
@@ -259,6 +280,59 @@ curl -sS -G "$RECALL_URL/sync" \
 ```
 
 ---
+
+## `GET /.well-known/recall`
+
+Unauthenticated, at the path RFC 8615 sets aside for a service describing
+itself. A client asks it before anything else: whether it can talk to this
+server at all, and what the server can do.
+
+```json
+{
+  "protocol": { "current": 1, "supported": [1] },
+  "server": {
+    "version": "0.3.3",
+    "build": {
+      "channel": "release",
+      "revision": "e100cfdd88e8a0e6659b357ad88979b381f1e548",
+      "created": "2026-09-23T01:10:00Z"
+    }
+  },
+  "min_client": "0.1.0",
+  "auth": { "methods": ["bearer"] },
+  "capabilities": {
+    "limits": {
+      "max_body_bytes": 5242880,
+      "rate_limit": { "max": 60, "window_seconds": 60 }
+    },
+    "merge_base": {},
+    "scopes": { "kinds": ["project", "global", "machine"] }
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `protocol.current` | The protocol this server's own client speaks. |
+| `protocol.supported` | Every protocol it accepts requests in. |
+| `server.version` | The server's identity, as SemVer. A release build reports its release. Any other build reports a `-dev` pre-release of the next patch with the commit as build metadata, e.g. `0.3.3-dev+ge100cfd`, which SemVer orders after `0.3.2` and before `0.3.3`. |
+| `server.build.channel` | `release` for a build the release workflow made, `dev` for anything else. |
+| `server.build.revision` | The commit it was built from. Provenance only: nothing is decided on it. Omitted when unknown. |
+| `server.build.created` | When it was built, when the build recorded it. Omitted otherwise. |
+| `min_client` | The oldest client version the server accepts. Every client released so far is accepted. |
+| `auth.methods` | How a client may authenticate. `bearer` is the `RECALL_TOKEN` above. |
+| `capabilities` | What the server can do, by name. Each is an object, so it can carry parameters later. |
+
+The rules that keep this readable by clients that do not exist yet:
+
+- **Unknown keys are ignored**, at any depth. A newer server may add fields
+  and capabilities; an older client reads past them.
+- **An absent capability is unsupported.**
+- **`protocol` changes only for a breaking change**, which is a breaking
+  release under [`releasing.md`](releasing.md). Capabilities only ever grow,
+  and nothing is removed within a protocol version.
+
+A server older than this document answers `404` here. It speaks protocol 1.
 
 ## `GET /health`
 

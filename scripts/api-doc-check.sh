@@ -49,6 +49,23 @@ check "admin page needs no token" "200" \
 check "admin stats needs a token" "401" \
   "$(curl -s -o /dev/null -w '%{http_code}' "$URL/admin/stats")"
 
+echo "Discovery and the protocol header"
+check "discovery needs no token" "200" \
+  "$(curl -s -o /dev/null -w '%{http_code}' "$URL/.well-known/recall")"
+check "discovery's top-level keys" 'protocol server min_client auth capabilities' \
+  "$(curl -s "$URL/.well-known/recall" | python3 -c '
+import json,sys; print(" ".join(json.load(sys.stdin).keys()))')"
+check "discovery's capabilities" 'limits merge_base scopes' \
+  "$(curl -s "$URL/.well-known/recall" | python3 -c '
+import json,sys; print(" ".join(json.load(sys.stdin)["capabilities"].keys()))')"
+check "discovery's protocol" '{"current": 1, "supported": [1]}' \
+  "$(curl -s "$URL/.well-known/recall" | python3 -c '
+import json,sys; print(json.dumps(json.load(sys.stdin)["protocol"]))')"
+check "an unknown protocol is 400" '{"error":"this server speaks Recall protocol 1, and the request asked for 2. Upgrade whichever side is older; GET /.well-known/recall says what this server supports"}' \
+  "$(curl -s "${auth[@]}" -H 'Recall-Protocol: 2' "$URL/sync?project_key=a/b")"
+check "protocol 1 is served" "200" \
+  "$(curl -s -o /dev/null -w '%{http_code}' "${auth[@]}" -H 'Recall-Protocol: 1' "$URL/sync?project_key=a/b")"
+
 echo "POST /sync"
 check "no project_key is 400" "400" \
   "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${auth[@]}" \

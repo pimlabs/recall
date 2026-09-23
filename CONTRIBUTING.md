@@ -102,7 +102,7 @@ cargo build --release -p recall
 ./scripts/api-doc-check.sh target/release/recall
 ```
 
-27 checks against a real server on a real socket: every status code, error string, field order and `null`-versus-`""` claim the document makes. Change a handler without changing the doc and this fails, which is the point.
+33 checks against a real server on a real socket: every status code, error string, field order and `null`-versus-`""` claim the document makes. Change a handler without changing the doc and this fails, which is the point.
 
 ### Links between documents
 

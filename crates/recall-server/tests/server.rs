@@ -659,3 +659,67 @@ fn fake_claude(dir: &std::path::Path, out: &str) -> String {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     path.to_str().unwrap().to_string()
 }
+
+// ---------------------------------------------------------------------------
+// discovery and the protocol header
+// ---------------------------------------------------------------------------
+
+/// A client needs to know what it is talking to before it knows whether it
+/// can authenticate, so discovery asks for no token.
+#[tokio::test]
+async fn discovery_needs_no_token_and_describes_the_server() {
+    let h = harness(|_| {});
+    let (status, _, body) = h.get(None, recall_wire::DISCOVERY_PATH).await;
+    assert_eq!(status, StatusCode::OK);
+    let doc: recall_wire::Discovery = serde_json::from_slice(&body).unwrap();
+    assert!(doc.speaks(recall_wire::PROTOCOL));
+    assert_eq!(doc.protocol.current, recall_wire::PROTOCOL);
+    // The deploy's commit is the build's revision, and a build that is not
+    // a release says so and reports a -dev version.
+    assert_eq!(doc.server.build.revision.as_deref(), Some("testcommit"));
+    assert_eq!(doc.server.build.channel, "dev");
+    assert!(
+        doc.server.version.contains("-dev"),
+        "{}",
+        doc.server.version
+    );
+    assert!(recall_wire::discovery::Version::parse(&doc.min_client).is_some());
+    assert_eq!(doc.auth.methods, vec!["bearer".to_string()]);
+    assert!(doc.can("merge_base") && doc.can("scopes") && doc.can("limits"));
+}
+
+/// A client that names a protocol this server does not speak is told so,
+/// before the token is even looked at: an upgrade is the fix, not a login.
+#[tokio::test]
+async fn an_unknown_protocol_is_refused_with_what_the_server_speaks() {
+    let h = harness(|_| {});
+    let req = Request::builder()
+        .method("GET")
+        .uri("/sync?project_key=acme/app")
+        .header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .header(recall_wire::PROTOCOL_HEADER, "99")
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, body) = h.send(req).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("protocol 1") && text.contains("99"), "{text}");
+}
+
+/// Every client before the header existed sends none, and the one this
+/// build ships sends 1. Both are served.
+#[tokio::test]
+async fn protocol_1_and_no_header_are_both_served() {
+    let h = harness(|_| {});
+    for header in [None, Some("1")] {
+        let mut req = Request::builder()
+            .method("GET")
+            .uri("/sync?project_key=acme/app")
+            .header("authorization", format!("Bearer {TEST_TOKEN}"));
+        if let Some(v) = header {
+            req = req.header(recall_wire::PROTOCOL_HEADER, v);
+        }
+        let (status, _, _) = h.send(req.body(Body::empty()).unwrap()).await;
+        assert_eq!(status, StatusCode::OK, "header {header:?}");
+    }
+}

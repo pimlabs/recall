@@ -28,6 +28,24 @@ break will be described here in full rather than smoothed over.
   `credentials.toml` rather than 0.3.0's `credentials.json`. `status`
   suggests `recall connect` for the machine scope instead of
   `RECALL_MACHINE_KEY`.
+- **The server says what it is: `GET /.well-known/recall`.** An
+  unauthenticated document with the protocol versions it speaks, its
+  version, whether it is a release build, the oldest client it accepts, how
+  clients authenticate, and what it can do. A release reports its release;
+  any other build reports a pre-release of the next patch, such as
+  `0.3.3-dev+ge100cfd`, and `recall version` says "dev build" too. Unknown
+  keys are to be ignored and nothing is removed within a protocol version,
+  so older clients keep reading newer servers. See `docs/reference/api.md`.
+- **Every request says which protocol and build sent it**, as
+  `Recall-Protocol: 1` and `User-Agent: recall/<version> (<os>-<arch>)`. A
+  server refuses a protocol it does not speak with `400` and names the one
+  it does; a request without the header is protocol 1, which is what every
+  earlier client speaks, so nothing already installed is affected.
+- **`recall doctor` and `recall status` show the server's version**, and
+  `doctor` fails when this client is older than the server accepts or the
+  two share no protocol. Against a server older than the discovery document
+  they report the commit as before. `status --json` gains `server_version`,
+  `server_channel`, `server_protocols`, `min_client` and `client_version`.
 
 ## 0.3.2 — 2026-09-23
 
