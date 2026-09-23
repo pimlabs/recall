@@ -42,3 +42,7 @@ tokio.workspace = true
 # so the binary users install still carries no server.
 recall-server.workspace = true
 tempfile.workspace = true
+# A stand-in server for what the real one cannot be made to do: be a
+# release from before devices, or record exactly what approving sent.
+# Already in the tree through recall-server.
+axum.workspace = true

@@ -1122,6 +1122,7 @@ dependencies = [
  "anstream",
  "anstyle",
  "anyhow",
+ "axum",
  "clap",
  "cliclack",
  "console",
