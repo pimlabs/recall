@@ -83,8 +83,8 @@ stays on the index where it is. Thanks to him for handing the name over.
 Notes about *you* rather than the repo can follow you into every project: set
 `RECALL_GLOBAL_KEY`, then `recall promote <file>` moves one there. Notes true
 of one box and wrong on the next — its RAM, which of two `dotnet` installs
-wins — belong in neither: `RECALL_MACHINE_KEY` gives them a scope that comes
-back only on that machine, and `recall promote <file> --to machine` files them
+wins — belong in neither: naming the machine (`[machine] name` in
+`~/.recall/config.toml`) gives them a scope that comes back only on that machine, and `recall promote <file> --to machine` files them
 there. And where the `owner/repo` key derived from the git remote is wrong — a
 repo with no remote, a monorepo, a fork — `RECALL_PROJECT_KEY` declares it
 instead. All three are in

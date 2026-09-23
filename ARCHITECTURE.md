@@ -177,7 +177,7 @@ memory directory. There are three:
 |---|---|---|---|
 | project | `owner/repo` from the git remote, or `RECALL_PROJECT_KEY` | the memory directory itself | anyone syncing that repository |
 | global | `global:<RECALL_GLOBAL_KEY>` | `<memory dir>/global/` | every project you sync |
-| machine | `machine:<RECALL_MACHINE_KEY>` | `<memory dir>/machine/` | only a machine declaring the same key |
+| machine | `machine:<name>` — `[machine] name` in `~/.recall/config.toml`, or `RECALL_MACHINE_KEY` | `<memory dir>/machine/` | only a machine with the same name |
 
 The global scope exists because Claude Code stores facts about *the user*
 inside whichever project it happened to learn them in — it even labels them
@@ -254,9 +254,13 @@ generated docs:
 cargo doc --workspace --no-deps --open
 ```
 
-Client-side variables are split by where they are set. The per-machine ones
-(`RECALL_URL`, `RECALL_TOKEN`, `RECALL_SOURCE_ENV`, and Claude Code's own
-`CLAUDE_CODE_REMOTE_MEMORY_DIR`) are in
+Client-side settings are split by where they are set. The per-machine ones
+live in `~/.recall` (`config.toml`: server and machine name;
+`credentials.toml`: tokens), written by `recall connect`, with environment
+variables (`RECALL_URL`, `RECALL_TOKEN`, `RECALL_SOURCE_ENV`,
+`RECALL_MACHINE_KEY`) winning over them where set — which is how a cloud
+environment configures them, alongside Claude Code's own
+`CLAUDE_CODE_REMOTE_MEMORY_DIR`. Both are in
 [`docs/reference/token-setup.md`](docs/reference/token-setup.md), which also covers the
 per-environment network allowlist a claude.ai cloud environment needs before
 it can reach a self-hosted server at all. The two that describe a *project*

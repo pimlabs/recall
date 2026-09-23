@@ -56,6 +56,20 @@ pub struct MiscasedDir {
     pub reserved: &'static str,
 }
 
+/// A variable in the environment winning over a different value in
+/// `config.toml`. Never the token: this is printed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Override {
+    /// The variable, e.g. `RECALL_SOURCE_ENV`.
+    pub variable: &'static str,
+    /// Its value in the environment, which is the one in effect.
+    pub environment: String,
+    /// The setting in `config.toml` it overrides, e.g. `machine.name`.
+    pub setting: &'static str,
+    /// That setting's value.
+    pub config: String,
+}
+
 /// The `--json` shape. Stable enough to script against; that is the point of
 /// having it at all.
 #[derive(serde::Serialize)]
@@ -157,6 +171,22 @@ pub struct Report {
     /// could not.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credentials_error: Option<String>,
+    /// `~/.recall/config.toml`, when there is a `~/.recall` to look in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_file: Option<String>,
+    /// Where the machine scope's key came from: `RECALL_MACHINE_KEY`, or the
+    /// machine name in `config.toml`.
+    pub machine_source: Source,
+    /// Settings in `config.toml` that were read and did nothing — an
+    /// unknown key, or a machine name that cannot be used.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub config_problems: Vec<String>,
+    /// Variables in the environment that override a *different* value in
+    /// `config.toml`. The environment wins, which is right in a cloud
+    /// session and usually a leftover on a laptop that has since run
+    /// `recall connect`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub overridden: Vec<Override>,
     /// Whether anyone but its owner can read the credentials file.
     /// `recall connect` never writes one like that; a copy or a restore can.
     pub credentials_exposed: bool,
@@ -275,7 +305,11 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
         credentials_exposed: cfg
             .credentials_file
             .as_deref()
-            .is_some_and(recall_hooks::credentials::readable_by_others),
+            .is_some_and(recall_hooks::home::readable_by_others),
+        config_file: cfg.config_file.as_ref().map(|p| p.display().to_string()),
+        machine_source: cfg.machine_source,
+        config_problems: cfg.config_problems.clone(),
+        overridden: overrides(here, cfg),
         server_ok: false,
         server_error: None,
         git_commit: None,
@@ -314,6 +348,55 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
         Err(err) => rep.server_error = Some(err.to_string()),
     }
     rep
+}
+
+/// Variables in the environment that override a different value in
+/// `config.toml`.
+///
+/// Compared as each value is *used*, not as it was typed: `jarvis` and
+/// `machine:jarvis` are the same machine key, and `https://x/` is the same
+/// server as `https://x`, so neither is reported as an override.
+fn overrides(here: &proj::Resolved, cfg: &ClientConfig) -> Vec<Override> {
+    let env = |name: &str| here.env.get(name).filter(|v| !v.trim().is_empty());
+    let mut out = Vec::new();
+
+    if let (Some(url), Some(saved)) = (env("RECALL_URL"), cfg.saved_server.as_deref()) {
+        if recall_hooks::home::normalize_url(&url) != recall_hooks::home::normalize_url(saved) {
+            out.push(Override {
+                variable: "RECALL_URL",
+                environment: url,
+                setting: "server",
+                config: saved.to_string(),
+            });
+        }
+    }
+    let saved_name = cfg
+        .saved_machine_name
+        .as_deref()
+        .and_then(recall_hooks::home::machine_name);
+    if let Some(name) = saved_name.as_deref() {
+        if let Some(raw) = env("RECALL_MACHINE_KEY") {
+            if scope::machine_key(&raw) != scope::machine_key(name) {
+                out.push(Override {
+                    variable: "RECALL_MACHINE_KEY",
+                    environment: raw,
+                    setting: "machine.name",
+                    config: name.to_string(),
+                });
+            }
+        }
+        if let Some(label) = env("RECALL_SOURCE_ENV") {
+            if label.trim() != name {
+                out.push(Override {
+                    variable: "RECALL_SOURCE_ENV",
+                    environment: label,
+                    setting: "machine.name",
+                    config: name.to_string(),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Distinguishes "you did not declare a key" from "you declared one and it
@@ -507,12 +590,15 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
         .credentials_file
         .as_deref()
         .unwrap_or("the credentials file");
+    let from_config = rep.config_file.as_deref().unwrap_or("the config file");
     println!(
         "RECALL_URL   : {}",
         match rep.url_source {
             Source::Unset => "(unset)".to_string(),
             Source::Environment => cfg.url.clone(),
-            Source::CredentialsFile => format!("{} (from {from_file})", cfg.url),
+            Source::CredentialsFile | Source::ConfigFile => {
+                format!("{} (from {from_config})", cfg.url)
+            }
         }
     );
     println!(
@@ -523,9 +609,18 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
                 Some(file) => format!("set, by {file}"),
                 None => "set, in this shell".to_string(),
             },
-            Source::CredentialsFile => format!("saved in {from_file}"),
+            Source::CredentialsFile | Source::ConfigFile => format!("saved in {from_file}"),
         }
     );
+    for problem in &rep.config_problems {
+        println!("config       : {problem} ({from_config})");
+    }
+    for o in &rep.overridden {
+        println!(
+            "config       : {}={} overrides {} = {:?} in {from_config}",
+            o.variable, o.environment, o.setting, o.config
+        );
+    }
     if let Some(err) = &rep.credentials_error {
         println!("credentials  : UNREADABLE — {err}");
     }

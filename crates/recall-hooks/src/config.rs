@@ -14,7 +14,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::claude::Env;
-use crate::credentials;
+use crate::home;
 
 /// Where a value came from, for `recall status` and `recall doctor` to say.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
@@ -26,8 +26,10 @@ pub enum Source {
     /// The environment a hook sees: the shell, or a settings file's `env`
     /// block over it. [`declared_env`](crate::declared_env) says which.
     Environment,
-    /// `~/.recall/credentials.json`, written by `recall connect`.
+    /// `~/.recall/credentials.toml`, written by `recall connect` — tokens.
     CredentialsFile,
+    /// `~/.recall/config.toml` — the server and this machine's name.
+    ConfigFile,
 }
 
 /// Why configuration is unusable. The messages match the ones the Go and
@@ -57,15 +59,27 @@ pub struct ClientConfig {
     pub url_source: Source,
     /// Where [`ClientConfig::token`] came from.
     pub token_source: Source,
-    /// The credentials file, when the environment left something unset and
-    /// it was therefore consulted — whether or not it exists.
+    /// `~/.recall/credentials.toml`, when there is a `~/.recall` to look in —
+    /// whether or not the file exists.
     pub credentials_file: Option<std::path::PathBuf>,
-    /// Why the credentials file could not be used, when it exists and could
-    /// not. Not an error here, for the reason nothing in this type is: a
-    /// broken file must not stop `recall status` from saying so.
+    /// `~/.recall/config.toml`, likewise.
+    pub config_file: Option<std::path::PathBuf>,
+    /// Why a file in `~/.recall` could not be used, when one exists and
+    /// could not. Not an error here, for the reason nothing in this type is:
+    /// a broken file must not stop `recall status` from saying so.
     pub credentials_error: Option<String>,
-    /// `RECALL_SOURCE_ENV`: the label synced files are stamped with,
-    /// falling back to the hostname and then to `"unknown"`.
+    /// Things in `config.toml` that were read and did nothing: keys this
+    /// version does not know, and a machine name it cannot use. Empty is
+    /// the ordinary case.
+    pub config_problems: Vec<String>,
+    /// What `config.toml` says this machine is called, whether or not the
+    /// environment overrides it — so `recall doctor` can say when it does.
+    pub saved_machine_name: Option<String>,
+    /// What `config.toml` names as the server, likewise.
+    pub saved_server: Option<String>,
+    /// The label synced files are stamped with: `RECALL_SOURCE_ENV`, else
+    /// the machine name in `config.toml`, else the hostname, else
+    /// `"unknown"`.
     pub source_env: String,
     /// `RECALL_PROJECT_KEY`: the key this project syncs under, declared
     /// rather than derived from the git remote, and normalised by
@@ -102,6 +116,9 @@ pub struct ClientConfig {
     /// which one it is must not receive another's facts. An ephemeral cloud
     /// session is a new machine every time and should leave this unset.
     pub machine_key: Option<String>,
+    /// Where [`ClientConfig::machine_key`] came from: `RECALL_MACHINE_KEY`,
+    /// or the machine name in `config.toml`.
+    pub machine_source: Source,
     /// Names of variables that were set to a value the normaliser refused,
     /// so the derived default stands instead.
     ///
@@ -131,7 +148,7 @@ pub const VARS: &[&str] = &[
     "RECALL_MACHINE_KEY",
     // Where `recall connect` keeps credentials. Read only when the
     // environment leaves the URL or the token unset.
-    credentials::HOME_VAR,
+    home::HOME_VAR,
     // Not Recall's, but read here as the last fallback for `source_env`, and
     // through the same lookup as the rest. Reading it from `std::env`
     // directly — which is what this did — left one variable resolving
@@ -159,9 +176,10 @@ impl ClientConfig {
             .as_deref()
             .and_then(crate::scope::global_key);
         let declared_machine = var(&lookup, "RECALL_MACHINE_KEY");
-        let machine_key = declared_machine
+        let mut machine_key = declared_machine
             .as_deref()
             .and_then(crate::scope::machine_key);
+        let mut machine_source = source_of(&machine_key);
 
         let mut rejected_vars = Vec::new();
         for (declared, accepted, name) in [
@@ -190,39 +208,43 @@ impl ClientConfig {
         let mut token = var(&lookup, "RECALL_TOKEN");
         let mut url_source = source_of(&url);
         let mut token_source = source_of(&token);
-        let mut credentials_file = None;
-        let mut credentials_error = None;
 
-        // The credentials file sits below every environment layer, so it is
-        // only read for what the environment left unset — and not read at
-        // all when it left nothing, which keeps it off the path of every
-        // machine configured the way they all were before it existed.
-        if url.is_none() || token.is_none() {
-            if let Some(home) = credentials::home(&lookup) {
-                let path = credentials::file(&home);
-                match credentials::load(&path) {
-                    Ok(Some(saved)) => {
-                        if url.is_none() {
-                            url = saved.default.clone();
-                            url_source = source_or(&url, Source::CredentialsFile);
-                        }
-                        // After the URL, and it has to be: tokens are saved
-                        // per server, so which token is right depends on
-                        // which server was chosen — by the environment or
-                        // by the line above.
-                        if token.is_none() {
-                            token = url
-                                .as_deref()
-                                .and_then(|u| saved.token_for(u))
-                                .map(str::to_string);
-                            token_source = source_or(&token, Source::CredentialsFile);
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(e) => credentials_error = Some(e.to_string()),
-                }
-                credentials_file = Some(path);
-            }
+        // `~/.recall` sits below every environment layer: each value it
+        // holds is used only where the environment left that value unset.
+        let saved = Saved::load(&lookup);
+
+        if url.is_none() {
+            url = saved.config.server.clone();
+            url_source = source_or(&url, Source::ConfigFile);
+        }
+        // After the URL, and it has to be: tokens are saved per server, so
+        // which token is right depends on which server was chosen — by the
+        // environment or by the line above.
+        if token.is_none() {
+            token = url
+                .as_deref()
+                .and_then(|u| saved.credentials.token_for(u))
+                .map(str::to_string);
+            token_source = source_or(&token, Source::CredentialsFile);
+        }
+
+        let mut config_problems: Vec<String> = saved
+            .config
+            .unknown_keys()
+            .into_iter()
+            .map(|k| format!("`{k}` is not a setting Recall knows, so it does nothing"))
+            .collect();
+        let saved_machine_name = saved.config.machine.name.clone();
+        let usable_name = saved_machine_name.as_deref().and_then(home::machine_name);
+        if saved_machine_name.is_some() && usable_name.is_none() {
+            config_problems.push(format!(
+                "machine.name = {:?} is not a usable name (letters, digits, `.`, `-`, `_`)",
+                saved_machine_name.as_deref().unwrap_or_default()
+            ));
+        }
+        if machine_key.is_none() {
+            machine_key = usable_name.as_deref().and_then(crate::scope::machine_key);
+            machine_source = source_or(&machine_key, Source::ConfigFile);
         }
 
         ClientConfig {
@@ -230,19 +252,26 @@ impl ClientConfig {
             token: token.unwrap_or_default(),
             url_source,
             token_source,
-            credentials_file,
-            credentials_error,
-            // Read eagerly, though it is the last fallback of three: it is a
-            // map lookup, and threading it in is what lets `hostname` stay
-            // free of `std::env` — and what lets the test below see it at
-            // all, on a machine where `hostname(1)` answers first.
+            credentials_file: saved.home.as_ref().map(home::Home::credentials_path),
+            config_file: saved.home.as_ref().map(home::Home::config_path),
+            credentials_error: saved.error,
+            config_problems,
+            saved_server: saved.config.server.clone(),
+            // Read eagerly, though it is the last fallback: it is a map
+            // lookup, and threading it in is what lets `hostname` stay free
+            // of `std::env` — and what lets the test below see it at all, on
+            // a machine where `hostname(1)` answers first.
             source_env: {
                 let from_env = var(&lookup, "HOSTNAME");
-                resolve_source_env(var(&lookup, "RECALL_SOURCE_ENV"), || hostname(from_env))
+                resolve_source_env(var(&lookup, "RECALL_SOURCE_ENV").or(usable_name), || {
+                    hostname(from_env)
+                })
             },
+            saved_machine_name,
             project_key,
             global_key,
             machine_key,
+            machine_source,
             rejected_vars,
             claude: Env::from_lookup(&lookup),
         }
@@ -258,6 +287,61 @@ impl ClientConfig {
             return Err(ConfigError::MissingToken);
         }
         Ok(())
+    }
+}
+
+/// What `~/.recall` holds, read once per configuration.
+struct Saved {
+    home: Option<home::Home>,
+    config: home::Config,
+    credentials: home::Credentials,
+    error: Option<String>,
+}
+
+impl Saved {
+    /// Both files, empty where they do not exist. A file that exists and
+    /// cannot be read contributes nothing and is recorded, never fatal.
+    ///
+    /// While `credentials.toml` does not exist, 0.3.0's `credentials.json`
+    /// is read in its place. The CLI migrates it before this runs, so that
+    /// is the path of a migration that failed — and a failed migration must
+    /// not be the thing that stops a working machine syncing.
+    fn load<F>(lookup: &F) -> Self
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let mut out = Saved {
+            home: home::locate(lookup),
+            config: home::Config::default(),
+            credentials: home::Credentials::default(),
+            error: None,
+        };
+        let Some(h) = out.home.clone() else {
+            return out;
+        };
+        let mut errors = Vec::new();
+        match h.load_config() {
+            Ok(c) => out.config = c.unwrap_or_default(),
+            Err(e) => errors.push(e.to_string()),
+        }
+        match h.load_credentials() {
+            Ok(Some(c)) => out.credentials = c,
+            Ok(None) => match h.read_legacy() {
+                Ok(Some((server, creds))) => {
+                    if out.config.server.is_none() {
+                        out.config.server = server;
+                    }
+                    out.credentials = creds;
+                }
+                Ok(None) => {}
+                Err(e) => errors.push(e.to_string()),
+            },
+            Err(e) => errors.push(e.to_string()),
+        }
+        if !errors.is_empty() {
+            out.error = Some(errors.join("; "));
+        }
+        out
     }
 }
 
@@ -480,92 +564,113 @@ mod tests {
         );
     }
 
-    /// A `credentials.json` under a temporary `RECALL_HOME`, holding `servers`
-    /// and naming `default`.
-    fn saved(servers: &[(&str, &str)], default: Option<&str>) -> tempfile::TempDir {
+    /// A `~/.recall` under a temporary directory: `servers` in
+    /// `credentials.toml`, and `server` and `name` in `config.toml`.
+    fn saved(
+        servers: &[(&str, &str)],
+        server: Option<&str>,
+        name: Option<&str>,
+    ) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        let mut c = credentials::Credentials::default();
+        let h = home::Home::at(dir.path());
+        let mut c = home::Credentials::default();
         for (url, token) in servers {
             c.insert(url, token);
         }
-        c.default = default.map(credentials::normalize_url);
-        credentials::save(&credentials::file(dir.path()), &c).unwrap();
+        h.save_credentials(&c).unwrap();
+        h.save_config(&home::Config {
+            server: server.map(home::normalize_url),
+            machine: home::Machine {
+                name: name.map(str::to_string),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
         dir
     }
 
-    /// `recall connect` alone is a complete setup: the URL and the token
-    /// both come from the file when the environment has neither.
+    fn at(dir: &tempfile::TempDir) -> String {
+        dir.path().to_string_lossy().to_string()
+    }
+
+    /// `recall connect` alone is a complete setup: the URL, the token and
+    /// the machine all come from `~/.recall` when the environment has none
+    /// of them.
     #[test]
-    fn the_credentials_file_supplies_what_the_environment_does_not() {
-        let home = saved(
+    fn the_recall_home_supplies_what_the_environment_does_not() {
+        let dir = saved(
             &[("https://a.example.com", "ta")],
             Some("https://a.example.com"),
+            Some("jarvis"),
         );
-        let home_str = home.path().to_string_lossy().to_string();
-        let cfg = ClientConfig::from_lookup(env(&[("RECALL_HOME", &home_str)]));
+        let cfg = ClientConfig::from_lookup(env(&[("RECALL_HOME", &at(&dir))]));
 
         assert_eq!(cfg.url, "https://a.example.com");
         assert_eq!(cfg.token, "ta");
-        assert_eq!(cfg.url_source, Source::CredentialsFile);
+        assert_eq!(cfg.url_source, Source::ConfigFile);
         assert_eq!(cfg.token_source, Source::CredentialsFile);
         assert_eq!(cfg.require(), Ok(()));
     }
 
-    /// Below the environment, never above it: an explicit `RECALL_TOKEN` —
-    /// which in a cloud environment or CI is the secret store doing its job
-    /// — wins.
+    /// One name, both uses: the label on synced files and the machine
+    /// scope's key. They were two variables that had to agree.
     #[test]
-    fn the_environment_wins_over_the_credentials_file() {
-        let home = saved(
-            &[("https://a.example.com", "from-file")],
-            Some("https://a.example.com"),
-        );
-        let home_str = home.path().to_string_lossy().to_string();
-        let cfg = ClientConfig::from_lookup(env(&[
-            ("RECALL_HOME", &home_str),
-            ("RECALL_URL", "https://a.example.com"),
-            ("RECALL_TOKEN", "from-env"),
-        ]));
-        assert_eq!(cfg.token, "from-env");
-        assert_eq!(cfg.token_source, Source::Environment);
-        assert_eq!(
-            cfg.credentials_file, None,
-            "nothing was missing, so nothing was read"
-        );
-
-        // The case that actually tests the layering: the URL is missing, so
-        // the file *is* read — and its token still must not replace the one
-        // the environment supplied.
-        let cfg = ClientConfig::from_lookup(env(&[
-            ("RECALL_HOME", &home_str),
-            ("RECALL_TOKEN", "from-env"),
-        ]));
-        assert_eq!(cfg.url_source, Source::CredentialsFile);
-        assert_eq!(cfg.token, "from-env");
-        assert_eq!(cfg.token_source, Source::Environment);
+    fn the_machine_name_is_both_the_label_and_the_scope() {
+        let dir = saved(&[], None, Some("jarvis"));
+        let cfg = ClientConfig::from_lookup(env(&[("RECALL_HOME", &at(&dir))]));
+        assert_eq!(cfg.source_env, "jarvis");
+        assert_eq!(cfg.machine_key.as_deref(), Some("machine:jarvis"));
+        assert_eq!(cfg.machine_source, Source::ConfigFile);
     }
 
-    /// The ordering coupling the file introduces, pinned rather than left
-    /// to a comment. Which token is right depends on which server: here the
-    /// environment names `a` and the file's default is `b`, and handing `a`
-    /// the token for `b` would be the exact mistake per-server keys exist
-    /// to prevent.
+    /// Each variable still wins over the file, independently of the others.
     #[test]
-    fn the_token_is_looked_up_for_the_url_in_effect_not_the_files_default() {
-        let home = saved(
+    fn the_environment_wins_over_the_recall_home() {
+        let dir = saved(
+            &[("https://a.example.com", "from-file")],
+            Some("https://a.example.com"),
+            Some("jarvis"),
+        );
+        let cfg = ClientConfig::from_lookup(env(&[
+            ("RECALL_HOME", &at(&dir)),
+            ("RECALL_TOKEN", "from-env"),
+            ("RECALL_SOURCE_ENV", "laptop"),
+            ("RECALL_MACHINE_KEY", "mbp"),
+        ]));
+        assert_eq!(
+            cfg.url_source,
+            Source::ConfigFile,
+            "the URL was not overridden"
+        );
+        assert_eq!(cfg.token, "from-env");
+        assert_eq!(cfg.token_source, Source::Environment);
+        assert_eq!(cfg.source_env, "laptop");
+        assert_eq!(cfg.machine_key.as_deref(), Some("machine:mbp"));
+        assert_eq!(cfg.machine_source, Source::Environment);
+        // And what the file says is still known, so doctor can name the
+        // override.
+        assert_eq!(cfg.saved_machine_name.as_deref(), Some("jarvis"));
+    }
+
+    /// The ordering coupling, pinned rather than left to a comment. Which
+    /// token is right depends on which server: here the environment names
+    /// `a` and the config names `b`, and handing `a` the token for `b` would
+    /// be the exact mistake per-server keys exist to prevent.
+    #[test]
+    fn the_token_is_looked_up_for_the_url_in_effect_not_the_configs() {
+        let dir = saved(
             &[
                 ("https://a.example.com", "ta"),
                 ("https://b.example.com", "tb"),
             ],
             Some("https://b.example.com"),
+            None,
         );
-        let home_str = home.path().to_string_lossy().to_string();
-
         let cfg = ClientConfig::from_lookup(env(&[
-            ("RECALL_HOME", &home_str),
+            ("RECALL_HOME", &at(&dir)),
             ("RECALL_URL", "https://A.example.com/"),
         ]));
-        assert_eq!(cfg.url, "https://A.example.com/");
         assert_eq!(cfg.url_source, Source::Environment);
         assert_eq!(
             cfg.token, "ta",
@@ -573,22 +678,46 @@ mod tests {
         );
         assert_eq!(cfg.token_source, Source::CredentialsFile);
 
-        // And a server the file has never heard of gets no token at all.
         let cfg = ClientConfig::from_lookup(env(&[
-            ("RECALL_HOME", &home_str),
+            ("RECALL_HOME", &at(&dir)),
             ("RECALL_URL", "https://c.example.com"),
         ]));
         assert_eq!(cfg.token, "");
         assert_eq!(cfg.require(), Err(ConfigError::MissingToken));
     }
 
+    /// A machine name the scope cannot use is reported, and leaves the
+    /// machine scope off rather than inventing one.
+    #[test]
+    fn an_unusable_machine_name_is_a_problem_not_a_scope() {
+        let dir = saved(&[], None, Some("my laptop"));
+        let cfg = ClientConfig::from_lookup(env(&[("RECALL_HOME", &at(&dir))]));
+        assert_eq!(cfg.machine_key, None);
+        assert_eq!(cfg.config_problems.len(), 1, "{:?}", cfg.config_problems);
+        assert_ne!(cfg.source_env, "my laptop");
+    }
+
+    /// Until the CLI has migrated it, 0.3.0's file still works — a failed
+    /// migration must not be what stops a machine syncing.
+    #[test]
+    fn a_not_yet_migrated_0_3_0_file_still_works() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("credentials.json"),
+            r#"{"version":1,"default":"https://a.example.com","servers":{"https://a.example.com":{"token":"ta"}}}"#,
+        )
+        .unwrap();
+        let cfg = ClientConfig::from_lookup(env(&[("RECALL_HOME", &at(&dir))]));
+        assert_eq!(cfg.url, "https://a.example.com");
+        assert_eq!(cfg.token, "ta");
+    }
+
     /// A broken file is reported, not fatal and not silently empty.
     #[test]
-    fn an_unreadable_credentials_file_is_recorded_rather_than_fatal() {
+    fn an_unreadable_file_is_recorded_rather_than_fatal() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(credentials::file(dir.path()), "{").unwrap();
-        let home_str = dir.path().to_string_lossy().to_string();
-        let cfg = ClientConfig::from_lookup(env(&[("RECALL_HOME", &home_str)]));
+        std::fs::write(dir.path().join("credentials.toml"), "servers = [").unwrap();
+        let cfg = ClientConfig::from_lookup(env(&[("RECALL_HOME", &at(&dir))]));
         assert_eq!(cfg.token_source, Source::Unset);
         assert!(cfg.credentials_error.is_some());
     }

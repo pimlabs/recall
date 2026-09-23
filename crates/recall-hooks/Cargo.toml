@@ -16,6 +16,8 @@ serde_json.workspace = true
 # destination directory, removed on drop if the rename never happens.
 tempfile.workspace = true
 thiserror.workspace = true
+# ~/.recall/config.toml and credentials.toml.
+toml.workspace = true
 
 [dev-dependencies]
 axum.workspace = true

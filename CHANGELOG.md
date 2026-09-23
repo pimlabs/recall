@@ -16,6 +16,36 @@ break will be described here in full rather than smoothed over.
 
 ## Unreleased
 
+- **One place for a machine's settings: `~/.recall/`.** `recall connect`
+  now writes two TOML files instead of `credentials.json`:
+
+  ```text
+  ~/.recall/config.toml        0644  server = "…", and [machine] name = "…"
+  ~/.recall/credentials.toml   0600  [servers."<url>"] token = "…"
+  ```
+
+  Two files so the one you open, edit and back up never holds a secret.
+  Tokens are still kept per server, so `recall connect` to a second server
+  and back again does not ask for the first one's token twice.
+
+  **The machine has one name, used twice.** `[machine] name` both labels the
+  files this machine syncs and names its machine scope, `machine:<name>`.
+  Those were two variables, `RECALL_SOURCE_ENV` and `RECALL_MACHINE_KEY`,
+  that had to agree and nothing checked. Both still work and still win over
+  the file; `recall doctor` now warns when one disagrees with the name.
+  Naming the machine turns the machine scope on, just as setting
+  `RECALL_MACHINE_KEY` did.
+
+  **Nothing to do on upgrade.** The first command that reads configuration
+  moves 0.3.0's `credentials.json` into the two files and removes it; if
+  that fails, the old file is still read and `recall doctor` says why. A
+  `config.toml` key Recall does not know is reported rather than ignored, and
+  a file written by a newer Recall is refused rather than overwritten.
+
+  `recall status --json` adds `config_file`, `machine_source`,
+  `config_problems` and `overridden`, and `url_source` can now read
+  `config_file` — the URL comes from there after `recall connect`.
+
 ## 0.3.1 — 2026-09-22
 
 - **Deleting something from a memory file now sticks.** Every push that
