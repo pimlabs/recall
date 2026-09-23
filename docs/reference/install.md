@@ -17,19 +17,22 @@ backfill` once per project.
 
 ## Install
 
-Four channels, all delivering the same binary. Pick whichever your machine
-already has.
+Four channels, all delivering the same binary — five counting Windows'
+PowerShell installer, which is the same channel as `curl`, just for a
+platform `curl \| bash` doesn't run on. Pick whichever your machine already
+has.
 
 | Channel | Command |
 |---|---|
 | **npm** / bun / pnpm | `npm install -g @pimlabs/recall` |
 | **Homebrew** | `brew install pimlabs/tap/recall` |
-| **curl** | `curl -fsSL https://recall.pimlabs.id/install \| bash` |
+| **curl** (macOS, Linux) | `curl -fsSL https://recall.pimlabs.id/install \| bash` |
+| **PowerShell** (Windows) | `irm https://recall.pimlabs.id/install.ps1 \| iex` |
 | **cargo** | `cargo install recall` |
 
-Supported: macOS and Linux, x64 and arm64. Windows needs WSL. There are no
-runtime dependencies — no `jq`, no `curl`, no Node — except on the server,
-where the semantic merge shells out to the `claude` CLI.
+Supported: macOS, Linux and Windows, x64 and arm64. There are no runtime
+dependencies — no `jq`, no `curl`, no Node — except on the server, where the
+semantic merge shells out to the `claude` CLI.
 
 ### npm (or bun, or pnpm)
 
@@ -90,6 +93,73 @@ is the Worker itself.
 **It is not your server's address.** `recall.pimlabs.id` is where this
 project publishes its installer; `RECALL_URL` is the host *you* deploy to,
 and the two have nothing to do with each other.
+
+### Windows
+
+```powershell
+irm https://recall.pimlabs.id/install.ps1 | iex
+```
+
+The PowerShell equivalent of `curl | bash`: the same Cloudflare Worker
+fetches `install.ps1` from `main` on every request, so there is no second
+copy to fall behind, and the same rule applies — the download's SHA-256 is
+checked against the release's `checksums.txt` before anything is written
+where it could run. Read it first if you'd rather not pipe a stranger's
+script into a shell:
+
+```powershell
+irm https://recall.pimlabs.id/install.ps1
+```
+
+Installs to `%LOCALAPPDATA%\recall\bin\recall.exe`. Override the directory
+with `$env:RECALL_BIN_DIR`, pin a version with `$env:RECALL_VERSION`, or skip
+touching PATH with `$env:RECALL_NO_PATH`. Written against Windows PowerShell
+5.1 — what Windows 10 and 11 ship — not PowerShell 7, so it runs with nothing
+extra turned on.
+
+The same bytes, with their history, are at
+[`install.ps1`](https://github.com/pimlabs/recall/blob/main/install.ps1) at
+the repository root, next to `install.sh`.
+
+**Git for Windows is required, separately from this installer.** Claude Code
+runs hook commands through Git Bash on Windows and falls back to PowerShell
+without it — which cannot run the bash-form command `recall init` writes
+into `.claude/settings.json`, so the push and pull hooks silently do nothing.
+The installer warns if it can't find Git Bash, and `recall doctor` checks for
+it on every run (`CLAUDE_CODE_GIT_BASH_PATH`, `bash.exe` from Git for Windows
+on `PATH`, or its default install location). Get it from
+[git-scm.com/download/win](https://git-scm.com/download/win) if you don't
+have it.
+
+**The project-slug rule is not yet verified on a real Windows machine.**
+Claude Code shards auto memory per project under
+`~/.claude/projects/<slug>/memory`, where `<slug>` is the project's path with
+every non-alphanumeric character turned into a dash — reverse-engineered from
+the installed CLI, not a published contract (see
+`docs/history/phase-0-findings.md`). On Windows that includes the drive
+letter's colon and every path separator, and the slug comes out the same
+whichever separator the path happens to use (`C:\Users\eko\code\recall` and
+`C:/Users/eko/code/recall` both become `C--Users-eko-code-recall`), which is
+what `crates/recall-hooks/src/claude.rs` implements and tests. What is
+*not* verified is whether Claude Code's own Node process computes the same
+string Recall does for the same directory — a lowercased drive letter, for
+one, would slug differently and point Recall at a directory Claude Code
+never reads from. If `recall status` shows files syncing but `recall doctor`
+or your own session shows Claude Code not picking them up, this is the first
+thing to check: compare `recall status`'s `memory dir` against the real
+directory under `~/.claude/projects/` on that machine.
+
+The same caveat covers a second case: Windows can address one directory by
+two different strings, an 8.3 "short name" (`C:\Users\RUNNER~1\code\recall`)
+and the long form (`C:\Users\runneradmin\code\recall`) — they name the same
+place on disk, but `slug()` has no way to know that and produces a different
+dash-separated string from each. Which one Claude Code sees, and which one
+Recall does, both depend on where the path came from (`git rev-parse`, a
+canonicalized path, an environment variable) rather than on anything either
+side controls.
+
+Windows client support ships x64 and arm64 binaries; the server remains
+Linux-only, and winget and code signing are not done yet.
 
 ### cargo
 
@@ -690,16 +760,17 @@ the one-time `claude setup-token` step that enables semantic merge.
 ## Releases
 
 Binaries are published by a GitHub Actions workflow when a `v*` tag is
-pushed: four client archives (macOS and Linux, x64 and arm64), two server
-archives (Linux, x64 and arm64), and a `checksums.txt` that npm's installer
-and the server image both verify against. `v0.1.0` was the
-first, on 2026-09-14.
+pushed: six client archives (macOS, Linux and Windows, x64 and arm64 —
+Windows as `.zip`, the rest as `.tar.gz`), two server archives (Linux, x64
+and arm64), and a `checksums.txt` that npm's installer and the server image
+both verify against. `v0.1.0` was the first, on 2026-09-14.
 
-npm and `install.sh` download those archives, so both are tied to a released
-version; npm's `postinstall` looks for a release named after its *own*
-version and says so plainly rather than failing obscurely. Homebrew and
-`cargo install --git` build from source and need no release at all, which is
-why `brew install --HEAD` worked before any tag existed.
+npm, `install.sh` and `install.ps1` download those archives, so all three are
+tied to a released version; npm's `postinstall` looks for a release named
+after its *own* version and says so plainly rather than failing obscurely.
+Homebrew and `cargo install --git` build from source and need no release at
+all, which is why `brew install --HEAD` worked before any tag existed —
+Homebrew installs macOS and Linux only; there is no Windows formula.
 
 `CHANGELOG.md` says what changed between versions, and what deliberately does
 not appear there.
