@@ -21,7 +21,7 @@ break will be described here in full rather than smoothed over.
   sending `RECALL_TOKEN`: it asks `POST /v1/devices/enroll` for a short
   code, the owner approves the code, and the machine is a device that can
   be listed and revoked on its own. Cloud sessions can enrol with an
-  expiring enrolment key instead of a code. This release is the server
+  expiring authkey instead of a code. This release is the server
   half; the client does not enrol yet, so nothing changes for a machine
   until it does. See "Devices" in `docs/reference/api.md`.
 - **`RECALL_TOKEN` works exactly as before**, on every route, and is how
@@ -36,14 +36,17 @@ break will be described here in full rather than smoothed over.
   approve, name and key fingerprint, before approving it),
   `POST /v1/devices/approve` (which can name the fingerprint it expects),
   `POST /v1/devices/deny`, `GET /v1/devices`, `POST /v1/devices/{id}/revoke`,
-  `POST /v1/enroll-keys`, `GET /v1/enroll-keys` and
-  `POST /v1/enroll-keys/{id}/revoke`.
+  `POST /v1/authkeys`, `GET /v1/authkeys` and
+  `POST /v1/authkeys/{id}/revoke`.
 - **Device names are plain and unique.** A name with control, format or
   invisible characters (a zero-width space, a right-to-left override) is
   refused, no two unrevoked devices share a name or names that read alike
-  (`Laptop`, or `lаptop` with a Cyrillic `а`, beside `laptop`), and a device an
-  enrolment key enrols is named by the server after the key's tag.
-- **Enrolment keys** enrol ephemeral devices unless told otherwise, enrol
+  (`Laptop`, or `lаptop` with a Cyrillic `а`, beside `laptop`), and a
+  device an authkey enrols is named by the server after the key's
+  tag. A name already taken is refused when its code is approved, not when
+  the machine enrols, so the unauthenticated enrol route says nothing about
+  which names exist.
+- **Authkeys** enrol ephemeral devices unless told otherwise, enrol
   at most 25 unrevoked devices unless `max_devices` says otherwise, and can
   be revoked together with every device they enrolled.
 - **`GET /admin/stats` needs the `admin` scope from a device.** Nothing
@@ -54,13 +57,17 @@ break will be described here in full rather than smoothed over.
   server started is refused, since the nonces that would catch its replay
   went with the process before. A signature's `created` may be a minute
   behind the server's clock but only five seconds ahead of it.
+- **The rate limit counts an IPv6 client by its /64**, on every route,
+  `/sync` included, rather than address by address, so one machine
+  cannot give itself a fresh bucket per request. An IPv4 address written
+  as IPv6 counts as the IPv4 address. Clients on IPv4 see no change.
 - **`GET /.well-known/recall` lists `device-sig-v1`** after `bearer` in
   `auth.methods`, and a new `devices` capability.
 - **New setting: `RECALL_EPHEMERAL_DEVICE_TTL_HOURS`** (default 24). An
   ephemeral device, one a cloud session enrolled with an ephemeral
-  enrolment key, is removed after that long without a signed request.
+  authkey, is removed after that long without a signed request.
 - **Three new tables in the database**, `devices`, `device_enrollments`
-  and `enroll_keys`, created on start. `memory_files` is untouched, and an
+  and `authkeys`, created on start. `memory_files` is untouched, and an
   older server ignores the new tables, so rolling back still works.
 - **The `/admin` page manages devices, and signs in with a passkey.** A new
   Devices tab approves a machine by its code (showing its name, agent and

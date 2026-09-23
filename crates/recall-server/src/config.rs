@@ -118,7 +118,7 @@ pub struct Config {
     pub claude_status_interval: Duration,
 
     /// How long an ephemeral device, one a cloud session enrolled with an
-    /// ephemeral enrolment key, may go without a signed request before it
+    /// ephemeral authkey, may go without a signed request before it
     /// is removed.
     ///
     /// A day by default. A cloud session left open over lunch, a meeting or

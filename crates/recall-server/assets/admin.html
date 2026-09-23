@@ -257,7 +257,7 @@
 
       <section class="card">
         <h2>Authkeys</h2>
-        <p class="muted">An authkey lets cloud sessions enrol themselves with the sync scope. Put it in the cloud environment's variables as RECALL_ENROLL_KEY.</p>
+        <p class="muted">An authkey lets cloud sessions enrol themselves with the sync scope. Put it in the cloud environment's variables as RECALL_AUTHKEY.</p>
         <label for="key-tag">Tag</label>
         <input type="text" id="key-tag" value="cloud" maxlength="32" autocomplete="off">
         <label for="key-days">Expires in (days, 1 to 365)</label>
@@ -651,12 +651,12 @@
 
   // ---- Authkeys.
   function loadKeys() {
-    return api("GET", "/v1/enroll-keys").then(function (r) {
+    return api("GET", "/v1/authkeys").then(function (r) {
       if (!r.ok) { say($("keys-error"), failure(r)); return; }
       say($("keys-error"), "");
       var list = $("keys");
       clear(list);
-      var keys = (r.data.enroll_keys || []).filter(function (k) { return !k.revoked_at; });
+      var keys = (r.data.authkeys || []).filter(function (k) { return !k.revoked_at; });
       keys.forEach(function (k) {
         var li = el("li");
         var main = el("div", "item-main");
@@ -677,10 +677,10 @@
 
   function revokeKey(k, button) {
     if (!window.confirm("Revoke the " + (k.tag || "untagged") + " authkey? No new device will enrol with it.")) return;
-    var enrolled = devicesCache.filter(function (d) { return d.enroll_key_id === k.id && !d.revoked_at; }).length;
+    var enrolled = devicesCache.filter(function (d) { return d.authkey_id === k.id && !d.revoked_at; }).length;
     var also = enrolled > 0 && window.confirm("Also revoke the " + enrolled + " device(s) it enrolled?");
     button.disabled = true;
-    api("POST", "/v1/enroll-keys/" + encodeURIComponent(k.id) + "/revoke", { revoke_devices: also }).then(function (r) {
+    api("POST", "/v1/authkeys/" + encodeURIComponent(k.id) + "/revoke", { revoke_devices: also }).then(function (r) {
       if (!r.ok) say($("keys-error"), failure(r));
       loadKeys();
       loadDevices();
@@ -697,7 +697,7 @@
     var max = parseInt($("key-max").value, 10);
     if (max) body.max_devices = max;
     $("key-create").disabled = true;
-    api("POST", "/v1/enroll-keys", body).then(function (r) {
+    api("POST", "/v1/authkeys", body).then(function (r) {
       $("key-create").disabled = false;
       if (!r.ok) { say($("keys-error"), failure(r)); return; }
       $("key-secret").textContent = r.data.key;

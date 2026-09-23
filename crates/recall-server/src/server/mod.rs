@@ -9,7 +9,7 @@
 //! | `GET /.well-known/recall` | none — a client asks before it can authenticate |
 //! | `POST /sync`, `GET /sync`, `GET /v1/devices/me` | bearer token, or any device's signature |
 //! | `POST /v1/devices/enroll`, `POST /v1/devices/enroll/poll` | none, but rate limited, and small bodies only |
-//! | `GET /admin/stats`, the rest of `/v1/devices`, and `/v1/enroll-keys` | bearer token, an admin device's signature, or the admin page's passkey session (with its CSRF header on a POST) |
+//! | `GET /admin/stats`, the rest of `/v1/devices`, and `/v1/authkeys` | bearer token, an admin device's signature, or the admin page's passkey session (with its CSRF header on a POST) |
 //! | `GET /admin/session`, `POST /admin/login/start`, `POST /admin/login/finish` | none, but rate limited |
 //! | `POST /admin/bootstrap/register` and `…/finish` | bearer token only, and only while no passkey exists |
 //! | `GET /admin/passkeys`, `POST /admin/passkeys/…`, `POST /admin/logout` | the passkey session only, with its CSRF header on a POST |
@@ -91,9 +91,9 @@ mod without_passkeys {
 
 use auth::ReplayCache;
 use devices::{
-    handle_approve, handle_create_enroll_key, handle_deny, handle_enroll, handle_list_devices,
-    handle_list_enroll_keys, handle_me, handle_pending, handle_poll, handle_revoke_device,
-    handle_revoke_enroll_key,
+    handle_approve, handle_create_authkey, handle_deny, handle_enroll, handle_list_authkeys,
+    handle_list_devices, handle_me, handle_pending, handle_poll, handle_revoke_authkey,
+    handle_revoke_device,
 };
 use handlers::{
     handle_admin_stats, handle_discovery, handle_health, handle_pull, handle_push, not_found,
@@ -248,14 +248,14 @@ impl Server {
                 post(handle_revoke_device).fallback(not_found),
             )
             .route(
-                paths::ENROLL_KEYS_PATH,
-                get(handle_list_enroll_keys)
-                    .post(handle_create_enroll_key)
+                paths::AUTHKEYS_PATH,
+                get(handle_list_authkeys)
+                    .post(handle_create_authkey)
                     .fallback(not_found),
             )
             .route(
-                "/v1/enroll-keys/{id}/revoke",
-                post(handle_revoke_enroll_key).fallback(not_found),
+                "/v1/authkeys/{id}/revoke",
+                post(handle_revoke_authkey).fallback(not_found),
             )
             .route_layer(from_fn(admin_only))
             .route_layer(from_fn_with_state(state.clone(), admin_guard));

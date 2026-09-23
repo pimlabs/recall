@@ -20,7 +20,7 @@ use passkey_types::webauthn::{CredentialCreationOptions, CredentialRequestOption
 use passkey_types::Passkey;
 use recall_server::{Config, Server, Store};
 use recall_wire::signature::{encode_public_key, fingerprint, SigningKey};
-use recall_wire::{Device, DeviceList, EnrollKeyCreated, EnrollPending, PendingEnrollment};
+use recall_wire::{Device, DeviceList, AuthkeyCreated, EnrollPending, PendingEnrollment};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -363,21 +363,21 @@ async fn bootstrap_then_sign_in_then_the_session_manages_devices() {
     let listed: DeviceList = serde_json::from_value(listed.body).unwrap();
     assert_eq!(listed.devices.len(), 1);
 
-    // An enrolment key, shown once, and revoked.
+    // An authkey, shown once, and revoked.
     let key = h
         .call(
             "POST",
-            "/v1/enroll-keys",
+            "/v1/authkeys",
             session.with_csrf(),
             Some(json!({ "tag": "cloud", "expires_in_days": 30 })),
         )
         .await;
     assert_eq!(key.status, StatusCode::OK, "{}", key.body);
-    let key: EnrollKeyCreated = serde_json::from_value(key.body).unwrap();
+    let key: AuthkeyCreated = serde_json::from_value(key.body).unwrap();
     let revoked = h
         .call(
             "POST",
-            &format!("/v1/enroll-keys/{}/revoke", key.id),
+            &format!("/v1/authkeys/{}/revoke", key.id),
             session.with_csrf(),
             None,
         )
@@ -513,7 +513,7 @@ async fn a_state_changing_request_without_the_right_csrf_token_is_403() {
             "forbidden: this needs the admin session's X-Recall-CSRF header"
         );
         for (method, uri) in [
-            ("POST", "/v1/enroll-keys"),
+            ("POST", "/v1/authkeys"),
             ("POST", "/admin/logout"),
             ("POST", "/admin/passkeys/register"),
         ] {
@@ -899,7 +899,7 @@ async fn without_a_public_url_passkeys_are_off_and_say_why_and_the_token_still_w
         .call("POST", "/admin/bootstrap/register", As::Token, None)
         .await;
     assert_eq!(bootstrap.status, StatusCode::SERVICE_UNAVAILABLE);
-    for uri in ["/admin/stats", "/v1/devices", "/v1/enroll-keys"] {
+    for uri in ["/admin/stats", "/v1/devices", "/v1/authkeys"] {
         let reply = h.call("GET", uri, As::Token, None).await;
         assert_eq!(reply.status, StatusCode::OK, "{uri}");
     }

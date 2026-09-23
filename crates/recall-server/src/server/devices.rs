@@ -1,5 +1,5 @@
 //! The device routes: enrolling and polling, which anyone may call, and
-//! approving, listing and revoking devices and enrolment keys, which need
+//! approving, listing and revoking devices and authkeys, which need
 //! the operator's token or an admin device.
 //!
 //! Enrolment is RFC 8628's device flow. The user code is typed by a person
@@ -19,15 +19,15 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use recall_wire::devices::{
-    self, displayable, normalize_user_code, ACCESS_DENIED, AUTHORIZATION_PENDING, CODE_TTL_SECONDS,
-    DEFAULT_MAX_DEVICES, ENROLL_KEY_PREFIX, EXPIRED_TOKEN, INVALID_GRANT, MAX_ENROLL_KEY_DAYS,
+    self, displayable, normalize_user_code, ACCESS_DENIED, AUTHKEY_PREFIX, AUTHORIZATION_PENDING,
+    CODE_TTL_SECONDS, DEFAULT_MAX_DEVICES, EXPIRED_TOKEN, INVALID_GRANT, MAX_AUTHKEY_DAYS,
     MAX_TAG_CHARS, POLL_INTERVAL_SECONDS, SCOPE_ADMIN, SCOPE_SYNC, SLOW_DOWN, USER_CODE_ALPHABET,
 };
 use recall_wire::signature::encode_public_key;
 use recall_wire::{
-    ApproveRequest, DenyRequest, DenyResponse, DeviceIdentity, DeviceList, EnrollApproved,
-    EnrollKeyCreated, EnrollKeyList, EnrollKeyRequest, EnrollKeyRevokeRequest, EnrollPending,
-    EnrollPollRequest, EnrollPollResponse, EnrollRequest, PendingEnrollment,
+    ApproveRequest, AuthkeyCreated, AuthkeyList, AuthkeyRequest, AuthkeyRevokeRequest, DenyRequest,
+    DenyResponse, DeviceIdentity, DeviceList, EnrollApproved, EnrollPending, EnrollPollRequest,
+    EnrollPollResponse, EnrollRequest, PendingEnrollment,
 };
 use serde::de::DeserializeOwned;
 use time::OffsetDateTime;
@@ -37,7 +37,7 @@ use super::middleware::{too_large, ClientIp};
 use super::respond::{error, internal, json, Refusal};
 use super::AppState;
 use crate::store::{
-    plain_name, Created, Decision, Inserted, NewDevice, NewEnrollKey, NewEnrollment, Poll,
+    plain_name, Created, Decision, Inserted, NewAuthkey, NewDevice, NewEnrollment, Poll,
 };
 use crate::{format_timestamp, now, parse_timestamp};
 
@@ -56,7 +56,7 @@ const MAX_PENDING_PER_ADDRESS: usize = 5;
 /// `expired_token` rather than `invalid_grant`.
 pub(super) const EXPIRED_ENROLLMENT_KEPT: Duration = Duration::from_secs(60 * 60);
 
-/// What a device an enrolment key enrols is called when the key has no
+/// What a device an authkey enrols is called when the key has no
 /// tag.
 const UNTAGGED: &str = "device";
 
@@ -164,18 +164,16 @@ pub(super) async fn handle_enroll(
     // Stored as the encoder writes it, whatever whitespace it came with.
     let public_key = encode_public_key(&key);
 
-    if let Some(enroll_key) = req.enroll_key.as_deref() {
-        return enroll_with_key(&state, enroll_key, &public_key, &req.agent);
+    if let Some(authkey) = req.authkey.as_deref() {
+        return enroll_with_authkey(&state, authkey, &public_key, &req.agent);
     }
 
+    // Whether the name is taken is not said here, only when the code is
+    // approved. This route needs no credential, so an answer that said it
+    // would tell anyone which names the owner's devices have, a question
+    // at a time; asked this way, each question waits for approval, and
+    // counts against its address's few waiting places.
     let name = &plain_name(&req.name);
-    // Said now, so the machine can pick another name before anyone is
-    // asked to approve it; approving checks again.
-    match state.store.name_in_use(name) {
-        Ok(false) => {}
-        Ok(true) => return name_taken(name).into_response(),
-        Err(e) => return internal(e),
-    }
     let now = now();
     let expires_at = later(Duration::from_secs(CODE_TTL_SECONDS));
     let enrollment_id = match new_id("enr_", 16) {
@@ -235,22 +233,22 @@ pub(super) async fn handle_enroll(
     internal(anyhow::anyhow!("could not find a free user code"))
 }
 
-/// An enrolment key approves at once, `sync` scope only, which is the
+/// An authkey approves at once, `sync` scope only, which is the
 /// whole of what a leaked one can give away.
 ///
 /// Nobody looks at a device enrolled this way before it exists, so it does
 /// not choose its name: it is the key's tag and the start of its id, such
 /// as `cloud-k3jz9w2q`, and cannot pass for the owner's laptop.
-fn enroll_with_key(state: &AppState, enroll_key: &str, public_key: &str, agent: &str) -> Response {
+fn enroll_with_authkey(state: &AppState, authkey: &str, public_key: &str, agent: &str) -> Response {
     let refused = |why: &str| {
         error(
             StatusCode::UNAUTHORIZED,
-            &format!("unauthorized: this enrolment key {why}"),
+            &format!("unauthorized: this authkey {why}"),
         )
     };
     let key = match state
         .store
-        .enroll_key_by_hash(&recall_wire::content_sha256(enroll_key.trim()))
+        .authkey_by_hash(&recall_wire::content_sha256(authkey.trim()))
     {
         Ok(Some(key)) => key,
         Ok(None) => return refused("is not one this server issued"),
@@ -285,7 +283,7 @@ fn enroll_with_key(state: &AppState, enroll_key: &str, public_key: &str, agent: 
                 scope: SCOPE_SYNC,
                 agent,
                 ephemeral: key.ephemeral,
-                enroll_key_id: Some(&key.id),
+                authkey_id: Some(&key.id),
                 created_at: &now,
             },
             Some(max_devices),
@@ -307,8 +305,8 @@ fn enroll_with_key(state: &AppState, enroll_key: &str, public_key: &str, agent: 
                 return error(
                     StatusCode::FORBIDDEN,
                     &format!(
-                        "forbidden: this enrolment key already has its {} devices; \
-                         revoke one, or make another key",
+                        "forbidden: this authkey already has its {} devices; \
+                         revoke one, or make another authkey",
                         max_devices
                     ),
                 )
@@ -545,16 +543,16 @@ pub(super) async fn handle_revoke_device(
     }
 }
 
-/// `POST /v1/enroll-keys`.
-pub(super) async fn handle_create_enroll_key(
+/// `POST /v1/authkeys`.
+pub(super) async fn handle_create_authkey(
     State(state): State<Arc<AppState>>,
     bytes: Bytes,
 ) -> Response {
-    let req: EnrollKeyRequest = match body(&bytes) {
+    let req: AuthkeyRequest = match body(&bytes) {
         Ok(req) => req,
         Err(refused) => return refused.into_response(),
     };
-    if !(1..=MAX_ENROLL_KEY_DAYS).contains(&req.expires_in_days) {
+    if !(1..=MAX_AUTHKEY_DAYS).contains(&req.expires_in_days) {
         return error(StatusCode::BAD_REQUEST, "expires_in_days must be 1 to 365");
     }
     // The tag becomes part of the name of every device the key enrols, so
@@ -571,14 +569,14 @@ pub(super) async fn handle_create_enroll_key(
     // Stored, rather than applied when the key is used, so the list shows
     // the limit every key has.
     let max_devices = req.max_devices.unwrap_or(DEFAULT_MAX_DEVICES);
-    let (id, secret) = match (new_id("ek_", 10), new_id(ENROLL_KEY_PREFIX, 32)) {
+    let (id, secret) = match (new_id("ak_", 10), new_id(AUTHKEY_PREFIX, 32)) {
         (Ok(id), Ok(secret)) => (id, secret),
         (Err(e), _) | (_, Err(e)) => return internal(e),
     };
     let expires_at = later(Duration::from_secs(
         u64::from(req.expires_in_days) * 24 * 60 * 60,
     ));
-    let stored = state.store.insert_enroll_key(&NewEnrollKey {
+    let stored = state.store.insert_authkey(&NewAuthkey {
         id: &id,
         key_sha256: &recall_wire::content_sha256(&secret),
         tag: &plain_name(&req.tag),
@@ -590,7 +588,7 @@ pub(super) async fn handle_create_enroll_key(
     match stored {
         Ok(key) => no_store(json(
             StatusCode::OK,
-            &EnrollKeyCreated {
+            &AuthkeyCreated {
                 id: key.id,
                 key: secret,
                 tag: key.tag,
@@ -604,36 +602,33 @@ pub(super) async fn handle_create_enroll_key(
     }
 }
 
-/// `GET /v1/enroll-keys`.
-pub(super) async fn handle_list_enroll_keys(State(state): State<Arc<AppState>>) -> Response {
-    match state.store.enroll_keys() {
-        Ok(enroll_keys) => json(StatusCode::OK, &EnrollKeyList { enroll_keys }),
+/// `GET /v1/authkeys`.
+pub(super) async fn handle_list_authkeys(State(state): State<Arc<AppState>>) -> Response {
+    match state.store.authkeys() {
+        Ok(authkeys) => json(StatusCode::OK, &AuthkeyList { authkeys }),
         Err(e) => internal(e),
     }
 }
 
-/// `POST /v1/enroll-keys/{id}/revoke`: no new device enrols with it. The
+/// `POST /v1/authkeys/{id}/revoke`: no new device enrols with it. The
 /// devices it enrolled keep working unless the body asks for them to be
 /// revoked too; the body may be empty.
-pub(super) async fn handle_revoke_enroll_key(
+pub(super) async fn handle_revoke_authkey(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     bytes: Bytes,
 ) -> Response {
-    let req: EnrollKeyRevokeRequest = if bytes.iter().all(u8::is_ascii_whitespace) {
-        EnrollKeyRevokeRequest::default()
+    let req: AuthkeyRevokeRequest = if bytes.iter().all(u8::is_ascii_whitespace) {
+        AuthkeyRevokeRequest::default()
     } else {
         match body(&bytes) {
             Ok(req) => req,
             Err(refused) => return refused.into_response(),
         }
     };
-    match state
-        .store
-        .revoke_enroll_key(&id, &now(), req.revoke_devices)
-    {
+    match state.store.revoke_authkey(&id, &now(), req.revoke_devices) {
         Ok(Some(key)) => json(StatusCode::OK, &key),
-        Ok(None) => error(StatusCode::NOT_FOUND, "no enrolment key has that id"),
+        Ok(None) => error(StatusCode::NOT_FOUND, "no authkey has that id"),
         Err(e) => internal(e),
     }
 }
@@ -673,8 +668,8 @@ mod tests {
         let id = new_id("dev_", 16).unwrap();
         assert!(id.starts_with("dev_") && id.len() == 4 + 26, "{id}");
         assert_ne!(id, new_id("dev_", 16).unwrap());
-        let key = new_id(ENROLL_KEY_PREFIX, 32).unwrap();
-        assert_eq!(key.len(), ENROLL_KEY_PREFIX.len() + 52, "{key}");
+        let key = new_id(AUTHKEY_PREFIX, 32).unwrap();
+        assert_eq!(key.len(), AUTHKEY_PREFIX.len() + 52, "{key}");
     }
 
     #[test]
