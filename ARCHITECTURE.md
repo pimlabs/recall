@@ -243,9 +243,10 @@ Deliberately boring. Two endpoints do the work and three exist to look at it. Th
 - `POST /sync` — one memory file, or one delete. Runs merge (see below) against the stored version and persists the result. `content` is omitted only when `deleted: true` — see "Deletes are tombstones, not row removal" below.
 - `GET /sync?project_key=...` — the current merged set for that project, tombstones included, so a puller can remove local copies.
 - `GET /health` — unauthenticated, and the only way a silently-degraded merge becomes visible from outside.
-- `GET /admin/stats` and `GET /admin` — read-only. There is deliberately no admin *write* surface, so a leaked token cannot quietly destroy history through it.
+- `GET /admin/stats` and `GET /admin` — read-only. There is deliberately no admin *write* surface for memory, so a leaked token cannot quietly destroy history through it.
+- `/v1/devices` and `/v1/authkeys` (0.4.1) — enrolling a machine as a device with its own key, and approving, listing and revoking devices and the authkeys cloud sessions enrol with. They change state about devices only; none of them reads or writes memory.
 
-Storage: whatever's simplest to self-host and keep running — a single SQLite file behind a small server process is enough for one user's data; don't reach for a distributed database for this. Auth: one bearer token, generated once, stored as an env var on every environment (never committed to the repo).
+Storage: whatever's simplest to self-host and keep running — a single SQLite file behind a small server process is enough for one user's data; don't reach for a distributed database for this. Auth: one bearer token, generated once, stored as an env var on every environment (never committed to the repo); and, from 0.4.1, enrolled devices that sign each request with a key of their own, individually revocable (Part 2 of [`docs/design/handshake.md`](docs/design/handshake.md)). The token stays as the legacy path while machines move over.
 
 ### Configuration
 

@@ -173,32 +173,50 @@ showing enough on both sides that a phished approval is noticed.
 Recall-Protocol: 1
 User-Agent: recall/0.3.3 (macos-arm64)
 Content-Digest: sha-256=:…:
-Signature-Input: sig1=("@method" "@target-uri" "content-digest" "recall-protocol");
-                 keyid="dev_7Q…";created=1790000000;nonce="…"
+Signature-Input: sig1=("@method" "@authority" "@path" "@query" "content-digest" "recall-protocol");
+                 created=1790000000;keyid="dev_7Q…";nonce="…";alg="ed25519"
 Signature: sig1=:…:
 ```
 
 The server looks up the key, refuses a revoked one, verifies the signature,
-requires `created` within ±60 seconds, rejects a nonce it has already seen
+requires `created` at most 60 seconds behind its clock and 5 ahead (see
+`api.md` for why ahead is so short), rejects a nonce it has already seen
 in that window (RFC 9421 §7.2.2), and records `last_seen`. No secret travels
 with the request, so a request copied out of a proxy log cannot be replayed.
+
+The first sketch of this covered `@target-uri`. Building it showed why
+that cannot work here: Traefik terminates TLS, so the server receives plain
+HTTP and cannot reconstruct the `https` the client signed, while it does
+receive the client's `Host`. So the signature covers the same URI in the
+parts the server can see, `@authority`, `@path` and `@query`. The
+`Content-Digest` is always sent and always covered, the digest of an empty
+body on a GET, so no request is signed without its body.
+
+**Built (server side, 0.4.1):** the wire contract in `recall-wire`
+(`signature`, `devices`) and the server's enrolment, approval, revocation,
+authkeys, signature checks and ephemeral sweep, documented in
+[`../reference/api.md`](../reference/api.md), which is now the authority for
+them. The client (`recall connect`, `recall devices`, the keychain), the
+admin page's Devices tab and passkeys are not built yet.
 
 ### Cloud sessions
 
 A cloud session is a new machine every time and cannot answer a prompt.
-Following Tailscale's auth keys:
+Following Tailscale's auth keys, with the same name and the same meaning,
+so it is called an **authkey** here too:
 
-- The owner creates an **enrolment key**: reusable, ephemeral, tagged
-  `cloud`, scope `sync` only, with an expiry. It is shown once.
+- The owner creates an **authkey**: reusable, ephemeral, tagged
+  `cloud`, scope `sync` only, with an expiry and a limit on how many
+  devices it may have enrolled at once (25 unless asked). It is shown once.
 - It goes in the cloud environment's variables. It can enrol devices; it
   cannot read or write memory.
-- Each session generates its own key pair, enrols with the enrolment key as
+- Each session generates its own key pair, enrols with the authkey as
   an ephemeral device, and is removed after a period of inactivity.
-- Revoking the enrolment key stops new sessions without touching the laptop.
+- Revoking the authkey stops new sessions without touching the laptop.
 
 The enrolment is automatic. When `recall pull` runs from the SessionStart
-hook and finds no device key but a `RECALL_ENROLL_KEY`, it generates a key
-pair in the container, enrols with the enrolment key, and is approved at
+hook and finds no device key but a `RECALL_AUTHKEY`, it generates a key
+pair in the container, enrols with the authkey, and is approved at
 once (Tailscale's `preauthorized`). Nothing is typed in the session.
 
 ### Without a terminal: the admin page
@@ -209,7 +227,7 @@ tab, the way Tailscale creates auth keys in its web admin console:
 
 - list devices, with last seen and version, and revoke one
 - approve a new device by entering the code it shows
-- create an enrolment key (shown once) and revoke one
+- create an authkey (shown once) and revoke one
 
 The page signs in with a **passkey** (WebAuthn): no password, bound to the
 site so it cannot be phished, and usable from a phone. The first sign-in
@@ -217,8 +235,8 @@ uses the operator's bootstrap secret once to register the passkey; the
 bootstrap secret can then be disabled.
 
 Setting up cloud sessions from a phone is then: open `/admin`, create an
-enrolment key, paste it into the cloud environment's variables as
-`RECALL_ENROLL_KEY`. That is the same one step as pasting `RECALL_TOKEN`
+authkey, paste it into the cloud environment's variables as
+`RECALL_AUTHKEY`. That is the same one step as pasting `RECALL_TOKEN`
 today.
 
 ### Owner commands
@@ -227,14 +245,17 @@ today.
 recall devices list                 name, scope, last seen, version, ephemeral?
 recall devices approve <code>
 recall devices revoke <name>
-recall devices enroll-key create --tag cloud --expires 90d   (shown once)
-recall devices enroll-key revoke <id>
+recall authkey create --tag cloud --expires 90d   (shown once)
+recall authkey list
+recall authkey revoke <id>
 ```
 
 ### Moving off the shared token
 
-1. The server advertises `bearer-legacy` alongside `device-sig-v1`, and keeps
-   accepting `RECALL_TOKEN` for several releases.
+1. The server advertises `bearer` alongside `device-sig-v1`, and keeps
+   accepting `RECALL_TOKEN` for several releases. (This sketch called it
+   `bearer-legacy`; 0.4.0 had already published `bearer`, and renaming it
+   would remove it within a protocol version.)
 2. `recall connect` enrols a device when the server supports it. `doctor`
    warns while a machine still uses the shared token.
 3. Removing `bearer-legacy` is a breaking change, so it ships as the next
@@ -278,7 +299,7 @@ legacy transition. None of it assumes one owner.
 - **Authorisation.** Every query filtered by the requesting device's owner;
   per-owner rate limits.
 - **Getting started.** An invitation from the operator, which is an
-  enrolment key bound to a new owner.
+  authkey bound to a new owner.
 - **Merge.** The server merges with its operator's `claude` login. Merging
   someone else's memory with it raises account and data-handling questions
   that are not technical. Client-side merge would avoid them.
@@ -370,7 +391,7 @@ process data) next to Advanced Data Protection (only the user's devices do).
   machine and decrypt what they pull. That is the only extra work a hook
   does, and it is cheap.
 - A device receives the content key wrapped to its public key when it is
-  approved (Part 2). Cloud sessions use a two-part enrolment key: one half
+  approved (Part 2). Cloud sessions use a two-part authkey: one half
   enrols, the other half, never sent, unwraps a copy of the content key
   the server stores but cannot open.
 - The API server never holds the content key. A compromise of the part

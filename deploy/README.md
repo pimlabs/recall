@@ -586,7 +586,7 @@ merge quality specifically. Tune with env vars in `.env` if needed:
 
 ## Removing a project that was stored under the wrong key
 
-Recall has **no admin write surface**, deliberately: `GET /admin/stats` is
+Recall has **no admin write surface for memory**, deliberately: `GET /admin/stats` is
 read-only, sqlite-web mounts the volume read-only, and nothing in the HTTP API
 can delete a project. A leaked token cannot be used to quietly destroy your
 history through any route the server exposes.
