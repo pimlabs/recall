@@ -320,7 +320,7 @@ delete is indistinguishable from a file that was never there.
 
 `recall-server admin list | rename | remove | restore` is how the owner moves,
 deletes or puts back what is stored under a project key. It is run inside the
-server's container, `docker compose exec -u node recall-server recall-server
+server's container, `docker exec -it -u node recall-server recall-server
 admin …`, and the procedure is in [`deploy/README.md`](deploy/README.md).
 
 The absence of an admin write surface on the public listener is a security
@@ -351,32 +351,55 @@ simpler, so it won:
   trade.
 
 What each change does, in order, is what the SQL procedure used to ask a
-person to remember: name the key exactly (never a prefix or a pattern) and
-confirm it by typing it back, or by `--yes`, which prints it instead; take a
-backup with `Store::backup` into `backups/admin/`, which the server's
-rotation never prunes; then one transaction, which reads the rows again,
-refuses if they differ from what was shown, and commits only if `changes()`
-equals the number of rows it named. `--dry-run` opens the database read-only
-and stops before the backup. A rename refuses a target key that holds any
-rows at all, because the primary key is `(project_key, file_path)` and
-folding two projects together is a merge, which belongs to `POST /sync`. A
-restore never overwrites a differing live row without `--overwrite`, and
-never deletes one.
+person to remember: name the keys exactly (never a prefix or a pattern) and
+confirm them by typing each back, a rename's target included, or by `--yes`,
+which prints them instead; take a backup with `Store::backup` into
+`backups/admin/`, which the server's rotation never prunes, and read it back
+to check it holds the rows shown; then one transaction, which reads the rows
+again, refuses if they differ from what was shown, and commits only if
+`changes()` equals the number of rows it named. `--dry-run` opens the
+database read-only and stops before the backup. A rename refuses a target key
+that holds any rows at all, because the primary key is `(project_key,
+file_path)` and folding two projects together has no single right answer for
+the files both have; the refusal points to the safe fold in
+`deploy/README.md` (copy the machine's memory directory aside, rename the old
+key to an archive key, reconcile by hand), not to "point the machine at the
+new key and let it push", whose first pull overwrites that machine's files. A
+restore never overwrites a differing live row without `--overwrite`, never
+removes a row, and never turns a live file into a tombstone (a deletion on
+every machine at its next pull) without `--restore-deletions` as well.
 
 It runs beside a live server, not instead of one. The store uses SQLite's
 default rollback journal (`journal_mode=delete`), and rusqlite gives every
 connection a 5-second busy timeout, which the admin connection states
 explicitly rather than inherits. The server's statements are each their own
 transaction. A change's transaction begins with `BEGIN IMMEDIATE`, so it
-holds the write lock before it re-reads anything: it waits behind a push in
-flight, a push waits behind it, and neither can deadlock the other. A lock that never comes, such
-as a reader that will not let the commit through, rolls the change back and
-says so. The journal mode itself is left alone: switching a shared production
-file to WAL is a change with consequences of its own, sqlite-web's read-only
-mount among them, and nothing here needs it. The commands refuse journal
-modes that cannot roll back (`off`, `memory`), and refuse to write as any
-user but the database file's owner, since `docker compose exec` defaults to
-root and a root-owned journal left by a crash is one the server cannot open.
+holds the write lock before it re-reads anything: it waits behind a
+statement in flight, a statement waits behind it, and neither can deadlock
+the other. A lock that never comes, such as a reader that will not let the
+commit through, rolls the change back and says so.
+
+What the lock does not do is order a change against a whole push. A push is
+several statements: the handler reads the stored row, may merge for up to
+`RECALL_MERGE_TIMEOUT_MS` holding no lock, then writes. A push that read
+before a change committed writes after it, and partly undoes it: a row comes
+back under the key a rename or remove emptied, or a merge of the replaced
+version lands over a restored row. The admin side cannot prevent that
+without changing the push path, which moving merge behind a queue (Part 5 of
+`docs/design/handshake.md`) is set to change anyway. So after
+committing, the command waits out the merge window (the server's timeout,
+read from the same environment the same way, plus a second) and checks; if
+anything came back it names the paths and the command to run, and exits 3.
+
+The journal mode is left alone: switching a shared production file to WAL is
+a change with consequences of its own, sqlite-web's read-only mount among
+them, and nothing here needs it. Nor is it checked. The modes that cannot
+roll back, `off` and `memory`, are settings of the connection that asks for
+them and are never stored in the file, so the admin connection always gets a
+journal that can. The commands refuse to write as any user but the database
+file's owner, since `docker exec` defaults to root and a root-owned journal
+left by a crash is one the server cannot open; a process that cannot tell who
+it runs as refuses too.
 
 ## Merge strategy
 
