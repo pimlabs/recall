@@ -445,10 +445,10 @@ one:
    Part 5. It depends on Part 2 for key distribution, and moving merge
    behind a queue changes the push contract, so it ships in a minor
    release. Strict end-to-end stays an option, not the default.
-2. **`CLAUDE.md`'s ground rule.** It says *"single owner, one bearer
-   token"*. This design keeps the single owner and replaces the single
-   token with enrolled devices. That wording changes only with the owner's
-   explicit agreement.
+2. **`CLAUDE.md`'s ground rule.** It said *"single owner, one bearer
+   token"*. Agreed by the owner (2026-09-23) and changed in the same pull
+   request as this document: still single owner, with the owner's machines
+   as enrolled devices and the shared token kept only as the legacy path.
 3. **Order of work.** Part 1 does not depend on Part 2 and ships first:
    discovery, version headers, golden fixtures, release-built server images,
    and with those the split into two binaries (Part 4). Then Part 2, with

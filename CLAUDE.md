@@ -27,7 +27,7 @@ A single well-scoped change → one agent, one worktree, straight through. Sever
 These were the project's original build-brief constraints (`PROMPT.md`, retired 2026-08-12 once the project it was written to kick off was actually built — see `ROADMAP.md`'s "Explicitly deferred" for the fuller reasoning behind the multi-user one). They're still load-bearing:
 
 - No Anthropic API key anywhere in this codebase — LLM-assisted merge goes through the local `claude` CLI only, authenticated via whatever `claude login` session is already on the machine running it.
-- No multi-user auth/billing — single owner, one bearer token. Recall is self-hosted by and for one person: no signup flow, no OAuth-for-other-users.
+- No multi-user auth/billing — single owner. Recall is self-hosted by and for one person: no signup flow, no OAuth-for-other-users. The owner's machines authenticate as enrolled, individually revocable devices (`docs/design/handshake.md`, agreed 2026-09-23); the one shared bearer token (`RECALL_TOKEN`) stays only as the legacy path until that transition finishes.
 - Hook config for a synced project lives in *that project's* `.claude/settings.json`, never user-level — this is why Recall works from fresh cloud sessions. Don't "simplify" this into `~/.claude/settings.json` — it would silently break the entire point.
 
 If a future task pushes toward multi-tenant auth, a hosted "Recall as a service for others" product, or an Anthropic API key anywhere in the request path — stop and ask the user first. That's a different project with different compliance implications (other people's data, billing, a privacy policy), not an incremental feature.
