@@ -200,7 +200,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
 cargo build --release
 ./scripts/compat-check.sh target/release/recall-server     # 19 checks
-./scripts/api-doc-check.sh target/release/recall-server    # 81 checks
+./scripts/api-doc-check.sh target/release/recall-server    # 85 checks
 ./scripts/trusted-ip-check.sh target/release/recall-server # 9 checks
 ```
 
