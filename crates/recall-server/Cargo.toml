@@ -24,6 +24,9 @@ getrandom.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# The Merkle tree hash for the audit log (RFC 9162 §2.1.1). Already in the
+# workspace through recall-wire.
+sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true
 # io-util is needed to stream the merge prompt into the CLI's stdin.

@@ -14,10 +14,13 @@ use anyhow::{Context, Result};
 use recall_wire::{AdminTotals, File, ProjectStats};
 use rusqlite::{Connection, OptionalExtension};
 
+use crate::audit::merkle::Frontier;
 use crate::now;
 
+mod audit;
 mod devices;
 
+pub use audit::{AuditEntry, ConsistencyError, Outcome};
 pub use devices::{
     Created, Decision, Inserted, NewDevice, NewEnrollKey, NewEnrollment, Poll, Waiting,
 };
@@ -46,12 +49,41 @@ pub struct Existing {
     pub deleted: bool,
 }
 
+/// The connection, plus the one piece of in-memory state built from it: the
+/// audit log's [`Frontier`], rebuilt at open from `audit_log.leaf_hash` so
+/// an append costs O(log n) hashes rather than replaying the whole table.
+///
+/// [`std::ops::Deref`] and [`std::ops::DerefMut`] to [`Connection`] mean
+/// every existing call site — `conn.execute(...)`, `conn.transaction()` —
+/// keeps compiling unchanged; only the audit-specific code added in this
+/// pull request reaches `audit` directly.
+struct StoreState {
+    conn: Connection,
+    audit: Frontier,
+}
+
+impl std::ops::Deref for StoreState {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.conn
+    }
+}
+
+impl std::ops::DerefMut for StoreState {
+    fn deref_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+}
+
 /// The SQLite database, and every query the server makes against it.
 pub struct Store {
     // A single connection behind a mutex. This is a single-owner server
     // against a local file; a pool would buy nothing and SQLite would
-    // serialize the writes anyway.
-    conn: Mutex<Connection>,
+    // serialize the writes anyway. The audit log's append-then-commit
+    // relies on this too: every write already goes through this one lock,
+    // so a leaf and the state change it records are never interleaved with
+    // another request's.
+    state: Mutex<StoreState>,
 }
 
 impl Store {
@@ -65,7 +97,10 @@ impl Store {
         }
         let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         let store = Self {
-            conn: Mutex::new(conn),
+            state: Mutex::new(StoreState {
+                conn,
+                audit: Frontier::new(),
+            }),
         };
         store.migrate()?;
         Ok(store)
@@ -74,7 +109,10 @@ impl Store {
     /// An in-memory database, for tests.
     pub fn open_in_memory() -> Result<Self> {
         let store = Self {
-            conn: Mutex::new(Connection::open_in_memory()?),
+            state: Mutex::new(StoreState {
+                conn: Connection::open_in_memory()?,
+                audit: Frontier::new(),
+            }),
         };
         store.migrate()?;
         Ok(store)
@@ -83,18 +121,18 @@ impl Store {
     // A panic in one request must not render the whole store unusable, and
     // nothing here leaves the database in a half-written state, so a
     // poisoned mutex is recovered rather than propagated.
-    fn lock(&self) -> MutexGuard<'_, Connection> {
-        self.conn.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock(&self) -> MutexGuard<'_, StoreState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn migrate(&self) -> Result<()> {
-        let conn = self.lock();
-        conn.execute_batch(SCHEMA)?;
+        let mut state = self.lock();
+        state.conn.execute_batch(SCHEMA)?;
 
         // Databases created before tombstones existed have no `deleted`
         // column. Adding it is safe and idempotent when guarded like this.
         let has_deleted = {
-            let mut stmt = conn.prepare("PRAGMA table_info(memory_files)")?;
+            let mut stmt = state.conn.prepare("PRAGMA table_info(memory_files)")?;
             let mut rows = stmt.query([])?;
             let mut found = false;
             while let Some(row) = rows.next()? {
@@ -105,7 +143,7 @@ impl Store {
             found
         };
         if !has_deleted {
-            conn.execute(
+            state.conn.execute(
                 "ALTER TABLE memory_files ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
@@ -114,8 +152,12 @@ impl Store {
         // Tables of their own, beside memory_files rather than in it, so a
         // server from before devices existed still opens this file and
         // simply never looks at them: rolling back stays a matter of
-        // starting the older image.
-        conn.execute_batch(devices::SCHEMA)?;
+        // starting the older image. Same for audit_log, added here.
+        state.conn.execute_batch(devices::SCHEMA)?;
+        state.conn.execute_batch(audit::SCHEMA)?;
+
+        let hashes = audit::leaf_hashes(&state.conn)?;
+        state.audit = Frontier::rebuild(&hashes);
         Ok(())
     }
 
@@ -318,6 +360,19 @@ impl Store {
             let _ = fs::remove_file(stale);
         }
         Ok(dest)
+    }
+}
+
+#[cfg(test)]
+impl Store {
+    /// Test-only: runs `f` against the raw connection. Used to assert things
+    /// no public method goes anywhere near on purpose, such as the audit
+    /// log's append-only triggers refusing a raw `UPDATE` or `DELETE`.
+    pub(crate) fn with_raw<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+    ) -> rusqlite::Result<T> {
+        f(&self.lock())
     }
 }
 
