@@ -196,6 +196,31 @@ Following Tailscale's auth keys:
   an ephemeral device, and is removed after a period of inactivity.
 - Revoking the enrolment key stops new sessions without touching the laptop.
 
+The enrolment is automatic. When `recall pull` runs from the SessionStart
+hook and finds no device key but a `RECALL_ENROLL_KEY`, it generates a key
+pair in the container, enrols with the enrolment key, and is approved at
+once (Tailscale's `preauthorized`). Nothing is typed in the session.
+
+### Without a terminal: the admin page
+
+The owner may have only a phone. Everything an owner does is also
+available on the server's existing `/admin` page, which gains a Devices
+tab, the way Tailscale creates auth keys in its web admin console:
+
+- list devices, with last seen and version, and revoke one
+- approve a new device by entering the code it shows
+- create an enrolment key (shown once) and revoke one
+
+The page signs in with a **passkey** (WebAuthn): no password, bound to the
+site so it cannot be phished, and usable from a phone. The first sign-in
+uses the operator's bootstrap secret once to register the passkey; the
+bootstrap secret can then be disabled.
+
+Setting up cloud sessions from a phone is then: open `/admin`, create an
+enrolment key, paste it into the cloud environment's variables as
+`RECALL_ENROLL_KEY`. That is the same one step as pasting `RECALL_TOKEN`
+today.
+
 ### Owner commands
 
 ```
@@ -302,19 +327,88 @@ minor release. It fits best alongside the move to release-built server
 images, which changes the Dockerfile anyway. Until then `recall serve` keeps
 working.
 
+## Part 5: end-to-end encryption, and merging without the server
+
+The owner wants memory contents encrypted end to end (2026-09-23): the
+server stores ciphertext and never sees a note. Atuin does this for shell
+history. The obstacle is merge: today the server reconciles concurrent
+edits with the Claude CLI, which needs plaintext. So merge moves to the
+client, in layers, cheapest first.
+
+### Encryption
+
+- One **content key** per owner, generated on the first device. Every
+  file body is encrypted with an AEAD cipher (XChaCha20-Poly1305, as
+  secsync uses) before it leaves the machine.
+- A device receives the content key wrapped to its public key when it is
+  approved, by the device that approves it. This is why Part 5 comes
+  after Part 2: key distribution rides on enrolment.
+- **Cloud sessions** have no approving device online. The enrolment key
+  therefore has two halves: one it sends to the server to enrol, and one
+  it never sends, used locally to unwrap a copy of the content key the
+  server stores but cannot open.
+- A **recovery key** is shown once when the content key is created. If
+  every device is lost without it, the memory is gone. That is the cost
+  of the server being unable to read it.
+- Not hidden: project keys, file paths, sizes and timings. secsync states
+  the same limit: its protocol *"doesn't hide meta data from the server"*.
+  Encrypting paths is possible later and is not proposed.
+
+### Merge, in layers
+
+1. **Detect on the server without reading.** A push carries the version it
+   was based on, as an `If-Match` precondition (RFC 9110 §13.1.1). If the
+   stored version has moved on, the server answers `412 Precondition
+   Failed` and changes nothing: the "lost update" problem RFC 9110 names.
+   This replaces today's `base_sha256`, which the server compares against
+   plaintext.
+2. **Three-way merge on the client.** The client keeps the plaintext of
+   the version it last synced (its base) in `~/.recall`, fetches and
+   decrypts the new server version, and merges the three the way
+   `git merge-file` does: changes to different lines combine
+   automatically. Memory files are short Markdown notes, so most
+   concurrent edits touch different lines and need nothing more.
+3. **Let the session's own Claude resolve the rest.** When lines overlap
+   and the merge runs inside a Claude Code session (the push hook), the
+   hook returns both versions to the running session through the hook's
+   `additionalContext`, which Claude Code feeds back to the model. Claude
+   rewrites the file, and that edit is pushed like any other, against the
+   new base. The model already in the session does the semantic merge the
+   server does today, with no second login and no plaintext on the server.
+4. **Outside a session**, for example `recall backfill` in a terminal:
+   `claude -p` when the machine is logged in; otherwise a conflict copy
+   next to the file, as Syncthing does with
+   `<file>.sync-conflict-<date>-<time>-<device>.<ext>`, picked up by
+   layer 3 at the next session start.
+5. `MEMORY.md` is never merged. It is an index Recall regenerates.
+
+### What changes on the server
+
+It stops merging and stops needing a `claude` login. It stores ciphertext,
+versions and metadata, and enforces `If-Match`. That also removes the
+multi-owner merge concern in Part 3.
+
+### Why not a CRDT
+
+Automerge and Yjs merge without conflicts and secsync relays them end to
+end encrypted. But they need the file stored as a CRDT document, and
+Claude Code reads and writes plain Markdown. The three-way merge above
+works on the files as they are.
+
 ## Open decisions
 
-1. **End-to-end encryption.** Atuin encrypts history on the client, so its
-   server never sees plaintext. Recall's server merges file contents with
-   the Claude CLI, which needs plaintext. E2E would mean moving merge to the
-   client. Not proposed now; recorded so it is decided on purpose.
+1. **End-to-end encryption.** Wanted by the owner; designed in Part 5. It
+   depends on Part 2 for key distribution, and replacing server-side
+   merge is a breaking change to the push contract, so it ships in a
+   minor release.
 2. **`CLAUDE.md`'s ground rule.** It says *"single owner, one bearer
    token"*. This design keeps the single owner and replaces the single
    token with enrolled devices. That wording changes only with the owner's
    explicit agreement.
 3. **Order of work.** Part 1 does not depend on Part 2 and ships first:
    discovery, version headers, golden fixtures, release-built server images,
-   and with those the split into two binaries (Part 4).
+   and with those the split into two binaries (Part 4). Then Part 2, with
+   the admin page, then Part 5.
 
 ## References
 
@@ -336,3 +430,9 @@ working.
 - Syncthing, understanding device IDs
 - Atuin, sync and encryption; CHANGELOG 18.12 (#3112, server moved to its own binary)
 - Tailscale `cmd/tailscaled` (`ts_include_cli` combined build)
+- RFC 9110, HTTP Semantics, §13.1.1 `If-Match` and 412
+- `git merge-file` (three-way file merge)
+- secsync, end-to-end encrypted CRDT relay (encryption, metadata limits)
+- Automerge
+- Syncthing, syncing: conflicting changes
+- Claude Code hooks reference (`additionalContext` on PostToolUse and SessionStart)
