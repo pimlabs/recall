@@ -20,6 +20,9 @@
 //! | [`sync`] | `POST /sync`, `GET /sync` — memory files in both directions |
 //! | [`health`] | `GET /health` — unauthenticated liveness and merge status |
 //! | [`admin`] | `GET /admin/stats` — what is stored, per project |
+//! | [`discovery`] | `GET /.well-known/recall` — what the server is and speaks |
+//! | [`devices`] | `/v1/devices`, `/v1/enroll-keys` — enrolling and managing devices |
+//! | [`signature`] | not an endpoint: how a device signs every request |
 //! | [`validate`] | the rules both halves enforce |
 //!
 //! # Frozen surface
@@ -42,12 +45,19 @@
 #![deny(missing_docs)]
 
 pub mod admin;
+pub mod devices;
 pub mod discovery;
 pub mod health;
+pub mod signature;
 pub mod sync;
 pub mod validate;
 
 pub use admin::{AdminStats, AdminTotals, ProjectStats};
+pub use devices::{
+    ApproveRequest, DenyRequest, DenyResponse, Device, DeviceList, DevicesCapability,
+    EnrollApproved, EnrollKey, EnrollKeyCreated, EnrollKeyList, EnrollKeyRequest, EnrollPending,
+    EnrollPollRequest, EnrollPollResponse, EnrollRequest,
+};
 pub use discovery::{Discovery, DISCOVERY_PATH, PROTOCOL, PROTOCOL_HEADER};
 pub use health::{ClaudeCliStatus, Health, MergeError, MergeStatus};
 /// The hash a push names its base by: SHA-256 of the file's exact bytes, as

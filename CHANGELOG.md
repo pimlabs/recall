@@ -14,6 +14,31 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
+## Unreleased
+
+- **The server enrols devices.** A machine can now be enrolled with a key
+  pair of its own and sign its requests (RFC 9421, Ed25519) instead of
+  sending `RECALL_TOKEN`: it asks `POST /v1/devices/enroll` for a short
+  code, the owner approves the code, and the machine is a device that can
+  be listed and revoked on its own. Cloud sessions can enrol with an
+  expiring enrolment key instead of a code. This release is the server
+  half; the client does not enrol yet, so nothing changes for a machine
+  until it does. See "Devices" in `docs/reference/api.md`.
+- **`RECALL_TOKEN` works exactly as before**, on every route, and is how
+  the first device is approved. Nothing that worked stops working.
+- **New routes:** `POST /v1/devices/enroll`, `POST /v1/devices/enroll/poll`,
+  and, for the owner, `POST /v1/devices/approve`, `POST /v1/devices/deny`,
+  `GET /v1/devices`, `POST /v1/devices/{id}/revoke`, `POST /v1/enroll-keys`,
+  `GET /v1/enroll-keys` and `POST /v1/enroll-keys/{id}/revoke`.
+- **`GET /.well-known/recall` lists `device-sig-v1`** after `bearer` in
+  `auth.methods`, and a new `devices` capability.
+- **New setting: `RECALL_EPHEMERAL_DEVICE_TTL_HOURS`** (default 24). An
+  ephemeral device, one a cloud session enrolled with an ephemeral
+  enrolment key, is removed after that long without a signed request.
+- **Three new tables in the database**, `devices`, `device_enrollments`
+  and `enroll_keys`, created on start. `memory_files` is untouched, and an
+  older server ignores the new tables, so rolling back still works.
+
 ## 0.4.0 — 2026-09-23
 
 - **Breaking: the server is its own binary, `recall-server`.** `recall serve`

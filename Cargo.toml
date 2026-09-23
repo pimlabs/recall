@@ -38,6 +38,14 @@ tempfile = "3"
 # The content hash a push names its base by. Both halves compute it, which is
 # why it lives in recall-wire.
 sha2 = "0.10"
+# Device keys and request signatures (RFC 9421). Pure Rust, so the server
+# still builds static against musl with no C crypto library to find.
+ed25519-dalek = "2"
+# Public keys, Content-Digest and Signature values on the wire.
+base64 = "0.22"
+# Device ids, enrolment codes and enrolment keys on the server. The same
+# version tempfile already brings in.
+getrandom = "0.4"
 # ~/.recall/config.toml and credentials.toml: files a person reads and edits.
 toml = "1"
 # The human-facing output: colour that turns itself off when stdout is not a

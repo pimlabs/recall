@@ -296,6 +296,10 @@ pub(super) async fn handle_discovery(State(state): State<Arc<AppState>>) -> Resp
         .or_else(|| discovery::revision().map(str::to_string));
     let channel = discovery::channel();
     let mut capabilities = std::collections::BTreeMap::new();
+    capabilities.insert(
+        discovery::CAPABILITY_DEVICES.to_string(),
+        serde_json::to_value(super::devices::capability()).unwrap_or_default(),
+    );
     capabilities.insert("merge_base".to_string(), serde_json::json!({}));
     capabilities.insert(
         "scopes".to_string(),
@@ -327,8 +331,13 @@ pub(super) async fn handle_discovery(State(state): State<Arc<AppState>>) -> Resp
                 },
             },
             min_client: MIN_CLIENT.to_string(),
+            // Appended, never reordered or removed within a protocol: a
+            // client reading this list may be older than any entry in it.
             auth: Auth {
-                methods: vec![discovery::AUTH_BEARER.to_string()],
+                methods: vec![
+                    discovery::AUTH_BEARER.to_string(),
+                    discovery::AUTH_DEVICE_SIG.to_string(),
+                ],
             },
             capabilities,
         },

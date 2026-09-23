@@ -19,6 +19,8 @@ recall-wire.workspace = true
 
 anyhow.workspace = true
 axum.workspace = true
+base64.workspace = true
+getrandom.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true

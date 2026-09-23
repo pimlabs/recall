@@ -173,8 +173,8 @@ showing enough on both sides that a phished approval is noticed.
 Recall-Protocol: 1
 User-Agent: recall/0.3.3 (macos-arm64)
 Content-Digest: sha-256=:…:
-Signature-Input: sig1=("@method" "@target-uri" "content-digest" "recall-protocol");
-                 keyid="dev_7Q…";created=1790000000;nonce="…"
+Signature-Input: sig1=("@method" "@authority" "@path" "@query" "content-digest" "recall-protocol");
+                 created=1790000000;keyid="dev_7Q…";nonce="…";alg="ed25519"
 Signature: sig1=:…:
 ```
 
@@ -182,6 +182,21 @@ The server looks up the key, refuses a revoked one, verifies the signature,
 requires `created` within ±60 seconds, rejects a nonce it has already seen
 in that window (RFC 9421 §7.2.2), and records `last_seen`. No secret travels
 with the request, so a request copied out of a proxy log cannot be replayed.
+
+The first sketch of this covered `@target-uri`. Building it showed why
+that cannot work here: Traefik terminates TLS, so the server receives plain
+HTTP and cannot reconstruct the `https` the client signed, while it does
+receive the client's `Host`. So the signature covers the same URI in the
+parts the server can see, `@authority`, `@path` and `@query`. The
+`Content-Digest` is always sent and always covered, the digest of an empty
+body on a GET, so no request is signed without its body.
+
+**Built (server side, 0.4.1):** the wire contract in `recall-wire`
+(`signature`, `devices`) and the server's enrolment, approval, revocation,
+enrolment keys, signature checks and ephemeral sweep, documented in
+[`../reference/api.md`](../reference/api.md), which is now the authority for
+them. The client (`recall connect`, `recall devices`, the keychain), the
+admin page's Devices tab and passkeys are not built yet.
 
 ### Cloud sessions
 
@@ -233,8 +248,10 @@ recall devices enroll-key revoke <id>
 
 ### Moving off the shared token
 
-1. The server advertises `bearer-legacy` alongside `device-sig-v1`, and keeps
-   accepting `RECALL_TOKEN` for several releases.
+1. The server advertises `bearer` alongside `device-sig-v1`, and keeps
+   accepting `RECALL_TOKEN` for several releases. (This sketch called it
+   `bearer-legacy`; 0.4.0 had already published `bearer`, and renaming it
+   would remove it within a protocol version.)
 2. `recall connect` enrols a device when the server supports it. `doctor`
    warns while a machine still uses the shared token.
 3. Removing `bearer-legacy` is a breaking change, so it ships as the next

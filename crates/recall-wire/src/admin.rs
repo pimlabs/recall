@@ -1,7 +1,8 @@
 //! `GET /admin/stats` — what the owner is storing, per project.
 //!
 //! Authenticated like `/sync`, and read-only: there is no admin *write*
-//! surface, deliberately.
+//! surface for memory, deliberately. Managing devices is in [`crate::devices`],
+//! and touches no memory.
 
 use serde::{Deserialize, Serialize};
 

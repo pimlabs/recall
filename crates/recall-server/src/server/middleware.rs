@@ -1,5 +1,5 @@
 //! What every authenticated request passes through before it reaches a
-//! handler: the rate limiter first, then the bearer check.
+//! handler: the rate limiter first, then the protocol check, then auth.
 //!
 //! The order is the point, and so is the fact that exactly one header may
 //! decide a client's rate-limit bucket — both are asserted by the tests
@@ -8,25 +8,71 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::body::Body;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
 
+use super::auth::{self, Caller};
 use super::respond::error;
 use super::AppState;
 
 /// Rate limiting runs *before* auth, so a flood of invalid tokens is
 /// limited too rather than escaping the limiter by never reaching the auth
 /// check.
+///
+/// Either credential is accepted: the operator's `RECALL_TOKEN`, exactly as
+/// before devices existed, or a device's signature. Whichever it was is
+/// left in the request's extensions as a [`Caller`], for the routes that
+/// care.
 pub(super) async fn guard(
     State(state): State<Arc<AppState>>,
     req: Request,
     next: Next,
 ) -> Response {
+    if let Some(refused) = limit(&state, &req) {
+        return refused;
+    }
+    match authenticate(&state, req).await {
+        Ok(req) => next.run(req).await,
+        Err(refused) => refused,
+    }
+}
+
+/// For the routes anyone may call, which is enrolling and polling: the
+/// same rate limit and protocol check as everything else, and no auth,
+/// since a machine enrolling has no credential yet.
+pub(super) async fn limited(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if let Some(refused) = limit(&state, &req) {
+        return refused;
+    }
+    next.run(req).await
+}
+
+/// After [`guard`], on the routes that manage devices: the operator, or a
+/// device approved with the admin scope. A `sync` device has proved who it
+/// is, so this is a 403, not a 401.
+pub(super) async fn admin_only(req: Request, next: Next) -> Response {
+    match req.extensions().get::<Caller>() {
+        Some(caller) if caller.is_admin() => next.run(req).await,
+        _ => error(
+            StatusCode::FORBIDDEN,
+            "forbidden: this needs RECALL_TOKEN or a device with the admin scope",
+        ),
+    }
+}
+
+/// The rate limit, then the protocol check. [`None`] when the request may
+/// go on.
+fn limit(state: &AppState, req: &Request) -> Option<Response> {
     if state
         .limiter
-        .limited(&client_ip(&req, &state.cfg.trusted_ip_header))
+        .limited(&client_ip(req, &state.cfg.trusted_ip_header))
     {
         let mut resp = error(
             StatusCode::TOO_MANY_REQUESTS,
@@ -41,10 +87,10 @@ pub(super) async fn guard(
         {
             resp.headers_mut().insert("retry-after", v);
         }
-        return resp;
+        return Some(resp);
     }
     if let Some(asked) = unsupported_protocol(req.headers()) {
-        return error(
+        return Some(error(
             StatusCode::BAD_REQUEST,
             &format!(
                 "this server speaks Recall protocol {}, and the request asked for {asked}. \
@@ -52,12 +98,35 @@ pub(super) async fn guard(
                 recall_wire::PROTOCOL,
                 recall_wire::DISCOVERY_PATH
             ),
-        );
+        ));
     }
-    if !authorized(&state.cfg.token, req.headers()) {
-        return error(StatusCode::UNAUTHORIZED, "unauthorized");
+    None
+}
+
+/// The bearer token first, unchanged: a request carrying the right one is
+/// the operator's, whatever else it carries. Then a signature, if there is
+/// one. Anything else is the same bare 401 it always was.
+async fn authenticate(state: &AppState, mut req: Request) -> Result<Request, Response> {
+    if authorized(&state.cfg.token, req.headers()) {
+        req.extensions_mut().insert(Caller::Operator);
+        return Ok(req);
     }
-    next.run(req).await
+    if !auth::is_signed(req.headers()) {
+        return Err(error(StatusCode::UNAUTHORIZED, "unauthorized"));
+    }
+    // The digest covers the body, so a signed request's body is read here,
+    // under the same bound the handlers apply, and handed on intact.
+    let (parts, body) = req.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, super::MAX_BODY_BYTES).await else {
+        return Err(error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request body too large",
+        ));
+    };
+    let caller = auth::verify(state, &parts, &bytes)?;
+    let mut req = Request::from_parts(parts, Body::from(bytes));
+    req.extensions_mut().insert(caller);
+    Ok(req)
 }
 
 /// The protocol a request asked for, when it is one this server does not

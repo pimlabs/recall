@@ -38,6 +38,7 @@ pub enum ConfigError {
 /// | [`merge_timeout`] | `RECALL_MERGE_TIMEOUT_MS` | 45s |
 /// | [`claude_bin`] | `RECALL_CLAUDE_BIN` | `claude` |
 /// | [`claude_status_interval`] | `RECALL_CLAUDE_STATUS_INTERVAL_MS` | 30m |
+/// | [`ephemeral_device_ttl`] | `RECALL_EPHEMERAL_DEVICE_TTL_HOURS` | 24h |
 ///
 /// [`addr`]: Config::addr
 /// [`token`]: Config::token
@@ -53,6 +54,7 @@ pub enum ConfigError {
 /// [`merge_timeout`]: Config::merge_timeout
 /// [`claude_bin`]: Config::claude_bin
 /// [`claude_status_interval`]: Config::claude_status_interval
+/// [`ephemeral_device_ttl`]: Config::ephemeral_device_ttl
 #[derive(Debug, Clone)]
 pub struct Config {
     /// The socket to bind, assembled from host and port.
@@ -112,6 +114,16 @@ pub struct Config {
     pub claude_bin: String,
     /// How often to re-check that the binary is present and logged in.
     pub claude_status_interval: Duration,
+
+    /// How long an ephemeral device, one a cloud session enrolled with an
+    /// ephemeral enrolment key, may go without a signed request before it
+    /// is removed.
+    ///
+    /// A day by default. A cloud session left open over lunch, a meeting or
+    /// a night keeps its device; a day's worth of finished sessions does
+    /// not pile up in the device list; and the key a finished session left
+    /// in its container stops working within a day of its last use.
+    pub ephemeral_device_ttl: Duration,
 }
 
 impl Default for Config {
@@ -131,9 +143,12 @@ impl Default for Config {
             merge_timeout: Duration::from_secs(45),
             claude_bin: "claude".to_string(),
             claude_status_interval: Duration::from_secs(30 * 60),
+            ephemeral_device_ttl: DEFAULT_EPHEMERAL_DEVICE_TTL,
         }
     }
 }
+
+const DEFAULT_EPHEMERAL_DEVICE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 impl Config {
     /// Reads configuration from the real process environment.
@@ -190,6 +205,9 @@ impl Config {
                 "RECALL_CLAUDE_STATUS_INTERVAL_MS",
                 30 * 60_000,
             )),
+            ephemeral_device_ttl: Duration::from_secs(
+                num("RECALL_EPHEMERAL_DEVICE_TTL_HOURS", 24).saturating_mul(3600),
+            ),
         };
         if cfg.token.is_empty() {
             return Err(ConfigError::MissingToken);
@@ -204,6 +222,11 @@ impl Config {
         }
         if cfg.claude_status_interval.is_zero() {
             cfg.claude_status_interval = Duration::from_secs(30 * 60);
+        }
+        // Zero would remove every ephemeral device at the next sweep,
+        // including the one whose session is running now.
+        if cfg.ephemeral_device_ttl.is_zero() {
+            cfg.ephemeral_device_ttl = DEFAULT_EPHEMERAL_DEVICE_TTL;
         }
         // A zero timeout is worse than a spinning loop: every merge would
         // hit an already-expired deadline and fail instantly, silently
@@ -272,6 +295,7 @@ mod tests {
             ("RECALL_MERGE_TIMEOUT_MS", "1234"),
             ("RECALL_CLAUDE_BIN", "/usr/bin/claude"),
             ("RECALL_CLAUDE_STATUS_INTERVAL_MS", "60000"),
+            ("RECALL_EPHEMERAL_DEVICE_TTL_HOURS", "2"),
         ]))
         .unwrap();
 
@@ -286,6 +310,7 @@ mod tests {
         assert_eq!(cfg.merge_timeout, Duration::from_millis(1234));
         assert_eq!(cfg.claude_bin, "/usr/bin/claude");
         assert_eq!(cfg.claude_status_interval, Duration::from_millis(60_000));
+        assert_eq!(cfg.ephemeral_device_ttl, Duration::from_secs(2 * 3600));
     }
 
     #[test]
@@ -317,8 +342,15 @@ mod tests {
                 ("RECALL_RATE_LIMIT_WINDOW_MS", value),
                 ("RECALL_CLAUDE_STATUS_INTERVAL_MS", value),
                 ("RECALL_MERGE_TIMEOUT_MS", value),
+                ("RECALL_EPHEMERAL_DEVICE_TTL_HOURS", value),
             ]))
             .unwrap();
+
+            assert_eq!(
+                cfg.ephemeral_device_ttl,
+                Duration::from_secs(24 * 3600),
+                "{value:?}"
+            );
 
             assert_eq!(
                 cfg.backup_interval,

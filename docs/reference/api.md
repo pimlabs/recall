@@ -1,8 +1,9 @@
 # HTTP API
 
-Recall's server exposes six routes. Two carry memory files, two are for
-looking at the deployment, one says what the server is and speaks, and one is
-a browser page.
+Recall's server exposes six routes for memory and the deployment, and, since
+0.4.1, eight under `/v1` for devices. Two carry memory files, two are for
+looking at the deployment, one says what the server is and speaks, one is a
+browser page, and the device routes enrol machines and manage them.
 
 This is a **frozen** surface: field names, field order, and the difference
 between `null` and `""` are compatibility guarantees, not style. The shape was
@@ -16,7 +17,10 @@ cannot drift apart.
 Everything on this page is asserted against a running server by
 [`scripts/api-doc-check.sh`](../../scripts/api-doc-check.sh) — status codes,
 error wording, field order, and the `null`-versus-`""` distinction. If a
-handler changes and this document doesn't, that script fails.
+handler changes and this document doesn't, that script fails. The one
+exception is signed requests, which take a signing client rather than
+`curl`: [`crates/recall-server/tests/devices.rs`](../../crates/recall-server/tests/devices.rs)
+asserts what this page says about them.
 
 | Route | Auth | Purpose |
 |---|:---:|---|
@@ -26,36 +30,114 @@ handler changes and this document doesn't, that script fails.
 | [`GET /.well-known/recall`](#get-well-knownrecall) | **no** | Which protocol and release this server is, and what it can do |
 | [`GET /admin/stats`](#get-adminstats) | yes | What is stored, per project |
 | [`GET /admin`](#get-admin) | **no** | An HTML page rendering the above |
+| [`POST /v1/devices/enroll`](#post-v1devicesenroll) | **no** | Start enrolling a machine |
+| [`POST /v1/devices/enroll/poll`](#post-v1devicesenrollpoll) | **no** | Ask whether it was approved |
+| [`POST /v1/devices/approve`](#post-v1devicesapprove-and-post-v1devicesdeny) | admin | Approve a machine by its code |
+| [`POST /v1/devices/deny`](#post-v1devicesapprove-and-post-v1devicesdeny) | admin | Refuse one |
+| [`GET /v1/devices`](#get-v1devices) | admin | Every device |
+| [`POST /v1/devices/{id}/revoke`](#post-v1devicesidrevoke) | admin | Revoke one |
+| [`POST /v1/enroll-keys`](#post-v1enroll-keys) | admin | Make an enrolment key, for cloud sessions |
+| [`GET /v1/enroll-keys`](#get-v1enroll-keys-and-post-v1enroll-keysidrevoke) | admin | Every enrolment key |
+| [`POST /v1/enroll-keys/{id}/revoke`](#get-v1enroll-keys-and-post-v1enroll-keysidrevoke) | admin | Stop one enrolling anything more |
+
+"yes" is either credential below; "admin" is `RECALL_TOKEN` or a device
+approved with the `admin` scope.
 
 ---
 
 ## Authentication
 
-One bearer token, sent on every authenticated route:
+Two credentials are accepted on every authenticated route: the one bearer
+token, and, from 0.4.1, a request signed by an enrolled device.
+
+### The bearer token
 
 ```
 Authorization: Bearer <RECALL_TOKEN>
 ```
 
-There is exactly one token and one owner — see the ground rules in
-`CLAUDE.md`. The comparison is constant-time, so a wrong token takes the same
-time to reject whether the first character was right or the first thirty
-were.
+The operator's secret, from `deploy/.env`. It works exactly as it always
+has, on every route that needs auth, the device routes included: it is the
+legacy path, kept while machines move to device keys (see
+[`docs/design/handshake.md`](../design/handshake.md)). The comparison is
+constant-time, so a wrong token takes the same time to reject whether the
+first character was right or the first thirty were.
 
 `GET /health` and `GET /admin` are deliberately unauthenticated so uptime
 tooling can poll them without holding the token. `/health` reports no file
 contents and no project keys.
 
+### Device signatures
+
+A machine enrolled as a device holds an Ed25519 key pair it generated, and
+signs each request with it instead of sending a secret: [RFC 9421 HTTP
+Message Signatures](https://www.rfc-editor.org/rfc/rfc9421) over an [RFC
+9530 `Content-Digest`](https://www.rfc-editor.org/rfc/rfc9530) of the body.
+A request copied out of a proxy log is useless once its minute is up, and
+refused inside it.
+
+```
+Recall-Protocol: 1
+Content-Digest: sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:
+Signature-Input: sig1=("@method" "@authority" "@path" "@query" "content-digest" "recall-protocol");created=1790000000;keyid="dev_4k3jz…";nonce="Jq3v…";alg="ed25519"
+Signature: sig1=:…:
+```
+
+| Part | What it is |
+|---|---|
+| `Content-Digest` | SHA-256 of the body, as a structured-field byte sequence. Always sent: a `GET` sends the digest of an empty body, the value above. |
+| Covered components | All six, in any order: `@method`, `@authority` (host and port, lowercased, without `:443` or `:80`), `@path`, `@query` (`?` and the query as sent, or `?` alone), and the `Content-Digest` and `Recall-Protocol` headers. |
+| `created` | UNIX seconds. Must be within **60 seconds** of the server's clock, either way. |
+| `keyid` | The device id. |
+| `nonce` | A random string, 1 to 128 characters, never reused. |
+| `alg` | `"ed25519"`, or left out. |
+| Label | `sig1`. It is the only label the server reads. |
+
+The signature covers `@authority`, `@path` and `@query` rather than RFC
+9421's `@target-uri` because TLS ends at the proxy in front of the server,
+so the server never learns the scheme the client signed; it does see the
+`Host` the client sent. The signature base is built as RFC 9421 §2.5
+describes; the Rust implementation both halves use is
+[`recall_wire::signature`](../../crates/recall-wire/src/signature.rs), and
+its tests reproduce RFC 9421's own Ed25519 example (Appendix B.2.6) byte
+for byte.
+
+The server checks, in this order: the device exists and is not revoked;
+`created` is inside the window; the body matches `Content-Digest`; the
+signature verifies with the device's key; the nonce has not been seen from
+that device inside the window. It then notes the device's `last_seen`, to
+within a minute. A `sync` device may use every route but the admin ones; an
+`admin` device may use all of them.
+
+A request carrying the right bearer token is the operator's, whatever else
+it carries. A request with neither credential gets the same bare `401` as
+always.
+
+### Failures
+
 | Failure | Status | Body |
 |---|:---:|---|
-| Missing or malformed `Authorization` | `401` | `{"error":"unauthorized"}` |
-| Wrong token | `401` | `{"error":"unauthorized"}` |
+| No credential at all, or a malformed `Authorization` | `401` | `{"error":"unauthorized"}` |
+| Wrong token, and no signature | `401` | `{"error":"unauthorized"}` |
+| Only one of `Signature-Input` and `Signature` | `401` | `{"error":"unauthorized: a signed request needs both signature-input and signature"}` |
+| A `keyid` no device has | `401` | `{"error":"unauthorized: unknown device"}` |
+| A revoked device | `401` | `{"error":"unauthorized: this device has been revoked"}` |
+| `created` too far from the server's clock | `401` | `{"error":"unauthorized: signature created 75 seconds from the server's clock, more than the 60 allowed; check this machine's clock"}` |
+| The body is not what `Content-Digest` says | `401` | `{"error":"unauthorized: content-digest does not match the body"}` |
+| The signature does not verify | `401` | `{"error":"unauthorized: the signature does not verify"}` |
+| The same request a second time | `401` | `{"error":"unauthorized: this request was already received once"}` |
+| A component missing from what is covered, or a header that does not parse | `401` | `{"error":"unauthorized: …"}`, naming what is wrong |
+| A `sync` device on an admin route | `403` | `{"error":"forbidden: this needs RECALL_TOKEN or a device with the admin scope"}` |
+| Too many signed requests inside one minute to remember their nonces | `503` | `{"error":"too many signed requests at once, try again later"}` |
 | Too many requests | `429` | `{"error":"rate limit exceeded, try again later"}`, plus a `Retry-After` header |
+
+### Rate limiting
 
 Rate limiting is per client IP, defaulting to **60 requests per 60 seconds**
 (`RECALL_RATE_LIMIT_MAX`, `RECALL_RATE_LIMIT_WINDOW_MS`), and runs *before*
 the auth check — so a flood of invalid tokens is limited too, rather than
-escaping the limiter by never reaching auth.
+escaping the limiter by never reaching auth. The two enrolment routes, which
+need no credential, are limited the same way and share the same bucket.
 
 There is no batch endpoint: a client with many files sends one `POST /sync`
 each, so a run longer than `RECALL_RATE_LIMIT_MAX` files in one window is cut
@@ -191,7 +273,7 @@ way a degraded merge is visible, which is why the field exists.
 |:---:|---|
 | `200` | Stored. Check `merged` to see whether a merge happened. |
 | `400` | Bad JSON, a missing required field, or a rejected `file_path`. |
-| `401` | Bad or missing token. |
+| `401` | Bad or missing credentials; see [Authentication](#authentication). |
 | `413` | Body over 5 MiB (`400` if it fails to parse first). |
 | `429` | Rate limited. |
 | `500` | The database write failed. |
@@ -268,7 +350,7 @@ That is what a machine syncing a project for the first time sees.
 |:---:|---|
 | `200` | Including for a project the server has never heard of. |
 | `400` | No `project_key`. |
-| `401` | Bad or missing token. |
+| `401` | Bad or missing credentials; see [Authentication](#authentication). |
 | `429` | Rate limited. |
 
 ### Example
@@ -299,8 +381,14 @@ server at all, and what the server can do.
     }
   },
   "min_client": "0.1.0",
-  "auth": { "methods": ["bearer"] },
+  "auth": { "methods": ["bearer", "device-sig-v1"] },
   "capabilities": {
+    "devices": {
+      "enroll_path": "/v1/devices/enroll",
+      "code_ttl_seconds": 900,
+      "poll_interval_seconds": 5,
+      "signature_window_seconds": 60
+    },
     "limits": {
       "max_body_bytes": 5242880,
       "rate_limit": { "max": 60, "window_seconds": 60 }
@@ -320,8 +408,16 @@ server at all, and what the server can do.
 | `server.build.revision` | The commit it was built from. Provenance only: nothing is decided on it. Omitted when unknown. |
 | `server.build.created` | When it was built, when the build recorded it. Omitted otherwise. |
 | `min_client` | The oldest client version the server accepts. Every client released so far is accepted. |
-| `auth.methods` | How a client may authenticate. `bearer` is the `RECALL_TOKEN` above. |
+| `auth.methods` | How a client may authenticate. `bearer` is the `RECALL_TOKEN` above; `device-sig-v1`, from 0.4.1, is a [device signature](#device-signatures). New methods are appended; none is removed within a protocol version. |
 | `capabilities` | What the server can do, by name. Each is an object, so it can carry parameters later. |
+| `capabilities.devices` | From 0.4.1: the server enrols devices and accepts their signatures. |
+| `capabilities.devices.enroll_path` | Where enrolment starts, [`/v1/devices/enroll`](#post-v1devicesenroll). |
+| `capabilities.devices.code_ttl_seconds` | How long a user code can be approved: 900. |
+| `capabilities.devices.poll_interval_seconds` | How long to wait between polls: 5. |
+| `capabilities.devices.signature_window_seconds` | How far a signature's `created` may be from the server's clock, either way: 60. |
+| `capabilities.limits` | `max_body_bytes`, and `rate_limit`'s `max` requests per `window_seconds`. |
+| `capabilities.merge_base` | The server reads `base_sha256` on a push. |
+| `capabilities.scopes` | The memory scopes a client may sync, each under an ordinary `project_key`. |
 
 The rules that keep this readable by clients that do not exist yet:
 
@@ -426,9 +522,13 @@ Authenticated. What the owner is storing, per project.
 `last_backup_at` is omitted when backups are off.
 
 Read-only, and only `GET` is routed — a `POST` here is a `404`. There is no
-admin *write* surface at all, deliberately: nothing on this route can delete a
-project or edit a note, so a leaked token cannot be used to quietly destroy
-history through it.
+admin *write* surface for memory at all, deliberately: nothing on this route
+can delete a project or edit a note, so a leaked token cannot be used to
+quietly destroy history through it. The device routes below do change
+state, but only about devices; none of them reads or writes memory.
+
+Any device may read it, `sync` scope included: it is how a client checks
+that it can reach the server and is recognised.
 
 ## `GET /admin`
 
@@ -436,6 +536,250 @@ The same numbers as an HTML page, for a browser. Unauthenticated because it
 ships no data of its own — it fetches `/admin/stats` from the browser, which
 means the person looking at it still needs the token. Served under a strict
 CSP that allows no external anything.
+
+---
+
+## Devices
+
+From 0.4.1 a machine can be enrolled as a **device**: it generates an
+Ed25519 key pair, keeps the private half, and signs every request (see
+[Device signatures](#device-signatures)). Enrolment follows [RFC 8628, the
+OAuth device authorization
+grant](https://www.rfc-editor.org/rfc/rfc8628): the machine asks for a
+short code, the owner approves the code from somewhere already trusted, and
+the machine polls until it is approved. A cloud session, which cannot wait
+for anyone, enrols with an [enrolment key](#post-v1enroll-keys) instead
+and is approved at once.
+
+A device has a **scope**: `sync` may use every route except the admin ones;
+`admin` may also approve, list and revoke devices and enrolment keys. The
+operator's `RECALL_TOKEN` can do everything an `admin` device can, which is
+how the first device is approved.
+
+Every timestamp below has the [usual shape](#timestamps). A field that has
+no value yet is `null`, never omitted.
+
+## `POST /v1/devices/enroll`
+
+Unauthenticated, and rate limited like every other route.
+
+### Request
+
+```json
+{
+  "name": "laptop",
+  "public_key": "JrQLj5P_89iXES9-vFgrIy29clF9CC_oPPsw3c5D0bs",
+  "agent": "recall/0.4.1 (macos-aarch64)"
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|:---:|---|
+| `name` | string | yes | What the owner sees the machine as. At most 64 characters, no control characters. |
+| `public_key` | string | yes | The Ed25519 public key: the raw 32 bytes, base64url, no padding. A key of small order is refused. |
+| `agent` | string | no | The client's `User-Agent`, shown in the device list. At most 256 characters. |
+| `enroll_key` | string | no | An [enrolment key](#post-v1enroll-keys). With a valid one the device is approved at once. |
+
+### Response: waiting for approval
+
+Without `enroll_key`, RFC 8628 §3.2's device authorization response, the
+enrolment id standing where the RFC has its `device_code`:
+
+```json
+{
+  "enrollment_id": "enr_mbj7ngtlpbwploe7wcqba7bose",
+  "user_code": "KXHT-GVDV",
+  "expires_in": 900,
+  "interval": 5
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `enrollment_id` | What the machine polls with. A secret: keep it on the machine. |
+| `user_code` | What the owner approves: eight characters of RFC 8628 §6.1's consonant alphabet, `BCDFGHJKLMNPQRSTVWXZ`, with a hyphen. When it is typed back, case, the hyphen and spaces do not matter. |
+| `expires_in` | Seconds until the code can no longer be approved: fifteen minutes. |
+| `interval` | Seconds to wait between polls. |
+
+The machine should show the code, and its key's fingerprint, so the owner
+can check the device list shows the same one. The fingerprint is `SHA256:`
+and the unpadded base64 of the SHA-256 of the raw 32-byte key.
+
+### Response: approved with an enrolment key
+
+```json
+{ "device_id": "dev_lvfyq25b7avgrj4zzwkxi4wnhm", "scope": "sync", "ephemeral": true }
+```
+
+Always `sync` scope. `ephemeral` is the key's: an ephemeral device is
+removed once it has made no signed request for `RECALL_EPHEMERAL_DEVICE_TTL_HOURS`
+hours, 24 by default.
+
+### Status codes
+
+| Code | When |
+|:---:|---|
+| `200` | Either response above. |
+| `400` | Bad JSON, or a field that breaks the rules above, with the rule as the error. |
+| `401` | `{"error":"unauthorized: this enrolment key is not one this server issued"}`, `…has expired` or `…has been revoked`. |
+| `429` | Rate limited. |
+| `503` | A thousand enrolments are already waiting for approval: `{"error":"too many enrolments are waiting for approval, try again later"}`. |
+
+## `POST /v1/devices/enroll/poll`
+
+Unauthenticated; the `enrollment_id` is the secret.
+
+```json
+{ "enrollment_id": "enr_mbj7ngtlpbwploe7wcqba7bose" }
+```
+
+Once approved, a `200`:
+
+```json
+{ "device_id": "dev_eerivjyffuwecbgzybcesz5hwi", "scope": "sync" }
+```
+
+From then on the machine signs its requests with `keyid` set to
+`device_id`. The same answer comes back to every poll until the enrolment is
+swept away, an hour after its code expired, so a machine that lost the
+first one can ask again.
+
+Until then, a `400` whose `error` is one of RFC 8628 §3.5's codes, in the
+shape every Recall error has:
+
+| `error` | Meaning | What the machine does |
+|---|---|---|
+| `authorization_pending` | Nobody has approved it yet. | Wait `interval` seconds and poll again. |
+| `slow_down` | Not approved, and polled sooner than `interval` after the last poll. | Add five seconds to the interval, for this and every later poll. |
+| `expired_token` | Fifteen minutes passed with no approval. | Stop; start again with a new enrolment. |
+| `access_denied` | The owner denied it, or approved it and then revoked the device. | Stop. |
+| `invalid_grant` | No enrolment has that id (RFC 6749 §5.2), or it expired over an hour ago. | Stop. |
+
+An approval is answered even if it arrives after the code expired, as long
+as it was approved in time. A body with no `enrollment_id` is a `400`
+saying so. Every successful answer from the enrolment routes, and every
+poll answer, is sent with `Cache-Control: no-store`, as RFC 6749 §5.1 asks
+of token responses.
+
+## `POST /v1/devices/approve` and `POST /v1/devices/deny`
+
+Admin. The owner, holding `RECALL_TOKEN` or an admin device, approves or
+refuses the code a machine shows.
+
+```json
+{ "user_code": "KXHT-GVDV", "scope": "sync" }
+```
+
+`scope` is `sync` when left out, and may be `admin`. Deny takes only
+`user_code`.
+
+Approve answers with the new [device](#get-v1devices); deny with what was
+refused:
+
+```json
+{ "user_code": "HVBT-SJRK", "name": "phone", "denied": true }
+```
+
+| Code | When |
+|:---:|---|
+| `200` | Approved, or denied. |
+| `400` | Bad JSON, a `scope` other than `sync` or `admin`, or a `user_code` that is not eight letters of the alphabet: `{"error":"user_code must be the 8 letters the device shows, such as WDJB-MJHT"}`. |
+| `401`, `403` | See [Authentication](#authentication). |
+| `404` | `{"error":"no enrolment is waiting with that code"}` |
+| `409` | `{"error":"that code was already approved or denied"}` |
+| `410` | `{"error":"that code has expired; start the enrolment again"}` |
+
+## `GET /v1/devices`
+
+Admin. Every device, newest first, revoked ones included.
+
+```json
+{
+  "devices": [
+    {
+      "id": "dev_eerivjyffuwecbgzybcesz5hwi",
+      "name": "laptop",
+      "scope": "sync",
+      "ephemeral": false,
+      "agent": "recall/0.4.1 (macos-aarch64)",
+      "fingerprint": "SHA256:sWwtG+rRJiY5dk/bDuTTd0WZM2vUk0BM2ksRNsWfIGI",
+      "public_key": "JrQLj5P_89iXES9-vFgrIy29clF9CC_oPPsw3c5D0bs",
+      "enroll_key_id": null,
+      "created_at": "2026-09-23T12:04:54.311Z",
+      "last_seen": "2026-09-23T12:31:02.118Z",
+      "revoked_at": null
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | `dev_` and 26 lowercase base32 characters, 128 random bits. The `keyid` it signs with. |
+| `name` | What it enrolled as. |
+| `scope` | `sync` or `admin`. |
+| `ephemeral` | Whether it is removed once idle. |
+| `agent` | The `agent` it enrolled with. |
+| `fingerprint` | Its key's fingerprint, as the machine showed it. |
+| `public_key` | Its key, base64url. |
+| `enroll_key_id` | The enrolment key it came in with, or `null` when a person approved it. |
+| `created_at` | When it was approved. |
+| `last_seen` | Its latest signed request, to within a minute, or `null` before its first. |
+| `revoked_at` | When it was revoked, or `null`. |
+
+## `POST /v1/devices/{id}/revoke`
+
+Admin. The device's requests are refused from now on. It stays in the list,
+with `revoked_at` set, and the answer is the device as it now stands.
+Revoking one already revoked keeps the first time. `404` with `{"error":"no
+device has that id"}` for an id that is not there.
+
+## `POST /v1/enroll-keys`
+
+Admin. Makes an **enrolment key**: a credential for machines that cannot
+wait for someone to approve a code, such as cloud sessions. It enrols
+devices with `sync` scope and nothing else: it cannot read or write memory
+itself.
+
+```json
+{ "tag": "cloud", "expires_in_days": 90, "ephemeral": true }
+```
+
+| Field | Type | Required | Notes |
+|---|---|:---:|---|
+| `tag` | string | no | A label. At most 64 characters. |
+| `expires_in_days` | integer | yes | 1 to 365. There is no key that never expires. |
+| `ephemeral` | bool | no | Whether the devices it enrols are ephemeral. `false` when left out. |
+
+```json
+{
+  "id": "ek_7ufpkgr3tbilqv4w",
+  "key": "recall-ek-lcabjgjwdwpb22gc2remumv3qn3lafl6fdgfvntp733zpivc5oxq",
+  "tag": "cloud",
+  "ephemeral": true,
+  "created_at": "2026-09-23T12:04:54.382Z",
+  "expires_at": "2026-12-22T12:04:54.382Z"
+}
+```
+
+`key` is shown this once: the server keeps only its SHA-256. It starts with
+`recall-ek-` so one found in a log says what it is, followed by 256 random
+bits in lowercase base32. The reply is sent with `Cache-Control: no-store`.
+
+## `GET /v1/enroll-keys` and `POST /v1/enroll-keys/{id}/revoke`
+
+Admin. The list is every enrolment key, newest first, expired and revoked
+ones included, each as above without `key` and with `revoked_at` (`null`
+until revoked):
+
+```json
+{ "enroll_keys": [ { "id": "ek_7ufpkgr3tbilqv4w", "tag": "cloud", "ephemeral": true, "created_at": "2026-09-23T12:04:54.382Z", "expires_at": "2026-12-22T12:04:54.382Z", "revoked_at": null } ] }
+```
+
+Revoking one stops it enrolling anything more and answers with the key as it
+now stands. Devices it already enrolled keep working; revoke those one by
+one. `404` with `{"error":"no enrolment key has that id"}` for an id that
+is not there.
 
 ---
 

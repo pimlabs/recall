@@ -55,9 +55,15 @@ check "discovery needs no token" "200" \
 check "discovery's top-level keys" 'protocol server min_client auth capabilities' \
   "$(curl -s "$URL/.well-known/recall" | python3 -c '
 import json,sys; print(" ".join(json.load(sys.stdin).keys()))')"
-check "discovery's capabilities" 'limits merge_base scopes' \
+check "discovery's capabilities" 'devices limits merge_base scopes' \
   "$(curl -s "$URL/.well-known/recall" | python3 -c '
 import json,sys; print(" ".join(json.load(sys.stdin)["capabilities"].keys()))')"
+check "discovery's auth methods" 'bearer device-sig-v1' \
+  "$(curl -s "$URL/.well-known/recall" | python3 -c '
+import json,sys; print(" ".join(json.load(sys.stdin)["auth"]["methods"]))')"
+check "the devices capability" '{"enroll_path": "/v1/devices/enroll", "code_ttl_seconds": 900, "poll_interval_seconds": 5, "signature_window_seconds": 60}' \
+  "$(curl -s "$URL/.well-known/recall" | python3 -c '
+import json,sys; print(json.dumps(json.load(sys.stdin)["capabilities"]["devices"]))')"
 check "discovery's protocol" '{"current": 1, "supported": [1]}' \
   "$(curl -s "$URL/.well-known/recall" | python3 -c '
 import json,sys; print(json.dumps(json.load(sys.stdin)["protocol"]))')"
@@ -151,6 +157,88 @@ import json,sys
 print(" ".join(json.load(open(sys.argv[1]))["projects"][0].keys()))' "$WORK/stats.json")"
 check "admin stats is read-only" "404" \
   "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${auth[@]}" "$URL/admin/stats")"
+
+echo "Devices"
+# RFC 9421's test-key-ed25519 (Appendix B.1.4): a valid key, and a public one.
+KEY=JrQLj5P_89iXES9-vFgrIy29clF9CC_oPPsw3c5D0bs
+json=(-H 'Content-Type: application/json')
+enroll() { # name, [extra JSON members]
+  curl -s -X POST "${json[@]}" \
+    -d "{\"name\":\"$1\",\"public_key\":\"$KEY\",\"agent\":\"doc-check\"${2:-}}" "$URL/v1/devices/enroll"
+}
+poll() { # enrollment_id
+  curl -s -X POST "${json[@]}" -d "{\"enrollment_id\":\"$1\"}" "$URL/v1/devices/enroll/poll"
+}
+field() { # file, key
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$1" "$2"
+}
+keys() { # file
+  python3 -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1])).keys()))' "$1"
+}
+
+enroll laptop >"$WORK/enroll.json"
+check "enrolling needs no token, and answers with a code" 'enrollment_id user_code expires_in interval' \
+  "$(keys "$WORK/enroll.json")"
+check "the code is eight consonants with a hyphen" 'True' \
+  "$(python3 -c '
+import json,re,sys
+print(bool(re.fullmatch(r"[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}", json.load(open(sys.argv[1]))["user_code"])))' "$WORK/enroll.json")"
+check "fifteen minutes, polled every five seconds" '900 5' \
+  "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["expires_in"], d["interval"])' "$WORK/enroll.json")"
+ENROLLMENT=$(field "$WORK/enroll.json" enrollment_id)
+CODE=$(field "$WORK/enroll.json" user_code)
+check "a bad public key is 400" '{"error":"public_key must be an Ed25519 public key: 32 bytes, base64url without padding"}' \
+  "$(curl -s -X POST "${json[@]}" -d '{"name":"x","public_key":"nope"}' "$URL/v1/devices/enroll")"
+check "polling before approval: authorization_pending" '400 {"error":"authorization_pending"}' \
+  "$(curl -s -w ' %{http_code}' -X POST "${json[@]}" -d "{\"enrollment_id\":\"$ENROLLMENT\"}" \
+     "$URL/v1/devices/enroll/poll" | awk '{print $2, $1}')"
+check "polling again at once: slow_down" '{"error":"slow_down"}' "$(poll "$ENROLLMENT")"
+check "an unknown enrollment_id: invalid_grant" '{"error":"invalid_grant"}' "$(poll enr_unknown)"
+check "approving needs a token" '{"error":"unauthorized"}' \
+  "$(curl -s -X POST "${json[@]}" -d "{\"user_code\":\"$CODE\"}" "$URL/v1/devices/approve")"
+curl -s -X POST "${auth[@]}" "${json[@]}" -d "{\"user_code\":\"$CODE\"}" \
+  "$URL/v1/devices/approve" >"$WORK/device.json"
+check "approving answers with the device" \
+  'id name scope ephemeral agent fingerprint public_key enroll_key_id created_at last_seen revoked_at' \
+  "$(keys "$WORK/device.json")"
+check "approved with sync scope unless asked" 'sync' "$(field "$WORK/device.json" scope)"
+DEVICE=$(field "$WORK/device.json" id)
+check "the poll after approval: the device" "{\"device_id\":\"$DEVICE\",\"scope\":\"sync\"}" "$(poll "$ENROLLMENT")"
+check "a code is approved once" '409' \
+  "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${auth[@]}" "${json[@]}" \
+     -d "{\"user_code\":\"$CODE\"}" "$URL/v1/devices/approve")"
+
+enroll phone >"$WORK/enroll2.json"
+curl -s -X POST "${auth[@]}" "${json[@]}" -d "{\"user_code\":\"$(field "$WORK/enroll2.json" user_code)\"}" \
+  "$URL/v1/devices/deny" >/dev/null
+check "a denied enrolment: access_denied" '{"error":"access_denied"}' \
+  "$(poll "$(field "$WORK/enroll2.json" enrollment_id)")"
+
+check "listing devices needs a token" '401' \
+  "$(curl -s -o /dev/null -w '%{http_code}' "$URL/v1/devices")"
+check "listing devices" "$DEVICE" \
+  "$(curl -s "${auth[@]}" "$URL/v1/devices" | python3 -c '
+import json,sys; print(" ".join(d["id"] for d in json.load(sys.stdin)["devices"]))')"
+
+curl -s -X POST "${auth[@]}" "${json[@]}" -d '{"tag":"cloud","expires_in_days":90,"ephemeral":true}' \
+  "$URL/v1/enroll-keys" >"$WORK/key.json"
+check "an enrolment key is shown once, with its prefix" 'True' \
+  "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["key"].startswith("recall-ek-"))' "$WORK/key.json")"
+check "the list never shows it again" 'False' \
+  "$(curl -s "${auth[@]}" "$URL/v1/enroll-keys" | python3 -c '
+import json,sys; print("key" in json.load(sys.stdin)["enroll_keys"][0])')"
+check "enrolling with the key is approved at once" 'device_id scope ephemeral' \
+  "$(enroll cloud ",\"enroll_key\":\"$(field "$WORK/key.json" key)\"" | python3 -c '
+import json,sys; print(" ".join(json.load(sys.stdin).keys()))')"
+curl -s -X POST "${auth[@]}" "$URL/v1/enroll-keys/$(field "$WORK/key.json" id)/revoke" >/dev/null
+check "a revoked key enrols nothing" '{"error":"unauthorized: this enrolment key has been revoked"}' \
+  "$(enroll cloud ",\"enroll_key\":\"$(field "$WORK/key.json" key)\"")"
+check "revoking a device stamps revoked_at" 'True' \
+  "$(curl -s -X POST "${auth[@]}" "$URL/v1/devices/$DEVICE/revoke" | python3 -c '
+import json,sys; print(json.load(sys.stdin)["revoked_at"] is not None)')"
+check "a signature from an unknown device is 401" '{"error":"unauthorized: unknown device"}' \
+  "$(curl -s -H 'Signature-Input: sig1=("@method");keyid="dev_nobody";created=1;nonce="n"' \
+     -H 'Signature: sig1=:AAAA:' "$URL/sync?project_key=a/b")"
 
 echo "Rate limiting"
 RL_PORT=8932

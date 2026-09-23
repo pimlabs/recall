@@ -14,4 +14,9 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+# Request signatures: Ed25519 keys, and the base64 their encodings use.
+# Here rather than in each half so the client and the server sign and
+# verify with one implementation.
+base64.workspace = true
+ed25519-dalek.workspace = true
 

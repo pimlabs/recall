@@ -4,16 +4,22 @@
 # crates/recall-wire/tests/golden.rs.
 #
 #   ./scripts/capture-wire-fixtures.sh 0.4.0
+#   ./scripts/capture-wire-fixtures.sh 0.4.1 target/release/recall-server
 #
 # Downloads that version's release archive for this machine (the server's
 # own, from 0.4.0), runs its server on a scratch database, and saves each
 # response into crates/recall-wire/fixtures/wire/<version>/. A file that already exists is
 # left alone: a shipped fixture is never rewritten, see the README there.
 # Request fixtures are not captured here; they are written from the
-# client's PushRequest at that tag.
+# wire types at that tag.
+#
+# With a second argument, that local recall-server binary is run instead of
+# downloading one: how a version's fixtures are captured from a development
+# build before it is released.
 set -u
 
-VERSION="${1:?usage: capture-wire-fixtures.sh <version>}"
+VERSION="${1:?usage: capture-wire-fixtures.sh <version> [recall-server binary]}"
+LOCAL_BIN="${2:-}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="$REPO_ROOT/crates/recall-wire/fixtures/wire/$VERSION"
 PORT=8932
@@ -46,10 +52,15 @@ case "$(uname -s)-$(uname -m)" in
   *) echo "no release archive for $(uname -s)-$(uname -m)" >&2; exit 1 ;;
 esac
 
-curl -sSfL -o "$WORK/a.tar.gz" \
-  "https://github.com/pimlabs/recall/releases/download/v$VERSION/$ASSET.tar.gz" || exit 1
-tar -xzf "$WORK/a.tar.gz" -C "$WORK"
-BIN="$WORK/$ASSET"
+if [ -n "$LOCAL_BIN" ]; then
+  BIN="$LOCAL_BIN"
+  SERVE=""
+else
+  curl -sSfL -o "$WORK/a.tar.gz" \
+    "https://github.com/pimlabs/recall/releases/download/v$VERSION/$ASSET.tar.gz" || exit 1
+  tar -xzf "$WORK/a.tar.gz" -C "$WORK"
+  BIN="$WORK/$ASSET"
+fi
 "$BIN" version
 
 # $SERVE is deliberately unquoted: empty for recall-server, which takes no
@@ -108,4 +119,86 @@ if [ ! -e "$OUT/discovery.json" ]; then
   else
     echo "skipped  $OUT/discovery.json (HTTP $code)"
   fi
+fi
+
+# Devices, from the version that added them (0.4.1): a server that does not
+# list the capability has none of these routes. One enrolment is followed
+# through, so each response is a real one from the step before. The public
+# key is RFC 9421's test-key-ed25519 (Appendix B.1.4): a valid key whose
+# private half is published, so nothing here is anyone's secret, and the
+# ids and the enrolment key come from a scratch database deleted on exit.
+if curl -s "$URL/.well-known/recall" | grep -q '"devices"'; then
+  KEY=JrQLj5P_89iXES9-vFgrIy29clF9CC_oPPsw3c5D0bs
+  JSON="Content-Type: application/json"
+  AGENT="recall/$VERSION (linux-x86_64)"
+
+  # fetch <name> <curl args...>: the body into $WORK/<name>, the status
+  # into $WORK/<name>.code.
+  fetch() {
+    local name=$1
+    shift
+    curl -s -o "$WORK/$name" -w '%{http_code}' "$@" >"$WORK/$name.code"
+  }
+  # keep <fixture> <name>: as save above, for a response already fetched.
+  keep() {
+    local file="$OUT/$1" code
+    code=$(cat "$WORK/$2.code")
+    if [ -e "$file" ]; then
+      echo "kept     $file"
+      return
+    fi
+    case "$code" in
+      2?? | 4??) cp "$WORK/$2" "$file"; echo "captured $file ($code)" ;;
+      *) echo "skipped  $file (HTTP $code)" ;;
+    esac
+  }
+  field() {
+    python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$WORK/$1" "$2"
+  }
+
+  fetch enroll -X POST -H "$JSON" \
+    -d "{\"name\":\"laptop\",\"public_key\":\"$KEY\",\"agent\":\"$AGENT\"}" \
+    "$URL/v1/devices/enroll"
+  keep enroll_response_pending.json enroll
+  ENROLLMENT=$(field enroll enrollment_id)
+
+  # Before anyone approves it: RFC 8628's authorization_pending.
+  fetch pending -X POST -H "$JSON" -d "{\"enrollment_id\":\"$ENROLLMENT\"}" \
+    "$URL/v1/devices/enroll/poll"
+  keep enroll_poll_error.json pending
+
+  fetch approve -X POST -H "$AUTH" -H "$JSON" \
+    -d "{\"user_code\":\"$(field enroll user_code)\",\"scope\":\"sync\"}" \
+    "$URL/v1/devices/approve"
+  keep device_approve_response.json approve
+
+  fetch polled -X POST -H "$JSON" -d "{\"enrollment_id\":\"$ENROLLMENT\"}" \
+    "$URL/v1/devices/enroll/poll"
+  keep enroll_poll_response.json polled
+
+  fetch enroll2 -X POST -H "$JSON" \
+    -d "{\"name\":\"phone\",\"public_key\":\"$KEY\",\"agent\":\"$AGENT\"}" \
+    "$URL/v1/devices/enroll"
+  fetch deny -X POST -H "$AUTH" -H "$JSON" -d "{\"user_code\":\"$(field enroll2 user_code)\"}" \
+    "$URL/v1/devices/deny"
+  keep device_deny_response.json deny
+
+  fetch key -X POST -H "$AUTH" -H "$JSON" -d '{"tag":"cloud","expires_in_days":90,"ephemeral":true}' \
+    "$URL/v1/enroll-keys"
+  keep enroll_key_create_response.json key
+
+  fetch approved -X POST -H "$JSON" \
+    -d "{\"name\":\"cloud-session\",\"public_key\":\"$KEY\",\"agent\":\"$AGENT\",\"enroll_key\":\"$(field key key)\"}" \
+    "$URL/v1/devices/enroll"
+  keep enroll_response_approved.json approved
+
+  fetch devices -H "$AUTH" "$URL/v1/devices"
+  keep device_list_response.json devices
+  fetch keys -H "$AUTH" "$URL/v1/enroll-keys"
+  keep enroll_key_list_response.json keys
+
+  fetch key_revoked -X POST -H "$AUTH" "$URL/v1/enroll-keys/$(field key id)/revoke"
+  keep enroll_key_revoke_response.json key_revoked
+  fetch device_revoked -X POST -H "$AUTH" "$URL/v1/devices/$(field approve id)/revoke"
+  keep device_revoke_response.json device_revoked
 fi

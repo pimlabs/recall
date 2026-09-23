@@ -31,7 +31,11 @@ pub fn now() -> String {
     format_timestamp(OffsetDateTime::now_utc())
 }
 
-fn format_timestamp(at: OffsetDateTime) -> String {
+/// [`now`]'s format, for a moment other than now: an expiry, or the
+/// cut-off a sweep compares against. Being one fixed-width format, two of
+/// these compare as strings in the same order as the times they name, which
+/// is what lets SQLite compare them.
+pub(crate) fn format_timestamp(at: OffsetDateTime) -> String {
     // `[subsecond digits:3]` is load-bearing: it must render actual
     // milliseconds, not three literal zeroes.
     let fmt = time::macros::format_description!(
@@ -42,9 +46,21 @@ fn format_timestamp(at: OffsetDateTime) -> String {
         .expect("the timestamp format is a compile-time constant")
 }
 
+/// Reads a timestamp [`now`] wrote. [`None`] for anything else.
+pub(crate) fn parse_timestamp(text: &str) -> Option<OffsetDateTime> {
+    OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timestamps_read_back_to_the_same_moment() {
+        let at = OffsetDateTime::from_unix_timestamp_nanos(1_788_472_195_191_000_000).unwrap();
+        assert_eq!(parse_timestamp(&format_timestamp(at)), Some(at));
+        assert_eq!(parse_timestamp("yesterday"), None);
+    }
 
     #[test]
     fn timestamps_match_javascripts_toisostring() {

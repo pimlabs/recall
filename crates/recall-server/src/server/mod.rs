@@ -6,15 +6,19 @@
 //! |---|---|
 //! | `GET /health` | none — uptime tooling holds no secret |
 //! | `GET /admin` | none — static markup, no data |
-//! | `POST /sync`, `GET /sync`, `GET /admin/stats` | bearer token |
+//! | `GET /.well-known/recall` | none — a client asks before it can authenticate |
+//! | `POST /sync`, `GET /sync`, `GET /admin/stats` | bearer token, or any device's signature |
+//! | `POST /v1/devices/enroll`, `POST /v1/devices/enroll/poll` | none, but rate limited |
+//! | the rest of `/v1/devices`, and `/v1/enroll-keys` | bearer token, or an admin device's signature |
 //! | anything else | 404 JSON |
 //!
 //! This module owns the shared state, the router, and the background jobs.
-//! The four things it wires together are private submodules, each living
-//! next to its own tests: `middleware.rs` (rate limiting, then auth),
-//! `handlers.rs` (one function per route), `respond.rs` (the JSON shape of
-//! every reply, errors included) and `limit.rs` (the per-IP window the
-//! middleware consults).
+//! What it wires together are private submodules, each living next to its
+//! own tests: `middleware.rs` (rate limiting, then the protocol check, then
+//! auth), `auth.rs` (device signatures and the replay cache),
+//! `handlers.rs` (one function per route), `devices.rs` (the device
+//! routes), `respond.rs` (the JSON shape of every reply, errors included)
+//! and `limit.rs` (the per-IP window the middleware consults).
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -24,27 +28,40 @@ use anyhow::{Context, Result};
 use axum::extract::DefaultBodyLimit;
 // Imported by name because this module has a `middleware` of its own, and
 // an unqualified `middleware::` would resolve to that one.
-use axum::middleware::from_fn_with_state;
-use axum::routing::get;
+use axum::middleware::{from_fn, from_fn_with_state};
+use axum::routing::{get, post};
 use axum::Router;
+use recall_wire::devices as paths;
 use recall_wire::MergeError;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
 use crate::merge::{Merger, Status};
-use crate::{now, Config, Store};
+use crate::{format_timestamp, now, Config, Store};
 
+mod auth;
+mod devices;
 mod handlers;
 mod limit;
 mod middleware;
 mod respond;
 
+use auth::ReplayCache;
+use devices::{
+    handle_approve, handle_create_enroll_key, handle_deny, handle_enroll, handle_list_devices,
+    handle_list_enroll_keys, handle_poll, handle_revoke_device, handle_revoke_enroll_key,
+};
 use handlers::{
     handle_admin_page, handle_admin_stats, handle_discovery, handle_health, handle_pull,
     handle_push, not_found,
 };
 use limit::RateLimiter;
-use middleware::guard;
+use middleware::{admin_only, guard, limited};
+
+/// How often idle ephemeral devices and long-expired enrolments are swept
+/// away. Removal is at most this late, which against a TTL counted in
+/// hours is nothing.
+const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 /// Bounds a single push. Memory files are prose; anything this large is a
 /// bug or an attack, not a note.
@@ -64,6 +81,7 @@ struct AppState {
     started_at: String,
     runtime: RwLock<Runtime>,
     limiter: RateLimiter,
+    replay: ReplayCache,
 }
 
 impl AppState {
@@ -98,6 +116,7 @@ impl Server {
                     claude_status: Status::default(),
                 }),
                 limiter,
+                replay: ReplayCache::new(),
             }),
         }
     }
@@ -106,6 +125,44 @@ impl Server {
     /// it without real sockets.
     pub fn router(&self) -> Router {
         let state = self.state.clone();
+        // Managing devices: authenticated, then held to the admin scope.
+        // The last layer added runs first, so `guard` has put the caller
+        // in place by the time `admin_only` looks for it.
+        let admin = Router::new()
+            .route(
+                paths::DEVICES_PATH,
+                get(handle_list_devices).fallback(not_found),
+            )
+            .route(
+                paths::APPROVE_PATH,
+                post(handle_approve).fallback(not_found),
+            )
+            .route(paths::DENY_PATH, post(handle_deny).fallback(not_found))
+            .route(
+                "/v1/devices/{id}/revoke",
+                post(handle_revoke_device).fallback(not_found),
+            )
+            .route(
+                paths::ENROLL_KEYS_PATH,
+                get(handle_list_enroll_keys)
+                    .post(handle_create_enroll_key)
+                    .fallback(not_found),
+            )
+            .route(
+                "/v1/enroll-keys/{id}/revoke",
+                post(handle_revoke_enroll_key).fallback(not_found),
+            )
+            .route_layer(from_fn(admin_only))
+            .route_layer(from_fn_with_state(state.clone(), guard));
+        // Enrolling: a machine has no credential yet, so no auth, but the
+        // same rate limit and protocol check as everything else.
+        let enrolment = Router::new()
+            .route(paths::ENROLL_PATH, post(handle_enroll).fallback(not_found))
+            .route(
+                paths::ENROLL_POLL_PATH,
+                post(handle_poll).fallback(not_found),
+            )
+            .route_layer(from_fn_with_state(state.clone(), limited));
         Router::new()
             // Go's mux dispatched every method through one guarded handler
             // and 404'd the ones it didn't implement; the method fallbacks
@@ -117,8 +174,10 @@ impl Server {
             )
             .route("/admin/stats", get(handle_admin_stats).fallback(not_found))
             // Registered before the layer, so only these two routes are
-            // rate limited and authenticated.
+            // rate limited and authenticated here.
             .route_layer(from_fn_with_state(state.clone(), guard))
+            .merge(admin)
+            .merge(enrolment)
             .route("/health", get(handle_health).fallback(not_found))
             .route(
                 recall_wire::DISCOVERY_PATH,
@@ -155,11 +214,35 @@ impl Server {
         run_backup(&self.state);
     }
 
+    /// Removes ephemeral devices idle for longer than
+    /// [`Config::ephemeral_device_ttl`], and enrolments that expired over
+    /// an hour ago. Answers how many of each went.
+    pub fn sweep_devices(&self) -> Result<(usize, usize)> {
+        sweep_devices(&self.state)
+    }
+
     /// Starts background work: the first Claude CLI status check, its
-    /// refresh loop, and backups. All of it is best-effort — none of it may
-    /// take the sync API down.
+    /// refresh loop, backups, and the device sweep. All of it is
+    /// best-effort — none of it may take the sync API down.
     pub fn start_background(&self) -> Vec<JoinHandle<()>> {
         let mut tasks = Vec::new();
+        {
+            let state = self.state.clone();
+            tasks.push(tokio::spawn(async move {
+                loop {
+                    let s = state.clone();
+                    match tokio::task::spawn_blocking(move || sweep_devices(&s)).await {
+                        Ok(Ok((0, 0))) => {}
+                        Ok(Ok((devices, enrollments))) => eprintln!(
+                            "removed {devices} idle ephemeral devices and {enrollments} expired enrolments"
+                        ),
+                        Ok(Err(e)) => eprintln!("device sweep failed: {e:#}"),
+                        Err(_) => {}
+                    }
+                    tokio::time::sleep(SWEEP_EVERY).await;
+                }
+            }));
+        }
         if self.state.cfg.merge_enabled {
             let state = self.state.clone();
             tasks.push(tokio::spawn(async move {
@@ -219,6 +302,14 @@ impl Server {
         }
         result.map_err(Into::into)
     }
+}
+
+fn sweep_devices(state: &AppState) -> Result<(usize, usize)> {
+    let now = time::OffsetDateTime::now_utc();
+    state.store.sweep_devices(
+        &format_timestamp(now - state.cfg.ephemeral_device_ttl),
+        &format_timestamp(now - devices::EXPIRED_ENROLLMENT_KEPT),
+    )
 }
 
 fn run_backup(state: &AppState) {

@@ -22,7 +22,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use recall_wire::{
-    AdminStats, Discovery, ErrorResponse, Health, PushRequest, PushResponse, SyncResponse,
+    AdminStats, ApproveRequest, DenyRequest, DenyResponse, Device, DeviceList, Discovery,
+    EnrollApproved, EnrollKey, EnrollKeyCreated, EnrollKeyList, EnrollKeyRequest, EnrollPending,
+    EnrollPollRequest, EnrollPollResponse, EnrollRequest, ErrorResponse, Health, PushRequest,
+    PushResponse, SyncResponse,
 };
 use serde_json::Value;
 
@@ -72,7 +75,35 @@ fn round_trip(kind: &str, bytes: &[u8]) -> Result<Value, String> {
         "health" => go::<Health>(bytes),
         "admin_stats" => go::<AdminStats>(bytes),
         "error" => go::<ErrorResponse>(bytes),
-        "discovery" => go::<Discovery>(bytes),
+        "discovery" => {
+            // The devices capability is typed; a document that lists it
+            // must list one this build can read.
+            let doc: Discovery = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+            if doc.can(recall_wire::discovery::CAPABILITY_DEVICES) && doc.devices().is_none() {
+                return Err("the devices capability does not read".to_string());
+            }
+            serde_json::to_value(doc).map_err(|e| e.to_string())
+        }
+        "enroll_request" | "enroll_request_with_key" => {
+            let req: EnrollRequest = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+            req.validate().map_err(|e| e.to_string())?;
+            serde_json::to_value(req).map_err(|e| e.to_string())
+        }
+        "enroll_response_pending" => go::<EnrollPending>(bytes),
+        "enroll_response_approved" => go::<EnrollApproved>(bytes),
+        "enroll_poll_request" => go::<EnrollPollRequest>(bytes),
+        "enroll_poll_response" => go::<EnrollPollResponse>(bytes),
+        // RFC 8628's error codes travel in the one error shape.
+        "enroll_poll_error" => go::<ErrorResponse>(bytes),
+        "device_approve_request" => go::<ApproveRequest>(bytes),
+        "device_approve_response" | "device_revoke_response" => go::<Device>(bytes),
+        "device_deny_request" => go::<DenyRequest>(bytes),
+        "device_deny_response" => go::<DenyResponse>(bytes),
+        "device_list_response" => go::<DeviceList>(bytes),
+        "enroll_key_create_request" => go::<EnrollKeyRequest>(bytes),
+        "enroll_key_create_response" => go::<EnrollKeyCreated>(bytes),
+        "enroll_key_list_response" => go::<EnrollKeyList>(bytes),
+        "enroll_key_revoke_response" => go::<EnrollKey>(bytes),
         other => Err(format!("no type is known for the fixture kind {other:?}")),
     }
 }
@@ -147,6 +178,23 @@ fn every_kind_has_a_fixture() {
         "admin_stats",
         "error",
         "discovery",
+        "enroll_request",
+        "enroll_request_with_key",
+        "enroll_response_pending",
+        "enroll_response_approved",
+        "enroll_poll_request",
+        "enroll_poll_response",
+        "enroll_poll_error",
+        "device_approve_request",
+        "device_approve_response",
+        "device_deny_request",
+        "device_deny_response",
+        "device_list_response",
+        "device_revoke_response",
+        "enroll_key_create_request",
+        "enroll_key_create_response",
+        "enroll_key_list_response",
+        "enroll_key_revoke_response",
     ] {
         assert!(
             all.iter().any(|(_, k, _)| k == kind),
