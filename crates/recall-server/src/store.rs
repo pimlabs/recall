@@ -16,6 +16,12 @@ use rusqlite::{Connection, OptionalExtension};
 
 use crate::now;
 
+mod devices;
+
+pub use devices::{
+    plain_name, Created, Decision, Inserted, NewAuthkey, NewDevice, NewEnrollment, Poll, Waiting,
+};
+
 /// Frozen: an already-deployed database was created with exactly this.
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS memory_files (
@@ -104,6 +110,12 @@ impl Store {
                 [],
             )?;
         }
+
+        // Tables of their own, beside memory_files rather than in it, so a
+        // server from before devices existed still opens this file and
+        // simply never looks at them: rolling back stays a matter of
+        // starting the older image.
+        conn.execute_batch(devices::SCHEMA)?;
         Ok(())
     }
 

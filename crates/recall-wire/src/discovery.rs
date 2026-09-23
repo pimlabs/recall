@@ -63,6 +63,19 @@ impl Discovery {
     pub fn can(&self, name: &str) -> bool {
         self.capabilities.contains_key(name)
     }
+
+    /// Whether the server accepts the authentication method `name`, such
+    /// as [`AUTH_DEVICE_SIG`].
+    pub fn accepts(&self, name: &str) -> bool {
+        self.auth.methods.iter().any(|m| m == name)
+    }
+
+    /// The [`CAPABILITY_DEVICES`] capability, read into its type. [`None`]
+    /// when the server does not list it, and also when it lists one this
+    /// build cannot read, which is the same answer: a client cannot use it.
+    pub fn devices(&self) -> Option<crate::DevicesCapability> {
+        serde_json::from_value(self.capabilities.get(CAPABILITY_DEVICES)?.clone()).ok()
+    }
 }
 
 /// The protocol versions a server speaks.
@@ -106,6 +119,14 @@ pub struct Auth {
 
 /// The one shared bearer token, `RECALL_TOKEN`.
 pub const AUTH_BEARER: &str = "bearer";
+
+/// Requests signed by an enrolled device's key: see
+/// [`crate::signature`].
+pub const AUTH_DEVICE_SIG: &str = "device-sig-v1";
+
+/// The capability a server lists when it enrols devices; its parameters
+/// are a [`crate::DevicesCapability`].
+pub const CAPABILITY_DEVICES: &str = "devices";
 
 /// A build made by the release workflow from a release tag.
 pub const CHANNEL_RELEASE: &str = "release";
@@ -329,6 +350,38 @@ mod tests {
         assert!(doc.speaks(1) && doc.speaks(2) && !doc.speaks(3));
         assert!(doc.can("merge_base") && doc.can("telepathy"));
         assert!(!doc.can("scopes"));
+        assert!(doc.accepts(AUTH_DEVICE_SIG) && doc.accepts(AUTH_BEARER));
+        assert!(!doc.accepts("passkey"));
+        assert_eq!(doc.devices(), None, "not listed, so not supported");
+    }
+
+    /// A devices capability with keys this build has never heard of still
+    /// reads; one missing a key it needs does not, and so is unusable.
+    #[test]
+    fn the_devices_capability_reads_into_its_type() {
+        let mut doc: Discovery = serde_json::from_str(
+            r#"{
+                "protocol": {"current": 1, "supported": [1]},
+                "server": {"version": "0.4.1", "build": {"channel": "release"}},
+                "min_client": "0.1.0",
+                "auth": {"methods": ["bearer", "device-sig-v1"]},
+                "capabilities": {"devices": {
+                    "enroll_path": "/v1/devices/enroll", "code_ttl_seconds": 900,
+                    "poll_interval_seconds": 5, "signature_window_seconds": 60,
+                    "passkeys": {}
+                }}
+            }"#,
+        )
+        .unwrap();
+        let devices = doc.devices().unwrap();
+        assert_eq!(devices.enroll_path, "/v1/devices/enroll");
+        assert_eq!(devices.signature_window_seconds, 60);
+
+        doc.capabilities.insert(
+            CAPABILITY_DEVICES.into(),
+            serde_json::json!({"enroll_path": "/x"}),
+        );
+        assert_eq!(doc.devices(), None);
     }
 
     #[test]

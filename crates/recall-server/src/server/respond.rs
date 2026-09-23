@@ -24,3 +24,35 @@ pub(super) fn error(status: StatusCode, message: &str) -> Response {
 pub(super) fn internal(e: anyhow::Error) -> Response {
     error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
 }
+
+/// An error reply before it becomes one: its status and its message.
+///
+/// The helpers that decide a request must be refused pass this back in a
+/// `Result`, rather than the finished `Response`, which is several times
+/// larger and would be copied through every `?` on the way out. It turns
+/// into exactly what [`error`] sends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Refusal {
+    status: StatusCode,
+    message: String,
+}
+
+impl Refusal {
+    pub(super) fn new(status: StatusCode, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            message: message.into(),
+        }
+    }
+
+    /// What [`internal`] sends.
+    pub(super) fn internal(e: anyhow::Error) -> Self {
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    }
+}
+
+impl IntoResponse for Refusal {
+    fn into_response(self) -> Response {
+        error(self.status, &self.message)
+    }
+}

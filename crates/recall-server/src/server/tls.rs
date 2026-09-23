@@ -12,9 +12,12 @@
 //! by the time a [`TlsMode`] reaches [`prepare`], `RECALL_TRUSTED_IP_HEADER`
 //! has already been forced empty (or refused the server outright, if it
 //! named a header), so the client IP the rate limiter sees is always the
-//! raw TCP peer address `axum-server` hands to `ConnectInfo`, the same as
-//! it would be with no header configured at all. Nothing in this module
-//! reads a header for that purpose.
+//! raw TCP peer address `axum-server` hands to `ConnectInfo`, counted the
+//! same way as it would be with no header configured at all (through
+//! `middleware.rs`'s one `bucket` function, so an IPv6 peer is its /64 and
+//! an IPv4-mapped one its IPv4 address). Nothing in this module reads a
+//! header for that purpose, and [`serve`] serves the same router, every
+//! route group and auth layer included, that plain HTTP does.
 //!
 //! What this module does own is the connection hardening an ingress would
 //! otherwise have provided, since here the socket is the internet's to open:

@@ -632,7 +632,7 @@ arriving new**, and **it has to stay cheap**.
       image installs the release's own `recall-server` binary. The image itself
       is still assembled on the server.
 
-- [ ] **Setting up the off-box backup is eight manual steps and a trap.**
+- [x] **Setting up the off-box backup is eight manual steps and a trap.**
       Two `rclone config` invocations, a crypt password that must be stored
       outside the machine before anything else happens, a write-read test, a
       first copy, and a crontab line — where the rclone config and the crontab
@@ -656,6 +656,12 @@ arriving new**, and **it has to stay cheap**.
       problem is the *setup*, so the fix guides the setup and leaves the
       runtime where it is. If a platform without cron ever matters, the answer
       is a sidecar container with its own `env_file`, not code in the server.
+
+      Shipped as `deploy/backup-offbox.sh init` rather than `recall backup
+      init`: the uploader already lives outside the server on purpose, and a
+      `recall` subcommand would need the client to carry rclone-shaped
+      provider logic it only ever runs from a VPS shell, for a command it
+      already had a home in. See "Off-box" in `deploy/README.md`.
 
 - [ ] **The admin surface can read but not write, and the write path is forty
       lines of hand-written SQL.** `GET /admin` serves a page that asks for a

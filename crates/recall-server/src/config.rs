@@ -104,6 +104,7 @@ pub enum ConfigError {
 /// | [`merge_timeout`] | `RECALL_MERGE_TIMEOUT_MS` | 45s |
 /// | [`claude_bin`] | `RECALL_CLAUDE_BIN` | `claude` |
 /// | [`claude_status_interval`] | `RECALL_CLAUDE_STATUS_INTERVAL_MS` | 30m |
+/// | [`ephemeral_device_ttl`] | `RECALL_EPHEMERAL_DEVICE_TTL_HOURS` | 24h |
 /// | [`tls`] | `RECALL_TLS_CERT`/`RECALL_TLS_KEY`, or `RECALL_TLS_ACME_DOMAINS`/`RECALL_TLS_ACME_EMAIL`/`RECALL_TLS_ACME_DIR`/`RECALL_TLS_ACME_STAGING` | off |
 /// | [`tls_max_connections`] | `RECALL_TLS_MAX_CONNECTIONS` | 512 |
 ///
@@ -124,6 +125,7 @@ pub enum ConfigError {
 /// [`merge_timeout`]: Config::merge_timeout
 /// [`claude_bin`]: Config::claude_bin
 /// [`claude_status_interval`]: Config::claude_status_interval
+/// [`ephemeral_device_ttl`]: Config::ephemeral_device_ttl
 /// [`tls`]: Config::tls
 /// [`tls_max_connections`]: Config::tls_max_connections
 #[derive(Debug, Clone)]
@@ -185,6 +187,16 @@ pub struct Config {
     pub claude_bin: String,
     /// How often to re-check that the binary is present and logged in.
     pub claude_status_interval: Duration,
+
+    /// How long an ephemeral device, one a cloud session enrolled with an
+    /// ephemeral authkey, may go without a signed request before it
+    /// is removed.
+    ///
+    /// A day by default. A cloud session left open over lunch, a meeting or
+    /// a night keeps its device; a day's worth of finished sessions does
+    /// not pile up in the device list; and the key a finished session left
+    /// in its container stops working within a day of its last use.
+    pub ephemeral_device_ttl: Duration,
 
     /// Whether this server terminates TLS itself. Off by default: the two
     /// existing deployments (`deploy/docker-compose.yml`,
@@ -268,11 +280,14 @@ impl Default for Config {
             merge_timeout: Duration::from_secs(45),
             claude_bin: "claude".to_string(),
             claude_status_interval: Duration::from_secs(30 * 60),
+            ephemeral_device_ttl: DEFAULT_EPHEMERAL_DEVICE_TTL,
             tls: TlsMode::Off,
             tls_max_connections: DEFAULT_TLS_MAX_CONNECTIONS,
         }
     }
 }
+
+const DEFAULT_EPHEMERAL_DEVICE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// See [`Config::tls_max_connections`].
 const DEFAULT_TLS_MAX_CONNECTIONS: usize = 512;
@@ -417,6 +432,9 @@ impl Config {
                 "RECALL_CLAUDE_STATUS_INTERVAL_MS",
                 30 * 60_000,
             )),
+            ephemeral_device_ttl: Duration::from_secs(
+                num("RECALL_EPHEMERAL_DEVICE_TTL_HOURS", 24).saturating_mul(3600),
+            ),
             tls,
             tls_max_connections: num(
                 "RECALL_TLS_MAX_CONNECTIONS",
@@ -436,6 +454,11 @@ impl Config {
         }
         if cfg.claude_status_interval.is_zero() {
             cfg.claude_status_interval = Duration::from_secs(30 * 60);
+        }
+        // Zero would remove every ephemeral device at the next sweep,
+        // including the one whose session is running now.
+        if cfg.ephemeral_device_ttl.is_zero() {
+            cfg.ephemeral_device_ttl = DEFAULT_EPHEMERAL_DEVICE_TTL;
         }
         // A zero timeout is worse than a spinning loop: every merge would
         // hit an already-expired deadline and fail instantly, silently
@@ -509,6 +532,7 @@ mod tests {
             ("RECALL_MERGE_TIMEOUT_MS", "1234"),
             ("RECALL_CLAUDE_BIN", "/usr/bin/claude"),
             ("RECALL_CLAUDE_STATUS_INTERVAL_MS", "60000"),
+            ("RECALL_EPHEMERAL_DEVICE_TTL_HOURS", "2"),
         ]))
         .unwrap();
 
@@ -523,6 +547,7 @@ mod tests {
         assert_eq!(cfg.merge_timeout, Duration::from_millis(1234));
         assert_eq!(cfg.claude_bin, "/usr/bin/claude");
         assert_eq!(cfg.claude_status_interval, Duration::from_millis(60_000));
+        assert_eq!(cfg.ephemeral_device_ttl, Duration::from_secs(2 * 3600));
     }
 
     #[test]
@@ -554,8 +579,15 @@ mod tests {
                 ("RECALL_RATE_LIMIT_WINDOW_MS", value),
                 ("RECALL_CLAUDE_STATUS_INTERVAL_MS", value),
                 ("RECALL_MERGE_TIMEOUT_MS", value),
+                ("RECALL_EPHEMERAL_DEVICE_TTL_HOURS", value),
             ]))
             .unwrap();
+
+            assert_eq!(
+                cfg.ephemeral_device_ttl,
+                Duration::from_secs(24 * 3600),
+                "{value:?}"
+            );
 
             assert_eq!(
                 cfg.backup_interval,
