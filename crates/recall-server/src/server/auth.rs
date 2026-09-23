@@ -22,8 +22,8 @@ use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
 use recall_wire::devices::SCOPE_ADMIN;
 use recall_wire::signature::{
-    self, Received, SignatureInput, Target, LABEL, SIGNATURE_HEADER, SIGNATURE_INPUT_HEADER,
-    WINDOW_SECONDS,
+    self, Received, SignatureInput, Target, LABEL, MAX_AHEAD_SECONDS, SIGNATURE_HEADER,
+    SIGNATURE_INPUT_HEADER, WINDOW_SECONDS,
 };
 use recall_wire::Device;
 
@@ -31,11 +31,16 @@ use super::respond::Refusal;
 use super::AppState;
 use crate::{now, parse_timestamp};
 
-/// How far a signature's `created` may be from the server's clock, and so
-/// also how long its nonce is remembered for. One constant for both: a
-/// verifier that accepted a wider window than the cache remembers would
-/// accept a request again once its nonce had been forgotten.
+/// How far a signature's `created` may be behind the server's clock, and
+/// so also how long after its `created` a nonce is remembered. One
+/// constant for both: a verifier that accepted a wider window than the
+/// cache remembers would accept a request again once its nonce had been
+/// forgotten.
 pub(super) const WINDOW: u64 = WINDOW_SECONDS;
+
+/// The longest a nonce stays live: `created` may be a few seconds ahead of
+/// the clock, and is then remembered for the window after it.
+pub(super) const NONCE_LIFETIME: u64 = WINDOW + MAX_AHEAD_SECONDS;
 
 /// Who a request came from, once it is known. The auth middleware puts one
 /// in every authenticated request's extensions.
@@ -100,8 +105,9 @@ fn rejected(why: &dyn std::fmt::Display) -> Refusal {
 
 /// Everything about a signed request its headers can settle, cheapest
 /// first: they parse; the device is known and not revoked; the signature
-/// meets Recall's profile, `created` inside the window; it was not made
-/// before this server started; the signature verifies; and its nonce has
+/// meets Recall's profile, `created` inside the window; it was not made so
+/// early that the process before this one could have accepted it; the
+/// signature verifies; and its nonce has
 /// not been seen. Nothing here reads the body or records anything.
 pub(super) fn check_headers(state: &AppState, parts: &Parts) -> Result<Checked, Refusal> {
     let field = |name: &str| joined(&parts.headers, name);
@@ -158,14 +164,22 @@ pub(super) fn check_headers(state: &AppState, parts: &Parts) -> Result<Checked, 
 
     // check_profile has made sure both are there.
     let (nonce, created) = (input.nonce().unwrap_or(""), input.created().unwrap_or(0));
-    // Nonces live in memory, so a restart forgets them. A signature made
-    // before this process started could have been accepted by the one
-    // before it, so it is refused here: without this, every deploy would
-    // open one window in which the last minute's requests could be sent
-    // again.
-    if created < state.started_unix {
+    // Nonces live in memory, so a restart forgets them, and a signature
+    // the process before this one accepted must be refused here instead:
+    // without this, every deploy would open a window in which the last
+    // minute's requests could be sent again. That process judged by the
+    // same clock, in whole seconds, and stopped before this one started,
+    // so it accepted nothing dated more than MAX_AHEAD_SECONDS past this
+    // one's start. Everything dated up to then is refused, including a
+    // signature made in the very second this process started, which the
+    // one before may have accepted in that same second. The cost is that
+    // for those few seconds after a start every signature is refused, and
+    // its client signs again.
+    let settled = state.started().saturating_add(MAX_AHEAD_SECONDS as i64);
+    if created <= settled {
         return Err(rejected(
-            &"signature created before this server started; sign the request again",
+            &"signature created before this server started, or too soon after; \
+              sign the request again in a few seconds",
         ));
     }
     if state.replay.seen(keyid, nonce, now) {
@@ -292,8 +306,8 @@ impl ReplayCache {
     /// A cache for signatures checked against `window`, holding at most
     /// `per_device` live nonces for any one device.
     ///
-    /// A nonce is live for up to twice the window, since `created` may be
-    /// a window ahead of the clock. The server sizes `per_device` from the
+    /// A nonce is live for up to [`NONCE_LIFETIME`], since `created` may be
+    /// a few seconds ahead of the clock. The server sizes `per_device` from the
     /// rate limit: as many requests as one address may send in that time,
     /// which a device keeping to the limit never reaches. So one device
     /// that does, from many addresses, is refused on its own, and cannot

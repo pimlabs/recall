@@ -179,7 +179,8 @@ Signature: sig1=:…:
 ```
 
 The server looks up the key, refuses a revoked one, verifies the signature,
-requires `created` within ±60 seconds, rejects a nonce it has already seen
+requires `created` at most 60 seconds behind its clock and 5 ahead (see
+`api.md` for why ahead is so short), rejects a nonce it has already seen
 in that window (RFC 9421 §7.2.2), and records `last_seen`. No secret travels
 with the request, so a request copied out of a proxy log cannot be replayed.
 
