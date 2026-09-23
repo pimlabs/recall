@@ -518,22 +518,6 @@ without running it" is the whole claim those three make.
   second time behind a symlinked `TMPDIR` — a runner that cannot see a class
   of failure is a runner that will let it back in.
 
-## Agreed 2026-09-23: versions, devices, two binaries, encryption
-
-See `docs/design/handshake.md` for the reasoning.
-
-- [x] Part 1: the server says what it is (`GET /.well-known/recall`, protocol and version headers). PR #96.
-- [x] Part 1: golden wire fixtures, so every shape a release sent is still read. PR #97.
-- [x] Part 4: `recall-server` is its own binary; the server image holds the release's own binary; a server runs releases, not `main`. PR #98, released as 0.4.0.
-- [ ] Part 2a: device keys, RFC 9421 signed requests and device enrolment, server side. PR #100.
-- [ ] Part 2b: the client enrols during `recall connect`, signs its requests, and gains `recall devices`; cloud sessions enrol with an enrolment key.
-- [ ] Part 2c: the `/admin` page gets a Devices tab with passkey sign-in, so a phone is enough.
-- [ ] Part 5: an audit log chained with hashes; `recall-worker` runs merges and memory evaluation off the public server; client-side encryption, so the API stores ciphertext.
-- [ ] Windows client: native builds, `install.ps1`, npm, and a Git Bash check in `doctor`. PR #99.
-- [ ] winget publishing for the Windows client.
-- [ ] Optional direct TLS in `recall-server` (certificate files or ACME), for a server with no ingress in front of it.
-- Parked, not agreed: a claude.ai connector (remote MCP) for Recall memory; see the design doc's 'Future idea' section.
-
 ## Designed, not yet built (2026-09-22)
 
 Everything above this line is done. These came out of a long session spent
@@ -642,7 +626,11 @@ arriving new**, and **it has to stay cheap**.
       **Not before 0.3.0.** Publishing an image adds a step to the release
       flow, and that flow has only ever been dry-run tested since the resume
       logic was added — 0.2.0 failed partway through, twice. Adding surface to
-      a path that has never survived a real run is the wrong order. Half done in 0.4.0: the server no longer compiles anything, because the image installs the release's own `recall-server` binary; the image itself is still assembled on the server.
+      a path that has never survived a real run is the wrong order.
+
+      Half done in 0.4.0: the server no longer compiles anything, because the
+      image installs the release's own `recall-server` binary. The image itself
+      is still assembled on the server.
 
 - [ ] **Setting up the off-box backup is eight manual steps and a trap.**
       Two `rclone config` invocations, a crypt password that must be stored
@@ -833,6 +821,34 @@ arriving new**, and **it has to stay cheap**.
       what is stored — a genuinely concurrent one — is merged. A staleness
       review can therefore assume its corrections stick; it should still
       treat a `CONFLICT` marker as a finding in its own right.
+
+## Agreed 2026-09-23: versions, devices, two binaries, encryption
+
+See `docs/design/handshake.md` for the reasoning.
+
+- [x] Part 1: the server says what it is (`GET /.well-known/recall`, protocol
+      and version headers). PR #96.
+- [x] Part 1: golden wire fixtures, so every shape a release sent is still
+      read. PR #97.
+- [x] Part 4: `recall-server` is its own binary; the server image holds the
+      release's own binary; a server runs releases, not `main`. PR #98,
+      shipping as 0.4.0.
+- [ ] Part 2a: device keys, RFC 9421 signed requests and device enrolment,
+      server side. PR #100.
+- [ ] Part 2b: the client enrols during `recall connect`, signs its requests,
+      and gains `recall devices`; cloud sessions enrol with an enrolment key.
+- [ ] Part 2c: the `/admin` page gets a Devices tab with passkey sign-in, so a
+      phone is enough.
+- [ ] Part 5: an audit log chained with hashes; `recall-worker` runs merges
+      and memory evaluation off the public server; client-side encryption, so
+      the API stores ciphertext.
+- [ ] Windows client: native builds, `install.ps1`, npm, and a Git Bash check
+      in `doctor`. PR #99.
+- [ ] winget publishing for the Windows client.
+- [ ] Optional direct TLS in `recall-server` (certificate files or ACME), for
+      a server with no ingress in front of it.
+- Parked, not agreed: a claude.ai connector (remote MCP) for Recall
+  memory; see the design doc's 'Future idea' section.
 
 ## Explicitly deferred
 
