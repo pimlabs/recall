@@ -14,6 +14,21 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
+## Unreleased
+
+- **`deploy/backup-offbox.sh init` sets up the off-box backup.** It asks for
+  a provider (S3-compatible, Cloudflare R2, Backblaze B2 through S3, or an
+  existing remote you already configured) and its credentials, creates the
+  raw and `crypt` remotes non-interactively, generates and shows the crypt
+  password(s) once, runs an encrypted write-read-delete round-trip test, runs
+  the first real copy, and installs the cron line for the user actually
+  running it. It refuses, with an explanation, if `rclone config` and
+  `crontab` would end up belonging to different users, such as under `sudo`.
+  Every answer can also come from a flag or an environment variable, and
+  without a terminal it never prompts: anything missing stops it before any
+  remote is created, and names what to pass. Re-running it is safe. See
+  "Off-box" in `deploy/README.md`.
+
 ## 0.4.0 — 2026-09-23
 
 - **Breaking: the server is its own binary, `recall-server`.** `recall serve`
