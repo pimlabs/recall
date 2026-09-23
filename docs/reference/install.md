@@ -2,13 +2,13 @@
 
 This document is the **client** half: getting the binary onto a machine and
 opting projects into sync. It assumes a server already exists, because every
-step below needs a `RECALL_URL` and a `RECALL_TOKEN` that only a server can
-give you. If you do not have one yet, start at
-[`../../deploy/README.md`](../../deploy/README.md) and come back.
+step below needs a `RECALL_URL` and, for the first machine, the
+`RECALL_TOKEN` that only a server can give you. If you do not have one yet,
+start at [`../../deploy/README.md`](../../deploy/README.md) and come back.
 
 "Machine" means yours — a second laptop, a desktop, a fresh claude.ai cloud
-session. Recall is single-owner by design: one token, no accounts. Nothing
-here sets up access for anyone else.
+session. Recall is single-owner by design: your machines, no accounts.
+Nothing here sets up access for anyone else.
 
 This installs `recall`, the client. The server is a separate binary,
 `recall-server`, set up once from [`deploy/README.md`](../../deploy/README.md).
@@ -211,37 +211,138 @@ Once per machine, from inside a project you want synced:
 recall connect https://your-recall-host
 ```
 
-One question at a time, each skipped when there is nothing to ask:
+From 0.4.1 a server **enrols machines as devices**: each machine makes a
+key pair, keeps the private half, and signs every request with it instead
+of sending the shared token. `connect` does this whenever the server
+supports it. One question at a time, each skipped when there is nothing to
+ask:
 
-1. **The token**, read without echoing it and checked against the server —
-   reachable, and the token accepted. A saved token that still works is
-   kept without asking.
+1. **How this machine is approved.** Your first machine is approved with
+   the server's `RECALL_TOKEN`, read without echoing it: `connect` asks
+   before using it, and the machine becomes an **admin** device, one that
+   can approve others. Every later machine is approved from one already
+   enrolled as admin, by a code it shows (below).
 2. **This machine's name**, suggested from what is already saved, then
-   `RECALL_MACHINE_KEY`, then the hostname. It labels what this machine
-   syncs and names its machine scope (below).
-3. **Save**: the token to `~/.recall/credentials.toml`, readable by you
-   only; the server and the name to `~/.recall/config.toml`.
-4. **This project**: wire its hooks, as `recall init` does, if they are not
+   `RECALL_MACHINE_KEY`, then the hostname. It names the device, labels what
+   this machine syncs, and names its machine scope (below).
+3. **Enrolment.** The machine shows a code and its key's fingerprint:
+
+   ```
+   Enrolling this machine as mbp
+   Code         WDJB-MJHT
+   Fingerprint  SHA256:sWwtG+rRJiY5dk/bDuTTd0WZM2vUk0BM2ksRNsWfIGI
+   ```
+
+   Approved with the token, it is done at once. Otherwise, on a machine
+   enrolled as admin (or one holding `RECALL_TOKEN`), run `recall devices
+   approve WDJB-MJHT`, check it shows the same name and fingerprint, and
+   confirm. `connect` waits, polling every few seconds, for up to fifteen
+   minutes.
+4. **Save**: the device key to `~/.recall/device.key`, readable by you only;
+   the server and the name to `~/.recall/config.toml`. A token saved by an
+   earlier `connect` is removed from `~/.recall/credentials.toml`, since
+   the machine no longer sends it. The token itself keeps working on the
+   server; rotating it is the operator's call.
+5. **This project**: wire its hooks, as `recall init` does, if they are not
    already — and if it has memory from before Recall, send it, as
    `recall backfill` does.
 
-A wrong token or an unreachable server saves nothing and says which it was.
-Run it again any time — to rename the machine, after rotating the token, or
-from a second project; with the server saved, `recall connect` alone is
-enough. `recall disconnect` removes the token again.
+Against a server older than 0.4.1, which does not enrol devices, `connect`
+asks for the token instead, checks it against the server and saves it to
+`~/.recall/credentials.toml`, readable by you only, exactly as before.
+
+An unreachable server, a wrong token or an enrolment nobody approved saves
+nothing and says which it was. Run it again any time — to rename the
+machine, or from a second project; with the server saved, `recall connect`
+alone is enough, and an enrolled machine is only checked, not enrolled
+again. `recall disconnect` removes the saved token and the device key; the
+server still lists the device until you revoke it.
 
 Without a terminal it asks nothing: `--name <name>` sets the name and `--yes`
-takes the default for every question. It still needs a saved token that
-works, since a token is only ever read from a terminal — automation that
-holds the secret sets `RECALL_TOKEN` instead.
+takes the default for every question. With `--yes` and a saved token that
+works, the machine is approved with that token; with `--yes` and no token,
+it enrols and waits for someone to approve its code. Without `--yes` and
+without a terminal, a machine with a saved token keeps using it, and one
+with neither is refused: a token is only ever read from a terminal, and
+automation that holds the secret sets `RECALL_TOKEN` instead.
+
+### Why a file and not the keychain
+
+`~/.recall/device.key` is a file created `0600` in a `0700` directory, not
+the macOS Keychain or a Linux secret service, and `recall doctor` says so
+rather than warning about it. `recall push` runs on every memory write, so
+two things rule a keychain out: macOS can stop the hook with an
+authorisation dialog when the binary changes, which every upgrade does, and
+a hook has nobody to answer it; and a keychain library would add over a
+megabyte to a 3 MB client while a cloud container has no keychain at all.
+A hook that finds the file readable by other users narrows it to `0600`
+and says so, since a copy may already have been taken. On Windows the file
+is in `%USERPROFILE%\.recall`, which Windows restricts to you, SYSTEM and
+administrators; with `RECALL_HOME` outside your profile, `recall doctor`
+does not claim that protection. The reasoning and the measurements are in
+[`../design/handshake.md`](../design/handshake.md).
+
+### The owner's commands: `recall devices` and `recall authkey`
+
+On a machine enrolled as admin (or with `RECALL_TOKEN` set):
+
+```sh
+recall devices list                          # name, scope, ephemeral, last seen, agent
+recall devices approve WDJB-MJHT             # shows name, agent, fingerprint; asks first
+recall devices approve WDJB-MJHT --admin     # an admin device, which can approve others
+recall devices revoke old-laptop             # its requests are refused from now on
+recall authkey create --tag cloud --expires 90d
+recall authkey list
+recall authkey revoke ak_ecfq6bc4luadka2i
+```
+
+`approve` looks the code up first and shows the machine's name, agent and
+key fingerprint, then asks. The approval sent to the server names that
+fingerprint, so it approves exactly the key you were shown. When the
+machine's owner reads you its fingerprint, `--fingerprint SHA256:…` refuses
+a code whose key has any other. `--yes` skips the question, for scripts,
+and `--json` prints the result. A lost laptop is `recall devices revoke
+<name>`: nothing else has to change on any other machine.
 
 `RECALL_URL` and `RECALL_TOKEN` still work, and **still win** over the saved
 file when set. That is where they belong in a claude.ai cloud environment or
 CI, whose variables are a secret store; `recall connect` refuses to run in a
 cloud session at all, since the container and anything saved in it is
-discarded. On a laptop, `recall doctor` suggests moving a token out of your
-shell. See `token-setup.md` for generating the token and for what a cloud
-environment needs.
+discarded. A device key, once there is one, wins over `RECALL_TOKEN`: the
+token is then not sent at all. On a laptop, `recall doctor` warns while the
+machine still uses the shared token, and when a token is left behind that
+it no longer needs. See `token-setup.md` for generating the token and for
+what a cloud environment needs.
+
+### Cloud sessions: `RECALL_AUTHKEY`
+
+A cloud session is a new machine every time and cannot wait for anyone to
+approve a code. Give its environment an **authkey** instead of the
+token:
+
+```sh
+recall authkey create --tag cloud --expires 90d
+```
+
+The key is shown once. Put it in the cloud environment's variables as
+`RECALL_AUTHKEY`, and remove `RECALL_TOKEN` from them. At each session's
+start, `recall pull` finds no device key, enrols the session with the
+authkey (approved at once, `sync` scope, named `cloud-…`), keeps the
+key in the container, and pulls. Nothing is typed. The device is ephemeral:
+the server removes it after a day without a request, and if a session
+outlives that, its next hook enrols again once and carries on. Hooks that
+start at once enrol one device between them.
+
+A **revoked** device is different: no hook enrols again after a
+revocation, with an authkey or without one, and the key is left where it
+is. That is what makes `recall devices revoke` cut a machine off, a laptop
+that happens to have `RECALL_AUTHKEY` set included; the hook says so and
+the session still starts. A new cloud session enrols afresh, so to stop
+those too, revoke the authkey (`recall authkey revoke <id>`), which touches
+no laptop. If enrolling fails, the hook says why in one line and falls back
+to `RECALL_TOKEN` when the environment still has it; a session always
+starts. A `device.key` that cannot be read is the exception: nothing is
+sent until it is fixed or moved aside, not even the token.
 
 ## When the derived project key is wrong
 
@@ -705,7 +806,8 @@ red when memory stops syncing.
 A claude.ai cloud session runs the hooks from the repo it cloned, but
 `recall` itself has to already be on `PATH` there — it isn't part of the
 repo. Install it as part of that environment's setup, the same one-time
-place you set `RECALL_TOKEN` and `CLAUDE_CODE_REMOTE_MEMORY_DIR`:
+place you set `RECALL_AUTHKEY` (or `RECALL_TOKEN`) and
+`CLAUDE_CODE_REMOTE_MEMORY_DIR`:
 
 ```sh
 npm install -g @pimlabs/recall

@@ -196,8 +196,57 @@ body on a GET, so no request is signed without its body.
 (`signature`, `devices`) and the server's enrolment, approval, revocation,
 authkeys, signature checks and ephemeral sweep, documented in
 [`../reference/api.md`](../reference/api.md), which is now the authority for
-them. The client (`recall connect`, `recall devices`, the keychain), the
-admin page's Devices tab and passkeys are not built yet.
+them. The admin page's Devices tab and passkeys are not built yet.
+
+**Built (client side, 0.4.1):** `recall connect` enrols a machine when the
+server's discovery lists `device-sig-v1`, approving the first one with the
+operator's token after asking, as an admin device, and removing the token
+it had saved; every request is then signed with `recall_wire::signature`,
+and a machine with no device key sends the token exactly as before. `recall
+pull` enrols a cloud session with `RECALL_AUTHKEY`, and a hook refused as
+"unknown device" with an ephemeral key enrols once more when that key is
+set; one refused as "revoked" never does, so a revocation holds.
+`recall devices` has the owner commands below; `approve` looks the code up
+first and approves with the fingerprint it showed. `doctor` checks the
+device with `GET /v1/devices/me` and warns while a machine that could enrol
+still uses the shared token. [`../reference/install.md`](../reference/install.md)
+describes all of it for a user.
+
+**As built, the key is a file, not the keychain.** The sketch above keeps
+the key in the OS keychain with a `0600` file as the fallback `doctor`
+warns about. Building it turned that around: `~/.recall/device.key`, one key
+per server, created `0600` in the `0700` `~/.recall`, is the only store, and
+`doctor` states that plainly instead of warning. Two constraints decided it,
+both from the hooks: `recall push` runs on every memory write, and nobody is
+there to answer anything it asks.
+
+1. **A hook must never wait on a prompt.** macOS attaches an access list to
+   a Keychain item naming the program that created it, and a program whose
+   code signature changes, which a Homebrew, npm or curl upgrade of an
+   unsigned or ad-hoc-signed binary does, gets an authorisation dialog on
+   its next read. A hook would sit behind that dialog until Claude Code's
+   hook timeout, on every edit, after every upgrade. Linux secret services
+   can prompt to unlock a collection the same way, and a cloud container or
+   an SSH session has no secret service at all.
+2. **Hooks stay light.** Measured on linux x86_64 with the release profile,
+   a minimal tokio and reqwest binary (the client's own stack) is
+   1,779,664 bytes, and 2,946,456 with `keyring` 4.2 and its default
+   stores: **+1,166,792 bytes**, a third on top of a 3.4 MB client, for a
+   secret-service stack over D-Bus. Reading a key from the keychain there
+   failed after 2.2 ms with `NoDefaultStore`, because a headless machine
+   has no store to read, where reading the file takes 12 to 20 µs.
+   `keyring` 4.2 also needs Rust 1.88, above this workspace's 1.82.
+   macOS latency could not be measured here; its dialog is the reason
+   anyway.
+
+What the file gives up is protection from other programs running as the
+same user, which the keychain gives only partly and only without dialogs
+nobody can answer. What it keeps is what `gh` and Claude Code settle for on
+Linux: the key is readable by its owner only. On Windows the file is in
+`%USERPROFILE%\.recall`, whose access list Windows limits to the user,
+SYSTEM and Administrators; Recall adds nothing to that. DPAPI, which would
+encrypt it to the user's login without a prompt, is the obvious next step
+there, and is not built.
 
 ### Cloud sessions
 

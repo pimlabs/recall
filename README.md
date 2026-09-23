@@ -61,7 +61,7 @@ irm https://recall.pimlabs.id/install.ps1 | iex    # Windows
 
 ```sh
 cd your-project
-recall connect https://recall.yourdomain.com # the token, this machine's name, then this
+recall connect https://recall.yourdomain.com # enrols this machine, names it, then this
                                              # project: wires it and sends its memory
 git add .claude/settings.json && git commit  # so fresh clones get it too
 recall doctor                                # confirm it's actually working
@@ -74,7 +74,7 @@ further project is `recall init` and `recall backfill`, or `recall connect`
 again from inside it.
 
 **"Connect" means your own second machine**, or a fresh cloud session — not
-someone else's. Recall is single-owner by design: one token, no accounts, no
+someone else's. Recall is single-owner by design: your machines, no accounts, no
 per-user anything. See `CLAUDE.md`'s ground rules for why that is a decision
 rather than an omission.
 

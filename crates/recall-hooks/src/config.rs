@@ -42,6 +42,9 @@ pub enum ConfigError {
     /// A server, but no way to authenticate against it.
     #[error("RECALL_TOKEN must be set")]
     MissingToken,
+    /// A saved device key that cannot be read back into a key.
+    #[error("the device key saved for this server is damaged; run recall connect to enrol again")]
+    DamagedDevice,
 }
 
 /// What `recall push`, `pull`, `status` and `init` need.
@@ -49,7 +52,10 @@ pub enum ConfigError {
 /// Named for what it is — configuration — to keep it distinct from
 /// `recall_hooks::client::Client`, which is the thing that actually makes
 /// requests.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// `Debug` is written out rather than derived, so that printing one never
+/// prints the token or the authkey.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct ClientConfig {
     /// `RECALL_URL`: where the server lives. Empty when unset.
     pub url: String,
@@ -64,6 +70,18 @@ pub struct ClientConfig {
     pub credentials_file: Option<std::path::PathBuf>,
     /// `~/.recall/config.toml`, likewise.
     pub config_file: Option<std::path::PathBuf>,
+    /// `~/.recall/device.key`, likewise.
+    pub device_file: Option<std::path::PathBuf>,
+    /// This machine's device at [`ClientConfig::url`], when it is enrolled
+    /// there. With one, every request is signed with its key and
+    /// [`ClientConfig::token`] is not sent at all.
+    pub device: Option<home::DeviceEntry>,
+    /// Why `device.key` could not be used, when it exists and could not.
+    pub device_error: Option<String>,
+    /// `RECALL_AUTHKEY`: an authkey, with which a machine that has
+    /// no device key yet enrols itself, approved at once. What a cloud
+    /// environment holds instead of `RECALL_TOKEN`.
+    pub authkey: Option<String>,
     /// Why a file in `~/.recall` could not be used, when one exists and
     /// could not. Not an error here, for the reason nothing in this type is:
     /// a broken file must not stop `recall status` from saying so.
@@ -132,6 +150,68 @@ pub struct ClientConfig {
     pub claude: Env,
 }
 
+impl std::fmt::Debug for ClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Every field, taken apart, so that a new one is a compile error
+        // here rather than silently missing from what a failing test prints.
+        let ClientConfig {
+            url,
+            token,
+            url_source,
+            token_source,
+            credentials_file,
+            config_file,
+            device_file,
+            device,
+            device_error,
+            authkey,
+            credentials_error,
+            config_problems,
+            saved_machine_name,
+            saved_server,
+            source_env,
+            project_key,
+            global_key,
+            machine_key,
+            machine_source,
+            rejected_vars,
+            claude,
+        } = self;
+        f.debug_struct("ClientConfig")
+            .field("url", url)
+            .field("token", &redacted(token))
+            .field("url_source", url_source)
+            .field("token_source", token_source)
+            .field("credentials_file", credentials_file)
+            .field("config_file", config_file)
+            .field("device_file", device_file)
+            .field("device", device)
+            .field("device_error", device_error)
+            .field("authkey", &authkey.as_deref().map(redacted))
+            .field("credentials_error", credentials_error)
+            .field("config_problems", config_problems)
+            .field("saved_machine_name", saved_machine_name)
+            .field("saved_server", saved_server)
+            .field("source_env", source_env)
+            .field("project_key", project_key)
+            .field("global_key", global_key)
+            .field("machine_key", machine_key)
+            .field("machine_source", machine_source)
+            .field("rejected_vars", rejected_vars)
+            .field("claude", claude)
+            .finish()
+    }
+}
+
+/// How a secret is printed: whether there is one, and nothing of it.
+pub(crate) fn redacted(secret: &str) -> &'static str {
+    if secret.is_empty() {
+        "(none)"
+    } else {
+        "(hidden)"
+    }
+}
+
 /// Every variable [`ClientConfig`] reads that is Recall's own.
 ///
 /// Claude Code's three are [`crate::claude::VARS`]; a caller enumerating
@@ -146,6 +226,7 @@ pub const VARS: &[&str] = &[
     "RECALL_PROJECT_KEY",
     "RECALL_GLOBAL_KEY",
     "RECALL_MACHINE_KEY",
+    crate::device::AUTHKEY_VAR,
     // Where `recall connect` keeps credentials. Read only when the
     // environment leaves the URL or the token unset.
     home::HOME_VAR,
@@ -247,6 +328,13 @@ impl ClientConfig {
             machine_source = source_or(&machine_key, Source::ConfigFile);
         }
 
+        // Looked up for the URL in effect, like the token, and for the same
+        // reason: an enrolment belongs to the server that approved it.
+        let device = url
+            .as_deref()
+            .and_then(|u| saved.devices.for_url(u))
+            .cloned();
+
         ClientConfig {
             url: url.unwrap_or_default(),
             token: token.unwrap_or_default(),
@@ -254,6 +342,12 @@ impl ClientConfig {
             token_source,
             credentials_file: saved.home.as_ref().map(home::Home::credentials_path),
             config_file: saved.home.as_ref().map(home::Home::config_path),
+            device_file: saved.home.as_ref().map(home::Home::device_path),
+            device,
+            device_error: saved.device_error,
+            authkey: var(&lookup, crate::device::AUTHKEY_VAR)
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty()),
             credentials_error: saved.error,
             config_problems,
             saved_server: saved.config.server.clone(),
@@ -279,14 +373,74 @@ impl ClientConfig {
 
     /// Reports what's missing for an operation that actually talks to the
     /// server.
+    ///
+    /// Either credential will do: a device key, or the token. So will an
+    /// authkey, which the hooks turn into a device key before they
+    /// need one.
     pub fn require(&self) -> Result<(), ConfigError> {
         if self.url.is_empty() {
             return Err(ConfigError::MissingUrl);
         }
-        if self.token.is_empty() {
+        if self.token.is_empty() && self.device.is_none() && self.authkey.is_none() {
             return Err(ConfigError::MissingToken);
         }
         Ok(())
+    }
+
+    /// A client for the server in effect: signing as this machine's device
+    /// when it has one, and sending the token when it does not.
+    ///
+    /// The device wins over the token wherever the token came from, the
+    /// environment included. It is the narrower credential, the one that
+    /// can be revoked on its own, and a machine enrolled on purpose should
+    /// not quietly go back to the shared secret because a shell profile
+    /// still exports it.
+    ///
+    /// For the same reason there is no client at all while `device.key`
+    /// exists and cannot be read: it may hold this server's key, and
+    /// sending the token in its place would be exactly that quiet way back.
+    pub fn client(&self) -> Result<crate::client::Client, ClientError> {
+        if let Some(why) = &self.device_error {
+            return Err(ClientError::DeviceFile(why.clone()));
+        }
+        let client = crate::client::Client::new(&self.url, &self.token)?;
+        match &self.device {
+            Some(entry) => {
+                let signer = crate::device::Signer::from_entry(entry)
+                    .map_err(|_| ClientError::Config(ConfigError::DamagedDevice))?;
+                Ok(client.with_signer(signer))
+            }
+            None => Ok(client),
+        }
+    }
+}
+
+/// Why [`ClientConfig::client`] could not build a client.
+#[derive(Debug, thiserror::Error)]
+pub enum ClientError {
+    /// The configuration cannot be used.
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    /// The HTTP client could not be built.
+    #[error(transparent)]
+    Client(#[from] crate::client::Error),
+    /// `device.key` exists and cannot be read, so nothing is sent, the
+    /// token included: see [`ClientConfig::client`].
+    #[error(
+        "{0}; nothing is sent until it is fixed, RECALL_TOKEN included. Move it aside and \
+         run recall connect to enrol again"
+    )]
+    DeviceFile(String),
+}
+
+impl ClientError {
+    /// Whether this machine's device key is what could not be used: the
+    /// file, or the key saved in it for this server.
+    pub fn is_device(&self) -> bool {
+        matches!(
+            self,
+            ClientError::DeviceFile(_) | ClientError::Config(ConfigError::DamagedDevice)
+        )
     }
 }
 
@@ -296,6 +450,8 @@ struct Saved {
     config: home::Config,
     credentials: home::Credentials,
     error: Option<String>,
+    devices: home::Devices,
+    device_error: Option<String>,
 }
 
 impl Saved {
@@ -315,6 +471,8 @@ impl Saved {
             config: home::Config::default(),
             credentials: home::Credentials::default(),
             error: None,
+            devices: home::Devices::default(),
+            device_error: None,
         };
         let Some(h) = out.home.clone() else {
             return out;
@@ -340,6 +498,12 @@ impl Saved {
         }
         if !errors.is_empty() {
             out.error = Some(errors.join("; "));
+        }
+        // Kept apart from the other two files' errors: a damaged device key
+        // is fixed by enrolling again, not by editing a file.
+        match h.load_devices() {
+            Ok(d) => out.devices = d.unwrap_or_default(),
+            Err(e) => out.device_error = Some(e.to_string()),
         }
         out
     }
@@ -598,6 +762,104 @@ mod tests {
 
     fn at(dir: &tempfile::TempDir) -> String {
         dir.path().to_string_lossy().to_string()
+    }
+
+    /// A device key or an authkey stands in for the token: a machine that
+    /// enrolled has none, and a cloud session holding `RECALL_AUTHKEY` has
+    /// none until it enrols.
+    #[test]
+    fn a_device_or_an_authkey_is_a_credential_too() {
+        let url = "https://a.example.com";
+        let authkey = ClientConfig::from_lookup(env(&[
+            ("RECALL_URL", url),
+            ("RECALL_AUTHKEY", " recall-ak-abc "),
+        ]));
+        assert_eq!(authkey.authkey.as_deref(), Some("recall-ak-abc"));
+        assert_eq!(authkey.require(), Ok(()));
+
+        let dir = saved(&[], Some(url), None);
+        let key = crate::device::DeviceKey::generate().unwrap();
+        home::Home::at(dir.path())
+            .save_device(url, key.entry("dev_x", "jarvis", "sync", false))
+            .unwrap();
+        let cfg = ClientConfig::from_lookup(env(&[("RECALL_HOME", &at(&dir))]));
+        assert_eq!(cfg.token, "");
+        assert_eq!(
+            cfg.device.as_ref().map(|d| d.device_id.as_str()),
+            Some("dev_x")
+        );
+        assert_eq!(cfg.require(), Ok(()));
+        assert!(cfg.client().unwrap().signs());
+
+        // Looked up for the server in effect, like the token.
+        let elsewhere = ClientConfig::from_lookup(env(&[
+            ("RECALL_HOME", &at(&dir)),
+            ("RECALL_URL", "https://b.example.com"),
+        ]));
+        assert!(elsewhere.device.is_none());
+        assert_eq!(elsewhere.require(), Err(ConfigError::MissingToken));
+    }
+
+    /// With both a device key and a token, a request carries the signature
+    /// and no `Authorization` at all: a request with the right bearer
+    /// token is the operator's whatever else it carries.
+    #[tokio::test]
+    async fn a_device_key_is_sent_instead_of_the_token_never_beside_it() {
+        let server = crate::testserver::FakeServer::start().await;
+        let dir = saved(
+            &[(server.url.as_str(), "saved-token")],
+            Some(server.url.as_str()),
+            None,
+        );
+        let key = crate::device::DeviceKey::generate().unwrap();
+        home::Home::at(dir.path())
+            .save_device(&server.url, key.entry("dev_x", "jarvis", "sync", false))
+            .unwrap();
+        let cfg = ClientConfig::from_lookup(env(&[
+            ("RECALL_HOME", &at(&dir)),
+            ("RECALL_TOKEN", "env-token"),
+        ]));
+        assert_eq!(cfg.token, "env-token");
+
+        let client = cfg.client().unwrap();
+        assert!(client.signs());
+        client.pull("acme/app").await.unwrap();
+        assert_eq!(server.last_authorization(), None);
+    }
+
+    /// A `device.key` that cannot be read might hold this server's key, so
+    /// nothing is sent rather than the token in its place.
+    #[test]
+    fn an_unreadable_device_file_is_no_reason_to_send_the_token() {
+        let url = "https://a.example.com";
+        let dir = saved(&[(url, "saved-token")], Some(url), None);
+        std::fs::write(dir.path().join("device.key"), "servers = [").unwrap();
+        let cfg = ClientConfig::from_lookup(env(&[
+            ("RECALL_HOME", &at(&dir)),
+            ("RECALL_TOKEN", "env-token"),
+        ]));
+        assert!(cfg.device_error.is_some());
+        let err = cfg.client().unwrap_err();
+        assert!(err.is_device(), "{err}");
+        let said = err.to_string();
+        assert!(
+            said.contains("device.key") && said.contains("RECALL_TOKEN included"),
+            "{said}"
+        );
+    }
+
+    /// Neither the token nor the authkey reaches a log line or a test
+    /// failure.
+    #[test]
+    fn nothing_prints_the_token_or_the_authkey() {
+        let cfg = ClientConfig::from_lookup(env(&[
+            ("RECALL_URL", "https://a.example.com"),
+            ("RECALL_TOKEN", "s3cret-token"),
+            ("RECALL_AUTHKEY", "recall-ak-s3cret"),
+        ]));
+        let printed = format!("{cfg:?}");
+        assert!(!printed.contains("s3cret"), "{printed}");
+        assert!(printed.contains("a.example.com"), "{printed}");
     }
 
     /// `recall connect` alone is a complete setup: the URL, the token and
