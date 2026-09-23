@@ -403,7 +403,7 @@ impl Home {
     /// standard library's is newer than this workspace's Rust, and this
     /// needs no crate for what a file created only-if-absent already does.
     /// What that costs is a lock left behind by a process killed while
-    /// holding it, which is why one older than [`LOCK_STALE`] is taken over:
+    /// holding it, which is why one older than `LOCK_STALE` is taken over:
     /// nothing holds it that long on purpose.
     pub fn lock_devices(&self) -> Result<DevicesLock<'_>, Error> {
         let path = self.dir.join(DEVICE_LOCK_FILE);
