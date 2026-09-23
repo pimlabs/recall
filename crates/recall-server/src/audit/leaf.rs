@@ -1,5 +1,5 @@
 //! The audit leaf, version 1: one per authenticated push, pull, delete,
-//! and change to a device or enrolment key, and one per action the server
+//! and change to a device or authkey, and one per action the server
 //! takes itself. See `docs/design/part5-plan.md`'s "PR 1: audit" for the
 //! wire shape this mirrors exactly.
 //!
@@ -41,10 +41,10 @@ pub mod action {
     pub const REVOKE: &str = "revoke";
     /// The server removed an idle ephemeral device.
     pub const SWEEP: &str = "sweep";
-    /// An enrolment key was created.
-    pub const ENROLL_KEY_CREATE: &str = "enroll_key_create";
-    /// An enrolment key was revoked.
-    pub const ENROLL_KEY_REVOKE: &str = "enroll_key_revoke";
+    /// An authkey was created.
+    pub const AUTHKEY_CREATE: &str = "authkey_create";
+    /// An authkey was revoked.
+    pub const AUTHKEY_REVOKE: &str = "authkey_revoke";
     /// The server started.
     pub const START: &str = "start";
 }
@@ -212,22 +212,22 @@ pub fn subject_denied(user_code: &str, name: &str) -> Value {
     Value::Object(m)
 }
 
-/// `subject` for [`action::ENROLL_KEY_CREATE`]: the key's metadata, never
+/// `subject` for [`action::AUTHKEY_CREATE`]: the key's metadata, never
 /// the secret itself — which the server never stores past the one response
 /// that shows it.
-pub fn subject_enroll_key(id: &str, tag: &str, ephemeral: bool, max_devices: Option<u32>) -> Value {
+pub fn subject_authkey(id: &str, tag: &str, ephemeral: bool, max_devices: Option<u32>) -> Value {
     let mut m = Map::new();
-    m.insert("enroll_key_id".into(), json!(id));
+    m.insert("authkey_id".into(), json!(id));
     m.insert("tag".into(), json!(tag));
     m.insert("ephemeral".into(), json!(ephemeral));
     m.insert("max_devices".into(), json!(max_devices));
     Value::Object(m)
 }
 
-/// `subject` for [`action::ENROLL_KEY_REVOKE`].
-pub fn subject_enroll_key_revoke(id: &str, revoke_devices: bool) -> Value {
+/// `subject` for [`action::AUTHKEY_REVOKE`].
+pub fn subject_authkey_revoke(id: &str, revoke_devices: bool) -> Value {
     let mut m = Map::new();
-    m.insert("enroll_key_id".into(), json!(id));
+    m.insert("authkey_id".into(), json!(id));
     m.insert("revoke_devices".into(), json!(revoke_devices));
     Value::Object(m)
 }

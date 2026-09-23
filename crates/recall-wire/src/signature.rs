@@ -74,9 +74,20 @@ pub const COVERED_COMPONENTS: [&str; 6] = [
     crate::PROTOCOL_HEADER,
 ];
 
-/// How far `created` may be from the server's clock, either way, in
-/// seconds. The server also remembers every nonce for this long.
+/// How far `created` may be behind the server's clock, in seconds. The
+/// server also remembers every nonce for this long after its `created`.
 pub const WINDOW_SECONDS: u64 = 60;
+
+/// How far `created` may be ahead of the server's clock, in seconds: a
+/// little, for a client whose clock runs slightly fast, and no more.
+///
+/// It is small because a server remembers nonces only in memory. A
+/// signature dated ahead of the clock outlives the process that accepted
+/// it by as much as it was ahead, and the process after it cannot tell
+/// the replay from the first sending; so a server that has just started
+/// refuses every signature dated up to this far past its start, and the
+/// more this is, the longer after each start that lasts.
+pub const MAX_AHEAD_SECONDS: u64 = 5;
 
 /// The longest nonce the server accepts. It keeps each one in memory for
 /// [`WINDOW_SECONDS`], so it is bounded.
@@ -112,7 +123,7 @@ pub enum SignatureError {
     /// The nonce is empty or longer than [`MAX_NONCE_LEN`].
     #[error("the nonce must be 1 to 128 characters")]
     Nonce,
-    /// `created` is outside the window.
+    /// `created` is further behind the server's clock than the window.
     #[error(
         "signature created {skew} seconds from the server's clock, more than the {window} allowed; check this machine's clock"
     )]
@@ -121,6 +132,17 @@ pub enum SignatureError {
         skew: u64,
         /// How far off it may be.
         window: u64,
+    },
+    /// `created` is further ahead of the server's clock than
+    /// [`MAX_AHEAD_SECONDS`].
+    #[error(
+        "signature created {ahead} seconds ahead of the server's clock, more than the {allowed} allowed; check this machine's clock"
+    )]
+    Ahead {
+        /// How far ahead it was, in seconds.
+        ahead: u64,
+        /// How far ahead it may be.
+        allowed: u64,
     },
     /// `expires` has passed.
     #[error("the signature has expired")]
@@ -451,6 +473,8 @@ impl SignatureInput {
 
     /// Checks the parameters and coverage against what Recall requires of
     /// every signature, given the verifier's clock as a UNIX time.
+    /// `created` may be up to `window` seconds behind that clock, and up
+    /// to [`MAX_AHEAD_SECONDS`] ahead of it.
     pub fn check_profile(&self, now: i64, window: u64) -> Result<(), SignatureError> {
         // RFC 9421 §3.2 step 6.5: an algorithm named in the signature has
         // to agree with the key's. The key is Ed25519, so only that name
@@ -475,6 +499,12 @@ impl SignatureInput {
             .created()
             .ok_or(SignatureError::MissingParameter("created"))?;
         let skew = now.abs_diff(created);
+        if created > now && skew > MAX_AHEAD_SECONDS {
+            return Err(SignatureError::Ahead {
+                ahead: skew,
+                allowed: MAX_AHEAD_SECONDS,
+            });
+        }
         if skew > window {
             return Err(SignatureError::Clock { skew, window });
         }
@@ -1233,12 +1263,14 @@ mod tests {
         );
     }
 
+    /// A minute behind the verifier's clock, and only a few seconds ahead
+    /// of it.
     #[test]
-    fn created_must_be_inside_the_window_either_way() {
+    fn created_must_be_inside_the_window() {
         let t = target(None);
         let signed = sign_request(&test_key(), "dev_abc", &t, "1", b"", NOW, "n").unwrap();
         check(&signed, &t, b"", NOW + 60).unwrap();
-        check(&signed, &t, b"", NOW - 60).unwrap();
+        check(&signed, &t, b"", NOW - 5).unwrap();
         assert_eq!(
             check(&signed, &t, b"", NOW + 61),
             Err(SignatureError::Clock {
@@ -1246,8 +1278,21 @@ mod tests {
                 window: 60
             })
         );
+        assert_eq!(
+            check(&signed, &t, b"", NOW - 6),
+            Err(SignatureError::Ahead {
+                ahead: 6,
+                allowed: MAX_AHEAD_SECONDS
+            })
+        );
+        for verifier in [NOW - 60, NOW - 3600] {
+            assert!(matches!(
+                check(&signed, &t, b"", verifier),
+                Err(SignatureError::Ahead { .. })
+            ));
+        }
         assert!(matches!(
-            check(&signed, &t, b"", NOW - 3600),
+            check(&signed, &t, b"", NOW + 3600),
             Err(SignatureError::Clock { .. })
         ));
     }

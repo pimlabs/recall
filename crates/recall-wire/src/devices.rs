@@ -9,12 +9,12 @@
 //! then on the machine signs its requests (see [`crate::signature`]).
 //!
 //! A cloud session cannot wait for anyone, so it enrols with an
-//! [`EnrollRequest::enroll_key`] instead, the way a Tailscale auth key
+//! [`EnrollRequest::authkey`] instead, the way a Tailscale auth key
 //! works: approved at once, `sync` scope only, and ephemeral if the key
 //! says so.
 //!
 //! Everything under `/v1/devices` except enrolling, polling and
-//! [`DEVICES_ME_PATH`], and everything under `/v1/enroll-keys`, needs the
+//! [`DEVICES_ME_PATH`], and everything under `/v1/authkeys`, needs the
 //! operator's `RECALL_TOKEN` or a device with [`SCOPE_ADMIN`].
 
 use serde::{Deserialize, Serialize};
@@ -40,17 +40,17 @@ pub const APPROVE_PATH: &str = "/v1/devices/approve";
 /// `POST`: refuse a pending enrolment by its user code.
 pub const DENY_PATH: &str = "/v1/devices/deny";
 
-/// `GET` lists enrolment keys, `POST` creates one.
-pub const ENROLL_KEYS_PATH: &str = "/v1/enroll-keys";
+/// `GET` lists authkeys, `POST` creates one.
+pub const AUTHKEYS_PATH: &str = "/v1/authkeys";
 
 /// `POST`: revoke the device `id`.
 pub fn revoke_device_path(id: &str) -> String {
     format!("{DEVICES_PATH}/{id}/revoke")
 }
 
-/// `POST`: revoke the enrolment key `id`.
-pub fn revoke_enroll_key_path(id: &str) -> String {
-    format!("{ENROLL_KEYS_PATH}/{id}/revoke")
+/// `POST`: revoke the authkey `id`.
+pub fn revoke_authkey_path(id: &str) -> String {
+    format!("{AUTHKEYS_PATH}/{id}/revoke")
 }
 
 /// `GET`: what the enrolment waiting with `user_code` asked for, so the
@@ -73,9 +73,9 @@ pub const CODE_TTL_SECONDS: u64 = 900;
 /// How often a machine may poll, in seconds (RFC 8628 §3.2's default).
 pub const POLL_INTERVAL_SECONDS: u64 = 5;
 
-/// What every enrolment key starts with, so one found in a log or a
+/// What every authkey starts with, so one found in a log or a
 /// secret scanner's report says what it is.
-pub const ENROLL_KEY_PREFIX: &str = "recall-ek-";
+pub const AUTHKEY_PREFIX: &str = "recall-ak-";
 
 /// The characters a user code is made of: RFC 8628 §6.1's base-20 set,
 /// consonants only, so no code spells a word and none needs a shift key.
@@ -87,12 +87,19 @@ pub const MAX_NAME_CHARS: usize = 64;
 /// The longest `agent` accepted, in characters.
 pub const MAX_AGENT_CHARS: usize = 256;
 
-/// The longest enrolment key tag accepted, in characters. A device an
-/// enrolment key enrols is named after the tag, so it is kept short.
+/// The longest authkey tag accepted, in characters. A device an
+/// authkey enrols is named after the tag, so it is kept short.
 pub const MAX_TAG_CHARS: usize = 32;
 
-/// The longest an enrolment key may live, in days.
-pub const MAX_ENROLL_KEY_DAYS: u32 = 365;
+/// The longest an authkey may live, in days.
+pub const MAX_AUTHKEY_DAYS: u32 = 365;
+
+/// How many unrevoked devices an authkey may have enrolled at once
+/// when it was made without saying. Enough for a day of cloud sessions,
+/// each an ephemeral device until it has been idle a day; few enough that
+/// a leaked key cannot mint devices without end. There is no key without
+/// a limit, only one made with a higher one.
+pub const DEFAULT_MAX_DEVICES: u32 = 25;
 
 /// RFC 8628 §3.5: not approved yet; poll again after the interval.
 pub const AUTHORIZATION_PENDING: &str = "authorization_pending";
@@ -140,12 +147,12 @@ pub struct EnrollRequest {
     /// which version each machine runs.
     #[serde(default)]
     pub agent: String,
-    /// An enrolment key, for a machine that cannot wait for approval. It
+    /// An authkey, for a machine that cannot wait for approval. It
     /// is approved at once, with `sync` scope, and named by the server
     /// rather than by `name`: nobody approved it, so it may not choose a
     /// name that passes for another machine's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enroll_key: Option<String>,
+    pub authkey: Option<String>,
 }
 
 /// Why an enrolment request was refused before anything was stored. The
@@ -221,7 +228,7 @@ pub fn is_hidden(c: char) -> bool {
 }
 
 /// Whether `text` is at most `max` characters, none of them
-/// [`is_hidden`]. Device names, agents and enrolment key tags are held to
+/// [`is_hidden`]. Device names, agents and authkey tags are held to
 /// this, since each is shown to a person deciding what to trust.
 pub fn displayable(text: &str, max: usize) -> bool {
     text.chars().count() <= max && !text.chars().any(is_hidden)
@@ -244,7 +251,7 @@ impl EnrollRequest {
     }
 }
 
-/// `POST /v1/devices/enroll` without an enrolment key: RFC 8628 §3.2's
+/// `POST /v1/devices/enroll` without an authkey: RFC 8628 §3.2's
 /// device authorization response, with the enrolment id in the place of
 /// its `device_code`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,7 +267,7 @@ pub struct EnrollPending {
     pub interval: u64,
 }
 
-/// `POST /v1/devices/enroll` with a valid enrolment key: approved at once.
+/// `POST /v1/devices/enroll` with a valid authkey: approved at once.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnrollApproved {
     /// The device id, which the machine signs with as `keyid`.
@@ -373,9 +380,9 @@ pub struct Device {
     pub fingerprint: String,
     /// Its Ed25519 public key, base64url without padding.
     pub public_key: String,
-    /// The enrolment key it enrolled with, or `null` when a person
+    /// The authkey it enrolled with, or `null` when a person
     /// approved it.
-    pub enroll_key_id: Option<String>,
+    pub authkey_id: Option<String>,
     /// When it was approved.
     pub created_at: String,
     /// When it last made a signed request, to within a minute; `null`
@@ -405,9 +412,9 @@ pub struct DeviceList {
     pub devices: Vec<Device>,
 }
 
-/// Body of `POST /v1/enroll-keys`.
+/// Body of `POST /v1/authkeys`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EnrollKeyRequest {
+pub struct AuthkeyRequest {
     /// A label, such as `cloud`.
     #[serde(default)]
     pub tag: String,
@@ -419,8 +426,8 @@ pub struct EnrollKeyRequest {
     #[serde(default = "default_true")]
     pub ephemeral: bool,
     /// The most devices it may have enrolled and unrevoked at once, 1 or
-    /// more; no limit when left out. An ephemeral device swept for being
-    /// idle frees its place.
+    /// more; [`DEFAULT_MAX_DEVICES`] when left out. An ephemeral device
+    /// swept for being idle frees its place.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_devices: Option<u32>,
 }
@@ -429,26 +436,26 @@ fn default_true() -> bool {
     true
 }
 
-/// Body of `POST /v1/enroll-keys/{id}/revoke`, which may also be empty.
+/// Body of `POST /v1/authkeys/{id}/revoke`, which may also be empty.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EnrollKeyRevokeRequest {
+pub struct AuthkeyRevokeRequest {
     /// Also revoke every device the key enrolled. `false` unless given:
     /// revoking a key on its own only stops new enrolments.
     #[serde(default)]
     pub revoke_devices: bool,
 }
 
-/// One enrolment key, without the key itself, which is shown only once.
+/// One authkey, without the key itself, which is shown only once.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EnrollKey {
-    /// `ek_` and 16 characters. Not a secret.
+pub struct Authkey {
+    /// `ak_` and 16 characters. Not a secret.
     pub id: String,
     /// Its label.
     pub tag: String,
     /// Whether devices enrolled with it are ephemeral.
     pub ephemeral: bool,
-    /// The most unrevoked devices it may have enrolled at once; `null` for
-    /// no limit.
+    /// The most unrevoked devices it may have enrolled at once. This
+    /// server always says; a `null` would mean [`DEFAULT_MAX_DEVICES`].
     pub max_devices: Option<u32>,
     /// When it was made.
     pub created_at: String,
@@ -458,32 +465,32 @@ pub struct EnrollKey {
     pub revoked_at: Option<String>,
 }
 
-/// `POST /v1/enroll-keys`: the new key, the one time it is ever shown.
+/// `POST /v1/authkeys`: the new key, the one time it is ever shown.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EnrollKeyCreated {
-    /// As in [`EnrollKey`].
+pub struct AuthkeyCreated {
+    /// As in [`Authkey`].
     pub id: String,
-    /// The key: [`ENROLL_KEY_PREFIX`] and 52 characters. The server keeps
+    /// The key: [`AUTHKEY_PREFIX`] and 52 characters. The server keeps
     /// only its SHA-256.
     pub key: String,
-    /// As in [`EnrollKey`].
+    /// As in [`Authkey`].
     pub tag: String,
-    /// As in [`EnrollKey`].
+    /// As in [`Authkey`].
     pub ephemeral: bool,
-    /// As in [`EnrollKey`].
+    /// As in [`Authkey`].
     pub max_devices: Option<u32>,
-    /// As in [`EnrollKey`].
+    /// As in [`Authkey`].
     pub created_at: String,
-    /// As in [`EnrollKey`].
+    /// As in [`Authkey`].
     pub expires_at: String,
 }
 
-/// `GET /v1/enroll-keys`.
+/// `GET /v1/authkeys`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EnrollKeyList {
-    /// Every enrolment key, newest first, revoked and expired ones
+pub struct AuthkeyList {
+    /// Every authkey, newest first, revoked and expired ones
     /// included.
-    pub enroll_keys: Vec<EnrollKey>,
+    pub authkeys: Vec<Authkey>,
 }
 
 /// The `devices` capability in the discovery document: present when the
@@ -496,8 +503,9 @@ pub struct DevicesCapability {
     pub code_ttl_seconds: u64,
     /// How often to poll: [`POLL_INTERVAL_SECONDS`].
     pub poll_interval_seconds: u64,
-    /// How far a signature's `created` may be from the server's clock:
-    /// [`signature::WINDOW_SECONDS`].
+    /// How far a signature's `created` may be behind the server's clock:
+    /// [`signature::WINDOW_SECONDS`]. Ahead of it, it may be only
+    /// [`signature::MAX_AHEAD_SECONDS`].
     pub signature_window_seconds: u64,
 }
 
@@ -534,7 +542,7 @@ mod tests {
             name: "laptop".into(),
             public_key: key.into(),
             agent: "recall/0.4.1 (macos-aarch64)".into(),
-            enroll_key: None,
+            authkey: None,
         };
         assert!(ok.validate().is_ok());
         for (req, want) in [
@@ -598,13 +606,13 @@ mod tests {
     }
 
     #[test]
-    fn an_enrolment_key_request_needs_an_expiry() {
-        assert!(serde_json::from_str::<EnrollKeyRequest>(r#"{"tag":"cloud"}"#).is_err());
-        let req: EnrollKeyRequest = serde_json::from_str(r#"{"expires_in_days":90}"#).unwrap();
+    fn an_authkey_request_needs_an_expiry() {
+        assert!(serde_json::from_str::<AuthkeyRequest>(r#"{"tag":"cloud"}"#).is_err());
+        let req: AuthkeyRequest = serde_json::from_str(r#"{"expires_in_days":90}"#).unwrap();
         assert_eq!(req.tag, "");
         assert!(req.ephemeral, "a key's devices are ephemeral unless asked");
         assert_eq!(req.max_devices, None);
-        let req: EnrollKeyRevokeRequest = serde_json::from_str("{}").unwrap();
+        let req: AuthkeyRevokeRequest = serde_json::from_str("{}").unwrap();
         assert!(!req.revoke_devices);
     }
 
@@ -647,7 +655,7 @@ mod tests {
     #[test]
     fn device_nulls_are_sent_not_omitted() {
         let text = serde_json::to_string(&Device::default()).unwrap();
-        for key in ["enroll_key_id", "last_seen", "revoked_at"] {
+        for key in ["authkey_id", "last_seen", "revoked_at"] {
             assert!(text.contains(&format!("\"{key}\":null")), "{text}");
         }
     }

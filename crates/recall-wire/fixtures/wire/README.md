@@ -15,16 +15,16 @@ newer client keeps reading older servers.
 | Kind | Source |
 | --- | --- |
 | `push_response`, `push_response_delete`, `sync_response`, `health`, `admin_stats`, `error`, `discovery` | Captured from that version's release archive by `scripts/capture-wire-fixtures.sh` |
-| `enroll_response_pending`, `enroll_response_approved`, `enroll_poll_response`, `enroll_poll_error`, `device_pending_response`, `device_approve_response`, `device_me_response`, `device_deny_response`, `device_list_response`, `device_revoke_response`, `enroll_key_create_response`, `enroll_key_list_response`, `enroll_key_revoke_response` | The same script: one enrolment followed through, each response a real one from the step before |
+| `enroll_response_pending`, `enroll_response_approved`, `enroll_poll_response`, `enroll_poll_error`, `device_pending_response`, `device_approve_response`, `device_me_response`, `device_deny_response`, `device_list_response`, `device_revoke_response`, `authkey_create_response`, `authkey_list_response`, `authkey_revoke_response` | The same script: one enrolment followed through, each response a real one from the step before |
 | `push_request`, `push_request_delete` | Written from recall-wire's `PushRequest` at that tag: its field order and its skip rules |
-| `enroll_request`, `enroll_request_with_key`, `enroll_poll_request`, `device_approve_request`, `device_deny_request`, `enroll_key_create_request`, `enroll_key_revoke_request` | Written the same way, from recall-wire's `devices` types |
+| `enroll_request`, `enroll_request_with_authkey`, `enroll_poll_request`, `device_approve_request`, `device_deny_request`, `authkey_create_request`, `authkey_revoke_request` | Written the same way, from recall-wire's `devices` types |
 | `audit_checkpoint_response`, `audit_entries_response`, `audit_consistency_response` | Written from recall-wire's `audit` types |
 | `audit_leaf_push`, `audit_leaf_approve` | A leaf exactly as `recall_server::audit::leaf::encode` writes one, for the `push` and `approve` actions — hand-built rather than captured, since a leaf's shape lives in `recall-server`, not this crate; see `docs/design/part5-plan.md`'s "PR 1: audit" for the field-by-field meaning |
 
 `discovery` exists from the version that introduced `/.well-known/recall`
 onwards; older servers answer 404 and have no file. The device kinds exist
 from 0.4.1. Their public key is RFC 9421's `test-key-ed25519`, whose
-private half is published, and their ids and enrolment key belong to the
+private half is published, and their ids and authkey belong to the
 scratch database the capture ran against, which no longer exists.
 `device_me_response` answers a signed request, which the script makes with
 `openssl` and that key's published private half, so it also shows a

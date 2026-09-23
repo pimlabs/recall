@@ -21,7 +21,7 @@
 //! | [`health`] | `GET /health` — unauthenticated liveness and merge status |
 //! | [`admin`] | `GET /admin/stats` — what is stored, per project |
 //! | [`discovery`] | `GET /.well-known/recall` — what the server is and speaks |
-//! | [`devices`] | `/v1/devices`, `/v1/enroll-keys` — enrolling and managing devices |
+//! | [`devices`] | `/v1/devices`, `/v1/authkeys` — enrolling and managing devices |
 //! | [`signature`] | not an endpoint: how a device signs every request |
 //! | [`validate`] | the rules both halves enforce |
 //!
@@ -56,10 +56,10 @@ pub mod validate;
 pub use admin::{AdminStats, AdminTotals, ProjectStats};
 pub use audit::{AuditCapability, AuditCheckpoint, AuditConsistencyResponse, AuditEntriesResponse};
 pub use devices::{
-    ApproveRequest, DenyRequest, DenyResponse, Device, DeviceIdentity, DeviceList,
-    DevicesCapability, EnrollApproved, EnrollKey, EnrollKeyCreated, EnrollKeyList,
-    EnrollKeyRequest, EnrollKeyRevokeRequest, EnrollPending, EnrollPollRequest, EnrollPollResponse,
-    EnrollRequest, PendingEnrollment,
+    ApproveRequest, Authkey, AuthkeyCreated, AuthkeyList, AuthkeyRequest, AuthkeyRevokeRequest,
+    DenyRequest, DenyResponse, Device, DeviceIdentity, DeviceList, DevicesCapability,
+    EnrollApproved, EnrollPending, EnrollPollRequest, EnrollPollResponse, EnrollRequest,
+    PendingEnrollment,
 };
 pub use discovery::{Discovery, DISCOVERY_PATH, PROTOCOL, PROTOCOL_HEADER};
 pub use health::{ClaudeCliStatus, Health, MergeError, MergeStatus};

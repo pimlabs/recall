@@ -29,6 +29,8 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true
+unicode-normalization.workspace = true
+unicode-security.workspace = true
 # io-util is needed to stream the merge prompt into the CLI's stdin.
 tokio = { workspace = true, features = ["io-util"] }
 

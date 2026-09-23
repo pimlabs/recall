@@ -10,10 +10,10 @@ use std::sync::Arc;
 use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, Request, StatusCode};
 use recall_server::{Config, Server, Store};
-use recall_wire::devices::{self, revoke_device_path, revoke_enroll_key_path};
+use recall_wire::devices::{self, revoke_authkey_path, revoke_device_path};
 use recall_wire::signature::{encode_public_key, SigningKey};
 use recall_wire::{
-    AuditCheckpoint, AuditEntriesResponse, Device, EnrollApproved, EnrollKeyCreated, EnrollPending,
+    AuditCheckpoint, AuditEntriesResponse, AuthkeyCreated, Device, EnrollApproved, EnrollPending,
 };
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -191,22 +191,22 @@ async fn every_authenticated_route_appends_exactly_one_leaf() {
     assert_eq!(h.size(), n + 1, "deny");
 
     let n = h.size();
-    let key: EnrollKeyCreated = ok(h
+    let key: AuthkeyCreated = ok(h
         .call(
             "POST",
-            devices::ENROLL_KEYS_PATH,
+            devices::AUTHKEYS_PATH,
             Some(TOKEN),
             Some(json!({"tag":"cloud","expires_in_days":90})),
         )
         .await);
-    assert_eq!(h.size(), n + 1, "enroll_key_create");
+    assert_eq!(h.size(), n + 1, "authkey_create");
 
     let n = h.size();
     let (status, _) = h
-        .call("POST", &revoke_enroll_key_path(&key.id), Some(TOKEN), None)
+        .call("POST", &revoke_authkey_path(&key.id), Some(TOKEN), None)
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(h.size(), n + 1, "enroll_key_revoke");
+    assert_eq!(h.size(), n + 1, "authkey_revoke");
 
     let n = h.size();
     let (status, _) = h
@@ -277,10 +277,10 @@ async fn every_authenticated_route_appends_exactly_one_leaf() {
 #[tokio::test]
 async fn the_sweep_appends_one_leaf_per_device_removed() {
     let h = harness();
-    let key: EnrollKeyCreated = ok(h
+    let key: AuthkeyCreated = ok(h
         .call(
             "POST",
-            devices::ENROLL_KEYS_PATH,
+            devices::AUTHKEYS_PATH,
             Some(TOKEN),
             Some(json!({"tag":"cloud","expires_in_days":90,"ephemeral":true})),
         )
@@ -295,7 +295,7 @@ async fn the_sweep_appends_one_leaf_per_device_removed() {
                 "name": "ignored",
                 "public_key": ephemeral.public_key(),
                 "agent": "t",
-                "enroll_key": key.key,
+                "authkey": key.key,
             })),
         )
         .await);

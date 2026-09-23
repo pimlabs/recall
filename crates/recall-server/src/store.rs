@@ -22,7 +22,7 @@ mod devices;
 
 pub use audit::{AuditEntry, ConsistencyError, Outcome};
 pub use devices::{
-    Created, Decision, Inserted, NewDevice, NewEnrollKey, NewEnrollment, Poll, Waiting,
+    plain_name, Created, Decision, Inserted, NewAuthkey, NewDevice, NewEnrollment, Poll, Waiting,
 };
 
 /// Frozen: an already-deployed database was created with exactly this.

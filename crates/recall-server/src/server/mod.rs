@@ -9,7 +9,7 @@
 //! | `GET /.well-known/recall` | none — a client asks before it can authenticate |
 //! | `POST /sync`, `GET /sync`, `GET /v1/devices/me` | bearer token, or any device's signature |
 //! | `POST /v1/devices/enroll`, `POST /v1/devices/enroll/poll` | none, but rate limited, and small bodies only |
-//! | `GET /admin/stats`, the rest of `/v1/devices`, and `/v1/enroll-keys` | bearer token, or an admin device's signature |
+//! | `GET /admin/stats`, the rest of `/v1/devices`, and `/v1/authkeys` | bearer token, or an admin device's signature |
 //! | anything else | 404 JSON |
 //!
 //! This module owns the shared state, the router, and the background jobs.
@@ -52,9 +52,9 @@ mod respond;
 use audit::{handle_checkpoint, handle_consistency, handle_entries};
 use auth::ReplayCache;
 use devices::{
-    handle_approve, handle_create_enroll_key, handle_deny, handle_enroll, handle_list_devices,
-    handle_list_enroll_keys, handle_me, handle_pending, handle_poll, handle_revoke_device,
-    handle_revoke_enroll_key,
+    handle_approve, handle_create_authkey, handle_deny, handle_enroll, handle_list_authkeys,
+    handle_list_devices, handle_me, handle_pending, handle_poll, handle_revoke_authkey,
+    handle_revoke_device,
 };
 use handlers::{
     handle_admin_page, handle_admin_stats, handle_discovery, handle_health, handle_pull,
@@ -89,10 +89,11 @@ struct AppState {
     store: Arc<Store>,
     merger: Merger,
     started_at: String,
-    /// When this process started, as a UNIX time: signatures made before
-    /// it are refused, since the nonces that would catch their replay were
-    /// in the memory of the process before.
-    started_unix: i64,
+    /// When this process started, as a UNIX time: signatures the process
+    /// before could have accepted are refused, since the nonces that would
+    /// catch their replay were in its memory (see `auth.rs`). Moved only
+    /// by tests, through [`Server::backdate_start`].
+    started_unix: AtomicI64,
     /// Added to the clock signatures are judged by. Zero except in tests.
     clock_offset: AtomicI64,
     runtime: RwLock<Runtime>,
@@ -112,6 +113,11 @@ impl AppState {
     fn now(&self) -> i64 {
         unix_now() + self.clock_offset.load(Ordering::Relaxed)
     }
+
+    /// When this process started, as a UNIX time.
+    fn started(&self) -> i64 {
+        self.started_unix.load(Ordering::Relaxed)
+    }
 }
 
 fn unix_now() -> i64 {
@@ -122,10 +128,10 @@ fn unix_now() -> i64 {
 }
 
 /// How many live nonces one device may have: as many requests as one
-/// address may make while a nonce stays live, which is up to two windows,
-/// since `created` may be a window ahead of the clock.
+/// address may make while a nonce stays live, which is up to the window
+/// and the few seconds `created` may be ahead of the clock.
 fn nonces_per_device(cfg: &Config) -> usize {
-    let live_ms = 2 * auth::WINDOW as u128 * 1000;
+    let live_ms = auth::NONCE_LIFETIME as u128 * 1000;
     let window_ms = cfg.rate_limit_window.as_millis().max(1);
     let windows = live_ms.div_ceil(window_ms);
     (cfg.rate_limit_max as u128 * windows).min(usize::MAX as u128) as usize
@@ -157,7 +163,7 @@ impl Server {
                 store,
                 merger,
                 started_at: now(),
-                started_unix: unix_now(),
+                started_unix: AtomicI64::new(unix_now()),
                 clock_offset: AtomicI64::new(0),
                 runtime: RwLock::new(Runtime {
                     last_backup_at: String::new(),
@@ -198,14 +204,14 @@ impl Server {
                 post(handle_revoke_device).fallback(not_found),
             )
             .route(
-                paths::ENROLL_KEYS_PATH,
-                get(handle_list_enroll_keys)
-                    .post(handle_create_enroll_key)
+                paths::AUTHKEYS_PATH,
+                get(handle_list_authkeys)
+                    .post(handle_create_authkey)
                     .fallback(not_found),
             )
             .route(
-                "/v1/enroll-keys/{id}/revoke",
-                post(handle_revoke_enroll_key).fallback(not_found),
+                "/v1/authkeys/{id}/revoke",
+                post(handle_revoke_authkey).fallback(not_found),
             )
             .route_layer(from_fn(admin_only))
             .route_layer(from_fn_with_state(state.clone(), guard));
@@ -284,6 +290,17 @@ impl Server {
     /// what happens after it, without waiting a minute for each.
     pub fn set_clock_offset(&self, seconds: i64) {
         self.state.clock_offset.store(seconds, Ordering::Relaxed);
+    }
+
+    /// Makes this server act as if it had started `seconds` earlier than
+    /// it did.
+    ///
+    /// Exposed so tests can sign requests at once, rather than waiting out
+    /// the few seconds after a start in which every signature is refused.
+    pub fn backdate_start(&self, seconds: i64) {
+        self.state
+            .started_unix
+            .fetch_sub(seconds, Ordering::Relaxed);
     }
 
     /// Writes a backup now. Failure is logged, never propagated: it becomes
