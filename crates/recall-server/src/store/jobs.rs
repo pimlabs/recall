@@ -68,7 +68,7 @@ pub(super) const SCHEMA: &str = "
 pub const MAX_OPEN_JOBS: usize = 1000;
 
 /// How many times a job is handed out before it is marked failed: once,
-/// then after each of [`RETRY_AFTER`].
+/// then again 1, 5 and 30 minutes after each failed attempt.
 pub const MAX_ATTEMPTS: u32 = 4;
 
 /// How long a job waits after its first, second and third failed attempt.
