@@ -1111,7 +1111,7 @@ fn doctor_fails_a_remote_session_with_no_memory_dir() {
 
     assert_eq!(r.code, 1, "stdout: {}", r.stdout);
     assert!(
-        r.stdout.contains("FAIL CLAUDE_CODE_REMOTE_MEMORY_DIR"),
+        r.stdout.contains("✗ CLAUDE_CODE_REMOTE_MEMORY_DIR"),
         "stdout: {}",
         r.stdout
     );
@@ -1130,8 +1130,8 @@ fn doctor_says_nothing_about_the_memory_dir_outside_a_remote_session() {
     let r = run(&["doctor"], repo.path(), &[], None);
 
     assert!(
-        !r.stdout.contains("FAIL CLAUDE_CODE_REMOTE_MEMORY_DIR")
-            && !r.stdout.contains("warn CLAUDE_CODE_REMOTE_MEMORY_DIR"),
+        !r.stdout.contains("✗ CLAUDE_CODE_REMOTE_MEMORY_DIR")
+            && !r.stdout.contains("! CLAUDE_CODE_REMOTE_MEMORY_DIR"),
         "stdout: {}",
         r.stdout
     );
@@ -1199,17 +1199,17 @@ fn doctor_passes_a_wired_project_that_can_reach_a_server() {
     // server, and no longer on the three things `init` and the environment
     // just supplied.
     assert!(
-        r.stdout.contains("ok   hooks"),
+        r.stdout.contains("✓ hooks"),
         "init wired the hooks, doctor should see it: {}",
         r.stdout
     );
     assert!(
-        r.stdout.contains("ok   RECALL_URL") && r.stdout.contains("ok   RECALL_TOKEN"),
+        r.stdout.contains("✓ RECALL_URL") && r.stdout.contains("✓ RECALL_TOKEN"),
         "both variables were set: {}",
         r.stdout
     );
     assert!(
-        r.stdout.contains("FAIL server"),
+        r.stdout.contains("✗ server"),
         "and the dead server is what is left: {}",
         r.stdout
     );
@@ -1451,11 +1451,7 @@ fn doctor_suggests_connect_for_a_shell_token_on_a_laptop() {
         &[("RECALL_URL", DEAD_SERVER), ("RECALL_TOKEN", "t")],
         None,
     );
-    assert!(
-        r.stdout.contains("warn token storage"),
-        "stdout: {}",
-        r.stdout
-    );
+    assert!(r.stdout.contains("! token storage"), "stdout: {}", r.stdout);
     assert!(r.stdout.contains("recall connect"), "stdout: {}", r.stdout);
 }
 
@@ -1592,4 +1588,258 @@ fn push_stays_silent_about_an_ordinary_file() {
 
     assert_eq!(r.code, 0);
     assert_eq!(r.stderr.trim(), "", "an ordinary edit is not worth a word");
+}
+
+// ---------------------------------------------------------------------------
+// connect as one flow, against a real server
+// ---------------------------------------------------------------------------
+
+/// `recall serve` from the binary under test, on a free port, killed on drop.
+struct LiveServer {
+    child: std::process::Child,
+    url: String,
+    _db: tempfile::TempDir,
+}
+
+impl Drop for LiveServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn live_server(token: &str) -> LiveServer {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let db = tempfile::tempdir().unwrap();
+    let child = Command::new(binary())
+        .arg("serve")
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("RECALL_TOKEN", token)
+        .env("RECALL_PORT", port.to_string())
+        .env("RECALL_DB_PATH", db.path().join("recall.db"))
+        .env("RECALL_MERGE_ENABLED", "false")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("recall serve starts");
+    let server = LiveServer {
+        child,
+        url: format!("http://127.0.0.1:{port}"),
+        _db: db,
+    };
+    for _ in 0..100 {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return server;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("recall serve did not start listening on {port}");
+}
+
+/// The whole flow with nobody at the keyboard: a saved token that still
+/// works is kept rather than asked for, the name comes from `--name`, and
+/// `--yes` wires the project — so a machine can be set up by a script once
+/// it holds a token.
+#[test]
+fn connect_with_a_working_saved_token_sets_the_machine_up_without_asking() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let home = recall_home_with(&[(&server.url, "right")], &server.url);
+    let home_str = home.path().to_string_lossy().to_string();
+
+    let r = run(
+        &["connect", "--yes", "--name", "jarvis"],
+        repo.path(),
+        &[("RECALL_HOME", &home_str)],
+        None,
+    );
+
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(
+        r.stderr.contains("Kept the saved token"),
+        "stderr: {}",
+        r.stderr
+    );
+    let config = std::fs::read_to_string(home.path().join("config.toml")).unwrap();
+    assert!(
+        config.contains("name = \"jarvis\""),
+        "config.toml: {config}"
+    );
+    assert!(
+        config.contains(&format!("server = \"{}\"", server.url)),
+        "config.toml: {config}"
+    );
+    let settings =
+        std::fs::read_to_string(repo.path().join(".claude").join("settings.json")).unwrap();
+    assert!(settings.contains("recall push"), "wired: {settings}");
+    // No memory here yet, so there is no first sync to offer.
+    assert!(!r.stderr.contains("First sync"), "stderr: {}", r.stderr);
+
+    // And a second run finds nothing left to do in the project.
+    let again = run(
+        &["connect", "--yes"],
+        repo.path(),
+        &[("RECALL_HOME", &home_str)],
+        None,
+    );
+    assert_eq!(again.code, 0, "stderr: {}", again.stderr);
+    assert!(
+        again.stderr.contains("already set up"),
+        "stderr: {}",
+        again.stderr
+    );
+    assert!(
+        again.stderr.contains("jarvis"),
+        "keeps the name: {}",
+        again.stderr
+    );
+}
+
+/// Wired by `connect`, memory that predates Recall is offered its first
+/// sync — and with `--yes`, sent.
+#[test]
+fn connect_sends_existing_memory_when_it_wires_a_project() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let home = recall_home_with(&[(&server.url, "right")], &server.url);
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [("RECALL_HOME", home_str.as_str())];
+
+    let memory_dir = status_json(repo.path(), &env)["memory_dir"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    std::fs::create_dir_all(&memory_dir).unwrap();
+    std::fs::write(
+        Path::new(&memory_dir).join("fact.md"),
+        "---\nname: fact\ndescription: a fact\n---\n\nA fact.\n",
+    )
+    .unwrap();
+
+    let r = run(
+        &["connect", "--yes", "--name", "jarvis"],
+        repo.path(),
+        &env,
+        None,
+    );
+
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(r.stderr.contains("First sync"), "stderr: {}", r.stderr);
+    assert!(!r.stderr.contains("0 sent"), "stderr: {}", r.stderr);
+}
+
+/// A saved token the server now rejects needs a person to type a new one.
+/// Without a terminal that is a refusal, and nothing is rewritten.
+#[test]
+fn connect_with_a_rejected_saved_token_and_no_terminal_changes_nothing() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let home = recall_home_with(&[(&server.url, "stale")], &server.url);
+    let home_str = home.path().to_string_lossy().to_string();
+    let before = std::fs::read_to_string(home.path().join("config.toml")).unwrap();
+
+    let r = run(
+        &["connect", "--yes", "--name", "jarvis"],
+        repo.path(),
+        &[("RECALL_HOME", &home_str)],
+        None,
+    );
+
+    assert_eq!(r.code, 1, "stderr: {}", r.stderr);
+    assert!(
+        r.stderr.contains("needs a new token"),
+        "stderr: {}",
+        r.stderr
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("config.toml")).unwrap(),
+        before
+    );
+    assert!(!repo.path().join(".claude").join("settings.json").exists());
+}
+
+#[test]
+fn connect_with_no_server_named_or_saved_says_to_name_one() {
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+
+    let r = run(
+        &["connect"],
+        repo.path(),
+        &[("RECALL_HOME", &home_str)],
+        None,
+    );
+
+    assert_eq!(r.code, 1, "stderr: {}", r.stderr);
+    assert!(r.stderr.contains("no server named"), "stderr: {}", r.stderr);
+    assert!(
+        r.stderr.contains("recall connect https://"),
+        "stderr: {}",
+        r.stderr
+    );
+}
+
+/// A name that cannot be used is refused before the server is contacted —
+/// this one is not a server at all, and the refusal still names the name.
+#[test]
+fn connect_refuses_an_unusable_name_before_anything_else() {
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+
+    let r = run(
+        &["connect", DEAD_SERVER, "--name", "my laptop"],
+        repo.path(),
+        &[("RECALL_HOME", &home_str)],
+        None,
+    );
+
+    assert_eq!(r.code, 1, "stderr: {}", r.stderr);
+    assert!(
+        r.stderr.contains("not a usable machine name"),
+        "stderr: {}",
+        r.stderr
+    );
+    assert!(!r.stderr.contains("reach"), "stderr: {}", r.stderr);
+}
+
+/// What is left in the shell after `connect` is named: a variable that
+/// disagrees with the name is a warning, one that agrees is only redundant.
+#[test]
+fn connect_names_the_machine_variables_a_shell_profile_still_exports() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let home = recall_home_with(&[(&server.url, "right")], &server.url);
+    let home_str = home.path().to_string_lossy().to_string();
+
+    let r = run(
+        &["connect", "--yes", "--name", "jarvis"],
+        repo.path(),
+        &[
+            ("RECALL_HOME", &home_str),
+            ("RECALL_SOURCE_ENV", "laptop"),
+            ("RECALL_MACHINE_KEY", "machine:jarvis"),
+        ],
+        None,
+    );
+
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(
+        r.stderr
+            .contains("RECALL_SOURCE_ENV=laptop wins over the name jarvis"),
+        "stderr: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr
+            .contains("RECALL_MACHINE_KEY says the same as the name"),
+        "stderr: {}",
+        r.stderr
+    );
 }

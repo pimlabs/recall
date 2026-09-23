@@ -16,6 +16,26 @@ break will be described here in full rather than smoothed over.
 
 ## Unreleased
 
+## 0.3.2 — 2026-09-23
+
+- **`recall connect` is the whole setup, one question at a time.** The
+  token, then a name for this machine (suggested from the hostname), then —
+  from inside a project — wiring its hooks and sending its existing memory.
+  Each step is skipped when there is nothing to do: a saved token that still
+  works is not asked for again, and a wired project is not offered. A
+  mistyped token is asked for again rather than ending the run. The URL is
+  optional once one is saved, `--name` and `--yes` answer the questions for a
+  script, and anything left in the shell profile (`RECALL_SOURCE_ENV`,
+  `RECALL_MACHINE_KEY`, `RECALL_TOKEN`) is named with what to do about it.
+  `recall init` now points at `recall connect` instead of at exports for a
+  shell profile.
+- **`recall doctor` and `recall status` are easier to read.** `doctor`
+  groups its checks — Connection, This project, Scopes, Backup — marks them
+  `✓ ! ✗ ○`, puts each fix on its own line, and writes `~` for your home
+  directory; `status` dims its labels and colours what is wrong. Colour
+  switches itself off when the output is not a terminal or `NO_COLOR` is set.
+  `--json` is unchanged, and remains the output to script against.
+
 - **One place for a machine's settings: `~/.recall/`.** `recall connect`
   now writes two TOML files instead of `credentials.json`:
 

@@ -35,6 +35,7 @@ mod project;
 mod promote;
 mod serve;
 mod status;
+mod ui;
 
 use std::path::PathBuf;
 
@@ -101,10 +102,17 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t = promote::Target::Global)]
         to: promote::Target,
     },
-    /// Save a server's token to ~/.recall, after checking it works
+    /// Set this machine up: the server's token, this machine's name, and the
+    /// project you are in
     Connect {
-        /// The server's URL, including https://
-        url: String,
+        /// The server's URL, including https://; defaults to the saved one
+        url: Option<String>,
+        /// This machine's name, instead of being asked
+        #[arg(long)]
+        name: Option<String>,
+        /// Answer yes to every question, and take the suggested name
+        #[arg(long, short)]
+        yes: bool,
     },
     /// Remove a saved token
     Disconnect {
@@ -166,7 +174,9 @@ fn main() {
         Cmd::Backfill => block_on_current(backfill::run()),
         Cmd::Serve => block_on_multi(serve::run()),
         Cmd::Promote { file, to } => block_on_current(promote::run(&file, to)),
-        Cmd::Connect { url } => block_on_current(connect::connect(&url)),
+        Cmd::Connect { url, name, yes } => {
+            block_on_current(connect::connect(connect::Args { url, name, yes }))
+        }
         Cmd::Disconnect { url } => connect::disconnect(url.as_deref()),
         Cmd::Status { json } => block_on_current(status::run(json)),
         Cmd::Doctor { json } => block_on_current(doctor::run(json)),

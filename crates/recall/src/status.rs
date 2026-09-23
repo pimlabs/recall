@@ -356,7 +356,7 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
 /// Compared as each value is *used*, not as it was typed: `jarvis` and
 /// `machine:jarvis` are the same machine key, and `https://x/` is the same
 /// server as `https://x`, so neither is reported as an override.
-fn overrides(here: &proj::Resolved, cfg: &ClientConfig) -> Vec<Override> {
+pub(crate) fn overrides(here: &proj::Resolved, cfg: &ClientConfig) -> Vec<Override> {
     let env = |name: &str| here.env.get(name).filter(|v| !v.trim().is_empty());
     let mut out = Vec::new();
 
@@ -430,6 +430,14 @@ fn declared_empty(rep: &Report, name: &str) -> bool {
         .any(|var| var.name == name && var.empty)
 }
 
+/// One line of the text report, formatted like `println!` and styled by
+/// [`crate::ui::field_line`].
+macro_rules! field {
+    ($($arg:tt)*) => {
+        crate::ui::field_line(&format!($($arg)*))
+    };
+}
+
 /// The block that exists because a value set in a settings file and a value
 /// exported from a shell look identical once they are in the environment —
 /// and only one of them is the one the hooks obey.
@@ -453,21 +461,22 @@ fn print_declared_env(rep: &Report) {
                 " — this overrides the value set in this shell"
             });
         }
-        println!("{label}: {} from {}{note}", var.name, var.file);
+        field!("{label}: {} from {}{note}", var.name, var.file);
     }
 
     for var in &rep.ignored_env {
-        println!(
+        field!(
             "settings     : {} in {} is not a string, so it sets nothing",
-            var.name, var.file
+            var.name,
+            var.file
         );
     }
 
     for file in &rep.unreadable_settings {
-        println!("settings     : UNREADABLE — {file}");
+        field!("settings     : UNREADABLE — {file}");
     }
     if !rep.unreadable_settings.is_empty() {
-        println!(
+        field!(
             "               Claude Code cannot read it either, so nothing it \
 declares is in effect for the hooks."
         );
@@ -475,7 +484,9 @@ declares is in effect for the hooks."
 }
 
 fn print_text(cfg: &ClientConfig, rep: &Report) {
-    println!("project      : {}", rep.project);
+    crate::ui::title("recall status", &cfg.source_env);
+    anstream::println!();
+    field!("project      : {}", rep.project);
     // Bound rather than inlined: one arm has to name the settings file the
     // key came from, and a `format!` inside a `match` inside a `println!`
     // does not outlive the statement that borrows it.
@@ -509,10 +520,10 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
         ),
         _ => key_source,
     };
-    println!("project_key  : {} ({key_source})", rep.project_key);
-    println!("memory dir   : {}", rep.memory_dir);
-    println!("memory files : {} on disk", rep.memory_files);
-    println!(
+    field!("project_key  : {} ({key_source})", rep.project_key);
+    field!("memory dir   : {}", rep.memory_dir);
+    field!("memory files : {} on disk", rep.memory_files);
+    field!(
         "hooks wired  : {}",
         if rep.hooks_wired {
             "yes"
@@ -521,7 +532,7 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
         }
     );
     print_declared_env(rep);
-    println!(
+    field!(
         "global       : {}",
         match &rep.global_key {
             None if rep.rejected_vars.contains(&"RECALL_GLOBAL_KEY") =>
@@ -547,7 +558,7 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
             ),
         }
     );
-    println!(
+    field!(
         "machine      : {}",
         match &rep.machine_key {
             None if rep.rejected_vars.contains(&"RECALL_MACHINE_KEY") =>
@@ -578,12 +589,14 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
         }
     );
     if let Some(d) = &rep.miscased_dir {
-        println!(
+        field!(
             "             ! '{}/' is not '{}/', so nothing under it syncs. On \
              macOS the two are the same directory and on Linux they are not, so \
              Recall refuses rather than file it somewhere you did not mean. \
              Rename it to '{}'.",
-            d.found, d.reserved, d.reserved
+            d.found,
+            d.reserved,
+            d.reserved
         );
     }
     let from_file = rep
@@ -591,7 +604,7 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
         .as_deref()
         .unwrap_or("the credentials file");
     let from_config = rep.config_file.as_deref().unwrap_or("the config file");
-    println!(
+    field!(
         "RECALL_URL   : {}",
         match rep.url_source {
             Source::Unset => "(unset)".to_string(),
@@ -601,7 +614,7 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
             }
         }
     );
-    println!(
+    field!(
         "RECALL_TOKEN : {}",
         match rep.token_source {
             Source::Unset => "(unset)".to_string(),
@@ -613,37 +626,40 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
         }
     );
     for problem in &rep.config_problems {
-        println!("config       : {problem} ({from_config})");
+        field!("config       : {problem} ({from_config})");
     }
     for o in &rep.overridden {
-        println!(
+        field!(
             "config       : {}={} overrides {} = {:?} in {from_config}",
-            o.variable, o.environment, o.setting, o.config
+            o.variable,
+            o.environment,
+            o.setting,
+            o.config
         );
     }
     if let Some(err) = &rep.credentials_error {
-        println!("credentials  : UNREADABLE — {err}");
+        field!("credentials  : UNREADABLE — {err}");
     }
     if rep.credentials_exposed {
-        println!("credentials  : readable by other users — chmod 600 {from_file}");
+        field!("credentials  : readable by other users — chmod 600 {from_file}");
     }
 
     if !rep.url_set {
         return;
     }
     if !rep.server_ok {
-        println!(
+        field!(
             "server       : UNREACHABLE ({})",
             rep.server_error.as_deref().unwrap_or("unknown error")
         );
         return;
     }
 
-    println!(
+    field!(
         "server       : reachable (git_commit {})",
         rep.git_commit.as_deref().unwrap_or("unknown")
     );
-    println!(
+    field!(
         "merge        : {}",
         if rep.merge_ready {
             "ready (claude CLI logged in)"
@@ -651,5 +667,5 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
             "not configured — server falls back to last-write-wins"
         }
     );
-    println!("synced files : {} on server", rep.synced_files);
+    field!("synced files : {} on server", rep.synced_files);
 }

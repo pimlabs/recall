@@ -23,6 +23,7 @@ use recall_hooks::{exit, ClientConfig};
 
 use crate::project as proj;
 use crate::status::{self, Report};
+use crate::ui;
 
 /// How much a finding matters, which is also the exit code's input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -37,16 +38,6 @@ pub enum Level {
     Warn,
     /// Memory is not syncing, or is syncing somewhere you did not ask for.
     Fail,
-}
-
-impl Level {
-    fn mark(self) -> &'static str {
-        match self {
-            Level::Ok => "ok  ",
-            Level::Warn => "warn",
-            Level::Fail => "FAIL",
-        }
-    }
 }
 
 /// One answered question.
@@ -464,7 +455,7 @@ pub async fn run(as_json: bool) -> anyhow::Result<i32> {
     if as_json {
         println!("{}", serde_json::to_string_pretty(&found)?);
     } else {
-        print_text(&cfg, &found);
+        print_text(&cfg, &rep, &found);
     }
     Ok(verdict(&found))
 }
@@ -483,30 +474,122 @@ pub(crate) fn verdict(found: &[Finding]) -> i32 {
     }
 }
 
-fn print_text(cfg: &ClientConfig, found: &[Finding]) {
-    for f in found {
-        println!("  {} {:<30} {}", f.level.mark(), f.check, f.detail);
-        if let Some(fix) = &f.fix {
-            println!("       {:<30} → {}", "", fix);
+/// The groups a report is read in, in order. A check belongs to the first
+/// group that names it; anything unlisted lands in the last, so a check
+/// added later is never silently left out of the report.
+const SECTIONS: &[(&str, &[&str])] = &[
+    (
+        "Connection",
+        &[
+            "RECALL_URL",
+            "RECALL_TOKEN",
+            "server",
+            "merge",
+            "token storage",
+            "credentials file",
+            "config file",
+            "config overridden",
+        ],
+    ),
+    (
+        "This project",
+        &[
+            "hooks",
+            "memory dir",
+            "CLAUDE_CODE_REMOTE_MEMORY_DIR",
+            "settings file",
+            "ignored value",
+            "rejected value",
+            "reserved directory",
+        ],
+    ),
+    ("Scopes", &["global scope", "machine scope"]),
+    ("Backup", &["off-box backup"]),
+];
+
+const OTHER: &str = "Other";
+
+fn section_of(check: &str) -> &'static str {
+    SECTIONS
+        .iter()
+        .find(|(_, checks)| checks.contains(&check))
+        .map(|(name, _)| *name)
+        .unwrap_or(OTHER)
+}
+
+/// How a finding is marked. An `ok` that describes something switched off
+/// or not applicable is quiet rather than green: "global scope: off" is not
+/// an achievement, and marking it like one dilutes the marks that are.
+fn tone_of(f: &Finding) -> ui::Tone {
+    match f.level {
+        Level::Fail => ui::Tone::Bad,
+        Level::Warn => ui::Tone::Warn,
+        Level::Ok
+            if f.detail == "off"
+                || f.detail.starts_with("not needed")
+                || f.detail.starts_with("not in a git repository") =>
+        {
+            ui::Tone::Quiet
+        }
+        Level::Ok => ui::Tone::Good,
+    }
+}
+
+fn print_text(cfg: &ClientConfig, rep: &Report, found: &[Finding]) {
+    let server = cfg
+        .url
+        .split_once("://")
+        .map(|(_, rest)| rest.trim_end_matches('/'))
+        .unwrap_or("no server");
+    ui::title("recall doctor", &format!("{} → {server}", cfg.source_env));
+
+    let width = found.iter().map(|f| f.check.len()).max().unwrap_or(0);
+    let names = SECTIONS.iter().map(|(n, _)| *n).chain([OTHER]);
+    for name in names {
+        let items: Vec<&Finding> = found
+            .iter()
+            .filter(|f| section_of(f.check) == name)
+            .collect();
+        if items.is_empty() {
+            continue;
+        }
+        let about = if name == "This project" {
+            rep.project_key.as_str()
+        } else {
+            ""
+        };
+        ui::section(name, about);
+        for f in items {
+            ui::check(
+                tone_of(f),
+                f.check,
+                width,
+                &ui::tilde(&f.detail),
+                f.fix.as_deref().map(ui::tilde).as_deref(),
+            );
         }
     }
 
     let fails = found.iter().filter(|f| f.level == Level::Fail).count();
     let warns = found.iter().filter(|f| f.level == Level::Warn).count();
-
-    println!();
     match (fails, warns) {
-        (0, 0) => println!("  Everything checks out."),
+        (0, 0) => ui::verdict(ui::Tone::Good, "Everything checks out."),
         // Named plainly, because the whole point is that this state used to
         // look identical to a healthy one.
-        (0, w) => println!("  Nothing broken. {w} thing(s) worth a look."),
-        (f, _) => println!(
-            "  {f} problem(s). Recall is not syncing {}.",
-            if cfg.url.is_empty() {
-                "anything here"
-            } else {
-                "everything it looks like it is"
-            }
+        (0, w) => ui::verdict(
+            ui::Tone::Warn,
+            &format!("Nothing broken. {w} thing(s) worth a look."),
+        ),
+        (f, _) => ui::verdict(
+            ui::Tone::Bad,
+            &format!(
+                "{f} problem(s). Recall is not syncing {}.",
+                if cfg.url.is_empty() {
+                    "anything here"
+                } else {
+                    "everything it looks like it is"
+                }
+            ),
         ),
     }
 }

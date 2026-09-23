@@ -12,19 +12,21 @@ This package downloads the prebuilt `recall` binary for your platform
 (macOS and Linux, x64 and arm64) and verifies it against the release's
 checksums. There's no Node dependency at runtime — the binary is Rust.
 
-Then, once per machine:
+Then, from inside a project you want synced:
 
 ```sh
-recall connect https://your-recall-host    # asks for the token, checks it, saves it
+recall connect https://your-recall-host    # the token, this machine's name, and this project
+git add .claude/settings.json && git commit -m "Enable Recall memory sync"
+recall doctor
 ```
 
-And once per project you want synced:
+`connect` checks the token before saving it, and skips whatever is already
+done, so it is safe to run again. Each further project:
 
 ```sh
 recall init
 git add .claude/settings.json && git commit -m "Enable Recall memory sync"
 recall backfill
-recall status
 ```
 
 Notes about *you* rather than about one repository can follow you into every

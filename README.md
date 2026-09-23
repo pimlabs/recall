@@ -56,13 +56,18 @@ cargo install recall
 ```
 
 ```sh
-recall connect https://recall.yourdomain.com # asks for the token, checks it, saves it
-                                             # to ~/.recall (docs/reference/token-setup.md)
-recall init                                  # wires .claude/settings.json
+cd your-project
+recall connect https://recall.yourdomain.com # the token, this machine's name, then this
+                                             # project: wires it and sends its memory
 git add .claude/settings.json && git commit  # so fresh clones get it too
-recall backfill                              # send memory that predates all this
-recall status                                # confirm it's actually working
+recall doctor                                # confirm it's actually working
 ```
+
+`connect` asks one question at a time and skips what is already done, so
+running it again is safe. It saves to `~/.recall`
+([`docs/reference/token-setup.md`](docs/reference/token-setup.md)). Each
+further project is `recall init` and `recall backfill`, or `recall connect`
+again from inside it.
 
 **"Connect" means your own second machine**, or a fresh cloud session — not
 someone else's. Recall is single-owner by design: one token, no accounts, no
