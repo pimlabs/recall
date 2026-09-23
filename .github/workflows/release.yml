@@ -211,12 +211,21 @@ jobs:
 
       # A static binary is the promise the image relies on; a dynamic one
       # would build here and fail to start in Alpine.
+      #
+      # Asked of the ELF headers, not of `file`'s wording: `file` says
+      # "static-pie linked" for the amd64 build and "statically linked" for
+      # the arm64 one, and matching only the first is what failed v0.4.0's
+      # first run. A dynamic binary has a program interpreter and names the
+      # libraries it needs; a static one, PIE or not, has neither.
       - name: Package
         run: |
           set -euo pipefail
           bin="target/${{ matrix.target }}/release/recall-server"
           file "$bin"
-          file "$bin" | grep -Eq 'static(-pie)? linked'
+          if readelf -lW "$bin" | grep -q 'INTERP' || readelf -dW "$bin" | grep -q '(NEEDED)'; then
+            echo "::error::$bin is dynamically linked; the image needs a static one"
+            exit 1
+          fi
           "$bin" version
           mkdir -p dist
           cp "$bin" "dist/${{ matrix.asset }}"
