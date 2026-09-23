@@ -38,6 +38,37 @@ services:
       - "8787"
     networks:
       - tunnel
+      - backend
+
+  # The merge worker: an enrolled device that takes conflicting pushes off
+  # the server's queue and merges them with the `claude` CLI, so the login
+  # that CLI holds is not in the container the internet reaches. It opens
+  # no port: no `ports`, no `expose`, no labels, and no ingress network. It
+  # reaches the server directly on `backend` and signs every request with
+  # its own key, kept on its own volume, never the server's.
+  #
+  # On first start it prints a code to approve with the `worker` scope; see
+  # "The merge worker" in deploy/README.md. Until one is approved the server
+  # merges inline, exactly as before.
+  recall-worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: worker
+      args:
+        RECALL_SOURCE: ${RECALL_SOURCE:-release}
+        RECALL_VERSION: ${RECALL_VERSION:-}
+        GIT_COMMIT: ${GIT_COMMIT:-}
+    container_name: recall-worker
+    restart: unless-stopped
+    environment:
+      RECALL_URL: http://recall-server:8787
+    volumes:
+      - recall-worker-data:/data
+    depends_on:
+      - recall-server
+    networks:
+      - backend
 
   # Read-only DB browser for the owner's own use. Kept off the `tunnel`
   # network on purpose — it has no bearer-token auth of its own, so
@@ -71,7 +102,13 @@ services:
 
 volumes:
   recall-data:
+  # The worker's key and its CLI's login. Never mounted into the server.
+  recall-worker-data:
 
 networks:
   tunnel:
   db-tools:
+  # Shared by recall-server and recall-worker only, so the worker can reach
+  # the server without going through the ingress. Not `internal`: the
+  # worker's `claude` CLI has to reach Anthropic.
+  backend:

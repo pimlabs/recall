@@ -96,6 +96,14 @@ jobs:
           node scripts/install-worker-test.js
           python3 scripts/wrangler-check.py
 
+      # recall-worker holds a device key and the `claude` login, and is safe
+      # beside the server only while it has no port, no ingress label or
+      # network, and no volume the server has. One YAML line undoes any of
+      # those, so each is asserted, and each assertion is shown to fail on a
+      # copy of the file with that line added.
+      - name: The merge worker stays unreachable in both compose files
+        run: python3 scripts/compose-check.py
+
       # Not a style check. The doc set has been reorganised twice — `docs/`
       # split into reference/ and history/, `tests/` renamed to `fixtures/` —
       # and a link left pointing at nothing is exactly what neither move
@@ -214,15 +222,21 @@ jobs:
         run: |
           set -eu
           docker build -f deploy/Dockerfile --build-arg RECALL_SOURCE=source -t recall-server-ci .
+          # The worker's image from source too: its own target, whose
+          # binary stage is picked by the same argument.
+          docker build -f deploy/Dockerfile --target worker --build-arg RECALL_SOURCE=source -t recall-worker-ci .
 
           rel="$RUNNER_TEMP/releases/v0.0.0-ci"
           mkdir -p "$rel"
-          docker build -f deploy/Dockerfile --target source -t recall-server-bin .
+          # source-worker holds both binaries, as a release does.
+          docker build -f deploy/Dockerfile --target source-worker -t recall-server-bin .
           id=$(docker create recall-server-bin)
-          docker cp "$id:/out/recall-server" "$rel/recall-server_linux_amd64"
+          for name in recall-server recall-worker; do
+            docker cp "$id:/out/$name" "$rel/${name}_linux_amd64"
+            tar -czf "$rel/${name}_linux_amd64.tar.gz" -C "$rel" "${name}_linux_amd64"
+            rm "$rel/${name}_linux_amd64"
+          done
           docker rm "$id"
-          tar -czf "$rel/recall-server_linux_amd64.tar.gz" -C "$rel" recall-server_linux_amd64
-          rm "$rel/recall-server_linux_amd64"
           (cd "$rel" && sha256sum *.tar.gz > checksums.txt)
           (cd "$RUNNER_TEMP/releases" && python3 -m http.server 8765 --bind 127.0.0.1 &)
           sleep 1
@@ -232,6 +246,13 @@ jobs:
             --build-arg RECALL_RELEASES_URL=http://127.0.0.1:8765 \
             -t recall-server-rel .
           docker run --rm --entrypoint recall-server recall-server-rel version
+          docker build -f deploy/Dockerfile --network host --target worker \
+            --build-arg RECALL_VERSION=0.0.0-ci \
+            --build-arg RECALL_RELEASES_URL=http://127.0.0.1:8765 \
+            -t recall-worker-rel .
+          docker run --rm --entrypoint recall-worker recall-worker-rel version
+          # The worker merges with the CLI, so its image must carry it.
+          docker run --rm --entrypoint sh recall-worker-rel -c 'command -v claude'
 
           # Every digit replaced, so the digest is wrong whatever it was.
           sed -i 's/^[0-9a-f]*/'"$(printf '0%.0s' $(seq 64))"'/' "$rel/checksums.txt"
@@ -252,9 +273,9 @@ jobs:
           # impossible without anyone noticing.
           docker run --rm --entrypoint sh recall-server-rel -c 'command -v wget'
 
-  # The client only — recall-server is Linux-only by design (see
-  # deploy/Dockerfile and its own crate docs), so it is excluded rather than
-  # tested and ignored. `recall`'s own integration tests still pull it in as
+  # The client only — recall-server and recall-worker are Linux-only by
+  # design (see deploy/Dockerfile and their own crate docs), so they are
+  # excluded rather than tested and ignored. `recall`'s own integration tests still pull it in as
   # a dev-dependency (it runs a real server in-process), which is why this
   # needs a C toolchain: rusqlite's `bundled` feature compiles SQLite from
   # source, and windows-latest carries the MSVC toolchain cc-rs needs for
@@ -287,12 +308,12 @@ jobs:
         run: cargo fmt --all --check
 
       - name: cargo clippy
-        run: cargo clippy --workspace --exclude recall-server --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --exclude recall-server --exclude recall-worker --all-targets --locked -- -D warnings
 
       # --no-fail-fast: a Windows failure in one crate otherwise hides every
       # failure in the crates after it, and each round trip is a CI run.
       - name: cargo test
-        run: cargo test --workspace --exclude recall-server --locked --no-fail-fast
+        run: cargo test --workspace --exclude recall-server --exclude recall-worker --locked --no-fail-fast
 
       # Parsed rather than run: running it for real means downloading a
       # release, and no release has been cut yet at the point a PR that
