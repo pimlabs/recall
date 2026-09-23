@@ -30,8 +30,6 @@ pub enum Source {
     CredentialsFile,
     /// `~/.recall/config.toml` — the server and this machine's name.
     ConfigFile,
-    /// `~/.recall/device.key` — this machine's device key.
-    DeviceFile,
 }
 
 /// Why configuration is unusable. The messages match the ones the Go and
@@ -322,17 +320,6 @@ impl ClientConfig {
             return Err(ConfigError::MissingToken);
         }
         Ok(())
-    }
-
-    /// Where the credential requests are sent with came from: the device
-    /// key when there is one, since it wins, and the token's source
-    /// otherwise.
-    pub fn auth_source(&self) -> Source {
-        if self.device.is_some() {
-            Source::DeviceFile
-        } else {
-            self.token_source
-        }
     }
 
     /// A client for the server in effect: signing as this machine's device
@@ -685,6 +672,42 @@ mod tests {
 
     fn at(dir: &tempfile::TempDir) -> String {
         dir.path().to_string_lossy().to_string()
+    }
+
+    /// A device key or an authkey stands in for the token: a machine that
+    /// enrolled has none, and a cloud session holding `RECALL_AUTHKEY` has
+    /// none until it enrols.
+    #[test]
+    fn a_device_or_an_authkey_is_a_credential_too() {
+        let url = "https://a.example.com";
+        let authkey = ClientConfig::from_lookup(env(&[
+            ("RECALL_URL", url),
+            ("RECALL_AUTHKEY", " recall-ek-abc "),
+        ]));
+        assert_eq!(authkey.authkey.as_deref(), Some("recall-ek-abc"));
+        assert_eq!(authkey.require(), Ok(()));
+
+        let dir = saved(&[], Some(url), None);
+        let key = crate::device::DeviceKey::generate().unwrap();
+        home::Home::at(dir.path())
+            .save_device(url, key.entry("dev_x", "jarvis", "sync", false))
+            .unwrap();
+        let cfg = ClientConfig::from_lookup(env(&[("RECALL_HOME", &at(&dir))]));
+        assert_eq!(cfg.token, "");
+        assert_eq!(
+            cfg.device.as_ref().map(|d| d.device_id.as_str()),
+            Some("dev_x")
+        );
+        assert_eq!(cfg.require(), Ok(()));
+        assert!(cfg.client().unwrap().signs());
+
+        // Looked up for the server in effect, like the token.
+        let elsewhere = ClientConfig::from_lookup(env(&[
+            ("RECALL_HOME", &at(&dir)),
+            ("RECALL_URL", "https://b.example.com"),
+        ]));
+        assert!(elsewhere.device.is_none());
+        assert_eq!(elsewhere.require(), Err(ConfigError::MissingToken));
     }
 
     /// `recall connect` alone is a complete setup: the URL, the token and

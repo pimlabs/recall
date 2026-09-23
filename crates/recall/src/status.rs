@@ -743,7 +743,7 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
         match rep.url_source {
             Source::Unset => "(unset)".to_string(),
             Source::Environment => cfg.url.clone(),
-            Source::CredentialsFile | Source::ConfigFile | Source::DeviceFile => {
+            Source::CredentialsFile | Source::ConfigFile => {
                 format!("{} (from {from_config})", cfg.url)
             }
         }
@@ -759,7 +759,7 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
                 Some(file) => format!("set, by {file}"),
                 None => "set, in this shell".to_string(),
             },
-            Source::CredentialsFile | Source::ConfigFile | Source::DeviceFile => {
+            Source::CredentialsFile | Source::ConfigFile => {
                 format!("saved in {from_file}")
             }
         }
