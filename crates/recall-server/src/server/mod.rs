@@ -49,7 +49,8 @@ mod respond;
 use auth::ReplayCache;
 use devices::{
     handle_approve, handle_create_enroll_key, handle_deny, handle_enroll, handle_list_devices,
-    handle_list_enroll_keys, handle_poll, handle_revoke_device, handle_revoke_enroll_key,
+    handle_list_enroll_keys, handle_pending, handle_poll, handle_revoke_device,
+    handle_revoke_enroll_key,
 };
 use handlers::{
     handle_admin_page, handle_admin_stats, handle_discovery, handle_health, handle_pull,
@@ -138,6 +139,10 @@ impl Server {
                 post(handle_approve).fallback(not_found),
             )
             .route(paths::DENY_PATH, post(handle_deny).fallback(not_found))
+            .route(
+                "/v1/devices/pending/{user_code}",
+                get(handle_pending).fallback(not_found),
+            )
             .route(
                 "/v1/devices/{id}/revoke",
                 post(handle_revoke_device).fallback(not_found),

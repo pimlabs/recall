@@ -194,6 +194,16 @@ check "polling before approval: authorization_pending" '400 {"error":"authorizat
      "$URL/v1/devices/enroll/poll" | awk '{print $2, $1}')"
 check "polling again at once: slow_down" '{"error":"slow_down"}' "$(poll "$ENROLLMENT")"
 check "an unknown enrollment_id: invalid_grant" '{"error":"invalid_grant"}' "$(poll enr_unknown)"
+check "looking up a code needs a token" '401' \
+  "$(curl -s -o /dev/null -w '%{http_code}' "$URL/v1/devices/pending/$CODE")"
+curl -s "${auth[@]}" "$URL/v1/devices/pending/$(printf '%s' "$CODE" | tr 'A-Z' 'a-z' | tr -d '-')" \
+  >"$WORK/looked.json"
+check "looking up a code, typed any way, shows what it would approve" \
+  "user_code name agent fingerprint expires_in $CODE laptop doc-check" \
+  "$(python3 -c '
+import json,sys; d=json.load(open(sys.argv[1])); print(" ".join(d.keys()), d["user_code"], d["name"], d["agent"])' "$WORK/looked.json")"
+check "an unknown code is 404" '{"error":"no enrolment is waiting with that code"}' \
+  "$(curl -s "${auth[@]}" "$URL/v1/devices/pending/ZZZZ-ZZZZ")"
 check "approving needs a token" '{"error":"unauthorized"}' \
   "$(curl -s -X POST "${json[@]}" -d "{\"user_code\":\"$CODE\"}" "$URL/v1/devices/approve")"
 curl -s -X POST "${auth[@]}" "${json[@]}" -d "{\"user_code\":\"$CODE\"}" \
@@ -207,6 +217,8 @@ check "the poll after approval: the device" "{\"device_id\":\"$DEVICE\",\"scope\
 check "a code is approved once" '409' \
   "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${auth[@]}" "${json[@]}" \
      -d "{\"user_code\":\"$CODE\"}" "$URL/v1/devices/approve")"
+check "a decided code is no longer pending" '{"error":"that code was already approved or denied"}' \
+  "$(curl -s "${auth[@]}" "$URL/v1/devices/pending/$CODE")"
 
 enroll phone >"$WORK/enroll2.json"
 curl -s -X POST "${auth[@]}" "${json[@]}" -d "{\"user_code\":\"$(field "$WORK/enroll2.json" user_code)\"}" \

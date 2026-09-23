@@ -56,7 +56,7 @@ pub use admin::{AdminStats, AdminTotals, ProjectStats};
 pub use devices::{
     ApproveRequest, DenyRequest, DenyResponse, Device, DeviceList, DevicesCapability,
     EnrollApproved, EnrollKey, EnrollKeyCreated, EnrollKeyList, EnrollKeyRequest, EnrollPending,
-    EnrollPollRequest, EnrollPollResponse, EnrollRequest,
+    EnrollPollRequest, EnrollPollResponse, EnrollRequest, PendingEnrollment,
 };
 pub use discovery::{Discovery, DISCOVERY_PATH, PROTOCOL, PROTOCOL_HEADER};
 pub use health::{ClaudeCliStatus, Health, MergeError, MergeStatus};

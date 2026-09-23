@@ -50,6 +50,12 @@ pub fn revoke_enroll_key_path(id: &str) -> String {
     format!("{ENROLL_KEYS_PATH}/{id}/revoke")
 }
 
+/// `GET`: what the enrolment waiting with `user_code` asked for, so the
+/// approver can compare it with what the machine shows before approving.
+pub fn pending_path(user_code: &str) -> String {
+    format!("{DEVICES_PATH}/pending/{user_code}")
+}
+
 /// A device that may push and pull.
 pub const SCOPE_SYNC: &str = "sync";
 
@@ -242,6 +248,24 @@ pub struct ApproveRequest {
 pub struct DenyRequest {
     /// The code the machine shows.
     pub user_code: String,
+}
+
+/// `GET /v1/devices/pending/{user_code}`: an enrolment still waiting, as
+/// the approver sees it before deciding. Showing enough here that a
+/// phished approval gets noticed is what RFC 8628 §5.4 asks for.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingEnrollment {
+    /// The code, normalized.
+    pub user_code: String,
+    /// The name the machine asked to be known by.
+    pub name: String,
+    /// The `agent` it enrolled with.
+    pub agent: String,
+    /// Its key's fingerprint (see [`signature::fingerprint`]): the machine
+    /// shows the same one, and the two should match.
+    pub fingerprint: String,
+    /// Seconds until the code can no longer be approved.
+    pub expires_in: u64,
 }
 
 /// `POST /v1/devices/deny`: what was refused.

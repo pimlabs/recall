@@ -8,11 +8,6 @@
 //! fifteen minutes. The enrolment id the machine polls with is the long
 //! secret, as the device code is in the RFC.
 
-// The helpers here fail with the reply itself, which the handler hands
-// straight back to axum. Boxing it would allocate on the error path to
-// save a copy nobody would notice.
-#![allow(clippy::result_large_err)]
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,7 +15,7 @@ use anyhow::Context;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderValue, StatusCode};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use recall_wire::devices::{
     self, normalize_user_code, ACCESS_DENIED, AUTHORIZATION_PENDING, CODE_TTL_SECONDS,
     ENROLL_KEY_PREFIX, EXPIRED_TOKEN, INVALID_GRANT, MAX_ENROLL_KEY_DAYS, MAX_TAG_CHARS,
@@ -30,15 +25,15 @@ use recall_wire::signature::encode_public_key;
 use recall_wire::{
     ApproveRequest, DenyRequest, DenyResponse, DeviceList, EnrollApproved, EnrollKeyCreated,
     EnrollKeyList, EnrollKeyRequest, EnrollPending, EnrollPollRequest, EnrollPollResponse,
-    EnrollRequest,
+    EnrollRequest, PendingEnrollment,
 };
 use serde::de::DeserializeOwned;
 use time::OffsetDateTime;
 
-use super::respond::{error, internal, json};
+use super::respond::{error, internal, json, Refusal};
 use super::AppState;
 use crate::store::{Created, Decision, NewDevice, NewEnrollKey, NewEnrollment, Poll};
-use crate::{format_timestamp, now};
+use crate::{format_timestamp, now, parse_timestamp};
 
 /// How many enrolments may wait for approval at once. An owner has a
 /// handful at most; the cap is what bounds the table when someone who is
@@ -52,8 +47,9 @@ pub(super) const EXPIRED_ENROLLMENT_KEPT: Duration = Duration::from_secs(60 * 60
 
 /// Reads a JSON body, answering with the wording `POST /sync` uses for one
 /// that does not parse.
-fn body<T: DeserializeOwned>(bytes: &Bytes) -> Result<T, Response> {
-    serde_json::from_slice(bytes).map_err(|_| error(StatusCode::BAD_REQUEST, "invalid json body"))
+fn body<T: DeserializeOwned>(bytes: &Bytes) -> Result<T, Refusal> {
+    serde_json::from_slice(bytes)
+        .map_err(|_| Refusal::new(StatusCode::BAD_REQUEST, "invalid json body"))
 }
 
 /// A reply that carries a secret, which RFC 6749 §5.1 says no cache may
@@ -122,7 +118,7 @@ fn later(by: Duration) -> String {
 pub(super) async fn handle_enroll(State(state): State<Arc<AppState>>, bytes: Bytes) -> Response {
     let req: EnrollRequest = match body(&bytes) {
         Ok(req) => req,
-        Err(resp) => return resp,
+        Err(refused) => return refused.into_response(),
     };
     let key = match req.validate() {
         Ok(key) => key,
@@ -248,7 +244,7 @@ fn enroll_with_key(
 pub(super) async fn handle_poll(State(state): State<Arc<AppState>>, bytes: Bytes) -> Response {
     let req: EnrollPollRequest = match body(&bytes) {
         Ok(req) => req,
-        Err(resp) => return resp,
+        Err(refused) => return refused.into_response(),
     };
     if req.enrollment_id.is_empty() {
         return error(StatusCode::BAD_REQUEST, "enrollment_id is required");
@@ -277,27 +273,27 @@ pub(super) async fn handle_poll(State(state): State<Arc<AppState>>, bytes: Bytes
 
 /// The code a person typed, normalized, or the 400 that says what a code
 /// looks like.
-fn user_code(input: &str) -> Result<String, Response> {
+fn user_code(input: &str) -> Result<String, Refusal> {
     normalize_user_code(input).ok_or_else(|| {
-        error(
+        Refusal::new(
             StatusCode::BAD_REQUEST,
             "user_code must be the 8 letters the device shows, such as WDJB-MJHT",
         )
     })
 }
 
-fn undecided<T>(decision: Decision<T>) -> Result<T, Response> {
+fn undecided<T>(decision: Decision<T>) -> Result<T, Refusal> {
     match decision {
         Decision::Done(v) => Ok(v),
-        Decision::NotFound => Err(error(
+        Decision::NotFound => Err(Refusal::new(
             StatusCode::NOT_FOUND,
             "no enrolment is waiting with that code",
         )),
-        Decision::Expired => Err(error(
+        Decision::Expired => Err(Refusal::new(
             StatusCode::GONE,
             "that code has expired; start the enrolment again",
         )),
-        Decision::AlreadyDecided => Err(error(
+        Decision::AlreadyDecided => Err(Refusal::new(
             StatusCode::CONFLICT,
             "that code was already approved or denied",
         )),
@@ -308,14 +304,14 @@ fn undecided<T>(decision: Decision<T>) -> Result<T, Response> {
 pub(super) async fn handle_approve(State(state): State<Arc<AppState>>, bytes: Bytes) -> Response {
     let req: ApproveRequest = match body(&bytes) {
         Ok(req) => req,
-        Err(resp) => return resp,
+        Err(refused) => return refused.into_response(),
     };
     if req.scope != SCOPE_SYNC && req.scope != SCOPE_ADMIN {
         return error(StatusCode::BAD_REQUEST, "scope must be sync or admin");
     }
     let code = match user_code(&req.user_code) {
         Ok(code) => code,
-        Err(resp) => return resp,
+        Err(refused) => return refused.into_response(),
     };
     let device_id = match new_id("dev_", 16) {
         Ok(id) => id,
@@ -327,7 +323,7 @@ pub(super) async fn handle_approve(State(state): State<Arc<AppState>>, bytes: By
         .map(undecided)
     {
         Ok(Ok(device)) => json(StatusCode::OK, &device),
-        Ok(Err(resp)) => resp,
+        Ok(Err(refused)) => refused.into_response(),
         Err(e) => internal(e),
     }
 }
@@ -336,11 +332,11 @@ pub(super) async fn handle_approve(State(state): State<Arc<AppState>>, bytes: By
 pub(super) async fn handle_deny(State(state): State<Arc<AppState>>, bytes: Bytes) -> Response {
     let req: DenyRequest = match body(&bytes) {
         Ok(req) => req,
-        Err(resp) => return resp,
+        Err(refused) => return refused.into_response(),
     };
     let code = match user_code(&req.user_code) {
         Ok(code) => code,
-        Err(resp) => return resp,
+        Err(refused) => return refused.into_response(),
     };
     match state.store.deny_enrollment(&code, &now()).map(undecided) {
         Ok(Ok(name)) => json(
@@ -351,7 +347,49 @@ pub(super) async fn handle_deny(State(state): State<Arc<AppState>>, bytes: Bytes
                 denied: true,
             },
         ),
-        Ok(Err(resp)) => resp,
+        Ok(Err(refused)) => refused.into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+/// `GET /v1/devices/pending/{user_code}`: what approving the code would
+/// approve, so the approver can check the name and fingerprint against the
+/// machine's screen first (RFC 8628 §5.4). It is judged exactly as
+/// approving it would be, so the two never disagree.
+pub(super) async fn handle_pending(
+    State(state): State<Arc<AppState>>,
+    Path(input): Path<String>,
+) -> Response {
+    let code = match user_code(&input) {
+        Ok(code) => code,
+        Err(refused) => return refused.into_response(),
+    };
+    let now = OffsetDateTime::now_utc();
+    match state
+        .store
+        .pending_enrollment(&code, &format_timestamp(now))
+        .map(undecided)
+    {
+        Ok(Ok(waiting)) => {
+            // Only a key that parsed was ever stored.
+            let fingerprint = recall_wire::signature::parse_public_key(&waiting.public_key)
+                .map(|k| recall_wire::signature::fingerprint(&k))
+                .unwrap_or_default();
+            let expires_in = parse_timestamp(&waiting.expires_at)
+                .map(|at| (at - now).whole_seconds().max(0) as u64)
+                .unwrap_or(0);
+            json(
+                StatusCode::OK,
+                &PendingEnrollment {
+                    user_code: code,
+                    name: waiting.name,
+                    agent: waiting.agent,
+                    fingerprint,
+                    expires_in,
+                },
+            )
+        }
+        Ok(Err(refused)) => refused.into_response(),
         Err(e) => internal(e),
     }
 }
@@ -384,7 +422,7 @@ pub(super) async fn handle_create_enroll_key(
 ) -> Response {
     let req: EnrollKeyRequest = match body(&bytes) {
         Ok(req) => req,
-        Err(resp) => return resp,
+        Err(refused) => return refused.into_response(),
     };
     if !(1..=MAX_ENROLL_KEY_DAYS).contains(&req.expires_in_days) {
         return error(StatusCode::BAD_REQUEST, "expires_in_days must be 1 to 365");

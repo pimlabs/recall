@@ -11,6 +11,7 @@ use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use axum::Extension;
 use recall_wire::discovery::{self, Auth, Build, Protocol, ServerInfo};
 use recall_wire::{
     AdminStats, ClaudeCliStatus, Health, MergeError, MergeStatus, PushRequest, PushResponse,
@@ -18,6 +19,7 @@ use recall_wire::{
 };
 use recall_wire::{Discovery, PROTOCOL};
 
+use super::auth::Caller;
 use super::respond::{error, internal, json};
 use super::AppState;
 use crate::now;
@@ -34,8 +36,12 @@ const ADMIN_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; script-s
 const REQUIRED_FIELDS_MSG: &str =
     "project_key, file_path, and content (string) are required, unless deleted is true";
 
-pub(super) async fn handle_push(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
-    let req: PushRequest = match serde_json::from_slice(&body) {
+pub(super) async fn handle_push(
+    State(state): State<Arc<AppState>>,
+    caller: Option<Extension<Caller>>,
+    body: Bytes,
+) -> Response {
+    let mut req: PushRequest = match serde_json::from_slice(&body) {
         Ok(req) => req,
         Err(_) => {
             // Go's json.Unmarshal tolerates absent fields and reports them
@@ -68,6 +74,14 @@ pub(super) async fn handle_push(State(state): State<Arc<AppState>>, body: Bytes)
             StatusCode::BAD_REQUEST,
             "file_path must be relative, no traversal",
         );
+    }
+
+    // The name belongs to the key. A push a device signed is recorded under
+    // the name that device enrolled as, whatever the body claims, so one
+    // machine cannot write as another. A bearer push has no key to go by
+    // and keeps the label it sent, exactly as before devices existed.
+    if let Some(Extension(Caller::Device { name, .. })) = caller {
+        req.source_env = name;
     }
 
     let updated_at = now();

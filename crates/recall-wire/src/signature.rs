@@ -590,31 +590,43 @@ pub fn sign_request(
     })
 }
 
+/// A signed request as it arrived, everything [`verify_request`] reads
+/// from it.
+pub struct Received<'a> {
+    /// The `Signature-Input` member labelled [`LABEL`].
+    pub input: &'a SignatureInput,
+    /// The `Signature` member labelled [`LABEL`].
+    pub signature: &'a [u8],
+    /// Where the derived components come from.
+    pub target: Target<'a>,
+    /// A header's value by lowercase name, with repeated headers joined by
+    /// `", "` (RFC 9110 §5.3).
+    pub field: &'a dyn Fn(&str) -> Option<String>,
+    /// The whole body.
+    pub body: &'a [u8],
+}
+
 /// Everything about a signed request that can be checked without state:
 /// the profile ([`SignatureInput::check_profile`]), the body against
-/// `Content-Digest`, and the signature against `key`.
+/// `Content-Digest`, and the signature against `key`, given the verifier's
+/// clock as a UNIX time.
 ///
-/// `field` returns a header's value by lowercase name, with repeated
-/// headers joined by `", "` (RFC 9110 §5.3). What needs the server's state,
-/// which key a `keyid` names and whether a nonce was already used, is the
-/// caller's.
-#[allow(clippy::too_many_arguments)]
+/// What needs the server's state, which key a `keyid` names and whether a
+/// nonce was already used, is the caller's.
 pub fn verify_request(
-    input: &SignatureInput,
-    signature: &[u8],
-    target: &Target<'_>,
-    field: &dyn Fn(&str) -> Option<String>,
-    body: &[u8],
+    req: &Received<'_>,
     key: &VerifyingKey,
     now: i64,
     window: u64,
 ) -> Result<(), SignatureError> {
-    input.check_profile(now, window)?;
-    let digest = field(CONTENT_DIGEST_HEADER)
+    req.input.check_profile(now, window)?;
+    let digest = (req.field)(CONTENT_DIGEST_HEADER)
         .ok_or_else(|| SignatureError::MissingComponent(CONTENT_DIGEST_HEADER.to_string()))?;
-    check_content_digest(&digest, body)?;
-    let base = input.signature_base(|name| component_value(target, field, name))?;
-    verify(key, &base, signature)
+    check_content_digest(&digest, req.body)?;
+    let base = req
+        .input
+        .signature_base(|name| component_value(&req.target, req.field, name))?;
+    verify(key, &base, req.signature)
 }
 
 // ---------------------------------------------------------------------------
@@ -1078,16 +1090,14 @@ mod tests {
         let field = headers(signed);
         let input = SignatureInput::parse(&field(SIGNATURE_INPUT_HEADER).unwrap(), LABEL)?;
         let signature = parse_signature(&field(SIGNATURE_HEADER).unwrap(), LABEL)?;
-        verify_request(
-            &input,
-            &signature,
-            target,
-            &field,
+        let received = Received {
+            input: &input,
+            signature: &signature,
+            target: *target,
+            field: &field,
             body,
-            &test_key().verifying_key(),
-            now,
-            WINDOW_SECONDS,
-        )
+        };
+        verify_request(&received, &test_key().verifying_key(), now, WINDOW_SECONDS)
     }
 
     #[test]
@@ -1156,17 +1166,15 @@ mod tests {
         };
         let input = SignatureInput::parse(&signed.signature_input, LABEL).unwrap();
         let sig = parse_signature(&signed.signature, LABEL).unwrap();
+        let received = Received {
+            input: &input,
+            signature: &sig,
+            target: t,
+            field: &field,
+            body,
+        };
         assert_eq!(
-            verify_request(
-                &input,
-                &sig,
-                &t,
-                &field,
-                body,
-                &test_key().verifying_key(),
-                NOW,
-                WINDOW_SECONDS
-            ),
+            verify_request(&received, &test_key().verifying_key(), NOW, WINDOW_SECONDS),
             Err(SignatureError::BadSignature)
         );
     }

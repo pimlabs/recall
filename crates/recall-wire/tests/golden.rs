@@ -24,8 +24,8 @@ use std::path::{Path, PathBuf};
 use recall_wire::{
     AdminStats, ApproveRequest, DenyRequest, DenyResponse, Device, DeviceList, Discovery,
     EnrollApproved, EnrollKey, EnrollKeyCreated, EnrollKeyList, EnrollKeyRequest, EnrollPending,
-    EnrollPollRequest, EnrollPollResponse, EnrollRequest, ErrorResponse, Health, PushRequest,
-    PushResponse, SyncResponse,
+    EnrollPollRequest, EnrollPollResponse, EnrollRequest, ErrorResponse, Health, PendingEnrollment,
+    PushRequest, PushResponse, SyncResponse,
 };
 use serde_json::Value;
 
@@ -97,6 +97,7 @@ fn round_trip(kind: &str, bytes: &[u8]) -> Result<Value, String> {
         "enroll_poll_error" => go::<ErrorResponse>(bytes),
         "device_approve_request" => go::<ApproveRequest>(bytes),
         "device_approve_response" | "device_revoke_response" => go::<Device>(bytes),
+        "device_pending_response" => go::<PendingEnrollment>(bytes),
         "device_deny_request" => go::<DenyRequest>(bytes),
         "device_deny_response" => go::<DenyResponse>(bytes),
         "device_list_response" => go::<DeviceList>(bytes),
@@ -187,6 +188,7 @@ fn every_kind_has_a_fixture() {
         "enroll_poll_error",
         "device_approve_request",
         "device_approve_response",
+        "device_pending_response",
         "device_deny_request",
         "device_deny_response",
         "device_list_response",

@@ -225,6 +225,19 @@ pub enum Decision<T> {
 /// public_key, agent, expires_at, decided)`.
 type Pending = (String, String, String, String, String, bool);
 
+/// An enrolment still waiting for a decision, as an approver is shown it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Waiting {
+    /// What the machine asked to be called.
+    pub name: String,
+    /// Its public key, base64url.
+    pub public_key: String,
+    /// Its `User-Agent`.
+    pub agent: String,
+    /// When its code stops being approvable.
+    pub expires_at: String,
+}
+
 fn pending_by_code(conn: &Connection, user_code: &str) -> Result<Option<Pending>> {
     Ok(conn
         .query_row(
@@ -424,6 +437,30 @@ impl Store {
             (&enrollment_id,),
         )?;
         Ok(Decision::Done(name))
+    }
+
+    /// What the enrolment waiting with `user_code` asked for, judged the
+    /// way approving it would be, so a lookup and the approval after it
+    /// never disagree about whether the code is still good.
+    pub fn pending_enrollment(&self, user_code: &str, now: &str) -> Result<Decision<Waiting>> {
+        let conn = self.lock();
+        let Some((_, name, public_key, agent, expires_at, decided)) =
+            pending_by_code(&conn, user_code)?
+        else {
+            return Ok(Decision::NotFound);
+        };
+        if decided {
+            return Ok(Decision::AlreadyDecided);
+        }
+        if expires_at.as_str() <= now {
+            return Ok(Decision::Expired);
+        }
+        Ok(Decision::Done(Waiting {
+            name,
+            public_key,
+            agent,
+            expires_at,
+        }))
     }
 
     /// Stores a device, and answers with it as the API shows it.
@@ -663,6 +700,21 @@ mod tests {
     fn a_code_is_decided_once() {
         let st = Store::open_in_memory().unwrap();
         enroll(&st, "enr_a", "BCDF-GHJK", 0);
+        let Decision::Done(waiting) = st.pending_enrollment("BCDF-GHJK", &ts(1)).unwrap() else {
+            panic!("not waiting");
+        };
+        assert_eq!(
+            (waiting.name.as_str(), waiting.expires_at),
+            ("laptop", ts(900))
+        );
+        assert_eq!(
+            st.pending_enrollment("BCDF-GHJK", &ts(900)).unwrap(),
+            Decision::Expired
+        );
+        assert_eq!(
+            st.pending_enrollment("ZZZZ-ZZZZ", &ts(1)).unwrap(),
+            Decision::NotFound
+        );
         assert_eq!(
             st.deny_enrollment("BCDF-GHJK", &ts(1)).unwrap(),
             Decision::Done("laptop".into())

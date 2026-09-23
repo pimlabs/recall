@@ -12,10 +12,10 @@ use axum::body::Body;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 
 use super::auth::{self, Caller};
-use super::respond::error;
+use super::respond::{error, Refusal};
 use super::AppState;
 
 /// Rate limiting runs *before* auth, so a flood of invalid tokens is
@@ -36,7 +36,7 @@ pub(super) async fn guard(
     }
     match authenticate(&state, req).await {
         Ok(req) => next.run(req).await,
-        Err(refused) => refused,
+        Err(refused) => refused.into_response(),
     }
 }
 
@@ -106,19 +106,19 @@ fn limit(state: &AppState, req: &Request) -> Option<Response> {
 /// The bearer token first, unchanged: a request carrying the right one is
 /// the operator's, whatever else it carries. Then a signature, if there is
 /// one. Anything else is the same bare 401 it always was.
-async fn authenticate(state: &AppState, mut req: Request) -> Result<Request, Response> {
+async fn authenticate(state: &AppState, mut req: Request) -> Result<Request, Refusal> {
     if authorized(&state.cfg.token, req.headers()) {
         req.extensions_mut().insert(Caller::Operator);
         return Ok(req);
     }
     if !auth::is_signed(req.headers()) {
-        return Err(error(StatusCode::UNAUTHORIZED, "unauthorized"));
+        return Err(Refusal::new(StatusCode::UNAUTHORIZED, "unauthorized"));
     }
     // The digest covers the body, so a signed request's body is read here,
     // under the same bound the handlers apply, and handed on intact.
     let (parts, body) = req.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, super::MAX_BODY_BYTES).await else {
-        return Err(error(
+        return Err(Refusal::new(
             StatusCode::PAYLOAD_TOO_LARGE,
             "request body too large",
         ));

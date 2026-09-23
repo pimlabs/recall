@@ -17,7 +17,7 @@ use recall_wire::devices::{self, ENROLL_KEY_PREFIX};
 use recall_wire::signature::{self, encode_public_key, fingerprint, SigningKey, Target};
 use recall_wire::{
     Device, DeviceList, EnrollApproved, EnrollKey, EnrollKeyCreated, EnrollKeyList, EnrollPending,
-    EnrollPollResponse, ErrorResponse, PushResponse, SyncResponse,
+    EnrollPollResponse, ErrorResponse, PendingEnrollment, PushResponse, SyncResponse,
 };
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -347,6 +347,172 @@ async fn a_machine_enrols_by_code_approved_with_the_operator_token() {
             "that code was already approved or denied".into()
         )
     );
+}
+
+/// RFC 8628 §5.4: before approving, the approver sees what the code would
+/// approve, and can compare the name and fingerprint with the machine's own
+/// screen. The lookup judges the code exactly as approving it would.
+#[tokio::test]
+async fn the_approver_sees_what_it_is_approving_first() {
+    let h = harness(|_| {});
+    let laptop = Machine::new(19);
+    let pending: EnrollPending = ok(h
+        .call(
+            "POST",
+            devices::ENROLL_PATH,
+            None,
+            Some(json!({"name": "laptop", "public_key": laptop.public_key(), "agent": "recall/0.4.1 (linux-x86_64)"})),
+        )
+        .await);
+
+    // Typed the way a person does: lowercase, no hyphen.
+    let typed = pending.user_code.to_lowercase().replace('-', "");
+    let seen: PendingEnrollment = ok(h
+        .call("GET", &devices::pending_path(&typed), Some(TOKEN), None)
+        .await);
+    assert_eq!(seen.user_code, pending.user_code, "normalized");
+    assert_eq!(seen.name, "laptop");
+    assert_eq!(seen.agent, "recall/0.4.1 (linux-x86_64)");
+    assert_eq!(seen.fingerprint, fingerprint(&laptop.key.verifying_key()));
+    assert!(
+        (890..=900).contains(&seen.expires_in),
+        "{}",
+        seen.expires_in
+    );
+
+    // Looking is not deciding: the machine is still waiting.
+    assert_eq!(
+        error_of(h.poll(&pending.enrollment_id).await).1,
+        "authorization_pending"
+    );
+
+    // Admin only, like approving.
+    assert_eq!(
+        error_of(
+            h.call("GET", &devices::pending_path(&typed), None, None)
+                .await
+        ),
+        (StatusCode::UNAUTHORIZED, "unauthorized".into())
+    );
+    let mut phone = Machine::new(20);
+    h.enrol(&mut phone, "sync").await;
+    let s = Signing::by(&phone);
+    assert_eq!(
+        h.signed("GET", &devices::pending_path(&typed), None, &s)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+
+    for (code, want) in [
+        ("ZZZZ-ZZZZ", StatusCode::NOT_FOUND),
+        ("abc", StatusCode::BAD_REQUEST),
+    ] {
+        assert_eq!(
+            h.call("GET", &devices::pending_path(code), Some(TOKEN), None)
+                .await
+                .0,
+            want,
+            "{code}"
+        );
+    }
+
+    // Once decided, it is no longer pending.
+    let _: Device = ok(h
+        .call(
+            "POST",
+            devices::APPROVE_PATH,
+            Some(TOKEN),
+            Some(json!({"user_code": pending.user_code})),
+        )
+        .await);
+    assert_eq!(
+        error_of(
+            h.call(
+                "GET",
+                &devices::pending_path(&pending.user_code),
+                Some(TOKEN),
+                None
+            )
+            .await
+        ),
+        (
+            StatusCode::CONFLICT,
+            "that code was already approved or denied".into()
+        )
+    );
+
+    // And once expired, it says so, as approving would.
+    let late: EnrollPending = ok(h
+        .call(
+            "POST",
+            devices::ENROLL_PATH,
+            None,
+            Some(json!({"name": "late", "public_key": laptop.public_key()})),
+        )
+        .await);
+    h.sql(&format!(
+        "UPDATE device_enrollments SET expires_at = '2020-01-01T00:00:00.000Z' WHERE user_code = '{}'",
+        late.user_code
+    ));
+    assert_eq!(
+        error_of(
+            h.call(
+                "GET",
+                &devices::pending_path(&late.user_code),
+                Some(TOKEN),
+                None
+            )
+            .await
+        ),
+        (
+            StatusCode::GONE,
+            "that code has expired; start the enrolment again".into()
+        )
+    );
+}
+
+/// The name belongs to the key: whatever a signed push says it came from,
+/// it is stored under the name the device enrolled as. A bearer push keeps
+/// the label it sent, as it always has.
+#[tokio::test]
+async fn a_signed_push_is_recorded_under_the_devices_own_name() {
+    let h = harness(|_| {});
+    let mut laptop = Machine::new(21);
+    h.enrol(&mut laptop, "sync").await;
+
+    let s = Signing::by(&laptop);
+    let mut claim = push_body("# signed\n");
+    claim["source_env"] = json!("the-other-machine");
+    let _: PushResponse = ok(h.signed("POST", "/sync", Some(claim), &s).await);
+
+    let s = Signing::by(&laptop);
+    let delete = json!({"project_key": "acme/app", "file_path": "gone.md", "deleted": true, "source_env": "someone-else"});
+    let _: PushResponse = ok(h.signed("POST", "/sync", Some(delete), &s).await);
+
+    let mut bearer = push_body("# bearer\n");
+    bearer["file_path"] = json!("bearer.md");
+    bearer["source_env"] = json!("cloud");
+    assert_eq!(
+        h.call("POST", "/sync", Some(TOKEN), Some(bearer)).await.0,
+        StatusCode::OK
+    );
+
+    let (_, body) = h
+        .call("GET", "/sync?project_key=acme%2Fapp", Some(TOKEN), None)
+        .await;
+    let pulled: SyncResponse = serde_json::from_slice(&body).unwrap();
+    let source = |path: &str| {
+        pulled
+            .files
+            .iter()
+            .find(|f| f.file_path == path)
+            .map(|f| f.source_env.clone())
+            .unwrap()
+    };
+    assert_eq!(source("MEMORY.md"), "laptop", "a signed write");
+    assert_eq!(source("gone.md"), "laptop", "a signed delete");
+    assert_eq!(source("bearer.md"), "cloud", "a bearer push is unchanged");
 }
 
 #[tokio::test]

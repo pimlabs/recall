@@ -1,7 +1,7 @@
 # HTTP API
 
 Recall's server exposes six routes for memory and the deployment, and, since
-0.4.1, eight under `/v1` for devices. Two carry memory files, two are for
+0.4.1, nine under `/v1` for devices. Two carry memory files, two are for
 looking at the deployment, one says what the server is and speaks, one is a
 browser page, and the device routes enrol machines and manage them.
 
@@ -32,6 +32,7 @@ asserts what this page says about them.
 | [`GET /admin`](#get-admin) | **no** | An HTML page rendering the above |
 | [`POST /v1/devices/enroll`](#post-v1devicesenroll) | **no** | Start enrolling a machine |
 | [`POST /v1/devices/enroll/poll`](#post-v1devicesenrollpoll) | **no** | Ask whether it was approved |
+| [`GET /v1/devices/pending/{user_code}`](#get-v1devicespendinguser_code) | admin | What a code would approve, before approving it |
 | [`POST /v1/devices/approve`](#post-v1devicesapprove-and-post-v1devicesdeny) | admin | Approve a machine by its code |
 | [`POST /v1/devices/deny`](#post-v1devicesapprove-and-post-v1devicesdeny) | admin | Refuse one |
 | [`GET /v1/devices`](#get-v1devices) | admin | Every device |
@@ -108,6 +109,11 @@ signature verifies with the device's key; the nonce has not been seen from
 that device inside the window. It then notes the device's `last_seen`, to
 within a minute. A `sync` device may use every route but the admin ones; an
 `admin` device may use all of them.
+
+**The name belongs to the key.** A push a device signed is stored with that
+device's name as its `source_env`, whatever the body's `source_env` says, so
+one machine cannot write under another's name. A push with the bearer token
+has no key to go by and is stored with the `source_env` it sent, as always.
 
 A request carrying the right bearer token is the operator's, whatever else
 it carries. A request with neither credential gets the same bare `401` as
@@ -209,7 +215,7 @@ Stores one memory file, or tombstones one.
 | `project_key` | string | yes | How two machines agree they mean the same project. See [Project identity](../../ARCHITECTURE.md#project-identity). |
 | `file_path` | string | yes | Relative to the memory directory, forward slashes. Validated — see below. |
 | `content` | string | for a write | The file's **exact** bytes, trailing newlines included. |
-| `source_env` | string | no | A display label for the machine. Nothing keys off it. |
+| `source_env` | string | no | A display label for the machine. Nothing keys off it. On a push a device signed, the server records the device's name here instead, whatever the body says: see below. |
 | `deleted` | bool | no | `true` makes this a delete; `content` is then omitted. |
 | `base_sha256` | string | no | SHA-256, lowercase hex, of the content this edit started from — what the client last pulled or pushed for this file. Decides whether the push is merged; see below. |
 
@@ -660,6 +666,30 @@ as it was approved in time. A body with no `enrollment_id` is a `400`
 saying so. Every successful answer from the enrolment routes, and every
 poll answer, is sent with `Cache-Control: no-store`, as RFC 6749 §5.1 asks
 of token responses.
+
+## `GET /v1/devices/pending/{user_code}`
+
+Admin. What approving the code would approve, so the owner can compare the
+name and fingerprint with what the machine shows before deciding: RFC 8628
+§5.4's defence against being talked into approving someone else's machine.
+The code is read the way approving reads it: case, the hyphen and spaces do
+not matter.
+
+```json
+{
+  "user_code": "RMVL-HDSN",
+  "name": "laptop",
+  "agent": "recall/0.4.1 (linux-x86_64)",
+  "fingerprint": "SHA256:sWwtG+rRJiY5dk/bDuTTd0WZM2vUk0BM2ksRNsWfIGI",
+  "expires_in": 899
+}
+```
+
+`user_code` comes back normalized; `expires_in` is the seconds left to
+approve it. Looking decides nothing: the machine keeps polling
+`authorization_pending`. The answers for a code that cannot be approved are
+the ones approving it would give, `400`, `404`, `409` and `410`, listed
+under approve below.
 
 ## `POST /v1/devices/approve` and `POST /v1/devices/deny`
 

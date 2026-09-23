@@ -167,6 +167,10 @@ if curl -s "$URL/.well-known/recall" | grep -q '"devices"'; then
     "$URL/v1/devices/enroll/poll"
   keep enroll_poll_error.json pending
 
+  # What the approver sees before deciding.
+  fetch looked -H "$AUTH" "$URL/v1/devices/pending/$(field enroll user_code)"
+  keep device_pending_response.json looked
+
   fetch approve -X POST -H "$AUTH" -H "$JSON" \
     -d "{\"user_code\":\"$(field enroll user_code)\",\"scope\":\"sync\"}" \
     "$URL/v1/devices/approve"

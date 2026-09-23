@@ -26,8 +26,14 @@ break will be described here in full rather than smoothed over.
   until it does. See "Devices" in `docs/reference/api.md`.
 - **`RECALL_TOKEN` works exactly as before**, on every route, and is how
   the first device is approved. Nothing that worked stops working.
+- **A device's pushes carry its own name.** A push a device signed is
+  stored with that device's name as `source_env`, whatever the push says,
+  so one machine cannot write as another. Pushes with `RECALL_TOKEN` keep
+  the name they send.
 - **New routes:** `POST /v1/devices/enroll`, `POST /v1/devices/enroll/poll`,
-  and, for the owner, `POST /v1/devices/approve`, `POST /v1/devices/deny`,
+  and, for the owner, `GET /v1/devices/pending/{user_code}` (what a code
+  would approve, name and key fingerprint, before approving it),
+  `POST /v1/devices/approve`, `POST /v1/devices/deny`,
   `GET /v1/devices`, `POST /v1/devices/{id}/revoke`, `POST /v1/enroll-keys`,
   `GET /v1/enroll-keys` and `POST /v1/enroll-keys/{id}/revoke`.
 - **`GET /.well-known/recall` lists `device-sig-v1`** after `bearer` in

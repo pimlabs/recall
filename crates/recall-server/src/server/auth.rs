@@ -6,24 +6,19 @@
 //! describes, checked against the device its `keyid` names, and remembered
 //! so it cannot be sent twice.
 
-// A refusal is the reply itself, which the middleware hands straight back
-// to axum. Boxing it would allocate on the error path to save a copy
-// nobody would notice.
-#![allow(clippy::result_large_err)]
-
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::Response;
 use recall_wire::devices::SCOPE_ADMIN;
 use recall_wire::signature::{
-    self, SignatureInput, Target, LABEL, SIGNATURE_HEADER, SIGNATURE_INPUT_HEADER, WINDOW_SECONDS,
+    self, Received, SignatureInput, Target, LABEL, SIGNATURE_HEADER, SIGNATURE_INPUT_HEADER,
+    WINDOW_SECONDS,
 };
 
-use super::respond::{error, internal};
+use super::respond::Refusal;
 use super::AppState;
 use crate::{now, parse_timestamp};
 
@@ -37,6 +32,9 @@ pub(super) enum Caller {
     Device {
         /// `dev_…`.
         id: String,
+        /// The name it enrolled as. A push it signs is recorded under this,
+        /// whatever the push says: the name belongs to the key.
+        name: String,
         /// `sync` or `admin`.
         scope: String,
     },
@@ -76,9 +74,9 @@ const LAST_SEEN_EVERY: Duration = Duration::from_secs(60);
 /// The order is cheapest first, and the nonce is recorded last: only a
 /// request whose signature verified may take a place in the replay cache,
 /// or anyone could fill it.
-pub(super) fn verify(state: &AppState, parts: &Parts, body: &[u8]) -> Result<Caller, Response> {
+pub(super) fn verify(state: &AppState, parts: &Parts, body: &[u8]) -> Result<Caller, Refusal> {
     let rejected = |why: &dyn std::fmt::Display| {
-        error(StatusCode::UNAUTHORIZED, &format!("unauthorized: {why}"))
+        Refusal::new(StatusCode::UNAUTHORIZED, format!("unauthorized: {why}"))
     };
     let field = |name: &str| joined(&parts.headers, name);
 
@@ -100,13 +98,14 @@ pub(super) fn verify(state: &AppState, parts: &Parts, body: &[u8]) -> Result<Cal
     let device = match state.store.device(keyid) {
         Ok(Some(device)) => device,
         Ok(None) => return Err(rejected(&"unknown device")),
-        Err(e) => return Err(internal(e)),
+        Err(e) => return Err(Refusal::internal(e)),
     };
     if device.revoked_at.is_some() {
         return Err(rejected(&"this device has been revoked"));
     }
-    let key = signature::parse_public_key(&device.public_key)
-        .map_err(|e| internal(anyhow::anyhow!("device {} has a bad key: {e}", device.id)))?;
+    let key = signature::parse_public_key(&device.public_key).map_err(|e| {
+        Refusal::internal(anyhow::anyhow!("device {} has a bad key: {e}", device.id))
+    })?;
 
     // Behind Traefik the request arrives as HTTP/1.1 with the client's
     // Host passed through; over HTTP/2 the authority is in the URI.
@@ -124,17 +123,15 @@ pub(super) fn verify(state: &AppState, parts: &Parts, body: &[u8]) -> Result<Cal
         query: parts.uri.query(),
     };
     let unix_now = unix_now();
-    signature::verify_request(
-        &input,
-        &sig,
-        &target,
-        &field,
+    let received = Received {
+        input: &input,
+        signature: &sig,
+        target,
+        field: &field,
         body,
-        &key,
-        unix_now,
-        WINDOW_SECONDS,
-    )
-    .map_err(|e| rejected(&e))?;
+    };
+    signature::verify_request(&received, &key, unix_now, WINDOW_SECONDS)
+        .map_err(|e| rejected(&e))?;
 
     // check_profile has made sure both are there.
     let (nonce, created) = (input.nonce().unwrap_or(""), input.created().unwrap_or(0));
@@ -142,7 +139,7 @@ pub(super) fn verify(state: &AppState, parts: &Parts, body: &[u8]) -> Result<Cal
         Ok(true) => {}
         Ok(false) => return Err(rejected(&"this request was already received once")),
         Err(Full) => {
-            return Err(error(
+            return Err(Refusal::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "too many signed requests at once, try again later",
             ))
@@ -163,6 +160,7 @@ pub(super) fn verify(state: &AppState, parts: &Parts, body: &[u8]) -> Result<Cal
     }
     Ok(Caller::Device {
         id: device.id,
+        name: device.name,
         scope: device.scope,
     })
 }
@@ -311,11 +309,13 @@ mod tests {
         assert!(Caller::Operator.is_admin());
         assert!(Caller::Device {
             id: "dev_a".into(),
+            name: "laptop".into(),
             scope: "admin".into()
         }
         .is_admin());
         assert!(!Caller::Device {
             id: "dev_a".into(),
+            name: "laptop".into(),
             scope: "sync".into()
         }
         .is_admin());

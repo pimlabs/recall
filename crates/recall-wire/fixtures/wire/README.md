@@ -15,7 +15,7 @@ newer client keeps reading older servers.
 | Kind | Source |
 | --- | --- |
 | `push_response`, `push_response_delete`, `sync_response`, `health`, `admin_stats`, `error`, `discovery` | Captured from that version's release archive by `scripts/capture-wire-fixtures.sh` |
-| `enroll_response_pending`, `enroll_response_approved`, `enroll_poll_response`, `enroll_poll_error`, `device_approve_response`, `device_deny_response`, `device_list_response`, `device_revoke_response`, `enroll_key_create_response`, `enroll_key_list_response`, `enroll_key_revoke_response` | The same script: one enrolment followed through, each response a real one from the step before |
+| `enroll_response_pending`, `enroll_response_approved`, `enroll_poll_response`, `enroll_poll_error`, `device_pending_response`, `device_approve_response`, `device_deny_response`, `device_list_response`, `device_revoke_response`, `enroll_key_create_response`, `enroll_key_list_response`, `enroll_key_revoke_response` | The same script: one enrolment followed through, each response a real one from the step before |
 | `push_request`, `push_request_delete` | Written from recall-wire's `PushRequest` at that tag: its field order and its skip rules |
 | `enroll_request`, `enroll_request_with_key`, `enroll_poll_request`, `device_approve_request`, `device_deny_request`, `enroll_key_create_request` | Written the same way, from recall-wire's `devices` types |
 

@@ -18,7 +18,7 @@ use crate::now;
 
 mod devices;
 
-pub use devices::{Created, Decision, NewDevice, NewEnrollKey, NewEnrollment, Poll};
+pub use devices::{Created, Decision, NewDevice, NewEnrollKey, NewEnrollment, Poll, Waiting};
 
 /// Frozen: an already-deployed database was created with exactly this.
 const SCHEMA: &str = "
