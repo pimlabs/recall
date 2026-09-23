@@ -54,6 +54,12 @@ base64 = "0.22"
 # Device ids, enrolment codes and enrolment keys on the server. The same
 # version tempfile already brings in.
 getrandom = "0.4"
+# Device names compared the way a person reads them: normalized, then by
+# Unicode's confusable skeleton (UTS #39), so `lаptop` with a Cyrillic `а`
+# cannot stand beside `laptop`. Both from unicode-rs, pure Rust, no build
+# script; the server only, so the client carries neither table.
+unicode-normalization = "0.1"
+unicode-security = "0.1"
 # ~/.recall/config.toml and credentials.toml: files a person reads and edits.
 toml = "1"
 # The human-facing output: colour that turns itself off when stdout is not a

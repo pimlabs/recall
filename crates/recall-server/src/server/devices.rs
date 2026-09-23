@@ -20,8 +20,8 @@ use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use recall_wire::devices::{
     self, displayable, normalize_user_code, ACCESS_DENIED, AUTHORIZATION_PENDING, CODE_TTL_SECONDS,
-    ENROLL_KEY_PREFIX, EXPIRED_TOKEN, INVALID_GRANT, MAX_ENROLL_KEY_DAYS, MAX_TAG_CHARS,
-    POLL_INTERVAL_SECONDS, SCOPE_ADMIN, SCOPE_SYNC, SLOW_DOWN, USER_CODE_ALPHABET,
+    DEFAULT_MAX_DEVICES, ENROLL_KEY_PREFIX, EXPIRED_TOKEN, INVALID_GRANT, MAX_ENROLL_KEY_DAYS,
+    MAX_TAG_CHARS, POLL_INTERVAL_SECONDS, SCOPE_ADMIN, SCOPE_SYNC, SLOW_DOWN, USER_CODE_ALPHABET,
 };
 use recall_wire::signature::encode_public_key;
 use recall_wire::{
@@ -36,7 +36,9 @@ use super::auth::Caller;
 use super::middleware::{too_large, ClientIp};
 use super::respond::{error, internal, json, Refusal};
 use super::AppState;
-use crate::store::{Created, Decision, Inserted, NewDevice, NewEnrollKey, NewEnrollment, Poll};
+use crate::store::{
+    plain_name, Created, Decision, Inserted, NewDevice, NewEnrollKey, NewEnrollment, Poll,
+};
 use crate::{format_timestamp, now, parse_timestamp};
 
 /// How many enrolments may wait for approval at once. An owner has a
@@ -166,7 +168,7 @@ pub(super) async fn handle_enroll(
         return enroll_with_key(&state, enroll_key, &public_key, &req.agent);
     }
 
-    let name = req.name.trim();
+    let name = &plain_name(&req.name);
     // Said now, so the machine can pick another name before anyone is
     // asked to approve it; approving checks again.
     match state.store.name_in_use(name) {
@@ -271,6 +273,7 @@ fn enroll_with_key(state: &AppState, enroll_key: &str, public_key: &str, agent: 
         &key.tag
     };
     let random = &device_id["dev_".len()..];
+    let max_devices = key.max_devices.unwrap_or(DEFAULT_MAX_DEVICES);
     // The short name first; the whole id only in the one-in-a-trillion
     // case that the short one is taken.
     for name in [format!("{tag}-{}", &random[..8]), format!("{tag}-{random}")] {
@@ -285,7 +288,7 @@ fn enroll_with_key(state: &AppState, enroll_key: &str, public_key: &str, agent: 
                 enroll_key_id: Some(&key.id),
                 created_at: &now,
             },
-            key.max_devices,
+            Some(max_devices),
         );
         match inserted {
             Ok(Inserted::Done(device)) => {
@@ -306,7 +309,7 @@ fn enroll_with_key(state: &AppState, enroll_key: &str, public_key: &str, agent: 
                     &format!(
                         "forbidden: this enrolment key already has its {} devices; \
                          revoke one, or make another key",
-                        key.max_devices.unwrap_or(0)
+                        max_devices
                     ),
                 )
             }
@@ -565,6 +568,9 @@ pub(super) async fn handle_create_enroll_key(
     if req.max_devices == Some(0) {
         return error(StatusCode::BAD_REQUEST, "max_devices must be at least 1");
     }
+    // Stored, rather than applied when the key is used, so the list shows
+    // the limit every key has.
+    let max_devices = req.max_devices.unwrap_or(DEFAULT_MAX_DEVICES);
     let (id, secret) = match (new_id("ek_", 10), new_id(ENROLL_KEY_PREFIX, 32)) {
         (Ok(id), Ok(secret)) => (id, secret),
         (Err(e), _) | (_, Err(e)) => return internal(e),
@@ -575,9 +581,9 @@ pub(super) async fn handle_create_enroll_key(
     let stored = state.store.insert_enroll_key(&NewEnrollKey {
         id: &id,
         key_sha256: &recall_wire::content_sha256(&secret),
-        tag: req.tag.trim(),
+        tag: &plain_name(&req.tag),
         ephemeral: req.ephemeral,
-        max_devices: req.max_devices,
+        max_devices: Some(max_devices),
         created_at: &now(),
         expires_at: &expires_at,
     });

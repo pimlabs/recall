@@ -94,6 +94,13 @@ pub const MAX_TAG_CHARS: usize = 32;
 /// The longest an enrolment key may live, in days.
 pub const MAX_ENROLL_KEY_DAYS: u32 = 365;
 
+/// How many unrevoked devices an enrolment key may have enrolled at once
+/// when it was made without saying. Enough for a day of cloud sessions,
+/// each an ephemeral device until it has been idle a day; few enough that
+/// a leaked key cannot mint devices without end. There is no key without
+/// a limit, only one made with a higher one.
+pub const DEFAULT_MAX_DEVICES: u32 = 25;
+
 /// RFC 8628 §3.5: not approved yet; poll again after the interval.
 pub const AUTHORIZATION_PENDING: &str = "authorization_pending";
 /// RFC 8628 §3.5: not approved yet, and polled too soon; add five seconds
@@ -419,8 +426,8 @@ pub struct EnrollKeyRequest {
     #[serde(default = "default_true")]
     pub ephemeral: bool,
     /// The most devices it may have enrolled and unrevoked at once, 1 or
-    /// more; no limit when left out. An ephemeral device swept for being
-    /// idle frees its place.
+    /// more; [`DEFAULT_MAX_DEVICES`] when left out. An ephemeral device
+    /// swept for being idle frees its place.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_devices: Option<u32>,
 }
@@ -447,8 +454,8 @@ pub struct EnrollKey {
     pub tag: String,
     /// Whether devices enrolled with it are ephemeral.
     pub ephemeral: bool,
-    /// The most unrevoked devices it may have enrolled at once; `null` for
-    /// no limit.
+    /// The most unrevoked devices it may have enrolled at once. This
+    /// server always says; a `null` would mean [`DEFAULT_MAX_DEVICES`].
     pub max_devices: Option<u32>,
     /// When it was made.
     pub created_at: String,

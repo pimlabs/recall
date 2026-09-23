@@ -23,7 +23,7 @@ pub use admin::{
     AddedCredential, AdminCredential, AdminSession, NewAdminCredential, RemovedCredential,
 };
 pub use devices::{
-    Created, Decision, Inserted, NewDevice, NewEnrollKey, NewEnrollment, Poll, Waiting,
+    plain_name, Created, Decision, Inserted, NewDevice, NewEnrollKey, NewEnrollment, Poll, Waiting,
 };
 
 /// Frozen: an already-deployed database was created with exactly this.

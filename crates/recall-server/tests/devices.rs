@@ -1759,6 +1759,33 @@ async fn names_are_plain_unique_and_not_chosen_by_key_enrolments() {
         .contains(&approved.name["cloud-".len()..]));
 }
 
+/// Verification finding N2: a name that reads as a device's name is that
+/// name, whether it differs in script (a Cyrillic `а`), in normal form
+/// (`é` as one character or two) or by case folding (`ß` and `SS`). And a
+/// name is stored composed, however it was sent.
+#[tokio::test]
+async fn a_name_that_looks_like_a_devices_is_that_name() {
+    let h = harness(|_| {});
+    for (seed, taken, stored, lookalike) in [
+        (60, "laptop", "laptop", "l\u{0430}ptop"),
+        (62, "cafe\u{0301}", "caf\u{00E9}", "caf\u{00E9}"),
+        (64, "STRASSE", "STRASSE", "Stra\u{00DF}e"),
+    ] {
+        let mut first = Machine::named(seed, taken);
+        assert_eq!(h.enrol(&mut first, "sync").await.name, stored);
+        let (status, why) = error_of(
+            h.call(
+                "POST",
+                devices::ENROLL_PATH,
+                None,
+                Some(json!({"name": lookalike, "public_key": Machine::new(seed + 1).public_key()})),
+            )
+            .await,
+        );
+        assert_eq!(status, StatusCode::CONFLICT, "{lookalike:?}: {why}");
+    }
+}
+
 /// Review finding 5: nonces live in memory, so a server that has just
 /// started refuses a signature made before it did, which the process
 /// before it may already have accepted.
@@ -1952,6 +1979,36 @@ async fn enrolment_keys_are_ephemeral_by_default_capped_and_revocable_with_their
         .await
         .0,
         StatusCode::BAD_REQUEST
+    );
+}
+
+/// Verification finding N3: a key made without `max_devices` minted
+/// devices until it expired, enough of them, leaked, to fill the nonce
+/// cache for everyone. It now has a limit whether asked for one or not.
+#[tokio::test]
+async fn an_enrolment_key_made_without_a_limit_has_the_default_one() {
+    let h = harness(|_| {});
+    let created = h.create_enroll_key(true).await;
+    assert_eq!(created.max_devices, Some(devices::DEFAULT_MAX_DEVICES));
+    let listed: EnrollKeyList = ok(h
+        .call("GET", devices::ENROLL_KEYS_PATH, Some(TOKEN), None)
+        .await);
+    assert_eq!(
+        listed.enroll_keys[0].max_devices,
+        Some(devices::DEFAULT_MAX_DEVICES)
+    );
+
+    for seed in 0..devices::DEFAULT_MAX_DEVICES {
+        let machine = Machine::new(100 + seed as u8);
+        let _: EnrollApproved = ok(h.enrol_with_key(&machine, &created.key).await);
+    }
+    assert_eq!(
+        error_of(h.enrol_with_key(&Machine::new(200), &created.key).await),
+        (
+            StatusCode::FORBIDDEN,
+            "forbidden: this enrolment key already has its 25 devices; revoke one, or make another key"
+                .into()
+        )
     );
 }
 

@@ -92,6 +92,13 @@ pub(super) fn is_signed(headers: &HeaderMap) -> bool {
 /// full cache is a few megabytes.
 const REPLAY_CAPACITY: usize = 16_384;
 
+/// The most live nonces one device may have, however high the rate limit
+/// is set: a sixty-fourth of the cache. Every device would have to be at
+/// its cap together to fill it, and an enrolment key mints at most
+/// [`recall_wire::devices::DEFAULT_MAX_DEVICES`] unless its maker asked
+/// for more, so a leaked one cannot mint enough to lock everyone else out.
+pub(super) const MAX_NONCES_PER_DEVICE: usize = REPLAY_CAPACITY / 64;
+
 /// `last_seen` is written at most this often per device: every request
 /// would be a write, and "seen in the last minute" is all a person reading
 /// the device list, or the ephemeral sweep, needs.
@@ -310,16 +317,23 @@ pub(super) enum Recorded {
 
 impl ReplayCache {
     /// A cache for signatures checked against `window`, holding at most
-    /// `per_device` live nonces for any one device.
+    /// `per_device` live nonces for any one device, and never more than
+    /// [`MAX_NONCES_PER_DEVICE`].
     ///
     /// A nonce is live for up to [`NONCE_LIFETIME`], since `created` may be
     /// a few seconds ahead of the clock. The server sizes `per_device` from the
     /// rate limit: as many requests as one address may send in that time,
     /// which a device keeping to the limit never reaches. So one device
     /// that does, from many addresses, is refused on its own, and cannot
-    /// fill the cache and lock every other device out.
+    /// fill the cache and lock every other device out. The ceiling keeps
+    /// that true when the rate limit is set high: without it, a few dozen
+    /// devices at their share would fill the cache.
     pub(super) fn new(window: u64, per_device: usize) -> Self {
-        Self::with_capacity(window, REPLAY_CAPACITY, per_device)
+        Self::with_capacity(
+            window,
+            REPLAY_CAPACITY,
+            per_device.min(MAX_NONCES_PER_DEVICE),
+        )
     }
 
     fn with_capacity(window: u64, capacity: usize, per_device: usize) -> Self {
@@ -476,6 +490,26 @@ mod tests {
         assert_eq!(
             cache.first_use("greedy", "d", 1100, &at(1100)),
             Recorded::Fresh
+        );
+    }
+
+    /// Verification finding N3: with the rate limit set high, a device's
+    /// share was high too, and ~137 devices at it filled the cache. It is
+    /// now a sixty-fourth of the cache at most, whatever the limit.
+    #[test]
+    fn a_devices_share_is_capped_however_high_the_rate_limit() {
+        assert_eq!(ReplayCache::new(60, usize::MAX).per_device, 256);
+        assert_eq!(ReplayCache::new(60, 120).per_device, 120);
+        let cache = ReplayCache::new(60, usize::MAX);
+        for n in 0..256 {
+            assert_eq!(
+                cache.first_use("greedy", &n.to_string(), 1000, &at(1000)),
+                Recorded::Fresh
+            );
+        }
+        assert_eq!(
+            cache.first_use("greedy", "one more", 1000, &at(1000)),
+            Recorded::DeviceFull
         );
     }
 

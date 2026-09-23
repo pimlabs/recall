@@ -237,6 +237,11 @@ check "a decided code is no longer pending" '{"error":"that code was already app
 check "a second device named laptop, in any case, is 409" \
   '{"error":"a device named Laptop already exists; revoke it first, or enrol with another name"}' \
   "$(enroll Laptop)"
+check "laptop with a Cyrillic a, or a 1 for its l, is laptop too: 409" '409 409' \
+  "$(for name in 'lаptop' 1aptop; do
+       curl -s -o /dev/null -w '%{http_code} ' -X POST "${json[@]}" \
+         -d "{\"name\":\"$name\",\"public_key\":\"$KEY\"}" "$URL/v1/devices/enroll"
+     done | sed 's/ $//')"
 check "who am I, with the token: not a device" \
   '404 {"error":"not a device: this request was authenticated with RECALL_TOKEN"}' \
   "$(curl -s -o "$WORK/me.json" -w '%{http_code}' "${auth[@]}" "$URL/v1/devices/me") $(cat "$WORK/me.json")"
@@ -257,6 +262,7 @@ curl -s -X POST "${auth[@]}" "${json[@]}" -d '{"tag":"cloud","expires_in_days":9
   "$URL/v1/enroll-keys" >"$WORK/key.json"
 check "an enrolment key is shown once, with its prefix, ephemeral unless asked" 'True True' \
   "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["key"].startswith("recall-ek-"), d["ephemeral"])' "$WORK/key.json")"
+check "a key made without max_devices enrols at most 25" '25' "$(field "$WORK/key.json" max_devices)"
 check "the list never shows it again" 'False' \
   "$(curl -s "${auth[@]}" "$URL/v1/enroll-keys" | python3 -c '
 import json,sys; print("key" in json.load(sys.stdin)["enroll_keys"][0])')"
