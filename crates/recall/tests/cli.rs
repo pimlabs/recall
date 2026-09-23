@@ -1660,11 +1660,7 @@ fn connect_with_a_working_saved_token_sets_the_machine_up_without_asking() {
     );
 
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
-    assert!(
-        r.stderr.contains("Kept the saved token"),
-        "stderr: {}",
-        r.stderr
-    );
+    assert!(r.stderr.contains("Saved token OK"), "stderr: {}", r.stderr);
     let config = std::fs::read_to_string(home.path().join("config.toml")).unwrap();
     assert!(
         config.contains("name = \"jarvis\""),
@@ -1678,7 +1674,7 @@ fn connect_with_a_working_saved_token_sets_the_machine_up_without_asking() {
         std::fs::read_to_string(repo.path().join(".claude").join("settings.json")).unwrap();
     assert!(settings.contains("recall push"), "wired: {settings}");
     // No memory here yet, so there is no first sync to offer.
-    assert!(!r.stderr.contains("First sync"), "stderr: {}", r.stderr);
+    assert!(!r.stderr.contains("Uploaded"), "stderr: {}", r.stderr);
 
     // And a second run finds nothing left to do in the project.
     let again = run(
@@ -1689,7 +1685,7 @@ fn connect_with_a_working_saved_token_sets_the_machine_up_without_asking() {
     );
     assert_eq!(again.code, 0, "stderr: {}", again.stderr);
     assert!(
-        again.stderr.contains("already set up"),
+        again.stderr.contains("already syncs"),
         "stderr: {}",
         again.stderr
     );
@@ -1729,8 +1725,8 @@ fn connect_sends_existing_memory_when_it_wires_a_project() {
     );
 
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
-    assert!(r.stderr.contains("First sync"), "stderr: {}", r.stderr);
-    assert!(!r.stderr.contains("0 sent"), "stderr: {}", r.stderr);
+    assert!(r.stderr.contains("Uploaded"), "stderr: {}", r.stderr);
+    assert!(!r.stderr.contains("Uploaded 0"), "stderr: {}", r.stderr);
 }
 
 /// A saved token the server now rejects needs a person to type a new one.
@@ -1832,13 +1828,12 @@ fn connect_names_the_machine_variables_a_shell_profile_still_exports() {
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
     assert!(
         r.stderr
-            .contains("RECALL_SOURCE_ENV=laptop wins over the name jarvis"),
+            .contains("RECALL_SOURCE_ENV=laptop overrides the name jarvis"),
         "stderr: {}",
         r.stderr
     );
     assert!(
-        r.stderr
-            .contains("RECALL_MACHINE_KEY says the same as the name"),
+        r.stderr.contains("RECALL_MACHINE_KEY is no longer needed"),
         "stderr: {}",
         r.stderr
     );

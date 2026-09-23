@@ -16,6 +16,11 @@ break will be described here in full rather than smoothed over.
 
 ## Unreleased
 
+- **`recall connect` says less.** Every line is shorter — "Connected to
+  recall.example.com", "Saved token OK", "Sync recall?", "Uploaded 5 files",
+  "Connected as jarvis" — and the commit hint is just the two git commands.
+  Nothing about what it does or asks has changed.
+
 ## 0.3.2 — 2026-09-23
 
 - **`recall connect` is the whole setup, one question at a time.** The
