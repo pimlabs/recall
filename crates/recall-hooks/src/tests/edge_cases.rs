@@ -18,6 +18,15 @@ use crate::testserver::FakeServer;
 /// A symlinked directory inside the memory dir must not be descended
 /// into. Descending would follow it out of the tree, and a symlink
 /// pointing at an ancestor would make the walk never terminate.
+///
+/// Unix only: creating a symlink on Windows needs `std::os::windows`'s
+/// separate file/directory calls and, without Developer Mode enabled,
+/// elevated privileges that a CI runner does not grant by default. The code
+/// under test (`state::list_memory_files`) does not read `cfg(unix)`
+/// anywhere — it is walking whatever `read_dir` and `symlink_metadata` hand
+/// it — so this is a gap in how the scenario is *constructed* for the test,
+/// not a known gap in the behaviour itself.
+#[cfg(unix)]
 #[tokio::test]
 async fn the_walk_does_not_descend_into_a_symlinked_directory() {
     let f = Fixture::new().await;
@@ -219,6 +228,14 @@ async fn concurrent_pushes_never_leave_a_corrupt_baseline() {
 
 /// Pull overwrites in place, so it has to cope with what is already
 /// there — including a file the user made read-only.
+///
+/// Unix only: a read-only *file* is what `0o444` means here, and rename-over
+/// succeeds regardless because the permission that actually matters belongs
+/// to the directory (see the comment below). Windows has no equivalent
+/// concept — its read-only attribute blocks a rename outright, even for an
+/// administrator, so the scenario itself does not carry over, not just the
+/// mechanism for setting it up.
+#[cfg(unix)]
 #[tokio::test]
 async fn pull_replaces_a_read_only_file() {
     use std::os::unix::fs::PermissionsExt;

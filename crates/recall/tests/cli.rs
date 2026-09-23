@@ -14,6 +14,17 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+/// The PostToolUse payload Claude Code sends for an edit to `file`.
+///
+/// Built as JSON rather than spliced into a string: a Windows path is full
+/// of backslashes, which a hand-assembled string leaves as invalid escapes.
+/// The hook then reads a malformed payload and stays silent, so a test
+/// expecting silence passes for the wrong reason and one expecting a
+/// message fails without saying why.
+fn hook_payload(file: &Path) -> String {
+    serde_json::json!({ "tool_input": { "file_path": file } }).to_string()
+}
+
 fn binary() -> PathBuf {
     // Cargo builds integration-test binaries next to the crate's own.
     let mut path = std::env::current_exe().expect("test binary path");
@@ -42,6 +53,20 @@ fn run(args: &[&str], cwd: &Path, env: &[(&str, &str)], stdin: Option<&str>) -> 
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // env_clear() strips everything, and on Windows that includes the
+    // variables CreateProcess itself needs just to start a process at all —
+    // without `SystemRoot` in particular, spawning can fail before the
+    // binary under test ever runs. These are OS plumbing, never RECALL_* or
+    // anything a test reads, so the "clean environment" property below is
+    // unaffected. Not verified on a real Windows machine; if the windows CI
+    // job's `cargo test -p recall` fails at `spawn()` rather than in an
+    // assertion, this list is the first thing to widen.
+    #[cfg(windows)]
+    for var in ["SystemRoot", "windir", "TEMP", "TMP", "LOCALAPPDATA"] {
+        if let Ok(v) = std::env::var(var) {
+            cmd.env(var, v);
+        }
+    }
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -79,6 +104,11 @@ fn run(args: &[&str], cwd: &Path, env: &[(&str, &str)], stdin: Option<&str>) -> 
 /// both spellings agree there and CI stayed green while seven tests could not
 /// pass on the machine this project is developed on.
 ///
+/// Windows has the same shape of problem for a different reason:
+/// `canonicalize()` always returns the verbatim `\\?\C:\...` form, which
+/// `git rev-parse --show-toplevel` never produces — [`strip_verbatim_prefix`]
+/// is this platform's half of what resolving symlinks is on macOS.
+///
 /// `home_elsewhere()` deliberately stays a plain `TempDir`: `HOME` is read
 /// from the environment verbatim and never goes through git, so the files
 /// under it really are reported with the unresolved spelling.
@@ -112,7 +142,40 @@ fn git_repo() -> Repo {
     // Resolved once, here, rather than at each assertion: rebuilding an
     // expected path a second way is how a test ends up asserting nothing.
     let path = std::fs::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
+    let path = strip_verbatim_prefix(path);
     Repo { _dir: dir, path }
+}
+
+/// `\\?\C:\...` back to `C:\...`, the "dunce" trick, inlined rather than
+/// taken as a dependency for four lines.
+///
+/// `canonicalize()` on Windows always returns the verbatim form — there is
+/// no flag to opt out — but the binary under test never produces one: `git
+/// rev-parse --show-toplevel` doesn't emit it, and nothing downstream adds
+/// it. Left unstripped, every expected path built from this helper carries
+/// a prefix the real output never has, and — the sharper edge — `Path::join`
+/// on a verbatim path does not treat `/` as a separator at all, so a
+/// `.join("a/b/c")` (several of these tests join a single string containing
+/// its own separators) becomes one bizarre component instead of three.
+/// A no-op on every other platform.
+#[cfg(windows)]
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    match path.to_str() {
+        Some(s) => match s.strip_prefix(r"\\?\") {
+            // `\\?\UNC\server\share\...` is verbatim for a UNC path, and
+            // stripping only the `\\?\` would leave `UNC\...`, not a share
+            // path (`\\server\share\...`) — a temp directory is never one,
+            // so this is unreached in practice, but wrong is wrong.
+            Some(rest) if !rest.starts_with(r"UNC\") => PathBuf::from(rest),
+            _ => path,
+        },
+        None => path,
+    }
+}
+
+#[cfg(not(windows))]
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    path
 }
 
 /// The guard for the above, and it is filesystem-independent on purpose: it
@@ -120,6 +183,13 @@ fn git_repo() -> Repo {
 /// build their expectations from. On Linux both answers are the unresolved
 /// path and this passes trivially; on macOS they differ unless `git_repo()`
 /// resolves, which is exactly the bug.
+///
+/// On Windows a second, legitimate difference joins the comparison: git
+/// always prints `/`-separated paths, and `project::root()` in the binary
+/// turns those into `\` before doing anything else with them — see
+/// `project.rs::git_toplevel`. `git_says` gets the identical transform here,
+/// so this stays a guard on the *fixture* rather than growing a second copy
+/// of what the binary does and silently passing if the two drifted apart.
 #[test]
 fn the_repo_helper_agrees_with_git_about_where_the_repo_is() {
     let repo = git_repo();
@@ -130,6 +200,7 @@ fn the_repo_helper_agrees_with_git_about_where_the_repo_is() {
         .unwrap();
     assert!(out.status.success(), "git rev-parse failed in the fixture");
     let git_says = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let git_says = native_separators(git_says);
     assert_eq!(
         repo.path().display().to_string(),
         git_says,
@@ -137,6 +208,20 @@ fn the_repo_helper_agrees_with_git_about_where_the_repo_is() {
          reports another, so every assertion naming a path is comparing two \
          different strings"
     );
+}
+
+/// What `project::root()` does to git's output before anything else touches
+/// it — duplicated here rather than imported, because `recall` has no
+/// library target for an integration test to link against; see the module
+/// doc.
+#[cfg(windows)]
+fn native_separators(path: String) -> String {
+    path.replace('/', "\\")
+}
+
+#[cfg(not(windows))]
+fn native_separators(path: String) -> String {
+    path
 }
 
 /// An address nothing is listening on, so the client's failure path runs
@@ -186,10 +271,7 @@ fn pull_exits_zero_when_nothing_is_configured() {
 #[test]
 fn push_is_a_silent_no_op_for_a_file_that_is_not_memory() {
     let repo = git_repo();
-    let payload = format!(
-        r#"{{"tool_input":{{"file_path":"{}/src/main.rs"}}}}"#,
-        repo.path().to_string_lossy()
-    );
+    let payload = hook_payload(&repo.path().join("src/main.rs"));
     let r = run(&["push"], repo.path(), &[], Some(&payload));
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
     assert!(r.stderr.is_empty(), "expected silence, got {:?}", r.stderr);
@@ -216,6 +298,14 @@ fn push_ignores_a_malformed_hook_payload() {
 /// rather than replacing the real one: `recall` shells out to `git` to find
 /// the project root, and a test that broke that would pass for the wrong
 /// reason.
+///
+/// Unix only: an extensionless `#!/bin/sh` script made executable with
+/// `chmod` is not something Windows can run by that name at all — it would
+/// need a `.exe`/`.cmd`/`.bat` extension and a completely different
+/// mechanism. The fork this guards against (`Command::new("hostname")` in
+/// `config.rs`) is not itself gated, so this is a gap in the test's own
+/// technique, not a known gap in the behaviour under test.
+#[cfg(unix)]
 fn hostname_shim() -> (tempfile::TempDir, PathBuf, String) {
     use std::os::unix::fs::PermissionsExt;
 
@@ -247,6 +337,7 @@ fn hostname_shim() -> (tempfile::TempDir, PathBuf, String) {
 ///
 /// `RECALL_SOURCE_ENV` is deliberately absent from the environment below: set
 /// it and the fallback never runs, and the test proves nothing.
+#[cfg(unix)]
 #[test]
 fn push_does_not_fork_hostname_before_deciding_a_file_is_not_its_business() {
     let repo = git_repo();
@@ -265,10 +356,7 @@ fn push_does_not_fork_hostname_before_deciding_a_file_is_not_its_business() {
     );
     std::fs::remove_file(&marker).unwrap();
 
-    let payload = format!(
-        r#"{{"tool_input":{{"file_path":"{}/src/main.rs"}}}}"#,
-        repo.path().to_string_lossy()
-    );
+    let payload = hook_payload(&repo.path().join("src/main.rs"));
     let r = run(&["push"], repo.path(), &[("PATH", &path)], Some(&payload));
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
     assert!(
@@ -1551,10 +1639,7 @@ fn push_says_so_when_the_file_is_another_projects_memory() {
     std::fs::create_dir_all(foreign.parent().unwrap()).unwrap();
     std::fs::write(&foreign, "# note\n").unwrap();
 
-    let payload = format!(
-        r#"{{"tool_input":{{"file_path":"{}"}}}}"#,
-        foreign.display()
-    );
+    let payload = hook_payload(&foreign);
     let r = run(&["push"], repo.path(), &[], Some(&payload));
 
     // Still exit 0 — a hook must never be the reason a session breaks.
@@ -1580,7 +1665,7 @@ fn push_stays_silent_about_an_ordinary_file() {
     std::fs::create_dir_all(source.parent().unwrap()).unwrap();
     std::fs::write(&source, "fn main() {}\n").unwrap();
 
-    let payload = format!(r#"{{"tool_input":{{"file_path":"{}"}}}}"#, source.display());
+    let payload = hook_payload(&source);
     let r = run(&["push"], repo.path(), &[], Some(&payload));
 
     assert_eq!(r.code, 0);

@@ -30,7 +30,15 @@ done
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 case "$os" in
   darwin | linux) ;;
-  *) die "unsupported OS: $os (macOS and Linux only; Windows needs WSL)" ;;
+  # Git Bash / MSYS2's `uname -s` says one of these, never darwin or linux.
+  # A Windows binary needs a Windows archive this script does not fetch, so
+  # send whoever ran this under Git Bash to the installer that does, rather
+  # than failing with an OS name that names nothing to do about it.
+  mingw* | msys* | cygwin*)
+    die "this is install.ps1's job on Windows, not install.sh's:
+    irm https://recall.pimlabs.id/install.ps1 | iex
+  Run that from PowerShell, not Git Bash." ;;
+  *) die "unsupported OS: $os (macOS and Linux only)" ;;
 esac
 
 arch="$(uname -m)"

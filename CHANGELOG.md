@@ -126,6 +126,37 @@ break will be described here in full rather than smoothed over.
   two share no protocol. Against a server older than the discovery document
   they report the commit as before. `status --json` gains `server_version`,
   `server_channel`, `server_protocols`, `min_client` and `client_version`.
+- **A Windows client.** `recall` ships for Windows on x64 and arm64.
+  Install it with `irm https://recall.pimlabs.id/install.ps1 | iex`, or with
+  `npm install -g @pimlabs/recall`, which now supports Windows. Git for
+  Windows is required: Claude Code runs hook commands through Git Bash there,
+  and without it falls back to PowerShell, which cannot run the hooks
+  `recall init` writes. `recall doctor` checks for it and says what to do.
+  The server stays Linux-only, and winget is not there yet. See the Windows
+  section of `docs/reference/install.md`, including what is a documented
+  guess rather than verified on a real machine.
+- **npm on macOS and Linux runs the binary directly.** The installer puts
+  the verified binary where npm's `recall` link points, instead of leaving a
+  wrapper script in between, so a hook call through an npm install starts
+  one process rather than two.
+- **winget publishing, set up but not live yet.** Every release can now
+  keep a `PimLabs.Recall` package in `microsoft/winget-pkgs` current, once
+  that package exists. The first version needs a one-time manual
+  submission, so `winget install PimLabs.Recall` does not work yet. See the
+  winget section of `docs/reference/releasing.md` for that submission;
+  `docs/reference/install.md` lists the channel once it is accepted.
+- **`deploy/backup-offbox.sh init` sets up the off-box backup.** It asks for
+  a provider (S3-compatible, Cloudflare R2, Backblaze B2 through S3, or an
+  existing remote you already configured) and its credentials, creates the
+  raw and `crypt` remotes non-interactively, generates and shows the crypt
+  password(s) once, runs an encrypted write-read-delete round-trip test, runs
+  the first real copy, and installs the cron line for the user actually
+  running it. It refuses, with an explanation, if `rclone config` and
+  `crontab` would end up belonging to different users, such as under `sudo`.
+  Every answer can also come from a flag or an environment variable, and
+  without a terminal it never prompts: anything missing stops it before any
+  remote is created, and names what to pass. Re-running it is safe. See
+  "Off-box" in `deploy/README.md`.
 
 ## 0.3.2 — 2026-09-23
 

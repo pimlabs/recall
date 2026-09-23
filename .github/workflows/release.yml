@@ -25,7 +25,7 @@ permissions:
   contents: write
 
 jobs:
-  # Before four native builds, not after: npm's postinstall downloads the
+  # Before the native builds, not after: npm's postinstall downloads the
   # release named after the package's *own* version, so a tag that disagrees
   # with npm/package.json ships a package that installs nothing — and it would
   # otherwise be discovered after twenty minutes of runner time.
@@ -75,6 +75,16 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
             asset: recall_linux_arm64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            asset: recall_windows_amd64
+          # windows-11-arm is GA per actions/runner-images, not a preview
+          # label — confirmed 2026-09-23. Client OS rather than Server, the
+          # same way the macOS runners above are, and that is fine for a
+          # native build+test job.
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            asset: recall_windows_arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -112,7 +122,11 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }} -p recall
 
-      - name: Package
+      # Unix packaging: a tar.gz containing the binary renamed to the asset
+      # name, which install.sh and npm's installer both expect to find inside
+      # once extracted.
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -121,10 +135,29 @@ jobs:
           tar -czf "dist/${{ matrix.asset }}.tar.gz" -C dist "${{ matrix.asset }}"
           rm "dist/${{ matrix.asset }}"
 
+      # Windows packaging: a zip containing the bare `recall.exe` — not
+      # renamed, unlike the Unix archives above — which install.ps1 and
+      # npm's installer both expect. A zip rather than a tar.gz because
+      # that is what Windows users actually have a double-click extractor
+      # for; install.ps1 and npm/install.js both extract it with `tar`,
+      # which has shipped as bsdtar (libarchive, zip-capable) on Windows
+      # since Windows 10, so this needs nothing beyond what Package (Unix)
+      # already assumes exists on the machine doing the extracting.
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/recall.exe" "dist/recall.exe"
+          Compress-Archive -Path "dist/recall.exe" -DestinationPath "dist/${{ matrix.asset }}.zip"
+          Remove-Item "dist/recall.exe"
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
-          path: dist/*.tar.gz
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
 
   # The server, since 0.4.0 a binary of its own. Linux only, because that is
   # where servers run, and static against musl, so the one file runs in the
@@ -178,12 +211,21 @@ jobs:
 
       # A static binary is the promise the image relies on; a dynamic one
       # would build here and fail to start in Alpine.
+      #
+      # Asked of the ELF headers, not of `file`'s wording: `file` says
+      # "static-pie linked" for the amd64 build and "statically linked" for
+      # the arm64 one, and matching only the first is what failed v0.4.0's
+      # first run. A dynamic binary has a program interpreter and names the
+      # libraries it needs; a static one, PIE or not, has neither.
       - name: Package
         run: |
           set -euo pipefail
           bin="target/${{ matrix.target }}/release/recall-server"
           file "$bin"
-          file "$bin" | grep -Eq 'static(-pie)? linked'
+          if readelf -lW "$bin" | grep -q 'INTERP' || readelf -dW "$bin" | grep -q '(NEEDED)'; then
+            echo "::error::$bin is dynamically linked; the image needs a static one"
+            exit 1
+          fi
           "$bin" version
           mkdir -p dist
           cp "$bin" "dist/${{ matrix.asset }}"
@@ -205,7 +247,7 @@ jobs:
           merge-multiple: true
 
       - name: Checksums
-        run: cd dist && sha256sum *.tar.gz > checksums.txt && cat checksums.txt
+        run: cd dist && sha256sum *.tar.gz *.zip > checksums.txt && cat checksums.txt
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -358,6 +400,50 @@ jobs:
             echo "checksums. The rewritten file is attached to this run as the \`formula\`"
             echo "artifact; it lands on \`main\` through a pull request like every other change."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # winget, via vedantmgoyal9/winget-releaser (which drives komac under the
+  # hood). Unlike the homebrew job above, this does not write to this
+  # repository — it opens a pull request against microsoft/winget-pkgs from
+  # a fork of it. That fork, and at least one version of the package already
+  # present in winget-pkgs, are both one-time setup done by hand; this job
+  # cannot create either. See docs/reference/releasing.md.
+  winget:
+    needs: publish
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      # The one credential this job stores: a classic PAT with the
+      # `public_repo` scope (to open the pull request) and, so a workflow
+      # file change upstream in winget-pkgs doesn't fail this job
+      # intermittently, `workflow`. It lives on the `release` environment,
+      # so it is only readable by a job that has already been approved.
+      # Missing is reported, not failed — the first submission and any
+      # later one done by hand still work without it.
+      - name: Is the winget token configured?
+        id: token
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if [ -n "$WINGET_TOKEN" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::WINGET_TOKEN is not set on the release environment, so winget-pkgs was not updated. See docs/reference/releasing.md."
+          fi
+      # The default installers-regex only matches .exe/.msi/.msix/.appx —
+      # release.yml's Windows archives are .zip (see the `build` job's
+      # "Package (Windows)" step), so it has to be widened or the action
+      # finds no installers to publish at all.
+      - name: Publish to winget-pkgs
+        if: steps.token.outputs.configured == 'true'
+        uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: PimLabs.Recall
+          installers-regex: '\.zip$'
+          release-tag: ${{ github.event.inputs.tag || github.ref_name }}
+          token: ${{ secrets.WINGET_TOKEN }}
 
   # The server runs the release that was just published: its image holds
   # the recall-server above, checked against checksums.txt. Not behind the
