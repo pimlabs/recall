@@ -38,6 +38,8 @@ tempfile = "3"
 # The content hash a push names its base by. Both halves compute it, which is
 # why it lives in recall-wire.
 sha2 = "0.10"
+# ~/.recall/config.toml and credentials.toml: files a person reads and edits.
+toml = "1"
 # `recall connect` reads the token from the terminal without echoing it.
 rpassword = "7"
 

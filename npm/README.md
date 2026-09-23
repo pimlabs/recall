@@ -31,8 +31,8 @@ Notes about *you* rather than about one repository can follow you into every
 project: set `RECALL_GLOBAL_KEY`, then `recall promote <file>` moves one
 there. Notes true of one box and wrong on the next — its RAM, which of two
 `dotnet` installs wins — get a scope of their own instead, so they never
-reach a machine they would be false on: `RECALL_MACHINE_KEY`, and
-`recall promote <file> --to machine`.
+reach a machine they would be false on: name the machine in
+`~/.recall/config.toml`, and `recall promote <file> --to machine`.
 
 `recall serve` runs the server side — the same binary, self-hosted.
 

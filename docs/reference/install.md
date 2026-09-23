@@ -135,8 +135,9 @@ recall connect https://your-recall-host
 ```
 
 It asks for the token without echoing it, checks it against the server —
-reachable, and the token accepted — and only then saves it to
-`~/.recall/credentials.json`, readable by you only. A wrong token or an
+reachable, and the token accepted — and only then saves it: the token to
+`~/.recall/credentials.toml`, readable by you only, and the server to
+`~/.recall/config.toml`. A wrong token or an
 unreachable server saves nothing and says which it was. `recall disconnect`
 removes it again.
 
@@ -267,7 +268,7 @@ Nothing syncs differently if you leave `RECALL_GLOBAL_KEY` unset — though
 `recall backfill` will then name anything in `global/` as belonging to no
 scope, because with the key unset it does.
 
-## Memories about this machine: `RECALL_MACHINE_KEY`
+## Memories about this machine: `[machine] name`
 
 Some of what Claude records is true of the machine and nothing else: how much
 RAM it has, which container runtime is installed, which of two conflicting
@@ -275,17 +276,27 @@ RAM it has, which container runtime is installed, which of two conflicting
 machine has 8 GB" is false on the next one, and a memory that is confidently
 wrong is worse than no memory at all.
 
-```sh
-export RECALL_MACHINE_KEY="mbp"     # a name for *this* machine
+Name the machine in `~/.recall/config.toml`:
+
+```toml
+[machine]
+name = "jarvis"        # letters, digits, `.`, `-`, `_`
 ```
 
-Anything in `<memory dir>/machine/` then syncs under `machine:mbp` and comes
-back only on a machine declaring that same key. It survives reinstalling this
+Anything in `<memory dir>/machine/` then syncs under `machine:jarvis` and
+comes back only on a machine with that same name. The same name also labels
+every file this machine syncs, which is what `recall status` shows as the
+last writer — one setting where there used to be two
+(`RECALL_MACHINE_KEY` and `RECALL_SOURCE_ENV`) that had to agree. Both
+variables still work and still win over the file; `recall doctor` warns when
+one disagrees with the name, which is usually a leftover in a shell profile. It survives reinstalling this
 machine; it never reaches a different one.
 
 - **Leave it unset in an ephemeral cloud session.** Every session is a new
   machine, and your laptop's facts do not describe it. Unset means `machine/`
-  is ignored — not filed under the project.
+  is ignored — not filed under the project. A cloud session has no
+  `~/.recall` (`recall connect` refuses to run there), so this is the
+  default unless `RECALL_MACHINE_KEY` is set on the environment.
 - **Pick a name per machine, not per person.** `RECALL_GLOBAL_KEY` is you;
   this is the box. Two machines sharing one key will share their facts, which
   is the failure this scope exists to prevent.

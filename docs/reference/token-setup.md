@@ -21,10 +21,20 @@ recall connect https://recall.yourdomain.com
 ```
 
 Paste the value from step 1 at the prompt; it is not echoed. `connect`
-checks it against the server before saving anything, then writes it to
-`~/.recall/credentials.json` with mode `0600` (set `RECALL_HOME` to put it
-elsewhere). Both the URL and the token come from there, so there is nothing
-to add to a shell profile.
+checks it against the server before saving anything, then writes two files
+(set `RECALL_HOME` to put them elsewhere):
+
+```text
+~/.recall/config.toml        0644  the server, and this machine's name
+~/.recall/credentials.toml   0600  the token, one per server
+```
+
+Both the URL and the token come from there, so there is nothing to add to a
+shell profile. They are two files so that the one you open and edit — to
+name the machine, or keep in a dotfiles repository — never has a secret in
+it. A machine that ran `recall connect` on 0.3.0 has a `credentials.json`
+instead; the first `recall` command after upgrading moves it into these two
+and removes it.
 
 **Why not the shell profile, which is what this page used to say.** A token
 in the environment is inherited by every process started from that shell,

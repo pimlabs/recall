@@ -1222,21 +1222,98 @@ fn doctor_passes_a_wired_project_that_can_reach_a_server() {
 /// A `RECALL_HOME` holding a credentials file, as `recall connect` would
 /// have left it. Written by hand rather than through `connect`, which needs
 /// a terminal the tests do not have.
-fn recall_home_with(servers: &[(&str, &str)], default: &str) -> tempfile::TempDir {
+fn recall_home_with(servers: &[(&str, &str)], server: &str) -> tempfile::TempDir {
+    recall_home_named(servers, server, None)
+}
+
+/// The same, with a machine name in `config.toml` as well.
+fn recall_home_named(
+    servers: &[(&str, &str)],
+    server: &str,
+    name: Option<&str>,
+) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
-    let servers: serde_json::Map<String, serde_json::Value> = servers
-        .iter()
-        .map(|(url, token)| ((*url).to_string(), serde_json::json!({ "token": token })))
-        .collect();
-    let body = serde_json::json!({ "version": 1, "default": default, "servers": servers });
-    let path = dir.path().join("credentials.json");
-    std::fs::write(&path, body.to_string()).unwrap();
+    let mut creds = String::from("version = 1\n");
+    for (url, token) in servers {
+        creds.push_str(&format!("\n[servers.\"{url}\"]\ntoken = \"{token}\"\n"));
+    }
+    let creds_path = dir.path().join("credentials.toml");
+    std::fs::write(&creds_path, creds).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
+    let mut config = String::from("version = 1\n");
+    if !server.is_empty() {
+        config.push_str(&format!("server = \"{server}\"\n"));
+    }
+    if let Some(name) = name {
+        config.push_str(&format!("\n[machine]\nname = \"{name}\"\n"));
+    }
+    std::fs::write(dir.path().join("config.toml"), config).unwrap();
     dir
+}
+
+/// 0.3.0 wrote `credentials.json`. The first command to read configuration
+/// moves it into the two TOML files and removes it — through the binary,
+/// because the migration lives in the CLI's resolution, not the library.
+#[test]
+fn a_0_3_0_credentials_file_is_migrated_by_the_first_command() {
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let legacy = home.path().join("credentials.json");
+    std::fs::write(
+        &legacy,
+        format!(
+            r#"{{"version":1,"default":"{DEAD_SERVER}","servers":{{"{DEAD_SERVER}":{{"token":"t"}}}}}}"#
+        ),
+    )
+    .unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+
+    let rep = status_json(repo.path(), &[("RECALL_HOME", &home_str)]);
+
+    assert!(!legacy.exists(), "the old file is gone");
+    assert_eq!(rep["url_source"], "config_file", "{rep}");
+    assert_eq!(rep["token_source"], "credentials_file", "{rep}");
+    let config = std::fs::read_to_string(home.path().join("config.toml")).unwrap();
+    assert!(
+        config.contains(&format!("server = \"{DEAD_SERVER}\"")),
+        "{config}"
+    );
+}
+
+/// One name in `config.toml`, both uses — through the binary.
+#[test]
+fn the_machine_name_in_config_turns_on_the_machine_scope() {
+    let repo = git_repo();
+    let home = recall_home_named(&[(DEAD_SERVER, "t")], DEAD_SERVER, Some("jarvis"));
+    let home_str = home.path().to_string_lossy().to_string();
+
+    let rep = status_json(repo.path(), &[("RECALL_HOME", &home_str)]);
+    assert_eq!(rep["machine_key"], "machine:jarvis", "{rep}");
+    assert_eq!(rep["machine_source"], "config_file", "{rep}");
+
+    // A leftover shell label that disagrees is reported, with both values.
+    let rep = status_json(
+        repo.path(),
+        &[("RECALL_HOME", &home_str), ("RECALL_SOURCE_ENV", "laptop")],
+    );
+    let o = &rep["overridden"][0];
+    assert_eq!(o["variable"], "RECALL_SOURCE_ENV", "{rep}");
+    assert_eq!(o["environment"], "laptop");
+    assert_eq!(o["config"], "jarvis");
+
+    // One that agrees is not.
+    let rep = status_json(
+        repo.path(),
+        &[
+            ("RECALL_HOME", &home_str),
+            ("RECALL_MACHINE_KEY", "machine:jarvis"),
+        ],
+    );
+    assert!(rep.get("overridden").is_none(), "{rep}");
 }
 
 /// A file written in an ephemeral container evaporates with it, and a
@@ -1267,7 +1344,7 @@ fn connect_refuses_in_a_remote_session_and_writes_nothing() {
         "and says what to do instead: {}",
         r.stderr
     );
-    assert!(!home.path().join("credentials.json").exists());
+    assert!(!home.path().join("credentials.toml").exists());
 }
 
 /// The token is read from a terminal and nowhere else. Piped stdin is not a
@@ -1287,7 +1364,7 @@ fn connect_without_a_terminal_refuses_and_writes_nothing() {
 
     assert_eq!(r.code, 1, "stderr: {}", r.stderr);
     assert!(r.stderr.contains("terminal"), "stderr: {}", r.stderr);
-    assert!(!home.path().join("credentials.json").exists());
+    assert!(!home.path().join("credentials.toml").exists());
 }
 
 #[test]
@@ -1308,8 +1385,8 @@ fn connect_refuses_something_that_is_not_a_server_url() {
 fn connect_will_not_overwrite_a_credentials_file_it_cannot_read() {
     let repo = git_repo();
     let home = tempfile::tempdir().unwrap();
-    let path = home.path().join("credentials.json");
-    std::fs::write(&path, "{ this is not json").unwrap();
+    let path = home.path().join("credentials.toml");
+    std::fs::write(&path, "{ this is not toml").unwrap();
     let home_str = home.path().to_string_lossy().to_string();
 
     let r = run(
@@ -1327,7 +1404,7 @@ fn connect_will_not_overwrite_a_credentials_file_it_cannot_read() {
     );
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
-        "{ this is not json"
+        "{ this is not toml"
     );
 }
 
@@ -1343,7 +1420,7 @@ fn status_reads_the_url_and_token_that_connect_saved() {
 
     assert_eq!(rep["url_set"], true, "{rep}");
     assert_eq!(rep["token_set"], true, "{rep}");
-    assert_eq!(rep["url_source"], "credentials_file");
+    assert_eq!(rep["url_source"], "config_file");
     assert_eq!(rep["token_source"], "credentials_file");
     assert_eq!(rep["credentials_exposed"], false);
 }
@@ -1360,7 +1437,7 @@ fn an_exported_token_still_wins_over_the_saved_one() {
         &[("RECALL_HOME", &home_str), ("RECALL_TOKEN", "exported")],
     );
     assert_eq!(rep["token_source"], "environment", "{rep}");
-    assert_eq!(rep["url_source"], "credentials_file", "{rep}");
+    assert_eq!(rep["url_source"], "config_file", "{rep}");
 }
 
 /// The migration nudge, through the real binary: a shell token on a laptop
@@ -1403,7 +1480,7 @@ fn disconnect_removes_the_saved_token_and_is_honest_about_the_shell() {
 
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
     assert!(
-        !home.path().join("credentials.json").exists(),
+        !home.path().join("credentials.toml").exists(),
         "the last server gone, the file goes too"
     );
     assert!(
@@ -1434,6 +1511,7 @@ fn disconnect_removes_the_saved_token_and_is_honest_about_the_shell() {
 #[test]
 fn disconnect_asks_which_when_it_cannot_tell() {
     let repo = git_repo();
+    // Two servers saved, and the config naming neither.
     let home = recall_home_with(
         &[
             ("https://a.example.com", "ta"),
@@ -1441,12 +1519,7 @@ fn disconnect_asks_which_when_it_cannot_tell() {
         ],
         "",
     );
-    // No default: rewrite without it.
-    let path = home.path().join("credentials.json");
-    let mut v: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    v.as_object_mut().unwrap().remove("default");
-    std::fs::write(&path, v.to_string()).unwrap();
+    let path = home.path().join("credentials.toml");
     let home_str = home.path().to_string_lossy().to_string();
 
     let r = run(

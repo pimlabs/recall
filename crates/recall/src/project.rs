@@ -11,7 +11,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use recall_hooks::{claude, client::Client, declared_env, project, scope, ClientConfig, Context};
+use recall_hooks::{
+    claude, client::Client, declared_env, home, project, scope, ClientConfig, Context,
+};
 
 /// The project root, resolved the way Claude Code resolves it: the git root,
 /// falling back to the working directory.
@@ -107,6 +109,14 @@ impl Resolved {
     /// whether the file concerns it at all, and that path must stay free of
     /// work this size.
     pub fn config(&self) -> ClientConfig {
+        // 0.3.0's `credentials.json` becomes the two TOML files, once. Here
+        // because every command that reads configuration comes through this,
+        // hooks included, so no machine is left on the old file for want of
+        // running one particular command. Failing is not fatal: the loader
+        // still reads the old file, and `recall doctor` names the problem.
+        if let Some(h) = home::locate(self.env.lookup()) {
+            let _ = h.migrate_legacy();
+        }
         ClientConfig::from_lookup(self.env.lookup())
     }
 

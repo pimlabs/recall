@@ -288,6 +288,41 @@ fn credentials_findings(rep: &Report, out: &mut Vec<Finding>) {
         ));
     }
 
+    let config_file = rep
+        .config_file
+        .as_deref()
+        .unwrap_or("~/.recall/config.toml");
+    for problem in &rep.config_problems {
+        out.push(warn(
+            "config file",
+            problem.clone(),
+            format!("edit {config_file}"),
+        ));
+    }
+    // The environment wins over the file, deliberately — but on a laptop
+    // that has run `recall connect`, a different value left in the shell is
+    // almost always a leftover, and it silently decides which machine this
+    // is.
+    for o in &rep.overridden {
+        let from = rep
+            .declared_env
+            .iter()
+            .find(|d| d.name == o.variable)
+            .map(|d| d.file.clone())
+            .unwrap_or_else(|| "your shell profile".to_string());
+        out.push(warn(
+            "config overridden",
+            format!(
+                "{}={} wins over {} = {:?} in {config_file}",
+                o.variable, o.environment, o.setting, o.config
+            ),
+            format!(
+                "remove {} from {from}, or change {} to match",
+                o.variable, o.setting
+            ),
+        ));
+    }
+
     if let Some(err) = &rep.credentials_error {
         out.push(warn(
             "credentials file",
@@ -514,11 +549,15 @@ mod tests {
             token_set: true,
             // Saved by `recall connect` — the setup that should raise
             // nothing at all.
-            url_source: Source::CredentialsFile,
+            url_source: Source::ConfigFile,
             token_source: Source::CredentialsFile,
             credentials_file: Some("/h/.recall/credentials.json".into()),
             credentials_error: None,
             credentials_exposed: false,
+            config_file: Some("/h/.recall/config.toml".into()),
+            machine_source: Source::Unset,
+            config_problems: Vec::new(),
+            overridden: Vec::new(),
             server_ok: true,
             server_error: None,
             git_commit: Some("a1b2c3d".into()),
@@ -637,6 +676,40 @@ mod tests {
         let f = find(&found, "credentials file").unwrap();
         assert_eq!(f.level, Level::Warn);
         assert!(f.fix.as_deref().unwrap().starts_with("chmod 600"));
+    }
+
+    /// A leftover shell variable deciding which machine this is, named with
+    /// both values and a fix — but only a warning: the environment winning
+    /// is the documented rule, and in a cloud session it is the point.
+    #[test]
+    fn an_environment_value_overriding_the_config_is_named() {
+        let mut rep = healthy();
+        rep.overridden = vec![crate::status::Override {
+            variable: "RECALL_SOURCE_ENV",
+            environment: "laptop".into(),
+            setting: "machine.name",
+            config: "jarvis".into(),
+        }];
+        let found = findings(&rep);
+        let f = find(&found, "config overridden").unwrap();
+        assert_eq!(f.level, Level::Warn);
+        assert!(
+            f.detail.contains("laptop") && f.detail.contains("jarvis"),
+            "{}",
+            f.detail
+        );
+        assert!(f.fix.as_deref().unwrap().contains("RECALL_SOURCE_ENV"));
+        assert_eq!(verdict(&found), exit::OK);
+    }
+
+    #[test]
+    fn a_config_problem_is_a_warning_with_the_file_to_edit() {
+        let mut rep = healthy();
+        rep.config_problems = vec!["`machine.nmae` is not a setting Recall knows".into()];
+        let found = findings(&rep);
+        let f = find(&found, "config file").unwrap();
+        assert_eq!(f.level, Level::Warn);
+        assert!(f.fix.as_deref().unwrap().contains("config.toml"));
     }
 
     /// Every check must earn its exit code. A laptop with no machine scope

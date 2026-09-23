@@ -10,8 +10,8 @@ use std::io::IsTerminal;
 
 use recall_hooks::client::{self, Client};
 use recall_hooks::config::Source;
-use recall_hooks::credentials::{self, Credentials};
 use recall_hooks::exit;
+use recall_hooks::home::{self, Home};
 
 use crate::project as proj;
 
@@ -38,7 +38,7 @@ pub async fn connect(url: &str) -> anyhow::Result<i32> {
         return Ok(exit::CONFIG);
     }
 
-    let url = credentials::normalize_url(url);
+    let url = home::normalize_url(url);
     if !has_host(&url) {
         eprintln!("recall connect: {url:?} is not a server URL (e.g. https://recall.example.com)");
         return Ok(exit::CONFIG);
@@ -51,19 +51,18 @@ pub async fn connect(url: &str) -> anyhow::Result<i32> {
     }
 
     let here = proj::resolve();
-    let Some(home) = credentials::home(here.env.lookup()) else {
+    let Some(h) = home::locate(here.env.lookup()) else {
         eprintln!("recall connect: no home directory to save into — set RECALL_HOME");
         return Ok(exit::CONFIG);
     };
-    let path = credentials::file(&home);
 
     // Before the prompt, so a file this cannot read stops things before the
     // user has typed a secret — and so it is never overwritten.
-    let mut saved = match credentials::load(&path) {
-        Ok(saved) => saved.unwrap_or_default(),
+    let (mut creds, mut config) = match load_both(&h) {
+        Ok(both) => both,
         Err(e) => {
             eprintln!("recall connect: {e}");
-            eprintln!("  Nothing was changed. Move it aside and run recall connect again.");
+            eprintln!("  Nothing was changed. Fix or move it aside and run recall connect again.");
             return Ok(exit::CONFIG);
         }
     };
@@ -113,14 +112,21 @@ pub async fn connect(url: &str) -> anyhow::Result<i32> {
         }
     }
 
-    saved.insert(&url, &token);
-    if let Err(e) = credentials::save(&path, &saved) {
+    creds.insert(&url, &token);
+    config.server = Some(url.clone());
+    if let Err(e) = h
+        .save_credentials(&creds)
+        .and_then(|()| h.save_config(&config))
+    {
         eprintln!("recall connect: the token is valid, but saving it failed: {e}");
         return Ok(exit::CONFIG);
     }
 
     println!("Connected to {url}.");
-    println!("Token saved to {} (readable by you only).", path.display());
+    println!(
+        "Token saved to {} (readable by you only).",
+        h.credentials_path().display()
+    );
     report_environment_overrides(&here, &url);
     Ok(exit::OK)
 }
@@ -132,55 +138,61 @@ pub async fn connect(url: &str) -> anyhow::Result<i32> {
 /// whose job is to make you safer must not manufacture a false sense of it.
 pub fn disconnect(url: Option<&str>) -> anyhow::Result<i32> {
     let here = proj::resolve();
-    let Some(home) = credentials::home(here.env.lookup()) else {
+    let Some(h) = home::locate(here.env.lookup()) else {
         eprintln!("recall disconnect: no home directory, so nothing is saved — set RECALL_HOME");
         return Ok(exit::CONFIG);
     };
-    let path = credentials::file(&home);
-
-    let mut saved = match credentials::load(&path) {
-        Ok(Some(saved)) => saved,
-        Ok(None) => Credentials::default(),
+    let (mut creds, mut config) = match load_both(&h) {
+        Ok(both) => both,
         Err(e) => {
             eprintln!("recall disconnect: {e}");
             eprintln!("  Nothing was changed.");
             return Ok(exit::CONFIG);
         }
     };
+    let path = h.credentials_path();
 
     let target = match url {
-        Some(u) => Some(credentials::normalize_url(u)),
-        None => saved.default.clone().or_else(|| {
+        Some(u) => Some(home::normalize_url(u)),
+        None => config.server.clone().or_else(|| {
             // With exactly one server there is nothing to choose between.
-            (saved.servers.len() == 1)
-                .then(|| saved.servers.keys().next().cloned())
+            (creds.servers.len() == 1)
+                .then(|| creds.servers.keys().next().cloned())
                 .flatten()
         }),
     };
 
     match target {
-        None if saved.servers.is_empty() => {
+        None if creds.servers.is_empty() => {
             println!("No token is saved in {}.", path.display());
         }
         None => {
             eprintln!("recall disconnect: more than one server is saved; name one:");
-            for u in saved.servers.keys() {
+            for u in creds.servers.keys() {
                 eprintln!("  recall disconnect {u}");
             }
             return Ok(exit::CONFIG);
         }
         Some(target) => {
-            if saved.remove(&target) {
-                let result = if saved.servers.is_empty() {
-                    credentials::delete(&path)
+            if creds.remove(&target) {
+                let result = if creds.servers.is_empty() {
+                    h.delete_credentials()
                 } else {
-                    credentials::save(&path, &saved)
+                    h.save_credentials(&creds)
                 };
+                // The config stops naming a server it has no token for. The
+                // machine name stays: it describes this machine, not the
+                // connection.
+                let result = result.and_then(|()| {
+                    if config.server.as_deref() == Some(target.as_str()) {
+                        config.server = None;
+                        h.save_config(&config)
+                    } else {
+                        Ok(())
+                    }
+                });
                 if let Err(e) = result {
-                    eprintln!(
-                        "recall disconnect: could not update {}: {e}",
-                        path.display()
-                    );
+                    eprintln!("recall disconnect: {e}");
                     return Ok(exit::CONFIG);
                 }
                 println!("Removed the token for {target} from {}.", path.display());
@@ -209,7 +221,7 @@ pub fn disconnect(url: Option<&str>) -> anyhow::Result<i32> {
 /// file, named, because otherwise `connect` looks like it did nothing.
 fn report_environment_overrides(here: &proj::Resolved, connected: &str) {
     let cfg = here.config();
-    if cfg.url_source == Source::Environment && credentials::normalize_url(&cfg.url) != connected {
+    if cfg.url_source == Source::Environment && home::normalize_url(&cfg.url) != connected {
         println!();
         println!(
             "Note: RECALL_URL is set to {}, so this machine keeps talking to that server. \
@@ -241,6 +253,16 @@ fn environment_token_origin(here: &proj::Resolved, verb: &str) -> String {
              file exported it, so check your shell profile."
         ),
     }
+}
+
+/// Both files, after moving 0.3.0's JSON file into them, so everything below
+/// works on one format. Missing files read as empty.
+fn load_both(h: &Home) -> Result<(home::Credentials, home::Config), home::Error> {
+    h.migrate_legacy()?;
+    Ok((
+        h.load_credentials()?.unwrap_or_default(),
+        h.load_config()?.unwrap_or_default(),
+    ))
 }
 
 /// Whether `url` has a scheme Recall speaks and a host after it.
