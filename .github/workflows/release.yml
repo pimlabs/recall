@@ -63,8 +63,13 @@ jobs:
         # never appeared. If a build job never starts, check the label here
         # against actions/runner-images before looking anywhere else.
         include:
+          # Built on the arm64 runner, not macos-15-intel: Apple's toolchain
+          # targets x86_64 from Apple Silicon out of the box (cc-rs passes
+          # `-arch x86_64`, and the SDK carries both), and the Intel runner
+          # was the slowest leg every release, the one `publish` waited on.
+          # "Built for the right architecture" below checks the result.
           - target: x86_64-apple-darwin
-            os: macos-15-intel
+            os: macos-15
             asset: recall_darwin_amd64
           - target: aarch64-apple-darwin
             os: macos-15
@@ -99,10 +104,12 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      # Every target builds on a native runner rather than cross-compiling.
-      # rusqlite's `bundled` feature compiles the SQLite amalgamation from C,
-      # so a cross build would need a C toolchain per target — native runners
-      # (including the arm64 Linux one) avoid that entirely.
+      # Every target but one builds on a native runner. rusqlite's `bundled`
+      # feature compiles the SQLite amalgamation from C, so a cross build
+      # needs a C toolchain for the target, and native runners (including the
+      # arm64 Linux one) avoid that entirely. The exception is
+      # x86_64-apple-darwin, built on the arm64 macOS runner, whose Xcode
+      # toolchain already compiles for both Mac architectures.
       # What `recall version` prints beside the version number. Read back
       # from the checkout rather than from `github.sha`, which is the commit
       # the run was *triggered* on: for a tag push the two agree, but for a
@@ -121,6 +128,19 @@ jobs:
 
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }} -p recall
+
+      # A cross build that silently produced the host's architecture would
+      # ship an arm64 binary as recall_darwin_amd64. lipo reads the Mach-O
+      # header, so this fails before anything is packaged.
+      - name: Built for the right architecture
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          want=$(case "${{ matrix.target }}" in x86_64-*) echo x86_64 ;; aarch64-*) echo arm64 ;; esac)
+          got=$(lipo -archs "target/${{ matrix.target }}/release/recall")
+          echo "${{ matrix.target }}: $got"
+          [ "$got" = "$want" ] || { echo "::error::expected $want, the binary is $got"; exit 1; }
 
       # Unix packaging: a tar.gz containing the binary renamed to the asset
       # name, which install.sh and npm's installer both expect to find inside
