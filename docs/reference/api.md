@@ -1142,9 +1142,10 @@ lowercase hex.
 
 ## `GET /v1/audit/entries`
 
-Admin: `RECALL_TOKEN` or an `admin` device. The leaves name every project,
-file, device and authkey, which is what the device list and `/admin/stats`
-already keep to that scope; a `sync` device is `403`.
+Admin: `RECALL_TOKEN`, an `admin` device, or the admin page's passkey
+session. The leaves name every project, file, device and authkey, which is
+what the device list and `/admin/stats` already keep to that scope; a
+`sync` device is `403`.
 
 ```
 GET /v1/audit/entries?start=1000&end=1002

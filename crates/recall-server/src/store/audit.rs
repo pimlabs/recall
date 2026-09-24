@@ -24,7 +24,7 @@
 use anyhow::{bail, Result};
 use rusqlite::{Connection, TransactionBehavior};
 
-use super::{Store, StoreState};
+use super::Store;
 use crate::audit::merkle::{self, Hash, Tree};
 
 /// Created alongside `memory_files` and the device tables, every time the
@@ -93,20 +93,20 @@ pub(super) struct Loaded {
 /// error says to restore the database from a backup.
 pub(super) fn load(conn: &Connection) -> Result<Loaded> {
     let mut tree = Tree::new();
-    read_into(conn, &mut tree)?;
+    read_from(conn, 0, |hash| tree.append(hash))?;
     let last_at = last_at(conn, tree.size())?;
     Ok(Loaded { tree, last_at })
 }
 
-/// Reads every leaf past the ones `tree` already holds into it, in order,
-/// checked as [`load`] describes. What both opening and
-/// [`Store::audited_each`]'s catching up do.
-fn read_into(conn: &Connection, tree: &mut Tree) -> Result<()> {
+/// Reads every leaf from `seq` `from` on, in order, checked as [`load`]
+/// describes, handing each one's hash to `each`. What both opening and
+/// [`Store::audited_each`]'s catching up do. Answers how many it read.
+fn read_from(conn: &Connection, from: u64, mut each: impl FnMut(Hash)) -> Result<u64> {
     let mut stmt =
         conn.prepare("SELECT seq, leaf, leaf_hash FROM audit_log WHERE seq >= ?1 ORDER BY seq")?;
-    let mut rows = stmt.query((tree.size() as i64,))?;
+    let mut rows = stmt.query((from as i64,))?;
+    let mut want = from;
     while let Some(row) = rows.next()? {
-        let want = tree.size();
         let seq: i64 = row.get(0)?;
         if seq != want as i64 {
             bail!(
@@ -122,9 +122,10 @@ fn read_into(conn: &Connection, tree: &mut Tree) -> Result<()> {
                  restore the database from a backup"
             );
         }
-        tree.append(hash);
+        each(hash);
+        want += 1;
     }
-    Ok(())
+    Ok(want - from)
 }
 
 /// The `at` of the newest of `size` leaves, or empty for none.
@@ -145,33 +146,33 @@ fn last_at(conn: &Connection, size: u64) -> Result<String> {
         .unwrap_or_default())
 }
 
-/// Brings `tree` up to the table, for leaves another process appended
-/// since this one last looked: `recall-server reset-passkeys`, run on the
-/// host beside a running server. Run inside the write transaction, whose
-/// lock keeps anything else from appending until it commits. A table that
-/// holds fewer leaves than `tree` was rolled back under a running server
-/// (a backup restored without stopping it), and nothing more is appended
-/// onto it until the server restarts and reads it afresh.
-fn catch_up(conn: &Connection, tree: &mut Tree, audit_at: &mut String) -> Result<()> {
+/// The leaves the table holds past the `held` this store's tree has, for
+/// leaves another process appended since this one last looked:
+/// `recall-server reset-passkeys`, run on the host beside a running server.
+/// Their hashes, checked as [`load`] checks them, and the newest one's
+/// `at`, for the tree to take once the transaction this runs in commits;
+/// its lock keeps anything else from appending until then.
+///
+/// A table that holds fewer leaves than `held` was rolled back under a
+/// running server (a backup restored without stopping it), and nothing
+/// more is appended onto it until the server restarts and reads it afresh.
+fn catch_up(conn: &Connection, held: u64) -> Result<(Vec<Hash>, Option<String>)> {
     let stored: i64 =
         conn.query_row("SELECT COALESCE(MAX(seq) + 1, 0) FROM audit_log", [], |r| {
             r.get(0)
         })?;
-    let held = tree.size() as i64;
-    if stored < held {
+    if stored < held as i64 {
         bail!(
             "the audit log holds {stored} leaves, fewer than the {held} this server appended: \
              the database was replaced under a running server; restart it"
         );
     }
-    if stored > held {
-        read_into(conn, tree)?;
-        let newest = last_at(conn, tree.size())?;
-        if newest > *audit_at {
-            *audit_at = newest;
-        }
+    let mut hashes = Vec::new();
+    if stored == held as i64 {
+        return Ok((hashes, None));
     }
-    Ok(())
+    let read = read_from(conn, held, |hash| hashes.push(hash))?;
+    Ok((hashes, Some(last_at(conn, held + read)?)))
 }
 
 /// What [`Store::audited`]'s write closure hands back.
@@ -207,14 +208,16 @@ pub enum ConsistencyError {
     SecondBeyondTreeSize,
 }
 
-/// The `at` the next leaf carries: now, or the newest leaf's `at` if the
-/// clock has gone back since — so `at` never decreases along `seq`. Read
-/// under the store's lock, like the `seq` it goes with. Being one
-/// fixed-width format, two of these compare as strings.
-fn next_at(audit_at: &str) -> String {
+/// The `at` the next leaf carries: now, or the newest leaf's `at` (the
+/// later of the two given) if the clock has gone back since — so `at` never
+/// decreases along `seq`. Read under the store's lock, like the `seq` it
+/// goes with. Being one fixed-width format, two of these compare as
+/// strings.
+fn next_at(one: &str, other: &str) -> String {
+    let newest = one.max(other);
     let now = crate::now();
-    if now.as_str() < audit_at {
-        audit_at.to_string()
+    if now.as_str() < newest {
+        newest.to_string()
     } else {
         now
     }
@@ -254,23 +257,23 @@ impl Store {
         write: impl FnOnce(&rusqlite::Transaction, &str) -> Result<Outcome<T>>,
         build_leaves: impl FnOnce(u64, &str, &T) -> Vec<Vec<u8>>,
     ) -> Result<T> {
-        let mut guard = self.lock();
-        let StoreState {
-            conn,
-            audit,
-            audit_at,
-        } = &mut *guard;
+        let mut state = self.lock();
+        let (held, held_at) = (state.audit.size(), state.audit_at.clone());
         // `IMMEDIATE`: the database's write lock from the start, so another
         // process (`reset-passkeys`) cannot append between the catch-up
-        // below and this transaction's own leaves.
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        catch_up(&tx, audit, audit_at)?;
-        // The position the first leaf will hold if this commits: the
-        // tree's current size, read under the same lock the transaction
-        // holds for its whole duration, so no other request can observe or
+        // below and this transaction's own leaves. The transaction borrows
+        // the whole state, so the tree cannot learn of anything until it
+        // commits.
+        let tx = state
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (caught, caught_at) = catch_up(&tx, held)?;
+        // The position the first leaf will hold if this commits: the size
+        // of the tree the table holds, read under the lock the transaction
+        // holds for its whole duration, so no other request or process can
         // claim this seq first.
-        let seq = audit.size();
-        let at = next_at(audit_at);
+        let seq = held + caught.len() as u64;
+        let at = next_at(caught_at.as_deref().unwrap_or(""), &held_at);
         let value = match write(&tx, &at)? {
             Outcome::Commit(value) => value,
             Outcome::Refuse(value) => return Ok(value), // `tx` drops here: rolled back.
@@ -286,11 +289,13 @@ impl Store {
             hashes.push(leaf_hash);
         }
         tx.commit()?;
-        for leaf_hash in hashes {
-            audit.append(leaf_hash);
+        for leaf_hash in caught.into_iter().chain(hashes) {
+            state.audit.append(leaf_hash);
         }
         if !leaves.is_empty() {
-            *audit_at = at;
+            state.audit_at = at;
+        } else if let Some(caught_at) = caught_at.filter(|c| *c > state.audit_at) {
+            state.audit_at = caught_at;
         }
         Ok(value)
     }

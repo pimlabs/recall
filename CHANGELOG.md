@@ -165,9 +165,10 @@ break will be described here in full rather than smoothed over.
 - **New routes:** `GET /v1/audit/checkpoint` (the tree's size and root)
   and `GET /v1/audit/consistency` (the proof that one size extends
   another), any credential; `GET /v1/audit/entries` (the leaves, 1,000 or
-  2 MiB at a time), `RECALL_TOKEN` or an admin device only, since the
-  leaves name every project, file, device and authkey. `GET /sync`
-  answers now carry a `Recall-Audit-Checkpoint` header.
+  2 MiB at a time), `RECALL_TOKEN`, an admin device or the admin page's
+  session only, since the leaves name every project, file, device and
+  authkey. `GET /sync` answers now carry a `Recall-Audit-Checkpoint`
+  header.
 - **`GET /.well-known/recall` lists an `audit` capability**, `{
   "leaf_version": 1, "max_page": 1000, "max_page_bytes": 2097152 }`.
 - **`scripts/audit-verify.py`** checks an exported log offline: the tree
