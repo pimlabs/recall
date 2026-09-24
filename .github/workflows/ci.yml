@@ -385,10 +385,18 @@ jobs:
       # works the same way for this Dockerfile: a layer is skipped when
       # neither its instructions nor its input changed, so a docs-only push
       # to main (the image still builds unconditionally there) replays every
-      # layer from cache, and a PR that does touch crates/ still keeps the
-      # base image, apk/npm layers untouched by the diff. `mode=max` on both
-      # so the cache holds every intermediate layer (recall-server's own
-      # compile included), not only the ones the final image is made of.
+      # layer from cache. The Dockerfile's `source` stage uses cargo-chef so
+      # this pays off for ordinary code changes too, not just docs-only
+      # ones: a PR that touches crates/ without touching Cargo.toml/
+      # Cargo.lock keeps the base image, apk/npm layers AND the `cargo chef
+      # cook` layer (dependencies, compiled once and keyed on the recipe
+      # alone) from cache, and only recompiles the crates that actually
+      # changed. Before cargo-chef, any crates/ change invalidated the one
+      # layer that both compiled dependencies and the crates, so a doc
+      # comment change here paid for a full dependency rebuild same as a
+      # real code change did. `mode=max` on both so the cache holds every
+      # intermediate layer (the cook layer and recall-server's own compile
+      # included), not only the ones the final image is made of.
       - name: Server image builds, from source and from a release
         env:
           BUILDER: ${{ steps.buildx.outputs.name }}
