@@ -625,17 +625,20 @@ carry over is the older image's README, whose backup and restore copy
 commits and can corrupt a restore. After a rollback, back up and restore
 with the procedures in this README, which work whatever version is running.
 Or put the file back in the rollback journal before starting the older
-image, with both containers stopped:
+image, with both containers stopped, which this does:
 
 ```sh
-docker stop recall-server recall-sqlite-web
+docker inspect -f '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}' recall-server | grep -qx recall_recall-data &&
+docker stop recall-server recall-sqlite-web &&
 docker run --rm -v recall_recall-data:/data alpine sh -c \
   "apk add --no-cache sqlite >/dev/null && sqlite3 /data/recall.db 'PRAGMA journal_mode=DELETE'"
 ```
 
 It prints `delete`, having copied what the WAL held into `recall.db` and
 removed `recall.db-wal` and `recall.db-shm`. A server with WAL switches the
-file back at its next start.
+file back at its next start. The first line checks that the server's
+container keeps its database in `recall_recall-data`, as the restore below
+does, and for the same reason.
 
 ## The database files
 
@@ -708,14 +711,16 @@ them out with no WAL of its own. That is what makes it safe to copy, upload
 and restore from, where `recall.db` itself is not (see
 [The database files](#the-database-files)).
 
-**To restore:** name the snapshot, and paste this whole block, from the
-deployment's `deploy/` directory, whichever compose file it runs:
+**To restore:** put the snapshot's file name, one in `deploy/backups/`, in
+place of `recall-<timestamp>.db`, and paste this whole block from the
+checkout's root (it changes into `deploy/` itself), whichever compose file
+the deployment runs:
 
 ```sh
 cd deploy
-snap=recall-<timestamp>.db      # the snapshot to restore: a file in backups/
+snap=recall-<timestamp>.db
 [ -f "backups/$snap" ] &&
-docker inspect -f '{{range .Mounts}}{{.Name}} {{end}}' recall-server | grep -qw recall_recall-data &&
+docker inspect -f '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}' recall-server | grep -qx recall_recall-data &&
 docker stop recall-server recall-sqlite-web &&
 docker run --rm -e SNAP="$snap" -v recall_recall-data:/data -v "$(pwd)/backups":/backups:ro alpine sh -euc '
   cp "/backups/$SNAP" /data/recall.db.restoring
@@ -735,11 +740,19 @@ running. `scripts/restore-check.sh` runs this block, as written here,
 against a real server.
 
 Every step is chained with `&&`, so the first that fails stops the rest,
-and the order is the point of it:
+and the order is the point of it. If it stops after `docker stop` (this
+host has no `recall-sqlite-web` container, alpine could not be pulled, the
+snapshot is empty or not an SQLite file), it stopped before moving
+anything, and the live database is where it was: start both again with
+`docker start recall-server recall-sqlite-web` (leave out
+`recall-sqlite-web` if you do not run it), check `/health`, and fix what
+the error named. A `recall.db.restoring` it leaves in the volume is only
+the rejected copy; the next attempt overwrites it.
 
 - **The snapshot is checked first**, then copied in beside the live
   database as `recall.db.restoring` and checked to be an SQLite file, all
-  before anything live is touched. A mistyped name stops the block with the
+  before anything live is touched; `sh -e` stops the container at the
+  first command that fails. A mistyped name stops the block with the
   server still running on its database; moving the live files first would
   have left the server nothing, and it creates an empty database where it
   finds none.
@@ -747,10 +760,11 @@ and the order is the point of it:
   `recall-sqlite-web` are the names all three compose files give them, so
   this needs no `-f`, which `docker compose stop` would: without it, on a
   Traefik or direct-TLS host it reads `docker-compose.yml`, fails, and
-  stops nothing. `docker inspect` checks that the server's container
-  really has `recall_recall-data`, the volume all three compose files
-  declare, since `docker run` would otherwise create an empty one and
-  restore into that. A stack started with `-p` has another name for it (see
+  stops nothing. `docker inspect` checks that the volume the server's
+  container has at `/data` is exactly `recall_recall-data`, the one all
+  three compose files declare, since `docker run` would otherwise create an
+  empty one of that name and restore into it, while the server went on
+  with its own database untouched. A stack started with `-p` has another name for it (see
   [Switching ingress](#switching-ingress-on-a-server-that-is-already-running));
   the block then stops before touching anything, and the name in it is the
   one to change.

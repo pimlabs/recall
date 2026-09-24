@@ -295,10 +295,18 @@ impl Store {
         // connection opened? See `FileId` in the store.
         if let Some(opened) = state.file {
             if super::file_id(&state.conn) != Some(opened) {
-                bail!(
-                    "the database file {} was moved or replaced under this running server,                      which would otherwise go on writing into the file it had opened. Nothing                      was written. Restart the server, so it opens the file that is there now",
+                let why = format!(
+                    "the database file {} was moved or replaced under this running server, \
+                     which would otherwise go on writing into the file it had opened. Nothing \
+                     was written. Restart the server, so it opens the file that is there now",
                     state.conn.path().unwrap_or("")
                 );
+                // Every write from here on is refused with this, as a 500
+                // the owner may never see; the server's log says it once.
+                if !std::mem::replace(&mut state.moved_said, true) && state.log_moved {
+                    eprintln!("{why}");
+                }
+                bail!(why);
             }
         }
         let (held, held_at) = (state.audit.size(), state.audit_at.clone());

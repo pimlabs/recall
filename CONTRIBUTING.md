@@ -148,14 +148,17 @@ ingress. Change any of those three and this fails.
 ./scripts/restore-check.sh target/release/recall-server
 ```
 
-Thirty-three checks. The restore, the backups taken by hand and the switch
+Fifty-one checks. The restore, the backups taken by hand and the switch
 back to the rollback journal in `deploy/README.md` are extracted from the
 README and run as written against a real server, through a stand-in
 `docker` on PATH (no daemon needed): a restore with the server running and
-after a crash, one naming a snapshot that is not there, one on a stack
-whose volume has another name, one whose stop stopped nothing. Under WAL
-the mistakes in these are silent, and the database is the only copy, so
-change a block and this runs it.
+after a crash, one naming a snapshot that is not there, one whose snapshot
+is empty or not SQLite, one on a stack whose volume has another name, one
+whose stop stopped nothing. Under WAL the mistakes in these are silent, and
+the database is the only copy, so change a block and this runs it. It needs
+python3 with PyYAML, or the `docker compose` CLI in its place, to read the
+compose files, and says so if it has neither; `release.sh` asks before its
+build.
 
 ### Before touching anything frozen
 

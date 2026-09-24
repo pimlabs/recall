@@ -39,12 +39,15 @@ break will be described here in full rather than smoothed over.
   snapshot in, since a WAL left beside a restored `recall.db` is replayed
   into it. The restore stops and starts the containers by name
   (`docker stop recall-server recall-sqlite-web`), so it works on every
-  ingress without `-f`, and checks the snapshot exists before it moves
-  anything. The volume has to be a local filesystem, never NFS or SMB.
+  ingress without `-f`, and before it moves anything checks that the
+  snapshot is there and is an SQLite file, and that the volume it restores
+  into is the one the server's container has. The volume has to be a local
+  filesystem, never NFS or SMB.
 - **A server whose `recall.db` was moved or replaced under it refuses to
   write.** Every push and pull answers 500 until it is restarted, rather
   than 200 for writes into the file it had open, which after a restore
-  done without stopping it is no longer the database.
+  done without stopping it is no longer the database. Its log says so,
+  once.
 - **The compose files give `recall-server` 60 seconds to stop**
   (`stop_grace_period`), where Docker's default is 10: long enough for a
   merge in flight to finish and for the server to empty the WAL into

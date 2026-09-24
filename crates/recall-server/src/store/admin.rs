@@ -617,6 +617,8 @@ impl Store {
                 audit: crate::audit::merkle::Tree::new(),
                 audit_at: String::new(),
                 file,
+                log_moved: false,
+                moved_said: false,
             }),
         })
     }

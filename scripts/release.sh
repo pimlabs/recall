@@ -138,6 +138,18 @@ else
   ok "$TAG is unused"
 fi
 
+# restore-check.sh, in step 3, reads the compose files' container and volume
+# names with PyYAML, or with `docker compose config` where PyYAML is
+# missing. Asked here, before the long build, rather than found out after
+# it.
+if python3 -c 'import yaml' 2>/dev/null; then
+  ok "PyYAML, for restore-check.sh"
+elif docker compose version >/dev/null 2>&1; then
+  ok "docker compose, for restore-check.sh"
+else
+  die "restore-check.sh (step 3) reads the compose files with PyYAML or 'docker compose config', and this machine has neither: python3 -m pip install pyyaml"
+fi
+
 # Channels that were asked to publish and did not. Kept as a string rather
 # than an array: under `set -u`, bash 3.2 — which macOS still ships — errors
 # on ${arr[@]} when the array is empty.
@@ -197,7 +209,7 @@ run "cargo build --release"            cargo build --release --locked
 run "compat-check.sh (19 checks)"      ./scripts/compat-check.sh target/release/recall-server
 run "api-doc-check.sh (135 checks)"    ./scripts/api-doc-check.sh target/release/recall-server
 run "trusted-ip-check.sh (9 checks)"   ./scripts/trusted-ip-check.sh target/release/recall-server
-run "restore-check.sh (33 checks)"     ./scripts/restore-check.sh target/release/recall-server
+run "restore-check.sh (51 checks)"     ./scripts/restore-check.sh target/release/recall-server
 
 built=$(./target/release/recall version)
 printf '    built: %s\n' "$built"

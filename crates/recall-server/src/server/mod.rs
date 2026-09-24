@@ -842,7 +842,75 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::WalWatch;
+    use super::{Server, WalWatch};
+    use crate::{Config, Store};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// The background sweep checkpoints the WAL, so `recall.db` on its own,
+    /// which is all sqlite-web's single-file mount has, catches up within a
+    /// sweep rather than whenever SQLite's own threshold of 1000 pages comes
+    /// round. The file alone is copied out and opened with no WAL beside
+    /// it, the copy made holding the store's lock, which the checkpoint
+    /// takes too, so it is never of a file a checkpoint is half way through
+    /// writing.
+    #[tokio::test]
+    async fn the_sweep_checkpoints_the_wal_into_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("recall.db");
+        let store = Arc::new(Store::open(&db).unwrap());
+        let server = Server::new(
+            Config {
+                token: "sweep-token".into(),
+                merge_enabled: false,
+                ..Config::default()
+            },
+            store.clone(),
+        );
+        // The schema into the file first, so the file alone opens, and what
+        // it lacks below is only the rows.
+        assert!(store.checkpoint_all().unwrap());
+        for i in 0..5 {
+            store
+                .upsert_audited(
+                    "acme/app",
+                    &format!("f{i}.md"),
+                    "x",
+                    "",
+                    crate::store::test_leaf,
+                )
+                .unwrap();
+        }
+        let alone = || -> i64 {
+            let copy = tempfile::tempdir().unwrap();
+            let file = copy.path().join("recall.db");
+            store
+                .with_raw(|_| {
+                    std::fs::copy(&db, &file).unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            rusqlite::Connection::open(&file)
+                .unwrap()
+                .query_row("SELECT count(*) FROM memory_files", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(alone(), 0, "the rows are only in the WAL before the sweep");
+
+        let tasks = server.start_background();
+        let started = Instant::now();
+        while alone() != 5 {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the first sweep did not checkpoint: the file alone has {}",
+                alone()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        for t in tasks {
+            t.abort();
+        }
+    }
 
     /// Said after three sweeps behind in a row and every three after, said
     /// once more when it catches up, and not at all for a sweep or two.

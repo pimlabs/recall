@@ -663,65 +663,6 @@ async fn serve_shuts_down_cleanly() {
     assert_eq!(leaves, 1, "the start leaf, in the file");
 }
 
-/// The background sweep checkpoints the WAL, so `recall.db` on its own,
-/// which is all sqlite-web's single-file mount has, catches up within a
-/// sweep rather than whenever SQLite's own threshold of 1000 pages comes
-/// round. The file alone is copied out and opened with no WAL beside it.
-#[tokio::test]
-async fn the_sweep_checkpoints_the_wal_into_the_file() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("recall.db");
-    let store = Arc::new(Store::open(&db).unwrap());
-    let server = Server::new(
-        Config {
-            token: TEST_TOKEN.to_string(),
-            merge_enabled: false,
-            ..Config::default()
-        },
-        store.clone(),
-    );
-    // The schema into the file first, so the file alone opens, and what it
-    // lacks below is only the rows.
-    assert!(store.checkpoint_all().unwrap());
-    for i in 0..5 {
-        store
-            .upsert_audited("acme/app", &format!("f{i}.md"), "x", "", |seq, at| {
-                recall_server::audit::leaf::encode(
-                    seq,
-                    at,
-                    recall_server::audit::leaf::action::START,
-                    &recall_server::audit::leaf::Actor::Server,
-                    recall_server::audit::leaf::subject_start("test"),
-                    None,
-                )
-            })
-            .unwrap();
-    }
-    let alone = || -> i64 {
-        let copy = tempfile::tempdir().unwrap();
-        std::fs::copy(&db, copy.path().join("recall.db")).unwrap();
-        rusqlite::Connection::open(copy.path().join("recall.db"))
-            .unwrap()
-            .query_row("SELECT count(*) FROM memory_files", [], |r| r.get(0))
-            .unwrap()
-    };
-    assert_eq!(alone(), 0, "the rows are only in the WAL before the sweep");
-
-    let tasks = server.start_background();
-    let started = std::time::Instant::now();
-    while alone() != 5 {
-        assert!(
-            started.elapsed() < Duration::from_secs(10),
-            "the first sweep did not checkpoint: the file alone has {}",
-            alone()
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    for t in tasks {
-        t.abort();
-    }
-}
-
 /// A stand-in `claude` that drains stdin, ignores its arguments and prints
 /// `out`.
 fn fake_claude(dir: &std::path::Path, out: &str) -> String {

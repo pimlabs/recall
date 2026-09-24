@@ -76,12 +76,16 @@ pub struct Existing {
 ///
 /// `file` is the database file this connection opened, as (device, inode),
 /// which every audited write checks is still the file at its path: see
-/// [`FileId`].
+/// [`FileId`]. When it is not, `log_moved` says whether to say so on stderr
+/// as well as in the refusal (the server does; an admin command, which
+/// prints the refusal itself, does not), and `moved_said` that it has.
 struct StoreState {
     conn: Connection,
     audit: Tree,
     audit_at: String,
     file: Option<FileId>,
+    log_moved: bool,
+    moved_said: bool,
 }
 
 /// Which file a path names: its device and inode.
@@ -185,6 +189,8 @@ impl Store {
                 audit: Tree::new(),
                 audit_at: String::new(),
                 file,
+                log_moved: true,
+                moved_said: false,
             }),
         };
         store.migrate()?;
@@ -1123,11 +1129,15 @@ mod tests {
                 fs::rename(dir.path().join(f), aside.join(f)).unwrap();
             }
         }
+        // The message is a 500's body and a log line: one sentence, with no
+        // run of spaces where a line of the source was continued.
         let refused = |st: &Store| {
             let err = st
                 .upsert_audited("acme/app", "b.md", "y", "laptop", test_leaf)
                 .unwrap_err();
-            assert!(format!("{err:#}").contains("moved or replaced"), "{err:#}");
+            let said = format!("{err:#}");
+            assert!(said.contains("moved or replaced"), "{said}");
+            assert!(!said.contains("  "), "a run of spaces: {said:?}");
             let err = st.audit_append(test_leaf).unwrap_err();
             assert!(format!("{err:#}").contains("moved or replaced"), "{err:#}");
         };
