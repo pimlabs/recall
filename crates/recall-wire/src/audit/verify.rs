@@ -176,7 +176,8 @@ fn read_checkpoint_line(line: &[u8]) -> Check<(u64, Hash)> {
     let parsed = text.and_then(|t| {
         let (size, root) = t.split_once(' ')?;
         let well_formed = !root.is_empty() && !root.bytes().any(|b| b.is_ascii_whitespace());
-        Some((decimal(size)?, root)).filter(|_| well_formed)
+        let size = decimal(size)?;
+        well_formed.then_some((size, root))
     });
     let Some((size, root)) = parsed else {
         return bad(format!(
