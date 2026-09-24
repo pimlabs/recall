@@ -67,12 +67,19 @@ jobs:
             echo "::error::No CI run for $GITHUB_SHA yet. Wait for it, then run this again."
             exit 1
           fi
-          ci=$(gh run view "$run_id" --json jobs --jq '.jobs[] | select(.name == "ci") | .conclusion')
-          if [ "$ci" != "success" ]; then
-            echo "::error::CI on $GITHUB_SHA is '${ci:-not finished}', not success. Wait for it, or fix it first."
+          # The whole run, not only the job named `ci`: the Windows jobs
+          # test the client the release ships for Windows, so a red one
+          # blocks a release as much as a red Linux one. On a push to main
+          # every job runs; a run is `success` only when each of them is.
+          read -r status conclusion < <(gh run view "$run_id" --json status,conclusion \
+            --jq '"\(.status) \(.conclusion // "none")"')
+          if [ "$status" != "completed" ] || [ "$conclusion" != "success" ]; then
+            not_green=$(gh run view "$run_id" --json jobs --jq \
+              '[.jobs[] | select(.conclusion != "success" and .conclusion != "skipped") | "\(.name): \(if (.conclusion // "") == "" then .status else .conclusion end)"] | join(", ")')
+            echo "::error::CI on $GITHUB_SHA is '$status/$conclusion', not success (${not_green:-no job reported}). Wait for it, or fix it first."
             exit 1
           fi
-          echo "ci: success (run $run_id)"
+          echo "CI: every job green (run $run_id)"
 
       # A tag that already exists means this version was released, or
       # started to be. Pointing here, it is an interrupted run and Release is

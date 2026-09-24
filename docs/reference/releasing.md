@@ -64,8 +64,8 @@ git tag -a v0.3.1 -m "recall 0.3.1" && git push origin v0.3.1
 
 Both end in the same place. *Cut a release*
 (`.github/workflows/cut-release.yml`) reads the version from `main`, refuses
-if CI did not pass on that commit or if the tag already exists somewhere
-else, creates the tag, and starts the Release workflow on it. It dispatches
+if any CI job (Linux or Windows) did not pass on that commit or if the tag
+already exists somewhere else, creates the tag, and starts the Release workflow on it. It dispatches
 Release explicitly because a tag pushed with the workflow's own token starts
 no workflow by itself, and it dispatches it *on the tag* because the
 `release` environment only admits tag refs. Run it twice and the second run
@@ -225,13 +225,15 @@ git push origin v0.1.0
 ```
 
 `.github/workflows/release.yml` fires on `v*`. It builds the client for six
-targets, each on a **native runner** — `rusqlite` compiles SQLite from C, so
-cross-compiling would need a C toolchain per target — then writes
+targets, each on a **native runner** except Intel macOS — `rusqlite`
+compiles SQLite from C, so cross-compiling needs a C toolchain for the
+target, and only Xcode on the arm64 macOS runner already has one for both
+Mac architectures — then writes
 `checksums.txt` and creates the GitHub Release:
 
 | Asset | Runner |
 |---|---|
-| `recall_darwin_amd64.tar.gz` | `macos-15-intel` |
+| `recall_darwin_amd64.tar.gz` | `macos-15` (cross-built, checked with `lipo`) |
 | `recall_darwin_arm64.tar.gz` | `macos-15` |
 | `recall_linux_amd64.tar.gz` | `ubuntu-latest` |
 | `recall_linux_arm64.tar.gz` | `ubuntu-24.04-arm` |

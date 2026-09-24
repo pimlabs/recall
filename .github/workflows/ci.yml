@@ -18,14 +18,14 @@ on:
 # A pull_request run is keyed by its PR number, so the runs on one PR share a
 # group and supersede one another. Anything else is keyed by `github.run_id`,
 # unique per run, so a push to `main` is alone in its group and always runs
-# to the end: `cut-release.yml` refuses to tag a commit whose `ci` job did not
-# finish green, and a cancelled run is not green.
+# to the end: `cut-release.yml` refuses to tag a commit whose CI run did not
+# finish green in every job, and a cancelled run is not green.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('uncancellable-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Neither job pushes, tags or uploads anything with GITHUB_TOKEN — both only
-# read the checkout and build against it — so read is all either needs.
+# No job pushes, tags or uploads anything with GITHUB_TOKEN — each only
+# reads the checkout and builds against it — so read is all any needs.
 permissions:
   contents: read
 
@@ -425,6 +425,44 @@ jobs:
           # impossible without anyone noticing.
           docker run --rm --entrypoint sh recall-server-rel -c 'command -v wget'
 
+  # Whether this change can break what the `windows` jobs below test. The
+  # same reading of the diff as the server-image question in `ci` above;
+  # see there for why the base is fetched at depth 1 and why renames are
+  # off.
+  windows-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.diff.outputs.run }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Does this change touch the Windows client?
+        id: diff
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "Not a pull request: the Windows jobs run unconditionally."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base='${{ github.event.pull_request.base.sha }}'
+          if ! git cat-file -e "$base^{commit}" 2>/dev/null \
+            && ! git fetch --no-tags --depth=1 origin "$base"; then
+            echo "::warning::Could not reach base commit $base, so the Windows jobs run rather than skip."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed="$(git diff --no-renames --name-only "$base" HEAD)"
+          echo "Changed in this pull request:"
+          echo "$changed"
+          # What the jobs build, test and parse: the Rust workspace,
+          # install.ps1, and this workflow, which is only proven by running.
+          if printf '%s\n' "$changed" | grep -Eq '^(crates/|Cargo\.(toml|lock)$|install\.ps1$|\.github/workflows/ci\.yml$)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Nothing under crates/, Cargo.toml, Cargo.lock, install.ps1 or this workflow changed, so the Windows jobs were skipped. They run unconditionally on every push to main."
+          fi
+
   # The client only — recall-server and recall-worker are Linux-only by
   # design (see deploy/Dockerfile and their own crate docs), so they are
   # excluded rather than tested and ignored. `recall`'s own integration tests still pull it in as
@@ -439,7 +477,16 @@ jobs:
   # assembly for its target: if that fails on windows-11-arm it fails the
   # release's build matrix, and `publish` waits for every leg, so one
   # architecture would hold back every channel.
+  #
+  # Skipped on a pull request that touches nothing these jobs test: a
+  # Windows runner bills at twice Linux's rate, and the pair cost about as
+  # much as the whole Linux job, on docs-only and script-only PRs too. A push
+  # to main always runs them, which is what `cut-release.yml` checks before
+  # it tags. `windows-changes` answers the question on a cheap Linux runner
+  # first, since a job-level `if` cannot read the diff itself.
   windows:
+    needs: windows-changes
+    if: needs.windows-changes.outputs.run == 'true'
     strategy:
       fail-fast: false
       matrix:
