@@ -46,7 +46,10 @@ is far less likely than a bug in one. It checks:
    before it failed, or counted at the wrong attempt; an admin session
    acting with a passkey the log never added or already removed; a first
    passkey added with no bootstrap code outstanding or beside another, the
-   last passkey removed, or a reset that miscounts the passkeys it removed.
+   last passkey removed, or a reset that miscounts the passkeys it removed;
+   a host's rename, remove or restore (`recall-server admin`) that changed
+   no row, closed a job no push queued, one already settled or one of
+   another key, or, for a rename or a remove, left a job of its key open.
 
 What a signature proves is that a device sent a request with that method,
 path, query and body digest — not what the server did with it. A push's or
@@ -378,11 +381,14 @@ SUBJECT_KEYS = {
     "sessions_end": ["ended"],
     "bootstrap_code": ["expires_at"],
     "passkey_reset": ["passkeys_removed", "expires_at"],
+    "admin_rename": ["from", "to", "rows", "jobs_closed", "backup"],
+    "admin_remove": ["project_key", "rows", "jobs_closed", "backup"],
+    "admin_restore": ["project_key", "source", "added", "overwritten", "deleted", "jobs_closed", "backup"],
 }
 # Who may do what: a device or the operator through the API, the admin
 # page's passkey session on the routes that manage devices, an authkey
 # enrolling the one device it approves, the server on its own, the host
-# through `recall-server reset-passkeys`.
+# through `recall-server reset-passkeys` and `recall-server admin`.
 ACTORS = {
     "push": {"device", "operator"},
     "delete": {"device", "operator"},
@@ -408,12 +414,17 @@ ACTORS = {
     "sessions_end": {"session"},
     "bootstrap_code": {"server"},
     "passkey_reset": {"host"},
+    "admin_rename": {"host"},
+    "admin_remove": {"host"},
+    "admin_restore": {"host"},
 }
 # The actions whose request body the leaf keeps, and their routes.
 KEEPS_BODY = {"approve", "deny", "revoke", "authkey_create", "authkey_revoke"}
 ADMIN_ACTIONS = KEEPS_BODY | {"job_retry"}
 # The actions a worker device signs, and the only ones it may.
 WORKER_ACTIONS = {"job_claim", "job_result"}
+# The host's changes to stored memory, run beside the server on its file.
+HOST_ACTIONS = {"admin_rename", "admin_remove", "admin_restore"}
 SCOPES = ("sync", "admin", "worker")
 JOB_STATES = ("queued", "leased", "done", "failed")
 COVERED = ["@method", "@authority", "@path", "@query", "content-digest", "recall-protocol"]
@@ -569,6 +580,8 @@ def check_shape(leaf, position):
             raise Invalid("subject.expires_at is not a timestamp")
         if action == "passkey_reset" and (not is_int(subject["passkeys_removed"]) or subject["passkeys_removed"] < 0):
             raise Invalid("subject.passkeys_removed is not a count")
+    elif action in HOST_ACTIONS:
+        check_host_subject(action, subject)
     else:
         for key, value in subject.items():
             expect_str(value, f"subject.{key}")
@@ -584,6 +597,49 @@ def check_shape(leaf, position):
             raise Invalid(f"a {action} keeps its body")
     elif request is not None:
         raise Invalid(f"the {kind} signs nothing, but the leaf carries a request")
+
+
+def expect_count(value, what):
+    if not is_int(value) or value < 0:
+        raise Invalid(f"{what} is not a count")
+
+
+def expect_file_name(value, what):
+    """A file's name alone: the leaf names a backup, never where it is."""
+    if not isinstance(value, str) or not value or "/" in value or value in (".", ".."):
+        raise Invalid(f"{what} is not a file name")
+
+
+def check_host_subject(action, subject):
+    """A rename's, remove's or restore's subject: its keys, counts that say
+    it changed something, the jobs it closed, and its backup by name."""
+    if action == "admin_rename":
+        for key in ("from", "to"):
+            expect_str(subject[key], f"subject.{key}")
+            if not subject[key]:
+                raise Invalid(f"subject.{key} is empty")
+        if subject["from"] == subject["to"]:
+            raise Invalid("a rename onto the key it renames")
+    else:
+        expect_str(subject["project_key"], "subject.project_key")
+        if not subject["project_key"]:
+            raise Invalid("subject.project_key is empty")
+    if action == "admin_restore":
+        expect_file_name(subject["source"], "subject.source")
+        for key in ("added", "overwritten", "deleted"):
+            expect_count(subject[key], f"subject.{key}")
+        changed = subject["added"] + subject["overwritten"] + subject["deleted"]
+    else:
+        expect_count(subject["rows"], "subject.rows")
+        changed = subject["rows"]
+    if changed == 0:
+        raise Invalid(f"an {action} that changed no row (one that has nothing to change is not made)")
+    closed = subject["jobs_closed"]
+    if not isinstance(closed, list) or not all(isinstance(j, str) and j for j in closed):
+        raise Invalid("subject.jobs_closed is not a list of job ids")
+    if len(set(closed)) != len(closed):
+        raise Invalid("subject.jobs_closed names a job twice")
+    expect_file_name(subject["backup"], "subject.backup")
 
 
 def parse_signature_base(base):
@@ -799,6 +855,8 @@ def apply(leaf, state):
         apply_job(leaf, state)
     elif action in PASSKEY_ACTIONS:
         apply_passkey(leaf, state)
+    elif action in HOST_ACTIONS:
+        apply_host(leaf, state)
 
 
 PASSKEY_ACTIONS = {"passkey_add", "passkey_remove", "sessions_end", "bootstrap_code", "passkey_reset"}
@@ -833,6 +891,30 @@ def apply_passkey(leaf, state):
         if len(state.passkeys) == 1:
             raise Invalid("the last passkey was removed")
         state.passkeys.discard(subject["credential_id"])
+
+
+def apply_host(leaf, state):
+    """A rename, remove or restore closes, in its own transaction, the jobs
+    open for the rows it touched: each one it names must be open and of its
+    key, and a rename or a remove, which touch every row of the key, leave
+    none of that key open. A restore touches only the paths it writes, which
+    the leaf does not list, so the jobs it leaves open are not checked."""
+    action, subject = leaf["action"], leaf["subject"]
+    key = subject["from"] if action == "admin_rename" else subject["project_key"]
+    closed = set(subject["jobs_closed"])
+    for job_id in subject["jobs_closed"]:
+        job = state.jobs.get(job_id)
+        if job is None:
+            raise Invalid(f"an {action} closed {job_id}, which no push or result queued")
+        if job["state"] not in ("queued", "leased"):
+            raise Invalid(f"an {action} closed {job_id} once it was {job['state']}")
+        if job["file"][0] != key:
+            raise Invalid(f"an {action} of {key!r} closed {job_id}, a job of {job['file'][0]!r}")
+        job.update(state="done", holder=None)
+    if action != "admin_restore":
+        for job_id, job in state.jobs.items():
+            if job["file"][0] == key and job["state"] in ("queued", "leased") and job_id not in closed:
+                raise Invalid(f"an {action} of {key!r} left {job_id} open")
 
 
 def check_session(leaf, state):
