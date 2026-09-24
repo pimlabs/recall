@@ -17,10 +17,15 @@ use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use recall_server::audit::leaf;
 use recall_server::merge::Status;
+use recall_server::store::{Queued, Settled, Settlement};
 use recall_server::{Config, Server, Store};
+use recall_wire::{MergeResult, MergeSide, ResultRequest};
 use rusqlite::Connection;
+use serde_json::{json, Value};
 use tempfile::TempDir;
+use time::OffsetDateTime;
 use tower::ServiceExt;
 
 const OLD: &str = "local:-Users-me-thing";
@@ -874,6 +879,7 @@ fn a_changes_mismatch_rolls_back_every_command() {
             ));
         }
         let before = fx.dump();
+        let logged = leaves(&fx.db()).len();
         fx.sql(&format!(
             "CREATE TRIGGER skip_one {trigger} BEGIN SELECT RAISE(IGNORE); END;"
         ));
@@ -885,7 +891,24 @@ fn a_changes_mismatch_rolls_back_every_command() {
         assert!(stderr.contains("were expected"), "{args:?}: {stderr}");
         assert!(stderr.contains("rolled back"), "{args:?}: {stderr}");
         assert_eq!(fx.dump(), before, "{args:?} left a partial change");
+        assert_eq!(leaves(&fx.db()).len(), logged, "{args:?} left a leaf");
     }
+
+    // The same for the jobs a change closes: one skipped is the whole
+    // change rolled back.
+    let job = queue_merge(&fx.db(), "me/thing", "MEMORY.md", "- other, edited\n");
+    let before = (fx.dump(), jobs(&fx.db()), leaves(&fx.db()).len());
+    fx.sql("CREATE TRIGGER skip_job BEFORE UPDATE ON jobs BEGIN SELECT RAISE(IGNORE); END;");
+    let out = fx.admin(&["remove", "me/thing", "--yes"]);
+    fx.sql("DROP TRIGGER skip_job");
+    assert_exit(&out, 1);
+    let (_, stderr) = text(&out);
+    assert!(
+        stderr.contains("closed 0 merge job(s) where 1 were expected"),
+        "{stderr}"
+    );
+    assert_eq!((fx.dump(), jobs(&fx.db()), leaves(&fx.db()).len()), before);
+    assert_eq!(job_state(&fx.db(), &job).0, "queued");
 }
 
 /// `docker exec` runs as root unless told otherwise; a change made as
@@ -908,6 +931,445 @@ fn a_change_as_someone_other_than_the_owner_is_refused() {
     assert_eq!(fx.dump(), before);
     // Reading is fine as anyone.
     assert_exit(&fx.admin(&["list"]), 0);
+}
+
+// ---------------------------------------------------------------- merge jobs
+
+/// A leaf these tests do not look at, for the store's audited writes.
+fn some_leaf(seq: u64, at: &str) -> Vec<u8> {
+    leaf::encode(
+        seq,
+        at,
+        leaf::action::START,
+        &leaf::Actor::Server,
+        leaf::subject_start("test"),
+        None,
+    )
+}
+
+/// What a stale push of `content` to `key`/`path` does with a worker
+/// approved: the content is stored at once, and a job queued to merge it
+/// with the version it displaced. Answers the job's id.
+fn queue_merge(db: &Path, key: &str, path: &str, content: &str) -> String {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let id = format!(
+        "job_{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let incoming = MergeSide {
+        sha256: recall_wire::content_sha256(content),
+        content: content.into(),
+        source_env: "laptop".into(),
+        updated_at: T1.into(),
+    };
+    let (queued, _) = Store::open(db)
+        .unwrap()
+        .write_and_queue_merge_audited(
+            key,
+            path,
+            &incoming,
+            &id,
+            OffsetDateTime::now_utc(),
+            |seq, at, _| some_leaf(seq, at),
+        )
+        .unwrap();
+    assert_eq!(queued, Queued::Queued(id.clone()));
+    id
+}
+
+/// A worker leasing the oldest job it may run, as `POST /v1/jobs/claim`
+/// does: the job's id and the lease its result is posted under.
+fn claim(db: &Path) -> Option<(String, String)> {
+    let lease = format!("lse_{}", recall_server::now());
+    let job = Store::open(db)
+        .unwrap()
+        .claim_job_audited(
+            &["merge".to_string()],
+            &lease,
+            Duration::from_secs(600),
+            OffsetDateTime::now_utc(),
+            |seq, at, _| some_leaf(seq, at),
+        )
+        .unwrap()?;
+    Some((job.id, lease))
+}
+
+/// The worker holding `lease` posting `merged` as job `id`'s result, as
+/// `POST /v1/jobs/{id}/result` does.
+fn post_result(db: &Path, id: &str, lease: &str, merged: &str) -> Settled {
+    let settled = Store::open(db)
+        .unwrap()
+        .settle_job_audited(
+            id,
+            &ResultRequest {
+                lease_id: lease.into(),
+                merge: Some(MergeResult {
+                    content: merged.into(),
+                }),
+                error: None,
+            },
+            "worker",
+            "job_follow_up",
+            OffsetDateTime::now_utc(),
+            |seq, at, _| some_leaf(seq, at),
+        )
+        .unwrap();
+    match settled {
+        Settlement::Recorded(s) => s,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Every job: id, state, key, path, error.
+fn jobs(db: &Path) -> Vec<(String, String, String, String, Option<String>)> {
+    let conn = Connection::open(db).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT id, state, project_key, file_path, error FROM jobs ORDER BY id")
+        .unwrap();
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })
+        .unwrap();
+    rows.map(Result::unwrap).collect()
+}
+
+fn job_state(db: &Path, id: &str) -> (String, Option<String>) {
+    let job = jobs(db).into_iter().find(|j| j.0 == id).unwrap();
+    (job.1, job.4)
+}
+
+/// A rename closes the merge jobs open under the old key in its own
+/// transaction, a leased one included, and says so: a worker's result
+/// posted afterwards is answered as already recorded and writes nothing
+/// under either key, not even onto a file a machine still on the old key
+/// pushes after the rename, which a job left open would chase its result
+/// onto.
+#[test]
+fn a_rename_closes_the_open_jobs_so_a_late_result_writes_nothing() {
+    let fx = Fixture::new();
+    let leased = queue_merge(&fx.db(), OLD, "notes.md", "a fact, edited\n");
+    let (held, lease) = claim(&fx.db()).unwrap();
+    assert_eq!(held, leased);
+    let queued = queue_merge(&fx.db(), OLD, "MEMORY.md", "- edited\n");
+    let elsewhere = queue_merge(&fx.db(), "acme/app", "unrelated.md", "edited\n");
+
+    let out = fx.admin(&["rename", OLD, "me/new", "--dry-run"]);
+    assert_exit(&out, 0);
+    let (stdout, _) = text(&out);
+    assert!(
+        stdout.contains("Open merge jobs for these rows: 2, closed with the change"),
+        "{stdout}"
+    );
+    assert_eq!(job_state(&fx.db(), &queued).0, "queued", "not by a dry run");
+
+    let out = fx.admin(&["rename", OLD, "me/new", "--yes"]);
+    assert_exit(&out, 0);
+    let (stdout, _) = text(&out);
+    for id in [&leased, &queued] {
+        assert!(stdout.contains(&format!("  {id}  ")), "listed: {stdout}");
+    }
+    assert!(
+        stdout.contains(&format!(
+            "Closed 2 open merge job(s), so no result lands on these rows: {queued}, {leased}."
+        )),
+        "{stdout}"
+    );
+    for id in [&leased, &queued] {
+        let (state, error) = job_state(&fx.db(), id);
+        assert_eq!(state, "done");
+        assert!(
+            error.as_deref().unwrap().starts_with("renamed by admin"),
+            "{error:?}"
+        );
+    }
+    assert_eq!(job_state(&fx.db(), &elsewhere).0, "queued", "another key's");
+
+    // A machine still on the old key pushes, then the worker answers.
+    let late = Store::open(fx.db()).unwrap();
+    late.upsert_audited(OLD, "notes.md", "pushed after\n", "laptop", some_leaf)
+        .unwrap();
+    let moved = under(&fx.dump(), "me/new")
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let settled = post_result(&fx.db(), &leased, &lease, "a fact, merged\n");
+    assert!(!settled.applied && !settled.queued, "{settled:?}");
+    assert_eq!(settled.response.state, "done");
+    assert_eq!(settled.response.follow_up, None);
+
+    let after = fx.dump();
+    assert_eq!(under(&after, "me/new"), moved.iter().collect::<Vec<_>>());
+    let old: Vec<_> = under(&after, OLD).into_iter().map(|r| &r.2).collect();
+    assert_eq!(old, ["pushed after\n"]);
+    assert!(
+        !after.iter().any(|r| r.2.contains("merged")),
+        "the result is nowhere"
+    );
+    // Nothing left for a worker but the other key's job.
+    assert_eq!(claim(&fx.db()).map(|(id, _)| id), Some(elsewhere));
+    assert_eq!(claim(&fx.db()), None);
+}
+
+/// A remove closes its key's open jobs as done, "removed by admin", and
+/// drops their input as a delete does: a result posted after it cannot
+/// bring the removed notes back into a file pushed later under that key.
+#[test]
+fn a_remove_closes_the_open_jobs_so_a_late_result_writes_nothing() {
+    let fx = Fixture::new();
+    let job = queue_merge(&fx.db(), OLD, "notes.md", "a fact, edited\n");
+    let (_, lease) = claim(&fx.db()).unwrap();
+
+    let out = fx.admin(&["remove", OLD, "--yes"]);
+    assert_exit(&out, 0);
+    let (stdout, _) = text(&out);
+    assert!(
+        stdout.contains("Open merge jobs for these rows: 1, closed with the change"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "Closed 1 open merge job(s), so no result lands on these rows: {job}."
+        )),
+        "{stdout}"
+    );
+    let (state, error) = job_state(&fx.db(), &job);
+    assert_eq!(state, "done");
+    assert!(
+        error.as_deref().unwrap().starts_with("removed by admin"),
+        "{error:?}"
+    );
+    let payload: String = Connection::open(fx.db())
+        .unwrap()
+        .query_row("SELECT payload FROM jobs WHERE id = ?1", [&job], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(payload, "{}", "the removed notes are not kept in the job");
+
+    Store::open(fx.db())
+        .unwrap()
+        .upsert_audited(OLD, "notes.md", "a new start\n", "laptop", some_leaf)
+        .unwrap();
+    let settled = post_result(&fx.db(), &job, &lease, "a fact, merged\n");
+    assert!(!settled.applied && !settled.queued, "{settled:?}");
+    assert_eq!(settled.response.follow_up, None);
+    let old: Vec<_> = under(&fx.dump(), OLD)
+        .into_iter()
+        .map(|r| r.2.clone())
+        .collect();
+    assert_eq!(old, ["a new start\n"]);
+    assert_eq!(claim(&fx.db()), None);
+}
+
+/// A restore closes the open jobs for each path it writes, and only those.
+/// Left open, the job's result (a merge of the version the restore
+/// replaced) would no longer match the restored file, and be queued again
+/// against it as a follow-up, to land over the restore once merged.
+#[test]
+fn a_restore_closes_the_open_jobs_of_the_rows_it_writes() {
+    let fx = Fixture::new();
+    let snapshot = Store::open(fx.db())
+        .unwrap()
+        .backup(fx.dir.path().join("periodic"), 7)
+        .unwrap();
+    let snap = snapshot.to_str().unwrap();
+    // Since the backup: notes.md edited on a laptop, with a merge queued;
+    // extra.md new, with a merge queued too, which the restore leaves be.
+    let overwritten = queue_merge(&fx.db(), OLD, "notes.md", "a fact, edited\n");
+    let (_, lease) = claim(&fx.db()).unwrap();
+    Store::open(fx.db())
+        .unwrap()
+        .upsert_audited(OLD, "extra.md", "one\n", "laptop", some_leaf)
+        .unwrap();
+    let untouched = queue_merge(&fx.db(), OLD, "extra.md", "two\n");
+
+    let out = fx.admin(&["restore", snap, OLD, "--overwrite", "--dry-run"]);
+    assert_exit(&out, 0);
+    let (stdout, _) = text(&out);
+    assert!(
+        stdout.contains("Open merge jobs for these rows: 1, closed with the change"),
+        "{stdout}"
+    );
+    assert!(stdout.contains(&overwritten), "{stdout}");
+    assert!(!stdout.contains(&untouched), "{stdout}");
+
+    let out = fx.admin(&["restore", snap, OLD, "--overwrite", "--yes"]);
+    assert_exit(&out, 0);
+    let (stdout, _) = text(&out);
+    assert!(
+        stdout.contains(&format!(
+            "Closed 1 open merge job(s), so no result lands on these rows: {overwritten}."
+        )),
+        "{stdout}"
+    );
+    let (state, error) = job_state(&fx.db(), &overwritten);
+    assert_eq!(state, "done");
+    assert!(
+        error.as_deref().unwrap().starts_with("restored by admin"),
+        "{error:?}"
+    );
+    assert_eq!(job_state(&fx.db(), &untouched).0, "queued");
+
+    let settled = post_result(&fx.db(), &overwritten, &lease, "a fact, merged\n");
+    assert!(!settled.applied && !settled.queued, "{settled:?}");
+    assert_eq!(settled.response.follow_up, None);
+    let notes = under(&fx.dump(), OLD)
+        .into_iter()
+        .find(|r| r.1 == "notes.md")
+        .unwrap()
+        .clone();
+    assert_eq!(notes.2, "a fact\n", "the backup's version stands");
+    assert_eq!(claim(&fx.db()).map(|(id, _)| id), Some(untouched));
+}
+
+// ---------------------------------------------------------------- the audit log
+
+/// Every leaf in the log, parsed.
+fn leaves(db: &Path) -> Vec<Value> {
+    let store = Store::open(db).unwrap();
+    let n = store.audit_checkpoint().0;
+    store
+        .audit_entries(0, n, usize::MAX)
+        .unwrap()
+        .iter()
+        .map(|e| serde_json::from_slice(&e.leaf).unwrap())
+        .collect()
+}
+
+/// Each change that commits appends exactly one leaf, the host's, naming
+/// its keys, its counts, the jobs it closed and its backup by file name;
+/// listing, a dry run, a refusal and a confirmation not given append
+/// nothing.
+#[test]
+fn each_committed_change_appends_one_leaf_and_nothing_else_does() {
+    let fx = Fixture::new();
+    let job = queue_merge(&fx.db(), OLD, "notes.md", "a fact, edited\n");
+    let n = leaves(&fx.db()).len();
+
+    for (args, code) in [
+        (vec!["list"], 0),
+        (vec!["list", OLD], 0),
+        (vec!["rename", OLD, "me/new", "--dry-run"], 0),
+        (vec!["remove", OLD, "--dry-run"], 0),
+        (vec!["rename", OLD, "me/thing", "--yes"], 1),
+        (vec!["remove", "no/such/key", "--yes"], 1),
+    ] {
+        assert_exit(&fx.admin(&args), code);
+    }
+    assert_exit(&fx.admin_typing(&["remove", OLD], "not it\n"), 1);
+    assert_eq!(leaves(&fx.db()).len(), n, "nothing appended yet");
+
+    let out = fx.admin(&["rename", OLD, "me/new", "--yes"]);
+    assert_exit(&out, 0);
+    let all = leaves(&fx.db());
+    assert_eq!(all.len(), n + 1);
+    let backup = fx.snapshots()[0]
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let rename = &all[n];
+    assert_eq!(rename["seq"], json!(n));
+    assert_eq!(rename["action"], "admin_rename");
+    assert_eq!(rename["actor"], json!({"kind": "host"}));
+    assert_eq!(rename["request"], Value::Null);
+    assert_eq!(
+        rename["subject"],
+        json!({"from": OLD, "to": "me/new", "rows": 3, "jobs_closed": [job], "backup": backup})
+    );
+    assert!(
+        text(&out).0.contains(&format!(
+            "Recorded in the audit log as leaf {n} (admin_rename)"
+        )),
+        "{:?}",
+        text(&out)
+    );
+
+    assert_exit(&fx.admin(&["remove", "me/new", "--yes"]), 0);
+    let all = leaves(&fx.db());
+    assert_eq!(all.len(), n + 2);
+    assert_eq!(all[n + 1]["action"], "admin_remove");
+    assert_eq!(all[n + 1]["subject"]["project_key"], "me/new");
+    assert_eq!(all[n + 1]["subject"]["rows"], 3);
+    assert_eq!(all[n + 1]["subject"]["jobs_closed"], json!([]));
+
+    // The rename's backup holds OLD's rows: put them back.
+    let source = fx.snapshots()[0].clone();
+    assert_exit(
+        &fx.admin(&["restore", source.to_str().unwrap(), OLD, "--yes"]),
+        0,
+    );
+    let all = leaves(&fx.db());
+    assert_eq!(all.len(), n + 3);
+    let restore = &all[n + 2];
+    assert_eq!(restore["action"], "admin_restore");
+    assert_eq!(restore["subject"]["project_key"], OLD);
+    assert_eq!(restore["subject"]["source"], json!(backup));
+    assert_eq!(
+        (
+            &restore["subject"]["added"],
+            &restore["subject"]["overwritten"],
+            &restore["subject"]["deleted"]
+        ),
+        (&json!(3), &json!(0), &json!(0))
+    );
+    assert_ne!(restore["subject"]["backup"], json!(backup), "its own");
+    // Nothing of any file is in them: no content, and no path.
+    for leaf in &all[n..] {
+        let text = leaf.to_string();
+        for never in ["a fact", "notes.md", "MEMORY.md", "/backups"] {
+            assert!(!text.contains(never), "{never:?} in {text}");
+        }
+    }
+    // Nothing more to restore is nothing to record.
+    assert_exit(
+        &fx.admin(&["restore", source.to_str().unwrap(), OLD, "--yes"]),
+        0,
+    );
+    assert_eq!(leaves(&fx.db()).len(), n + 3);
+}
+
+/// The leaf commits with the change or not at all. A log that refuses the
+/// leaf leaves every row and job as it was, rather than a change the log
+/// never heard of; a leaf appended after the commit, in a transaction of
+/// its own, would leave the change made here.
+#[test]
+fn a_change_whose_leaf_cannot_be_appended_is_not_made() {
+    let fx = Fixture::new();
+    let snapshot = Store::open(fx.db())
+        .unwrap()
+        .backup(fx.dir.path().join("periodic"), 7)
+        .unwrap();
+    let snap = snapshot.to_str().unwrap();
+    let job = queue_merge(&fx.db(), OLD, "notes.md", "a fact, edited\n");
+    fx.sql(
+        "CREATE TRIGGER no_admin_leaves BEFORE INSERT ON audit_log
+         WHEN CAST(NEW.leaf AS TEXT) LIKE '%\"action\":\"admin_%'
+         BEGIN SELECT RAISE(ABORT, 'no admin leaves here'); END;",
+    );
+    let before = (fx.dump(), jobs(&fx.db()), leaves(&fx.db()).len());
+    for args in [
+        vec!["rename", OLD, "me/new", "--yes"],
+        vec!["remove", OLD, "--yes"],
+        vec!["restore", snap, OLD, "--overwrite", "--yes"],
+    ] {
+        let out = fx.admin(&args);
+        assert_exit(&out, 1);
+        let (_, stderr) = text(&out);
+        assert!(
+            stderr.contains("no admin leaves here"),
+            "{args:?}: {stderr}"
+        );
+        assert!(stderr.contains("The database was not changed."), "{stderr}");
+        assert_eq!(
+            (fx.dump(), jobs(&fx.db()), leaves(&fx.db()).len()),
+            before,
+            "{args:?}"
+        );
+    }
+    assert_eq!(job_state(&fx.db(), &job).0, "queued");
 }
 
 // ---------------------------------------------------------------- beside a server

@@ -69,6 +69,14 @@ pub mod action {
     /// `recall-server reset-passkeys` removed every passkey and session and
     /// issued a new bootstrap code.
     pub const PASSKEY_RESET: &str = "passkey_reset";
+    /// `recall-server admin rename` moved every row of one project key to
+    /// another.
+    pub const ADMIN_RENAME: &str = "admin_rename";
+    /// `recall-server admin remove` deleted every row of one project key.
+    pub const ADMIN_REMOVE: &str = "admin_remove";
+    /// `recall-server admin restore` copied one project key's rows back from
+    /// a backup.
+    pub const ADMIN_RESTORE: &str = "admin_restore";
 }
 
 /// Who did it (`actor.kind`).
@@ -102,7 +110,8 @@ pub enum Actor<'a> {
     /// settling a queued job itself once no worker is left to.
     Server,
     /// A command run where the server runs, on its database file:
-    /// `recall-server reset-passkeys`.
+    /// `recall-server reset-passkeys`, and `recall-server admin`'s renames,
+    /// removes and restores.
     Host,
 }
 
@@ -347,6 +356,90 @@ pub fn subject_bootstrap(removed: Option<usize>, expires_at: &str) -> Value {
     Value::Object(m)
 }
 
+/// What a `recall-server admin` change did, for [`subject_admin`].
+///
+/// Counts and names only: never a file's content, nor even its path, which
+/// the backup the change took holds, with everything else that was there.
+pub enum AdminChange<'a> {
+    /// [`action::ADMIN_RENAME`].
+    Rename {
+        /// The key the rows were under.
+        from: &'a str,
+        /// The key they are under now.
+        to: &'a str,
+        /// How many rows moved, tombstones included.
+        rows: usize,
+    },
+    /// [`action::ADMIN_REMOVE`].
+    Remove {
+        /// The key whose rows went.
+        project_key: &'a str,
+        /// How many rows went, tombstones included.
+        rows: usize,
+    },
+    /// [`action::ADMIN_RESTORE`].
+    Restore {
+        /// The key restored.
+        project_key: &'a str,
+        /// The file name of the backup restored from, without its directory.
+        source: &'a str,
+        /// Rows the live database lacked, inserted.
+        added: usize,
+        /// Live rows replaced with the backup's version.
+        overwritten: usize,
+        /// Live files replaced with the backup's tombstone
+        /// (`--restore-deletions`).
+        deleted: usize,
+    },
+}
+
+impl AdminChange<'_> {
+    /// Its [`action`].
+    pub fn action(&self) -> &'static str {
+        match self {
+            AdminChange::Rename { .. } => action::ADMIN_RENAME,
+            AdminChange::Remove { .. } => action::ADMIN_REMOVE,
+            AdminChange::Restore { .. } => action::ADMIN_RESTORE,
+        }
+    }
+}
+
+/// `subject` for [`action::ADMIN_RENAME`], [`action::ADMIN_REMOVE`] and
+/// [`action::ADMIN_RESTORE`]: the keys, how many rows changed, the ids of
+/// the open jobs the change closed (whose results would otherwise have
+/// landed on rows it moved, removed or replaced), and the file name of the
+/// backup it took first, never its content.
+pub fn subject_admin(change: &AdminChange<'_>, jobs_closed: &[String], backup: &str) -> Value {
+    let mut m = Map::new();
+    match change {
+        AdminChange::Rename { from, to, rows } => {
+            m.insert("from".into(), json!(from));
+            m.insert("to".into(), json!(to));
+            m.insert("rows".into(), json!(rows));
+        }
+        AdminChange::Remove { project_key, rows } => {
+            m.insert("project_key".into(), json!(project_key));
+            m.insert("rows".into(), json!(rows));
+        }
+        AdminChange::Restore {
+            project_key,
+            source,
+            added,
+            overwritten,
+            deleted,
+        } => {
+            m.insert("project_key".into(), json!(project_key));
+            m.insert("source".into(), json!(source));
+            m.insert("added".into(), json!(added));
+            m.insert("overwritten".into(), json!(overwritten));
+            m.insert("deleted".into(), json!(deleted));
+        }
+    }
+    m.insert("jobs_closed".into(), json!(jobs_closed));
+    m.insert("backup".into(), json!(backup));
+    Value::Object(m)
+}
+
 /// `subject` for [`action::PULL`]: which project was fetched.
 pub fn subject_pull(project_key: &str) -> Value {
     let mut m = Map::new();
@@ -508,6 +601,62 @@ mod tests {
                 r#""public_key":"JrQLj5P_89iXES9-vFgrIy29clF9CC_oPPsw3c5D0bs","fingerprint":"SHA256:fp","#,
                 r#""ephemeral":true,"authkey_id":"ak_1","user_code":null},"request":null}"#,
             )
+        );
+    }
+
+    /// An admin change's leaf names the keys, the counts, the jobs it
+    /// closed and its backup's file name, the host acting and signing
+    /// nothing.
+    #[test]
+    fn an_admin_leaf_has_the_documented_shape() {
+        let jobs = vec!["job_a".to_string()];
+        let text = |change: AdminChange<'_>| {
+            String::from_utf8(encode(
+                3,
+                "2026-10-02T09:00:00.000Z",
+                change.action(),
+                &Actor::Host,
+                subject_admin(&change, &jobs, "recall-2026-10-02T08-59-58-120Z.db"),
+                None,
+            ))
+            .unwrap()
+        };
+        assert_eq!(
+            text(AdminChange::Rename {
+                from: "local:-x",
+                to: "me/x",
+                rows: 3
+            }),
+            concat!(
+                r#"{"v":1,"seq":3,"at":"2026-10-02T09:00:00.000Z","action":"admin_rename","#,
+                r#""actor":{"kind":"host"},"subject":{"from":"local:-x","to":"me/x","rows":3,"#,
+                r#""jobs_closed":["job_a"],"backup":"recall-2026-10-02T08-59-58-120Z.db"},"request":null}"#,
+            )
+        );
+        let remove = text(AdminChange::Remove {
+            project_key: "me/x",
+            rows: 2,
+        });
+        assert!(
+            remove.contains(concat!(
+                r#""action":"admin_remove","actor":{"kind":"host"},"#,
+                r#""subject":{"project_key":"me/x","rows":2,"jobs_closed":["job_a"],"#
+            )),
+            "{remove}"
+        );
+        let restore = text(AdminChange::Restore {
+            project_key: "me/x",
+            source: "recall-1.db",
+            added: 1,
+            overwritten: 2,
+            deleted: 0,
+        });
+        assert!(
+            restore.contains(concat!(
+                r#""subject":{"project_key":"me/x","source":"recall-1.db","added":1,"#,
+                r#""overwritten":2,"deleted":0,"jobs_closed":["job_a"],"backup":"#
+            )),
+            "{restore}"
         );
     }
 

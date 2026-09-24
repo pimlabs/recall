@@ -362,8 +362,12 @@ confirm them by typing each back, a rename's target included, or by `--yes`,
 which prints them instead; take a backup with `Store::backup` into
 `backups/admin/`, which the server's rotation never prunes, and read it back
 to check it holds the rows shown; then one transaction, which reads the rows
-again, refuses if they differ from what was shown, and commits only if
-`changes()` equals the number of rows it named. `--dry-run` opens the
+again, refuses if they differ from what was shown, closes the merge jobs
+still open for those rows (a worker's late result would otherwise land on a
+row the change moved, removed or replaced), appends one audit leaf as the
+`host`, through the same catch-up `reset-passkeys` uses so a running server
+and the command write one tree, and commits only if `changes()` equals the
+number of rows and jobs it named. `--dry-run` opens the
 database read-only and stops before the backup. A rename refuses a target key
 that holds any rows at all, because the primary key is `(project_key,
 file_path)` and folding two projects together has no single right answer for

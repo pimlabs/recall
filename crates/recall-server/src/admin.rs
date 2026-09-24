@@ -23,9 +23,13 @@
 //!    directory the server's rotation never prunes, checks that the backup
 //!    holds the rows it was shown, and prints its path;
 //! 3. runs in one transaction, re-checks inside it that nothing changed
-//!    since it was shown, and commits only if `changes()` matches;
+//!    since it was shown, closes the merge jobs still open for the rows it
+//!    touches, so no worker's late result lands on them, appends one audit
+//!    leaf saying what it did, as the host, and commits only if `changes()`
+//!    matches;
 //! 4. waits out the server's merge window after committing, and checks that
-//!    no push that was already in flight has partly undone it;
+//!    no push that was already in flight has partly undone it, or queued a
+//!    job for its rows again;
 //! 5. can be previewed with `--dry-run`, which changes nothing and takes no
 //!    backup.
 //!
@@ -48,7 +52,10 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 
-use crate::store::admin::{archive_key, invisible, Abandoned, Access, Plan, Restore, Row, Summary};
+use crate::audit::leaf;
+use crate::store::admin::{
+    archive_key, invisible, Abandoned, Access, Applied, OpenJob, Plan, Restore, Row, Summary,
+};
 use crate::Store;
 
 const USAGE: &str = "\
@@ -83,10 +90,12 @@ Keys are matched exactly, never by prefix or pattern. Put -- before a key
 that starts with a dash.
 
 Every change takes a backup first, into $RECALL_BACKUP_DIR/admin/, which the
-server's rotation never prunes. It runs in one transaction and commits only
-if exactly the rows it showed changed. Then it waits out the server's merge
-window (RECALL_MERGE_TIMEOUT_MS, plus a second) and checks that no push
-already in flight has partly undone it. The database is RECALL_DB_PATH.
+server's rotation never prunes. It runs in one transaction, which also closes
+the merge jobs still open for its rows and appends its leaf to the audit log,
+and commits only if exactly the rows and jobs it showed changed. Then it
+waits out the server's merge window (RECALL_MERGE_TIMEOUT_MS, plus a second)
+and checks that no push already in flight has partly undone it. The database
+is RECALL_DB_PATH.
 
 Exit status: 0 done, or nothing to do; 1 refused or failed, and nothing was
 changed; 2 a usage error; 3 the change was made, but something needs a look
@@ -353,14 +362,14 @@ fn execute(command: Command, env: &dyn Fn(&str) -> Option<String>, io: Io) -> Re
             require_key(&store, &from, LIVE)?;
             let plan = store.plan_rename(&from, &to)?;
             let again = format!("recall-server admin rename {}", sh_args(&[&from, &to]));
-            carry_out(&mut ctx, &store, &plan, &again, opts)
+            carry_out(&mut ctx, &store, &plan, &again, None, opts)
         }
         Command::Remove { key, opts } => {
             let store = open_live(&ctx.db, opts)?;
             require_key(&store, &key, LIVE)?;
             let plan = store.plan_remove(&key)?;
             let again = format!("recall-server admin remove {}", sh_args(&[&key]));
-            carry_out(&mut ctx, &store, &plan, &again, opts)
+            carry_out(&mut ctx, &store, &plan, &again, None, opts)
         }
         Command::Restore {
             backup,
@@ -391,7 +400,7 @@ fn execute(command: Command, env: &dyn Fn(&str) -> Option<String>, io: Io) -> Re
                 },
                 sh_args(&[&backup.to_string_lossy(), &key])
             );
-            carry_out(&mut ctx, &store, &plan, &again, opts)
+            carry_out(&mut ctx, &store, &plan, &again, Some(&backup), opts)
         }
     }
 }
@@ -599,8 +608,16 @@ fn similar_keys(summaries: &[Summary], key: &str) -> Vec<String> {
 
 /// The part every change shares: show it, check it, confirm it, back up,
 /// check the backup, apply it, and check it held. `again` is the command
-/// line that makes the same change, for when that check says to.
-fn carry_out(ctx: &mut Ctx, store: &Store, plan: &Plan, again: &str, opts: Opts) -> Result<()> {
+/// line that makes the same change, for when that check says to; `source`
+/// is the backup a restore restores from.
+fn carry_out(
+    ctx: &mut Ctx,
+    store: &Store,
+    plan: &Plan,
+    again: &str,
+    source: Option<&Path>,
+    opts: Opts,
+) -> Result<()> {
     writeln!(ctx.out, "Database: {}", ctx.db.display())?;
     describe(ctx.out, plan)?;
     if let Some(why) = plan.refusal() {
@@ -660,8 +677,17 @@ fn carry_out(ctx: &mut Ctx, store: &Store, plan: &Plan, again: &str, opts: Opts)
         }
     }
 
-    let changed = match store.apply(plan) {
-        Ok(changed) => changed,
+    // The leaf names the backup by its file name: where it is, the
+    // directory every change's backup goes to, is this host's business,
+    // and what it holds is exactly what the log must never carry.
+    let backup_name = file_name(&snapshot);
+    let source_name = source.map(file_name).unwrap_or_default();
+    let mut appended = None;
+    let applied = match store.apply(plan, |seq, at, applied| {
+        appended = Some(seq);
+        audit_leaf(seq, at, plan, applied, &backup_name, &source_name)
+    }) {
+        Ok(applied) => applied,
         Err(err) => {
             // A change abandoned before it began leaves the database as
             // it was, so its backup would only pile up, one per retry, next
@@ -677,8 +703,64 @@ fn carry_out(ctx: &mut Ctx, store: &Store, plan: &Plan, again: &str, opts: Opts)
 
     // Committed. From here, every error must be an AfterCommit, or main
     // would claim the database was not changed.
-    let _ = writeln!(ctx.out, "{}", done(plan, changed));
+    let _ = writeln!(ctx.out, "{}", done(plan, &applied));
+    if let Some(seq) = appended {
+        let _ = writeln!(
+            ctx.out,
+            "Recorded in the audit log as leaf {seq} ({}), in the same transaction.",
+            change_of(plan, &applied, &source_name).action()
+        );
+    }
     settle(ctx, store, plan, again)
+}
+
+/// A path's last component, as the audit leaf names a backup.
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
+/// What `plan` did, as its audit leaf says it.
+fn change_of<'a>(plan: &'a Plan, applied: &Applied, source: &'a str) -> leaf::AdminChange<'a> {
+    match plan {
+        Plan::Rename { from, to, .. } => leaf::AdminChange::Rename {
+            from,
+            to,
+            rows: applied.rows,
+        },
+        Plan::Remove { key, .. } => leaf::AdminChange::Remove {
+            project_key: key,
+            rows: applied.rows,
+        },
+        Plan::Restore(r) => leaf::AdminChange::Restore {
+            project_key: &r.key,
+            source,
+            added: r.add.len(),
+            overwritten: r.overwrite.len(),
+            deleted: r.applied_deletions().len(),
+        },
+    }
+}
+
+/// The leaf a committed change appends: the host acting, signing nothing.
+fn audit_leaf(
+    seq: u64,
+    at: &str,
+    plan: &Plan,
+    applied: &Applied,
+    backup: &str,
+    source: &str,
+) -> Vec<u8> {
+    let change = change_of(plan, applied, source);
+    leaf::encode(
+        seq,
+        at,
+        change.action(),
+        &leaf::Actor::Host,
+        leaf::subject_admin(&change, &applied.jobs, backup),
+        None,
+    )
 }
 
 /// Deletes the backup of a change that did not happen, and says so.
@@ -762,9 +844,25 @@ fn settle(ctx: &mut Ctx, store: &Store, plan: &Plan, again: &str) -> Result<()> 
         let _ = writeln!(ctx.out, "Checked: the change held.");
         return Ok(());
     }
-    let paths: Vec<String> = undone.iter().map(|p| format!("  {}", shown(p))).collect();
-    let paths = paths.join("\n");
-    let n = undone.len();
+    // A job open for these rows again was queued by a push that landed
+    // after the commit, which also wrote its row: said beside the paths
+    // rather than instead of them, since its result will merge there too.
+    let jobs = if undone.jobs.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n{} merge job(s) were queued for them since, and will merge there:\n{}",
+            undone.jobs.len(),
+            job_lines(&undone.jobs)
+        )
+    };
+    let listed: Vec<String> = undone
+        .paths
+        .iter()
+        .map(|p| format!("  {}", shown(p)))
+        .collect();
+    let paths = listed.join("\n") + &jobs;
+    let n = undone.paths.len();
     Err(AfterCommit(match plan {
         Plan::Rename { from, to, .. } => format!(
             "the rename was committed, but {n} row(s) are under {from:?} again:\n{paths}\n\
@@ -859,6 +957,7 @@ fn describe(out: &mut dyn Write, plan: &Plan) -> io::Result<()> {
             to,
             rows,
             occupied,
+            ..
         } => {
             writeln!(
                 out,
@@ -881,7 +980,7 @@ fn describe(out: &mut dyn Write, plan: &Plan) -> io::Result<()> {
                 }
             }
         }
-        Plan::Remove { key, rows } => {
+        Plan::Remove { key, rows, .. } => {
             writeln!(
                 out,
                 "Remove {key:?}: {} row(s) are deleted, content included ({}).",
@@ -894,7 +993,40 @@ fn describe(out: &mut dyn Write, plan: &Plan) -> io::Result<()> {
         }
         Plan::Restore(r) => describe_restore(out, r)?,
     }
-    Ok(())
+    describe_jobs(out, plan)
+}
+
+/// How many open merge jobs the change closes, and which: always said,
+/// none included, since a dry run is where the owner learns it.
+fn describe_jobs(out: &mut dyn Write, plan: &Plan) -> io::Result<()> {
+    let jobs = plan.jobs();
+    let why = match plan {
+        Plan::Rename { from, .. } => {
+            format!("their versions are {from:?}'s, and a result must not land under either key")
+        }
+        Plan::Remove { .. } => "a result must not bring the removed notes back".to_string(),
+        Plan::Restore(_) => {
+            "a result, a merge of the versions the restore replaces, must not land over it"
+                .to_string()
+        }
+    };
+    if jobs.is_empty() {
+        return writeln!(out, "Open merge jobs for these rows: none.");
+    }
+    writeln!(
+        out,
+        "Open merge jobs for these rows: {}, closed with the change ({why}):",
+        jobs.len()
+    )?;
+    writeln!(out, "{}", job_lines(jobs))
+}
+
+/// One line per job: its id, its state and its file.
+fn job_lines(jobs: &[OpenJob]) -> String {
+    jobs.iter()
+        .map(|j| format!("  {}  {:<6}  {}", j.id, j.state, shown(&j.file_path)))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn describe_restore(out: &mut dyn Write, r: &Restore) -> io::Result<()> {
@@ -996,7 +1128,19 @@ fn differences(live: &Row, backup: &Row) -> String {
     parts.join("; ")
 }
 
-fn done(plan: &Plan, changed: usize) -> String {
+fn done(plan: &Plan, applied: &Applied) -> String {
+    let said = done_rows(plan, applied.rows);
+    if applied.jobs.is_empty() {
+        return said;
+    }
+    format!(
+        "{said}\nClosed {} open merge job(s), so no result lands on these rows: {}.",
+        applied.jobs.len(),
+        applied.jobs.join(", ")
+    )
+}
+
+fn done_rows(plan: &Plan, changed: usize) -> String {
     match plan {
         Plan::Rename { from, to, .. } => format!(
             "Done: moved {changed} row(s) from {from:?} to {to:?}. A machine still syncing under \

@@ -1121,6 +1121,18 @@ Every change does what this section used to ask you to remember:
   it commits only if SQLite's `changes()` is exactly the number of rows it
   named. Anything else rolls back. A change stopped this way before it began
   deletes the backup it took, so retrying does not pile them up.
+- **It closes the merge jobs still open for those rows**, in the same
+  transaction: with [a worker](#the-merge-worker), a push that conflicted
+  may be waiting in the queue, or being merged, as you run it. A rename or a
+  remove closes every job under the key, a restore every job for a file it
+  writes. Left open, a job's result would land on a row the change moved,
+  removed or replaced: queued again against a file pushed under the old key
+  later, or over the version a restore put back. The plan, `--dry-run`
+  included, says how many it closes and lists them; `done` says which it
+  closed. A result the worker posts afterwards is answered as already
+  recorded and changes nothing. The merge is lost, not the notes: the file
+  keeps the newer version the push stored, and the version it displaced is
+  in the job (after a rename or a restore) and in the backup.
 - **It runs with the server up, and checks afterwards.** Like the server, it
   waits up to 5 seconds for a write in flight, and if the lock never comes,
   it rolls back and says so. What a lock cannot stop is a push that was
@@ -1130,15 +1142,23 @@ Every change does what this section used to ask you to remember:
   the old key or a merge of the old version over a restored one. So after
   committing, the command waits out that window (the timeout plus a second:
   46 seconds with the default) and checks. If something came back, it names
-  the paths and what to run, and exits with status 3: the change was made,
-  but needs a look. Interrupting the wait is safe; it only skips the check.
-  Stopping the server first avoids the question altogether.
-- **It is not in the audit log.** The log records what the server does, for
-  requests and on its own; these commands run beside it, on the database
-  file, which is the one place the log cannot bind anyone. So a rename,
-  remove or restore leaves no leaf, and the files the log last recorded
-  under the old key are where the log last saw them. The backup each change
-  takes is the record of what was there before.
+  the paths, and any merge job queued for them since, and what to run, and
+  exits with status 3: the change was made, but needs a look. Interrupting
+  the wait is safe; it only skips the check. Stopping the server first
+  avoids the question altogether.
+- **It is in the audit log.** Each change that commits appends one leaf, in
+  the same transaction as the change, credited to the `host`: `admin_rename`,
+  `admin_remove` or `admin_restore`, with the keys, how many rows changed,
+  the ids of the jobs it closed, and the file name of the backup it took
+  (never a path or any content; the backup holds those). `list`, a dry run
+  and a change that is refused or rolled back append nothing. A running
+  server reads the leaf in before its own next one, so the log stays one
+  tree, and an export with these leaves in it verifies with
+  `scripts/audit-verify.py` like any other. The leaf is the host's own
+  account: whoever can run these commands can also edit the database file,
+  log included, so it records what was done rather than proving it, as a
+  checkpoint saved elsewhere does for what came before it (see "Audit" in
+  [`docs/reference/api.md`](../docs/reference/api.md#audit)).
 
 **A rename only moves rows onto a key that holds none**, even if no path
 overlaps. The primary key is `(project_key, file_path)`, so a rename onto an
@@ -1210,7 +1230,8 @@ tombstone flag. It adds what the live database lacks and leaves alone what
 the backup does not have; it never removes a row. A live row that differs
 from the backup's is **not** overwritten without `--overwrite`: the command
 lists each one with what would change (content size, timestamp, tombstone,
-source) and refuses.
+source) and refuses. Unlike restoring the whole database, it leaves the
+audit log as it is and adds its own `admin_restore` leaf to it.
 
 One kind of overwrite needs more than that. Where the backup has a file as
 deleted (a tombstone) and it is live now, restoring the tombstone deletes the

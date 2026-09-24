@@ -191,6 +191,24 @@ break will be described here in full rather than smoothed over.
   and `file_path` at most 4096 bytes, and a body on the admin routes at
   most 8 KiB. Revoking an authkey's devices after the key was revoked on
   its own now revokes them.
+- **`recall-server admin rename`, `remove` and `restore` close the merge
+  jobs still open for the rows they change**, in the same transaction: a
+  rename or a remove every job under the key, a restore every job for a
+  file it writes. A worker's result posted afterwards is answered as
+  already recorded and writes nothing, so it can no longer be queued again
+  onto a file pushed under the old key later, or over a restored version.
+  The plan and `--dry-run` say how many jobs each change closes, and the
+  check after the merge window names any job queued for those rows since.
+- **`recall-server admin`'s changes are in the audit log.** Each rename,
+  remove or restore that commits appends one leaf in the same transaction,
+  credited to the `host`: `admin_rename`, `admin_remove` or
+  `admin_restore`, with the keys, the row counts, the jobs it closed and
+  the backup's file name, never a path or content. A running server reads
+  it in before its own next leaf, so the log stays one tree. `list`, dry
+  runs and refused changes append nothing. `scripts/audit-verify.py`
+  accepts these leaves, checks their shape, and refuses one that closes a
+  job it could not have, or a rename or remove that leaves a job of its key
+  open.
 
 ## 0.4.1 — 2026-09-23
 
