@@ -102,7 +102,10 @@ mod hash_tests {
 }
 
 pub use sync::{File, PushRequest, PushResponse, SyncResponse};
-pub use validate::{validate_file_path, ValidationError};
+pub use validate::{
+    validate_base_sha256, validate_file_path, validate_project_key, ValidationError,
+    MAX_FILE_PATH_BYTES, MAX_PROJECT_KEY_BYTES,
+};
 
 use serde::{Deserialize, Serialize};
 

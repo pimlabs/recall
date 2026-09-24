@@ -71,11 +71,29 @@ pub(super) async fn handle_push(
     if req.project_key.is_empty() || req.file_path.is_empty() {
         return error(StatusCode::BAD_REQUEST, REQUIRED_FIELDS_MSG);
     }
-    if recall_wire::validate_file_path(&req.file_path).is_err() {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "file_path must be relative, no traversal",
-        );
+    match recall_wire::validate_file_path(&req.file_path) {
+        Ok(()) => {}
+        Err(e @ recall_wire::ValidationError::FilePathTooLong) => {
+            return error(StatusCode::BAD_REQUEST, &e.to_string())
+        }
+        Err(_) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "file_path must be relative, no traversal",
+            )
+        }
+    }
+    // Both end up in this push's audit leaf, so both are held to what a
+    // real client sends: a key no longer than a path, and a base that is a
+    // SHA-256, stored in the leaf as lowercase hex whatever case it came in.
+    if let Err(e) = recall_wire::validate_project_key(&req.project_key) {
+        return error(StatusCode::BAD_REQUEST, &e.to_string());
+    }
+    if let Some(base) = &mut req.base_sha256 {
+        if let Err(e) = recall_wire::validate_base_sha256(base) {
+            return error(StatusCode::BAD_REQUEST, &e.to_string());
+        }
+        base.make_ascii_lowercase();
     }
 
     // The name belongs to the key. A push a device signed is recorded under
@@ -88,40 +106,37 @@ pub(super) async fn handle_push(
     let caller_ref = caller.as_ref().map(|Extension(c)| c);
     let signed_ref = signed.as_ref().map(|Extension(s)| s);
     let actor = super::audit::actor_for(caller_ref);
-    let request = super::audit::signed_request_for(signed_ref);
-
-    let updated_at = now();
+    // A push's body is the file, and a delete's names it: neither is kept
+    // in the leaf (see `leaf::SignedRequest`).
+    let request = super::audit::signed_request_for(signed_ref, None);
 
     if req.deleted {
-        let stored_sha256 = content_sha256("");
-        let base_sha256 = req.base_sha256.clone();
-        let at = updated_at.clone();
-        let (leaf_project_key, leaf_file_path) = (req.project_key.clone(), req.file_path.clone());
         let result = state.store.tombstone_audited(
             &req.project_key,
             &req.file_path,
             &req.source_env,
-            &updated_at,
-            move |seq| {
+            |seq, at| {
                 leaf::encode(
                     seq,
-                    &at,
+                    at,
                     leaf::action::DELETE,
                     &actor,
-                    leaf::subject_file(
-                        &leaf_project_key,
-                        &leaf_file_path,
-                        true,
-                        &stored_sha256,
-                        base_sha256.as_deref(),
-                    ),
+                    leaf::subject_file(&leaf::FileChange {
+                        project_key: &req.project_key,
+                        file_path: &req.file_path,
+                        deleted: true,
+                        stored_sha256: &content_sha256(""),
+                        base_sha256: req.base_sha256.as_deref(),
+                        merged: false,
+                    }),
                     request.as_ref(),
                 )
             },
         );
-        if let Err(e) = result {
-            return internal(e);
-        }
+        let updated_at = match result {
+            Ok(at) => at,
+            Err(e) => return internal(e),
+        };
         return json(
             StatusCode::OK,
             &PushResponse {
@@ -185,36 +200,33 @@ pub(super) async fn handle_push(
         }
     }
 
-    let stored_sha256 = content_sha256(&content);
-    let base_sha256 = req.base_sha256.clone();
-    let at = updated_at.clone();
-    let (leaf_project_key, leaf_file_path) = (req.project_key.clone(), req.file_path.clone());
     let result = state.store.upsert_audited(
         &req.project_key,
         &req.file_path,
         &content,
         &req.source_env,
-        &updated_at,
-        move |seq| {
+        |seq, at| {
             leaf::encode(
                 seq,
-                &at,
+                at,
                 leaf::action::PUSH,
                 &actor,
-                leaf::subject_file(
-                    &leaf_project_key,
-                    &leaf_file_path,
-                    false,
-                    &stored_sha256,
-                    base_sha256.as_deref(),
-                ),
+                leaf::subject_file(&leaf::FileChange {
+                    project_key: &req.project_key,
+                    file_path: &req.file_path,
+                    deleted: false,
+                    stored_sha256: &content_sha256(&content),
+                    base_sha256: req.base_sha256.as_deref(),
+                    merged,
+                }),
                 request.as_ref(),
             )
         },
     );
-    if let Err(e) = result {
-        return internal(e);
-    }
+    let updated_at = match result {
+        Ok(at) => at,
+        Err(e) => return internal(e),
+    };
     json(
         StatusCode::OK,
         &PushResponse {
@@ -276,6 +288,11 @@ pub(super) async fn handle_pull(
             "project_key query param is required",
         );
     };
+    // It is named in this pull's audit leaf, so it is held to the length a
+    // push's is.
+    if let Err(e) = recall_wire::validate_project_key(project_key) {
+        return error(StatusCode::BAD_REQUEST, &e.to_string());
+    }
     let files = match state.store.list(project_key) {
         Ok(files) => files,
         Err(e) => return internal(e),
@@ -287,16 +304,15 @@ pub(super) async fn handle_pull(
     let caller_ref = caller.as_ref().map(|Extension(c)| c);
     let signed_ref = signed.as_ref().map(|Extension(s)| s);
     let actor = super::audit::actor_for(caller_ref);
-    let request = super::audit::signed_request_for(signed_ref);
-    let at = now();
-    let pk = project_key.clone();
-    if let Err(e) = state.store.audit_append(move |seq| {
+    // A pull has no body; its signature binds the project through @query.
+    let request = super::audit::signed_request_for(signed_ref, None);
+    if let Err(e) = state.store.audit_append(|seq, at| {
         leaf::encode(
             seq,
-            &at,
+            at,
             leaf::action::PULL,
             &actor,
-            leaf::subject_pull(&pk),
+            leaf::subject_pull(project_key),
             request.as_ref(),
         )
     }) {
@@ -406,6 +422,7 @@ pub(super) async fn handle_discovery(State(state): State<Arc<AppState>>) -> Resp
         serde_json::to_value(recall_wire::AuditCapability {
             leaf_version: recall_wire::audit::LEAF_VERSION,
             max_page: recall_wire::audit::MAX_PAGE,
+            max_page_bytes: recall_wire::audit::MAX_PAGE_BYTES as u64,
         })
         .unwrap_or_default(),
     );

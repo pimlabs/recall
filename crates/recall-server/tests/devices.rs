@@ -1384,7 +1384,7 @@ fn stored_device(h: &Harness, machine: &mut Machine, scope: &str) {
     let id = format!("dev_{}", machine.name);
     let inserted = h
         .store
-        .insert_device(
+        .enroll_device_audited(
             &recall_server::store::NewDevice {
                 id: &id,
                 name: &machine.name,
@@ -1396,6 +1396,17 @@ fn stored_device(h: &Harness, machine: &mut Machine, scope: &str) {
                 created_at: &recall_server::now(),
             },
             None,
+            |seq, at, device| {
+                use recall_server::audit::leaf;
+                leaf::encode(
+                    seq,
+                    at,
+                    leaf::action::APPROVE,
+                    &leaf::Actor::Operator,
+                    leaf::subject_device(device, None),
+                    None,
+                )
+            },
         )
         .unwrap();
     assert!(matches!(inserted, recall_server::store::Inserted::Done(_)));

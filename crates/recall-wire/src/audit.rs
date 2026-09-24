@@ -26,6 +26,13 @@ pub const CONSISTENCY_PATH: &str = "/v1/audit/consistency";
 /// The most leaves [`ENTRIES_PATH`] answers with in one page.
 pub const MAX_PAGE: u32 = 1000;
 
+/// The most bytes of leaves [`ENTRIES_PATH`] answers with in one page, 2
+/// MiB. A page whose leaves would come to more stops before the one that
+/// would cross it — never before its first — and its `end` says where it
+/// stopped. A typical leaf is under a kilobyte, so a full page of 1,000
+/// seldom meets it.
+pub const MAX_PAGE_BYTES: usize = 2 << 20;
+
 /// The leaf format this build writes and reads. Carried in the discovery
 /// document's `audit` capability so a client — or a future server version —
 /// knows which rules a leaf without its own `v` field long gone would have
@@ -71,7 +78,9 @@ impl AuditCheckpoint {
 pub struct AuditEntriesResponse {
     /// Echoed from the query.
     pub start: u64,
-    /// Echoed from the query.
+    /// One past the last leaf in `entries`: the query's `end`, unless the
+    /// page stopped early at [`MAX_PAGE_BYTES`], when it is where to ask
+    /// from next.
     pub end: u64,
     /// The tree's size when this was answered, so a caller paging through
     /// knows where the end really is without a second request.
@@ -100,6 +109,8 @@ pub struct AuditCapability {
     pub leaf_version: u32,
     /// The most entries one page of [`ENTRIES_PATH`] holds: [`MAX_PAGE`].
     pub max_page: u32,
+    /// The most bytes of leaves one page holds: [`MAX_PAGE_BYTES`].
+    pub max_page_bytes: u64,
 }
 
 #[cfg(test)]

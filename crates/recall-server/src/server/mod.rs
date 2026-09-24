@@ -7,9 +7,9 @@
 //! | `GET /health` | none — uptime tooling holds no secret |
 //! | `GET /admin` | none — static markup, no data |
 //! | `GET /.well-known/recall` | none — a client asks before it can authenticate |
-//! | `POST /sync`, `GET /sync`, `GET /v1/devices/me` | bearer token, or any device's signature |
+//! | `POST /sync`, `GET /sync`, `GET /v1/devices/me`, `GET /v1/audit/checkpoint`, `GET /v1/audit/consistency` | bearer token, or any device's signature |
 //! | `POST /v1/devices/enroll`, `POST /v1/devices/enroll/poll` | none, but rate limited, and small bodies only |
-//! | `GET /admin/stats`, the rest of `/v1/devices`, and `/v1/authkeys` | bearer token, or an admin device's signature |
+//! | `GET /admin/stats`, the rest of `/v1/devices`, `/v1/authkeys`, and `GET /v1/audit/entries` | bearer token, or an admin device's signature; small bodies only |
 //! | anything else | 404 JSON |
 //!
 //! This module owns the shared state, the router, and the background jobs.
@@ -77,6 +77,11 @@ const MAX_BODY_BYTES: usize = 5 << 20;
 /// anything gets to make the server hold megabytes.
 const ENROLL_BODY_BYTES: usize = 8 << 10;
 
+/// Bounds a request to the admin routes. Each body is a code, a scope, a
+/// fingerprint or a tag, and a signed one is kept whole in its audit leaf,
+/// so none may be more than a few kilobytes.
+const ADMIN_BODY_BYTES: usize = 8 << 10;
+
 struct Runtime {
     last_backup_at: String,
     last_merge_at: String,
@@ -143,20 +148,13 @@ pub struct Server {
 }
 
 impl Server {
-    /// Builds a server around an already-open store.
-    ///
-    /// Records a `start` leaf in the audit log: the server's own doing, so
-    /// its actor is [`crate::audit::leaf::Actor::Server`], and its subject
-    /// is the version that started. Best-effort — a store the audit table
-    /// somehow cannot be written to still serves sync, the same way a
-    /// failed backup does not take the server down.
+    /// Builds a server around an already-open store. Nothing is recorded
+    /// yet: the `start` leaf waits until the server is serving (see
+    /// [`Server::serve_with_shutdown`]).
     pub fn new(cfg: Config, store: Arc<Store>) -> Self {
         let limiter = RateLimiter::new(cfg.rate_limit_window, cfg.rate_limit_max);
         let merger = Merger::new(cfg.claude_bin.clone(), cfg.merge_timeout);
         let replay = ReplayCache::new(auth::WINDOW, nonces_per_device(&cfg));
-        if let Err(e) = record_start(&store) {
-            eprintln!("recording server start in the audit log: {e:#}");
-        }
         Self {
             state: Arc::new(AppState {
                 cfg,
@@ -213,6 +211,15 @@ impl Server {
                 "/v1/authkeys/{id}/revoke",
                 post(handle_revoke_authkey).fallback(not_found),
             )
+            // The leaves themselves: every project, file, device and
+            // authkey the log names, which is what the device list and the
+            // stats already keep to this scope. The checkpoint and the
+            // proofs, hashes only, stay open to any credential below.
+            .route(
+                recall_wire::audit::ENTRIES_PATH,
+                get(handle_entries).fallback(not_found),
+            )
+            .route_layer(DefaultBodyLimit::max(ADMIN_BODY_BYTES))
             .route_layer(from_fn(admin_only))
             .route_layer(from_fn_with_state(state.clone(), guard));
         // Enrolling: a machine has no credential yet, so no auth, but the
@@ -240,10 +247,6 @@ impl Server {
             .route(
                 recall_wire::audit::CHECKPOINT_PATH,
                 get(handle_checkpoint).fallback(not_found),
-            )
-            .route(
-                recall_wire::audit::ENTRIES_PATH,
-                get(handle_entries).fallback(not_found),
             )
             .route(
                 recall_wire::audit::CONSISTENCY_PATH,
@@ -380,10 +383,22 @@ impl Server {
     }
 
     /// Serves on an already-bound listener until `shutdown` resolves.
+    ///
+    /// First records a `start` leaf in the audit log: the server's own
+    /// doing, so its actor is [`crate::audit::leaf::Actor::Server`], and
+    /// its subject the version that started. Here rather than in
+    /// [`Server::new`] so that only a server that got its port records one:
+    /// one that failed to bind, because another was still running, leaves
+    /// nothing. Best-effort — a store the audit table somehow cannot be
+    /// written to still serves sync, the same way a failed backup does not
+    /// take the server down.
     pub async fn serve_with_shutdown<F>(&self, listener: TcpListener, shutdown: F) -> Result<()>
     where
         F: Future<Output = ()> + Send + 'static,
     {
+        if let Err(e) = record_start(&self.state.store) {
+            eprintln!("recording server start in the audit log: {e:#}");
+        }
         let tasks = self.start_background();
         let result = axum::serve(
             listener,
@@ -399,14 +414,13 @@ impl Server {
     }
 }
 
-/// Appends the `start` leaf [`Server::new`] records.
+/// Appends the `start` leaf [`Server::serve_with_shutdown`] records.
 fn record_start(store: &Store) -> Result<()> {
     let version = recall_wire::discovery::version();
-    let at = now();
-    store.audit_append(move |seq| {
+    store.audit_append(|seq, at| {
         crate::audit::leaf::encode(
             seq,
-            &at,
+            at,
             crate::audit::leaf::action::START,
             &crate::audit::leaf::Actor::Server,
             crate::audit::leaf::subject_start(&version),

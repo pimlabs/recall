@@ -49,18 +49,20 @@ pub struct Existing {
     pub deleted: bool,
 }
 
-/// The connection, plus the one piece of in-memory state built from it: the
-/// audit log's [`Tree`], rebuilt at open from `audit_log`, so an append, a
-/// checkpoint and a consistency proof each cost a few hashes rather than a
-/// pass over the whole table.
+/// The connection, plus the in-memory state built from it: the audit log's
+/// [`Tree`], rebuilt at open from `audit_log`, so an append, a checkpoint
+/// and a consistency proof each cost a few hashes rather than a pass over
+/// the whole table; and the newest leaf's `at`, which the next may not go
+/// below.
 ///
 /// [`std::ops::Deref`] and [`std::ops::DerefMut`] to [`Connection`] mean
 /// every existing call site — `conn.execute(...)`, `conn.transaction()` —
-/// keeps compiling unchanged; only the audit-specific code added in this
-/// pull request reaches `audit` directly.
+/// keeps compiling unchanged; only the audit-specific code reaches `audit`
+/// directly.
 struct StoreState {
     conn: Connection,
     audit: Tree,
+    audit_at: String,
 }
 
 impl std::ops::Deref for StoreState {
@@ -97,22 +99,20 @@ impl Store {
             }
         }
         let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
-        let store = Self {
-            state: Mutex::new(StoreState {
-                conn,
-                audit: Tree::new(),
-            }),
-        };
-        store.migrate()?;
-        Ok(store)
+        Self::with_connection(conn)
     }
 
     /// An in-memory database, for tests.
     pub fn open_in_memory() -> Result<Self> {
+        Self::with_connection(Connection::open_in_memory()?)
+    }
+
+    fn with_connection(conn: Connection) -> Result<Self> {
         let store = Self {
             state: Mutex::new(StoreState {
-                conn: Connection::open_in_memory()?,
+                conn,
                 audit: Tree::new(),
+                audit_at: String::new(),
             }),
         };
         store.migrate()?;
@@ -157,8 +157,9 @@ impl Store {
         state.conn.execute_batch(devices::SCHEMA)?;
         state.conn.execute_batch(audit::SCHEMA)?;
 
-        let hashes = audit::leaf_hashes(&state.conn)?;
-        state.audit = Tree::rebuild(hashes);
+        let loaded = audit::load(&state.conn)?;
+        state.audit = loaded.tree;
+        state.audit_at = loaded.last_at;
         Ok(())
     }
 
@@ -180,41 +181,20 @@ impl Store {
         Ok(row)
     }
 
-    /// Writes content, clearing any tombstone.
-    pub fn upsert(
-        &self,
-        project_key: &str,
-        file_path: &str,
-        content: &str,
-        source_env: &str,
-        updated_at: &str,
-    ) -> Result<()> {
-        let conn = self.lock();
-        conn.execute(
-            "INSERT INTO memory_files (project_key, file_path, content, source_env, updated_at, deleted)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0)
-             ON CONFLICT(project_key, file_path) DO UPDATE SET
-                 content = excluded.content,
-                 source_env = excluded.source_env,
-                 updated_at = excluded.updated_at,
-                 deleted = 0",
-            (project_key, file_path, content, nullable(source_env), updated_at),
-        )?;
-        Ok(())
-    }
-
-    /// [`Store::upsert`], with its leaf appended in the same transaction.
+    /// Writes content, clearing any tombstone, and appends the leaf
+    /// `build_leaf` makes from its `seq` and `at` in the same transaction.
+    /// Answers the time it was written, which is that `at`: the row's
+    /// `updated_at` and its leaf's `at` are one timestamp.
     pub fn upsert_audited(
         &self,
         project_key: &str,
         file_path: &str,
         content: &str,
         source_env: &str,
-        updated_at: &str,
-        build_leaf: impl FnOnce(u64) -> Vec<u8>,
-    ) -> Result<()> {
+        build_leaf: impl FnOnce(u64, &str) -> Vec<u8>,
+    ) -> Result<String> {
         self.audited(
-            |tx| {
+            |tx, at| {
                 tx.execute(
                     "INSERT INTO memory_files (project_key, file_path, content, source_env, updated_at, deleted)
                      VALUES (?1, ?2, ?3, ?4, ?5, 0)
@@ -223,25 +203,28 @@ impl Store {
                          source_env = excluded.source_env,
                          updated_at = excluded.updated_at,
                          deleted = 0",
-                    (project_key, file_path, content, nullable(source_env), updated_at),
+                    (project_key, file_path, content, nullable(source_env), at),
                 )?;
-                Ok(Outcome::Commit(()))
+                Ok(Outcome::Commit(at.to_string()))
             },
-            |seq, ()| build_leaf(seq),
+            |seq, at, _| build_leaf(seq, at),
         )
     }
 
-    /// [`Store::tombstone`], with its leaf appended in the same transaction.
+    /// Marks a file deleted while deliberately leaving its content in
+    /// place: a mistaken delete stays recoverable at the database level,
+    /// even though nothing in the app surfaces an undo yet. [`Store::list`]
+    /// withholds the content so a pull can't resurrect it. The leaf, and
+    /// the time answered, as [`Store::upsert_audited`].
     pub fn tombstone_audited(
         &self,
         project_key: &str,
         file_path: &str,
         source_env: &str,
-        updated_at: &str,
-        build_leaf: impl FnOnce(u64) -> Vec<u8>,
-    ) -> Result<()> {
+        build_leaf: impl FnOnce(u64, &str) -> Vec<u8>,
+    ) -> Result<String> {
         self.audited(
-            |tx| {
+            |tx, at| {
                 tx.execute(
                     "INSERT INTO memory_files (project_key, file_path, content, source_env, updated_at, deleted)
                      VALUES (?1, ?2, '', ?3, ?4, 1)
@@ -249,36 +232,12 @@ impl Store {
                          source_env = excluded.source_env,
                          updated_at = excluded.updated_at,
                          deleted = 1",
-                    (project_key, file_path, nullable(source_env), updated_at),
+                    (project_key, file_path, nullable(source_env), at),
                 )?;
-                Ok(Outcome::Commit(()))
+                Ok(Outcome::Commit(at.to_string()))
             },
-            |seq, ()| build_leaf(seq),
+            |seq, at, _| build_leaf(seq, at),
         )
-    }
-
-    /// Marks a file deleted while deliberately leaving its content in
-    /// place: a mistaken delete stays recoverable at the database level,
-    /// even though nothing in the app surfaces an undo yet. [`Store::list`]
-    /// withholds the content so a pull can't resurrect it.
-    pub fn tombstone(
-        &self,
-        project_key: &str,
-        file_path: &str,
-        source_env: &str,
-        updated_at: &str,
-    ) -> Result<()> {
-        let conn = self.lock();
-        conn.execute(
-            "INSERT INTO memory_files (project_key, file_path, content, source_env, updated_at, deleted)
-             VALUES (?1, ?2, '', ?3, ?4, 1)
-             ON CONFLICT(project_key, file_path) DO UPDATE SET
-                 source_env = excluded.source_env,
-                 updated_at = excluded.updated_at,
-                 deleted = 1",
-            (project_key, file_path, nullable(source_env), updated_at),
-        )?;
-        Ok(())
     }
 
     /// Every file for a project, tombstones included so a pulling client
@@ -431,6 +390,21 @@ impl Store {
     }
 }
 
+/// Test-only: a leaf for the store's own tests, which are about rows rather
+/// than what a leaf says. The store has no way to write without one.
+#[cfg(test)]
+pub(crate) fn test_leaf(seq: u64, at: &str) -> Vec<u8> {
+    use crate::audit::leaf;
+    leaf::encode(
+        seq,
+        at,
+        leaf::action::START,
+        &leaf::Actor::Server,
+        leaf::subject_start("test"),
+        None,
+    )
+}
+
 /// An absent `source_env` is stored as NULL, not `''` — `admin_stats`
 /// distinguishes the two.
 fn nullable(s: &str) -> Option<&str> {
@@ -449,17 +423,37 @@ mod tests {
         Store::open_in_memory().unwrap()
     }
 
+    fn put(st: &Store, project_key: &str, file_path: &str, content: &str, source_env: &str) {
+        st.upsert_audited(project_key, file_path, content, source_env, test_leaf)
+            .unwrap();
+    }
+
+    fn del(st: &Store, project_key: &str, file_path: &str, source_env: &str) {
+        st.tombstone_audited(project_key, file_path, source_env, test_leaf)
+            .unwrap();
+    }
+
+    /// The row's `updated_at` is its leaf's `at`: one moment, taken under
+    /// the lock the write holds, answered to the caller.
+    #[test]
+    fn a_write_is_stamped_with_its_leafs_at() {
+        let st = store();
+        let mut leaf_at = String::new();
+        let updated_at = st
+            .upsert_audited("acme/app", "a.md", "x", "laptop", |seq, at| {
+                leaf_at = at.to_string();
+                test_leaf(seq, at)
+            })
+            .unwrap();
+        assert_eq!(updated_at, leaf_at);
+        assert_eq!(st.list("acme/app").unwrap()[0].updated_at, updated_at);
+        assert_eq!(st.audit_checkpoint().0, 1);
+    }
+
     #[test]
     fn upsert_get_and_list_round_trip() {
         let st = store();
-        st.upsert(
-            "acme/app",
-            "MEMORY.md",
-            "hello",
-            "laptop",
-            "2026-01-01T00:00:00.000Z",
-        )
-        .unwrap();
+        put(&st, "acme/app", "MEMORY.md", "hello", "laptop");
 
         let got = st.get("acme/app", "MEMORY.md").unwrap().unwrap();
         assert_eq!(got.content, "hello");
@@ -477,16 +471,8 @@ mod tests {
     #[test]
     fn tombstone_preserves_content_but_list_withholds_it() {
         let st = store();
-        st.upsert(
-            "acme/app",
-            "gone.md",
-            "secret",
-            "laptop",
-            "2026-01-01T00:00:00.000Z",
-        )
-        .unwrap();
-        st.tombstone("acme/app", "gone.md", "laptop", "2026-01-01T00:00:01.000Z")
-            .unwrap();
+        put(&st, "acme/app", "gone.md", "secret", "laptop");
+        del(&st, "acme/app", "gone.md", "laptop");
 
         let row = st.get("acme/app", "gone.md").unwrap().unwrap();
         assert_eq!(row.content, "secret", "content must stay recoverable");
@@ -506,16 +492,8 @@ mod tests {
     #[test]
     fn upsert_clears_a_tombstone() {
         let st = store();
-        st.tombstone("acme/app", "f.md", "laptop", "2026-01-01T00:00:00.000Z")
-            .unwrap();
-        st.upsert(
-            "acme/app",
-            "f.md",
-            "back",
-            "laptop",
-            "2026-01-01T00:00:01.000Z",
-        )
-        .unwrap();
+        del(&st, "acme/app", "f.md", "laptop");
+        put(&st, "acme/app", "f.md", "back", "laptop");
         let row = st.get("acme/app", "f.md").unwrap().unwrap();
         assert!(!row.deleted);
         assert_eq!(row.content, "back");
@@ -531,14 +509,7 @@ mod tests {
     #[test]
     fn admin_stats_keeps_commas_inside_a_source_env() {
         let st = store();
-        st.upsert(
-            "acme/app",
-            "a.md",
-            "x",
-            "laptop,evil",
-            "2026-01-01T00:00:00.000Z",
-        )
-        .unwrap();
+        put(&st, "acme/app", "a.md", "x", "laptop,evil");
         let (projects, _) = st.admin_stats().unwrap();
         assert_eq!(projects[0].sources, vec!["laptop,evil".to_string()]);
     }
