@@ -14,6 +14,14 @@ description = "Recall's sync server: SQLite persistence, LLM-assisted merge, and
 name = "recall-server"
 path = "src/main.rs"
 
+[features]
+default = ["passkeys"]
+# Passkey (WebAuthn) sign-in for the /admin page. A feature only so that the
+# client's tests, which start a server in-process, need not build OpenSSL on
+# every platform the client is tested on (Windows among them). Every server
+# build, the release's and the image's, has it.
+passkeys = ["dep:webauthn-rs", "dep:openssl"]
+
 [dependencies]
 recall-wire.workspace = true
 # Only for the inline merge a server without a worker still runs. Built
@@ -27,6 +35,8 @@ getrandom.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# The admin session's token hash, and the admin page's CSP hashes.
+sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true
 unicode-normalization.workspace = true
@@ -34,6 +44,24 @@ unicode-security.workspace = true
 # io-util is needed to stream the merge prompt into the CLI's stdin.
 tokio = { workspace = true, features = ["io-util"] }
 
+# Passkey sign-in for /admin. Pinned exactly: the discoverable (usernameless)
+# flow is behind `conditional-ui`, a preview feature whose API may change in
+# any release. `danger-allow-state-serialisation` lets a ceremony's state be
+# sealed into the id the page sends back rather than held in a table
+# strangers can fill; `server/passkeys.rs` says why that is safe here.
+webauthn-rs = { version = "=0.5.5", features = ["conditional-ui", "danger-allow-state-serialisation"], optional = true }
+# The trade-off, stated once: this is where OpenSSL enters the codebase.
+# webauthn-rs-core verifies signatures and attestation with it and cannot be
+# built without it. `vendored` compiles it from source into the binary, so
+# the server stays one static musl file with no system OpenSSL to find. The
+# cost: about 5 MiB with webauthn-rs, a slower clean build, perl and make
+# in the build environment, and an OpenSSL fix reaching a server only in a
+# new recall-server release, not from the host's package updates. It is
+# named here, as a direct dependency, so that feature unification vendors
+# the copy webauthn-rs-core uses too. Only the server has it: the client stays on
+# rustls, and `cargo tree -p recall -e normal | grep -i openssl` prints
+# nothing.
+openssl = { version = "0.10", features = ["vendored"], optional = true }
 # Direct TLS (server/tls.rs), both modes off unless configured. Only this
 # crate uses any of these; see the workspace Cargo.toml for the `ring`
 # choice.
@@ -53,6 +81,17 @@ recall-worker = { workspace = true, features = ["client"] }
 reqwest.workspace = true
 # Only to drive the Router in tests without binding a real socket.
 tower = { version = "0.5", features = ["util"] }
+# A software authenticator and WebAuthn client, so the passkey ceremonies
+# are tested end to end against the real verifier without a browser.
+passkey-authenticator = "0.5"
+passkey-client = "0.5"
+passkey-types = "0.5"
+# passkey-authenticator's user-verification trait is an async_trait.
+async-trait = "0.1"
+coset = "0.3"
+# Named only to spell the client's type; passkey-client already uses it.
+public-suffix = "0.1"
+url = "2"
 # Only for server/tls.rs's tests: a self-signed certificate to serve, and a
 # TLS client to hold connections open against it. Both already in the tree
 # (through rustls-acme and axum-server), and both with aws-lc-rs left out.

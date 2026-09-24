@@ -22,17 +22,31 @@ https://github.com/pimlabs/recall/blob/main/docs/reference/install.md
 
 Usage: recall-server [version | --version | -V | help | --help | -h]
        recall-server admin <list | rename | remove | restore> ...
+       recall-server reset-passkeys
 
 With no argument it serves until stopped. RECALL_TOKEN is required.
 `recall-server admin help` describes the admin commands, which change stored
-memory from a shell on the host and open no listener.";
+memory from a shell on the host and open no listener.
 
-/// What `recall-server version` prints: the same shape as `recall
-/// version`, so one reading of either tells the same story.
+reset-passkeys removes every passkey registered for /admin, and every
+session they signed in, from the database at RECALL_DB_PATH, and prints a
+one-time bootstrap code. It is for an owner who has lost all of them:
+RECALL_TOKEN and that code can then register a first passkey again. Run it
+where the server runs, as the database's owner, such as with
+docker compose exec -u node.";
+
+/// What `recall-server version` prints: the same first line as `recall
+/// version`, so one reading of either tells the same story, then the
+/// optional parts this binary was built with.
+///
+/// The second line is what lets a release be checked for what it must
+/// carry: a server built without `passkeys` starts and syncs as well as
+/// one built with it, and only `/admin` would show the difference. The
+/// release workflow refuses a binary whose line does not name it.
 fn version_line() -> String {
     let version = env!("CARGO_PKG_VERSION");
     let commit = option_env!("RECALL_GIT_COMMIT").unwrap_or("unknown");
-    match recall_wire::discovery::channel() {
+    let first = match recall_wire::discovery::channel() {
         recall_wire::discovery::CHANNEL_RELEASE => {
             format!("recall-server {version} ({commit})")
         }
@@ -40,7 +54,18 @@ fn version_line() -> String {
             "recall-server {version} ({commit}, dev build {})",
             recall_wire::discovery::version()
         ),
-    }
+    };
+    let features: &[&str] = if cfg!(feature = "passkeys") {
+        &["passkeys"]
+    } else {
+        &[]
+    };
+    let features = if features.is_empty() {
+        "none".to_string()
+    } else {
+        features.join(" ")
+    };
+    format!("{first}\nfeatures: {features}")
 }
 
 fn main() -> ExitCode {
@@ -59,6 +84,7 @@ fn main() -> ExitCode {
         // command runs beside a server, never as one, so it reads no token
         // and binds nothing.
         ["admin", ..] => return recall_server::admin::main(&args[1..]),
+        ["reset-passkeys"] => return recall_server::admin::reset_passkeys(),
         _ => {
             eprintln!(
                 "recall-server: unexpected arguments: {}\n\n{USAGE}",
@@ -73,7 +99,13 @@ fn main() -> ExitCode {
         // Opening the store before binding means a bad database path fails
         // at once with a clear error, not after the port is taken.
         let store = Arc::new(Store::open(&cfg.db_path)?);
-        Server::new(cfg, store).serve().await
+        let server = Server::new(cfg, store);
+        // Printed where only someone on the host reads it: with the token,
+        // it registers the first passkey.
+        if let Some(code) = server.issue_bootstrap_code()? {
+            eprintln!("{}", code.instructions(server.public_url()));
+        }
+        server.serve().await
     };
     let result = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

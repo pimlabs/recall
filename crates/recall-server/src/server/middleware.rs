@@ -14,6 +14,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
+use super::admin;
 use super::auth::{self, Caller};
 use super::respond::{error, Refusal};
 use super::AppState;
@@ -34,10 +35,53 @@ pub(super) async fn guard(
     if let Some(refused) = limit(&state, &req) {
         return refused;
     }
+    match authenticate(&state, with_client_ip(&state, req)).await {
+        Ok(req) => next.run(req).await,
+        Err(refused) => refused.into_response(),
+    }
+}
+
+/// [`guard`], for the routes that manage devices: the same two
+/// credentials, then a third, the admin page's passkey session, with its
+/// CSRF token on anything that changes state.
+///
+/// A separate guard rather than an option on the one above, so that `/sync`
+/// cannot come to accept the cookie by accident: its guard has no code
+/// that reads one.
+pub(super) async fn admin_guard(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if let Some(refused) = limit(&state, &req) {
+        return refused;
+    }
+    let mut req = with_client_ip(&state, req);
+    // The bearer token and a signature come first, exactly as in `guard`:
+    // a request carrying either is judged by it alone, cookie or not. An
+    // `Authorization` header counts as carrying the token whether or not
+    // it is the right one, so a wrong token beside a live cookie is a 401,
+    // not a fall back to the cookie.
+    let headers = req.headers();
+    if !headers.contains_key(axum::http::header::AUTHORIZATION)
+        && !auth::is_signed(headers)
+        && admin::has_session_cookie(headers)
+    {
+        return match admin::authenticate_session(&state, &mut req) {
+            Ok(()) => next.run(req).await,
+            Err(refused) => refused.into_response(),
+        };
+    }
     match authenticate(&state, req).await {
         Ok(req) => next.run(req).await,
         Err(refused) => refused.into_response(),
     }
+}
+
+fn with_client_ip(state: &AppState, mut req: Request) -> Request {
+    let ip = client_ip(&req, &state.cfg.trusted_ip_header);
+    req.extensions_mut().insert(ClientIp(ip));
+    req
 }
 
 /// The address a request came from, as the rate limiter keys it, for the
@@ -51,18 +95,30 @@ pub(super) struct ClientIp(pub(super) String);
 /// than those routes take is refused before any of it is read.
 pub(super) async fn limited(
     State(state): State<Arc<AppState>>,
-    mut req: Request,
+    req: Request,
     next: Next,
 ) -> Response {
-    if let Some(refused) = limit(&state, &req) {
+    unauthenticated(&state, req, next, super::ENROLL_BODY_BYTES).await
+}
+
+/// [`limited`], for signing in to the admin page, whose bodies are a
+/// passkey's answer: larger than an enrolment, still small.
+pub(super) async fn limited_sign_in(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    unauthenticated(&state, req, next, super::SIGN_IN_BODY_BYTES).await
+}
+
+async fn unauthenticated(state: &AppState, req: Request, next: Next, max_body: usize) -> Response {
+    if let Some(refused) = limit(state, &req) {
         return refused;
     }
-    if declared_length(req.headers()).is_some_and(|n| n > super::ENROLL_BODY_BYTES) {
+    if declared_length(req.headers()).is_some_and(|n| n > max_body) {
         return too_large().into_response();
     }
-    let ip = client_ip(&req, &state.cfg.trusted_ip_header);
-    req.extensions_mut().insert(ClientIp(ip));
-    next.run(req).await
+    next.run(with_client_ip(state, req)).await
 }
 
 /// What `Content-Length` says the body will be, when it says.
@@ -123,7 +179,7 @@ pub(super) async fn worker_only(req: Request, next: Next) -> Response {
 
 /// The rate limit, then the protocol check. [`None`] when the request may
 /// go on.
-fn limit(state: &AppState, req: &Request) -> Option<Response> {
+pub(super) fn limit(state: &AppState, req: &Request) -> Option<Response> {
     if state
         .limiter
         .limited(&client_ip(req, &state.cfg.trusted_ip_header))
@@ -214,7 +270,7 @@ fn authorized(token: &str, headers: &HeaderMap) -> bool {
 /// Compared without an early exit so the time taken doesn't reveal how much
 /// of a guessed token was right. Lengths are allowed to short-circuit —
 /// they leak only the length, as `crypto/subtle` does.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(super) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -240,7 +296,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// the limiter is decorative.
 ///
 /// The answer is a bucket rather than an address: see [`bucket`].
-fn client_ip(req: &Request, trusted_header: &str) -> String {
+pub(super) fn client_ip(req: &Request, trusted_header: &str) -> String {
     if !trusted_header.is_empty() {
         if let Some(ip) = header_str(req.headers(), trusted_header) {
             return bucket(ip);

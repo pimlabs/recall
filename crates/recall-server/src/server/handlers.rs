@@ -1,4 +1,4 @@
-//! One function per route, plus the two constants the admin page needs.
+//! One function per route. The admin page itself is in `admin.rs`.
 //!
 //! Status codes and error wording are part of the frozen API surface —
 //! `docs/api.md` describes them and `scripts/api-doc-check.sh` asserts them
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::Extension;
 use recall_wire::discovery::{self, Auth, Build, Protocol, ServerInfo};
 use recall_wire::{
@@ -24,15 +24,6 @@ use super::respond::{error, internal, json};
 use super::AppState;
 use crate::now;
 use crate::store::Queued;
-
-/// The admin page is embedded so the binary stays self-contained — there is
-/// no asset directory to forget to ship.
-const ADMIN_HTML: &str = include_str!("../../assets/admin.html");
-
-/// The token the page holds lives in sessionStorage on this origin;
-/// `default-src 'none'` with `connect-src 'self'` means even a future
-/// injection bug there would have nowhere to send it.
-const ADMIN_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'";
 
 const REQUIRED_FIELDS_MSG: &str =
     "project_key, file_path, and content (string) are required, unless deleted is true";
@@ -511,21 +502,6 @@ pub(super) async fn handle_discovery(State(state): State<Arc<AppState>>) -> Resp
             capabilities,
         },
     )
-}
-
-/// Static markup only: the page holds no data, it asks the viewer for a
-/// token and fetches `/admin/stats` itself.
-pub(super) async fn handle_admin_page() -> Response {
-    (
-        StatusCode::OK,
-        [
-            ("content-type", "text/html; charset=utf-8"),
-            ("x-content-type-options", "nosniff"),
-            ("content-security-policy", ADMIN_CSP),
-        ],
-        ADMIN_HTML,
-    )
-        .into_response()
 }
 
 pub(super) async fn handle_admin_stats(State(state): State<Arc<AppState>>) -> Response {

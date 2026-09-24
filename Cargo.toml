@@ -12,14 +12,18 @@ members = [
 [workspace.package]
 version = "0.4.1"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/pimlabs/recall"
 
 [workspace.dependencies]
 recall-wire = { path = "crates/recall-wire", version = "0.4.1" }
 recall-hooks = { path = "crates/recall-hooks", version = "0.4.1" }
-recall-server = { path = "crates/recall-server", version = "0.4.1" }
+# Without its default features, so a crate that depends on the server only to
+# run one in its tests (the client does) does not build the passkey support
+# and the OpenSSL under it. Built as itself (`-p recall-server`, or as part
+# of the workspace), the server has them.
+recall-server = { path = "crates/recall-server", version = "0.4.1", default-features = false }
 # Without its HTTP client by default: recall-server uses only its merge
 # code. recall-worker's own binary turns `client` back on.
 recall-worker = { path = "crates/recall-worker", version = "0.4.1", default-features = false }

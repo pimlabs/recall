@@ -18,6 +18,7 @@ use crate::now;
 
 mod devices;
 mod jobs;
+mod passkeys;
 
 pub use devices::{
     plain_name, Created, Decision, Inserted, NewAuthkey, NewDevice, NewEnrollment, Poll, Waiting,
@@ -25,6 +26,10 @@ pub use devices::{
 pub use jobs::{
     clip, Failure, Queued, Retried, Settled, Settlement, MAX_ATTEMPTS, MAX_ERROR_BYTES, MAX_LINKS,
     MAX_OPEN_JOBS,
+};
+pub use passkeys::{
+    AddedCredential, AdminCredential, AdminSession, BootstrapCode, FirstPasskey,
+    NewAdminCredential, RemovedCredential,
 };
 
 /// Frozen: an already-deployed database was created with exactly this.
@@ -125,6 +130,7 @@ impl Store {
         // simply never looks at them: rolling back stays a matter of
         // starting the older image.
         conn.execute_batch(devices::SCHEMA)?;
+        conn.execute_batch(passkeys::SCHEMA)?;
         // The one change to an existing table the merge queue needs:
         // devices may now have the worker scope, which SQLite can only
         // allow by rebuilding the table. Then the queue's own table, beside

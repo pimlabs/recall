@@ -311,6 +311,92 @@ for n in 1 2 3 4 5; do v6_enroll "2001:db8:5:5::$n" "v6-$n" >/dev/null; done
 check "every IPv6 address in one /64 is one address: the sixth waiting is 429" '429 200' \
   "$(v6_enroll 2001:db8:5:5:ffff:ffff:ffff:ffff v6-6) $(v6_enroll 2001:db8:5:6::1 v6-7)"
 
+echo "The admin page and passkey sign-in"
+curl -s -D "$WORK/page.headers" -o /dev/null "$URL/admin"
+header() { # file, name
+  tr -d '\r' <"$1" | awk -v h="$(printf '%s' "$2" | tr 'A-Z' 'a-z'):" 'tolower($1)==h{$1=""; sub(/^ /,""); print}'
+}
+check "the page's CSP allows no inline code by default and no eval" 'True' \
+  "$(header "$WORK/page.headers" content-security-policy | python3 -c '
+import sys; c=sys.stdin.read()
+print("unsafe" not in c and "default-src '"'"'none'"'"'" in c and "script-src '"'"'sha256-" in c and "frame-ancestors '"'"'none'"'"'" in c)')"
+check "the page cannot be framed" 'DENY' "$(header "$WORK/page.headers" x-frame-options)"
+check "the page sends no referrer" 'no-referrer' "$(header "$WORK/page.headers" referrer-policy)"
+curl -s "$URL/admin/session" >"$WORK/session.json"
+check "the session status needs no token" 'passkeys bootstrapped session' "$(keys "$WORK/session.json")"
+check "without RECALL_PUBLIC_URL passkeys are off, and it says why" 'False True None' \
+  "$(python3 -c '
+import json,sys; d=json.load(open(sys.argv[1]))
+print(d["passkeys"]["enabled"], "RECALL_PUBLIC_URL is not set" in d["passkeys"]["reason"], d["session"])' "$WORK/session.json")"
+check "signing in with passkeys off is 503" '503' \
+  "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${json[@]}" "$URL/admin/login/start")"
+check "the bootstrap needs the token" '401 {"error":"unauthorized"}' \
+  "$(curl -s -o "$WORK/b.json" -w '%{http_code}' -X POST "${json[@]}" "$URL/admin/bootstrap/register") $(cat "$WORK/b.json")"
+check "the bootstrap with passkeys off is 503" '503' \
+  "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${json[@]}" "${auth[@]}" "$URL/admin/bootstrap/register")"
+check "managing passkeys needs a session, not the token" \
+  '401 {"error":"unauthorized: this needs an admin session; sign in with a passkey"}' \
+  "$(curl -s -o "$WORK/p.json" -w '%{http_code}' "${auth[@]}" "$URL/admin/passkeys") $(cat "$WORK/p.json")"
+check "and so does signing out the other sessions" \
+  '401 {"error":"unauthorized: this needs an admin session; sign in with a passkey"}' \
+  "$(curl -s -o "$WORK/lo.json" -w '%{http_code}' -X POST "${auth[@]}" "$URL/admin/logout/others") $(cat "$WORK/lo.json")"
+FAKE="__Host-recall_admin=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+check "a session cookie the server did not issue is 401 on the device routes" \
+  '{"error":"unauthorized: the admin session has ended; sign in again"}' \
+  "$(curl -s -H "Cookie: $FAKE" "$URL/v1/devices")"
+check "a wrong token beside a session cookie is judged by the token" '401 {"error":"unauthorized"}' \
+  "$(curl -s -o "$WORK/w.json" -w '%{http_code}' -H "Cookie: $FAKE" -H 'Authorization: Bearer wrong' \
+     "$URL/v1/devices") $(cat "$WORK/w.json")"
+check "a session cookie is not a credential on /sync" '{"error":"unauthorized"}' \
+  "$(curl -s -H "Cookie: $FAKE" -H 'X-Recall-CSRF: x' "$URL/sync?project_key=a/b")"
+
+PK_PORT=8934
+PK_URL="http://localhost:$PK_PORT"
+RECALL_TOKEN="$TOKEN" RECALL_PORT="$PK_PORT" RECALL_DB_PATH="$WORK/pk.sqlite" \
+  RECALL_MERGE_ENABLED=false RECALL_PUBLIC_URL="$PK_URL" "$BIN" >"$WORK/pk.log" 2>&1 &
+PK=$!
+for _ in $(seq 1 40); do curl -sf "$PK_URL/health" >/dev/null 2>&1 && break; sleep 0.25; done
+check "with RECALL_PUBLIC_URL passkeys are on, bound to its origin" "True $PK_URL False" \
+  "$(curl -s "$PK_URL/admin/session" | python3 -c '
+import json,sys; d=json.load(sys.stdin); print(d["passkeys"]["enabled"], d["passkeys"]["origin"], d["bootstrapped"])')"
+check "signing in before any passkey exists is 409" '409' \
+  "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${json[@]}" "$PK_URL/admin/login/start")"
+check "a ceremony start that is not JSON is 415" '415 {"error":"this needs Content-Type: application/json"}' \
+  "$(curl -s -o "$WORK/ct.json" -w '%{http_code}' -X POST -H 'Content-Type: text/plain' \
+     "$PK_URL/admin/login/start") $(cat "$WORK/ct.json")"
+check "and so is one that names no type" '415' \
+  "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${auth[@]}" "$PK_URL/admin/bootstrap/register")"
+# The code a server with no passkey prints as it starts: four groups of
+# four letters, the only such line in its log.
+code_in() { grep -Eo '^ *[B-Z]{4}-[B-Z]{4}-[B-Z]{4}-[B-Z]{4} *$' "$1" | tail -1 | tr -d ' '; }
+CODE=$(code_in "$WORK/pk.log")
+check "starting with no passkey, the server prints a one-time bootstrap code" 'True' \
+  "$(python3 -c 'import sys; print(len(sys.argv[1]) == 19)' "$CODE")"
+check "the token without that code is 403" \
+  '403 {"error":"forbidden: registering the first passkey needs the one-time bootstrap code the server printed where it runs, as well as RECALL_TOKEN"}' \
+  "$(curl -s -o "$WORK/nc.json" -w '%{http_code}' -X POST "${json[@]}" "${auth[@]}" -d '{"bootstrap_code":"BCDF-GHJK-LMNP-QRST"}' \
+     "$PK_URL/admin/bootstrap/register") $(cat "$WORK/nc.json")"
+# reset-passkeys replaces it, and says so; the old one stops working.
+RECALL_DB_PATH="$WORK/pk.sqlite" "$BIN" reset-passkeys >"$WORK/reset.out" 2>&1
+OLD_CODE=$CODE
+CODE=$(code_in "$WORK/reset.out")
+check "reset-passkeys prints a new code, and the one before stops working" 'True 403' \
+  "$(python3 -c 'import sys; print(len(sys.argv[1]) == 19 and sys.argv[1] != sys.argv[2])' "$CODE" "$OLD_CODE") $(curl -s -o /dev/null -w '%{http_code}' -X POST "${json[@]}" "${auth[@]}" \
+     -d "{\"bootstrap_code\":\"$OLD_CODE\"}" "$PK_URL/admin/bootstrap/register")"
+curl -s -D "$WORK/boot.headers" -X POST "${json[@]}" "${auth[@]}" -d "{\"bootstrap_code\":\"$CODE\"}" \
+  "$PK_URL/admin/bootstrap/register" >"$WORK/boot.json"
+check "the bootstrap answers with a ceremony and a discoverable-credential challenge" \
+  'ceremony_id options localhost required' \
+  "$(python3 -c '
+import json,sys; d=json.load(open(sys.argv[1])); pk=d["options"]["publicKey"]
+print(" ".join(d.keys()), pk["rp"]["id"], pk["authenticatorSelection"]["residentKey"])' "$WORK/boot.json")"
+check "a challenge is never cached" 'no-store' "$(header "$WORK/boot.headers" cache-control)"
+check "finishing a ceremony that does not exist is 400" \
+  '{"error":"this ceremony has expired or was already used; start again"}' \
+  "$(curl -s -X POST "${json[@]}" -d '{"ceremony_id":"cer_nope","credential":{"id":"x","rawId":"eA","type":"public-key","response":{"authenticatorData":"eA","clientDataJSON":"eA","signature":"eA","userHandle":null}}}' \
+     "$PK_URL/admin/login/finish")"
+kill $PK 2>/dev/null
+
 echo "Jobs, without a worker"
 # Claiming and posting results need a worker's signature, which takes a
 # signing client rather than curl; crates/recall-server/tests/jobs.rs covers
