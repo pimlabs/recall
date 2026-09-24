@@ -1,0 +1,40 @@
+[package]
+name = "recall-worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Recall's merge worker: an enrolled device that drains the sync server's merge queue with the local claude CLI"
+
+# Named for the reason recall-server names its own: the Dockerfile, the
+# release archives and the compose files invoke it by this name.
+[[bin]]
+name = "recall-worker"
+path = "src/main.rs"
+required-features = ["client"]
+
+[features]
+default = ["client"]
+# Everything but the merge itself: enrolling, signing requests and the job
+# loop, with the HTTP client they need. recall-server depends on this crate
+# for the merge alone and turns this off, so the process that faces the
+# internet carries no client code.
+client = ["dep:reqwest", "dep:getrandom", "dep:base64"]
+
+[dependencies]
+recall-wire.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+# io-util streams the merge prompt into the CLI's stdin.
+tokio = { workspace = true, features = ["io-util"] }
+
+reqwest = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -159,8 +159,9 @@ saying where. Reading the audit routes appends nothing.
 every pull leaves the client a checkpoint without another request.
 
 **The leaf, version 1.** One per authenticated push, pull and change to a
-device or authkey (an authkey enrolling a device included), and one per
-action the server takes itself. Unauthenticated routes and refused requests
+device or authkey (an authkey enrolling a device included), one per merge
+job leased, settled or retried, and one per action the server takes
+itself. Unauthenticated routes and refused requests
 append nothing, so the internet cannot grow the log. Shown indented; stored
 on one line, compact, in this field order:
 
@@ -179,9 +180,9 @@ on one line, compact, in this field order:
 | `v` | Leaf format, `1`. |
 | `seq` | Its index in the tree, from 0. |
 | `at` | Taken under the store's lock with `seq`, and never below the leaf before it. |
-| `action` | `push`, `delete`, `pull`, `approve`, `enroll`, `deny`, `revoke`, `sweep`, `authkey_create`, `authkey_revoke`, `start`. Later pull requests add `merge`, `key_create`, `key_grant`, `seal`, `evaluate` and `strict`. |
-| `actor.kind` | `device` (a signed request), `operator` (`RECALL_TOKEN`), `authkey` (by id and tag, for the device it enrols) or `server` (its own sweeps, and `start`, which records the version it started as). |
-| `subject` | Per action. `approve` and `enroll` leaves carry the device's `public_key`, and from PR 3 its `encryption_key`, so the log verifies without the `devices` table. A push says whether the server `merged` it inline. |
+| `action` | `push`, `delete`, `pull`, `approve`, `enroll`, `deny`, `revoke`, `sweep`, `authkey_create`, `authkey_revoke`, `start`, and, with PR 2's queue, `job_claim`, `job_result` and `job_retry`. Later pull requests add `key_create`, `key_grant`, `seal`, `evaluate` and `strict`. |
+| `actor.kind` | `device` (a signed request), `operator` (`RECALL_TOKEN`), `authkey` (by id and tag, for the device it enrols) or `server` (its own sweeps; `start`, which records the version it started as; and the jobs it settles itself: a merge with no worker left, a lease run out, a job failed for want of anything to merge it). |
+| `subject` | Per action. `approve` and `enroll` leaves carry the device's `public_key`, and from PR 3 its `encryption_key`, so the log verifies without the `devices` table. A push says whether the server `merged` it inline, or names the `merge_job` it queued; that job's `job_result` says what the file became, by hash. |
 | `request` | For a signed request: the SHA-256 of its body in base64, as its `Content-Digest` carries it; the RFC 9421 signature base the server verified; the signature; and the body itself for the device-management actions, whose bodies are small and hold no secret, so what they asked for is bound to the subject. `null` otherwise. A push's body, the file, is not kept: its signature proves the device pushed at that moment, not which file the server says it was. |
 
 Discovery gains `"audit": { "leaf_version": 1, "max_page": 1000,
@@ -611,8 +612,8 @@ two prefixes are the domain separation the RFC says *"is required to give
 second preimage resistance"*. The server keeps the hash of every complete
 subtree in memory, 64 bytes a leaf (64 MB at a million), rebuilt at start
 from the leaves themselves, each rehashed and compared with its stored
-`leaf_hash` (a few seconds at a million; a log that fails to match stops the
-start). An append costs O(log n) hashes, a root O(log n), and a consistency
+`leaf_hash` (8.5 s at a million on a small VM, against 1.8 s to read the
+stored hashes alone; a log that fails to match stops the start). An append costs O(log n) hashes, a root O(log n), and a consistency
 proof (§2.1.4) O(log² n), a few hundred, with no read of the database. The
 first version recomputed each proof from every `leaf_hash` under the
 store's one lock, about 2 s at a million leaves, during which no push or
@@ -834,7 +835,7 @@ by then `U` has already crossed the wire.
 an HTTP client, never on `axum` or `rusqlite`. On first start it generates its
 keys in `/data`, enrols like any device, and prints its user code and
 fingerprint to its log. The owner approves it with
-`recall devices approve <code> --scope worker`, which from PR 3 also grants it
+`recall devices approve <code> --worker`, which from PR 3 also grants it
 the content key, or with `RECALL_TOKEN` and `curl` from the host, which grants
 nothing until a device runs `recall keys grant worker`. It signs every
 request, and it opens no port.
@@ -887,10 +888,12 @@ Recommended: the same compose file, as a second service.
 
 ```yaml
   recall-worker:
+    profiles: ["worker"]           # opt-in: COMPOSE_PROFILES=worker in deploy/.env
     build: { context: .., dockerfile: deploy/Dockerfile, target: worker }
     restart: unless-stopped
+    init: true
     environment:
-      RECALL_URL: http://recall-server:8787
+      RECALL_WORKER_SERVER: http://recall-server:8787   # never the client's RECALL_URL
     volumes:
       - recall-worker-data:/data   # its keys and the claude login; not the server's volume
     networks:
@@ -907,13 +910,13 @@ a bucket of its own. The long-poll claim costs about three requests a minute.
 The Dockerfile gains a `worker` target carrying Node, the `claude` CLI and
 `recall-worker`; after PR 5 the API image carries neither Node nor the CLI.
 `claude setup-token` moves to
-`docker compose exec -it recall-worker claude setup-token`.
+`docker compose exec -it -u node recall-worker claude setup-token`.
 `scripts/compose-check.py` asserts, as `wrangler-check.py` does for the
 installer's config, that the worker has no `ports`, `expose` or labels, is on
 no ingress network, and shares no volume with the server.
 
-The stronger option is another host, with `RECALL_URL` set to the public
-address and requests going through Traefik like any client's. That takes the
+The stronger option is another host, with `RECALL_WORKER_SERVER` set to the
+public address and requests going through Traefik like any client's. That takes the
 key off the machine the internet reaches, at the cost of a second machine; see
 open decision 2.
 

@@ -20,6 +20,8 @@ newer client keeps reading older servers.
 | `enroll_request`, `enroll_request_with_authkey`, `enroll_poll_request`, `device_approve_request`, `device_deny_request`, `authkey_create_request`, `authkey_revoke_request` | Written the same way, from recall-wire's `devices` types |
 | `audit_checkpoint_response`, `audit_entries_response`, `audit_consistency_response` | The same script, after the enrolment above and a push that device signs: the checkpoint, every leaf, and the proof from size 1, with nothing appended between them |
 | `audit_leaf_push`, `audit_leaf_approve`, `audit_leaf_enroll` | Three of those leaves, byte for byte as the entries page holds them: the signed push, the approve that carries its key, and the enrolment the authkey made. `tests/golden.rs` checks them as the offline verifier would: the push's signature against the approve's key, its digest and keyid, and the page's leaves against the checkpoint's root |
+| `push_response_queued`, `job_claim_response`, `job_claim_response_empty`, `job_result_response`, `job_list_response` | The same script: one conflict queued for a worker enrolled on a second scratch server, claimed and merged, each response a real one |
+| `job_claim_request`, `job_result_request`, `job_result_request_error`, `device_approve_request_worker` | Written from recall-wire's `jobs` and `devices` types |
 
 `discovery` exists from the version that introduced `/.well-known/recall`
 onwards; older servers answer 404 and have no file. The device kinds exist
@@ -43,14 +45,16 @@ which gained `device-sig-v1` and the `devices` capability). Being
 unreleased, it was captured again as the device shapes changed during
 review; replace it once more from the release archive when 0.4.1 is out.
 
-`0.4.2/` is the audit log's, captured the same way from a development
-build (`./scripts/capture-wire-fixtures.sh 0.4.2
-target/release/recall-server`), holding only what it adds or changes: the
-audit kinds, and `discovery`, which gained the `audit` capability. The
-push in it is signed by `openssl` with `test-key-ed25519`'s published
-private half, like `device_me_response`. The directory is named for the
-release expected to ship it; if another ships first, rename it to the one
-that does, and replace it from the release archive once that is out.
+`0.4.2/` holds what the merge queue and the audit log add or change: the
+job kinds, `push_response_queued` (a push answered with the `merge_job` it
+queued), `health` (with the `worker` and `queue` members a server with a
+worker reports), `device_approve_request_worker`, the audit kinds, and
+`discovery` (with `merge_queue` and `audit`). It was captured from a
+development build with `./scripts/capture-wire-fixtures.sh 0.4.2
+target/release/recall-server`, so its versions say `-dev`; replace it from
+the release archive of the release that ships them. Its worker, and the
+push in the audit kinds, sign with the same published test key the device
+kinds use, with `openssl`.
 
 ## Rules
 

@@ -49,6 +49,13 @@ pub mod action {
     pub const AUTHKEY_REVOKE: &str = "authkey_revoke";
     /// The server started.
     pub const START: &str = "start";
+    /// A worker, or the server draining the queue itself, leased a job.
+    pub const JOB_CLAIM: &str = "job_claim";
+    /// A job's result was recorded: a merge applied to its file, a
+    /// follow-up queued, or an attempt failed.
+    pub const JOB_RESULT: &str = "job_result";
+    /// A failed job was queued again.
+    pub const JOB_RETRY: &str = "job_retry";
 }
 
 /// Who did it (`actor.kind`).
@@ -72,7 +79,8 @@ pub enum Actor<'a> {
         /// Its label.
         tag: &'a str,
     },
-    /// The server's own doing: a sweep, or `start`.
+    /// The server's own doing: a sweep, `start`, or merging a queued job
+    /// itself once no worker is left to.
     Server,
 }
 
@@ -127,7 +135,7 @@ pub struct SignedRequest<'a> {
     /// The request body itself, for the actions whose body is a few bytes
     /// of JSON with no secret in it: `approve`, `deny`, `revoke`,
     /// `authkey_create` and `authkey_revoke`. [`None`], written `null`, for
-    /// a push, a delete and a pull.
+    /// a push, a delete, a pull and the job actions.
     pub body: Option<&'a str>,
 }
 
@@ -190,16 +198,17 @@ pub struct FileChange<'a> {
     /// stored is not what was sent, and `stored_sha256` is not the hash of
     /// the pushed content.
     pub merged: bool,
+    /// The job that will merge this push with the version it displaced,
+    /// when it was queued for a worker rather than merged here.
+    pub merge_job: Option<&'a str>,
 }
 
 /// `subject` for [`action::PUSH`] and [`action::DELETE`]: a file's identity
 /// and the hash of what is now stored, never the content.
 ///
-/// `merge_job` is always `null` in this pull request — jobs and the worker
-/// are `part5-plan.md`'s PR 2 — and is carried now so its field position is
-/// part of the frozen leaf shape rather than an addition later that would
-/// need a `v: 2`. `merged` is the other kind of merge, the one done inline
-/// before storing.
+/// Two kinds of merge show here. `merged` is the one done inline before
+/// storing; `merge_job` names the job a push was queued for instead, whose
+/// own `job_result` leaf records what the worker made of it.
 pub fn subject_file(change: &FileChange<'_>) -> Value {
     let mut m = Map::new();
     m.insert("project_key".into(), json!(change.project_key));
@@ -208,7 +217,69 @@ pub fn subject_file(change: &FileChange<'_>) -> Value {
     m.insert("stored_sha256".into(), json!(change.stored_sha256));
     m.insert("base_sha256".into(), json!(change.base_sha256));
     m.insert("merged".into(), json!(change.merged));
-    m.insert("merge_job".into(), Value::Null);
+    m.insert("merge_job".into(), json!(change.merge_job));
+    Value::Object(m)
+}
+
+/// `subject` for [`action::JOB_CLAIM`]: the job leased, which attempt this
+/// is and until when, and, for a merge, its file. Never the lease id, which
+/// is what a result is posted under.
+pub fn subject_job_claim(job: &recall_wire::Job) -> Value {
+    let mut m = Map::new();
+    m.insert("job_id".into(), json!(job.id));
+    m.insert("kind".into(), json!(job.kind));
+    m.insert("attempt".into(), json!(job.attempt));
+    m.insert("lease_expires_at".into(), json!(job.lease_expires_at));
+    m.insert(
+        "project_key".into(),
+        json!(job.merge.as_ref().map(|i| &i.project_key)),
+    );
+    m.insert(
+        "file_path".into(),
+        json!(job.merge.as_ref().map(|i| &i.file_path)),
+    );
+    Value::Object(m)
+}
+
+/// What a recorded result changed, for [`subject_job_result`].
+pub struct JobChange<'a> {
+    /// The job.
+    pub job_id: &'a str,
+    /// Its file's project.
+    pub project_key: &'a str,
+    /// Its file.
+    pub file_path: &'a str,
+    /// Its state now: `done`, `queued` for another attempt, or `failed`.
+    pub state: &'a str,
+    /// `content_sha256` of the merged content, when this result wrote it to
+    /// the file; [`None`] when the file was left as it was.
+    pub stored_sha256: Option<&'a str>,
+    /// The job that merges this result with a newer version, when the
+    /// file changed while it ran.
+    pub follow_up: Option<&'a str>,
+}
+
+/// `subject` for [`action::JOB_RESULT`]. A result's body is the merged
+/// file, so it is not kept; `stored_sha256` says what, if anything, the
+/// file became.
+pub fn subject_job_result(change: &JobChange<'_>) -> Value {
+    let mut m = Map::new();
+    m.insert("job_id".into(), json!(change.job_id));
+    m.insert("project_key".into(), json!(change.project_key));
+    m.insert("file_path".into(), json!(change.file_path));
+    m.insert("state".into(), json!(change.state));
+    m.insert("stored_sha256".into(), json!(change.stored_sha256));
+    m.insert("follow_up".into(), json!(change.follow_up));
+    Value::Object(m)
+}
+
+/// `subject` for [`action::JOB_RETRY`].
+pub fn subject_job_retry(job: &recall_wire::JobSummary) -> Value {
+    let mut m = Map::new();
+    m.insert("job_id".into(), json!(job.id));
+    m.insert("kind".into(), json!(job.kind));
+    m.insert("project_key".into(), json!(job.project_key));
+    m.insert("file_path".into(), json!(job.file_path));
     Value::Object(m)
 }
 
@@ -312,6 +383,7 @@ mod tests {
                 stored_sha256: "4b1f",
                 base_sha256: Some("9f2c"),
                 merged: true,
+                merge_job: None,
             }),
             Some(&SignedRequest {
                 body_sha256: "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",

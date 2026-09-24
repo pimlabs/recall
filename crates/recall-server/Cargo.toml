@@ -16,6 +16,9 @@ path = "src/main.rs"
 
 [dependencies]
 recall-wire.workspace = true
+# Only for the inline merge a server without a worker still runs. Built
+# without the worker's `client` feature, so no HTTP client comes with it.
+recall-worker.workspace = true
 
 anyhow.workspace = true
 axum.workspace = true
@@ -47,6 +50,10 @@ http-body.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# The end-to-end test: a real worker, client and all, against this server
+# on a real socket. Tests only, so the server binary still has no client.
+recall-worker = { workspace = true, features = ["client"] }
+reqwest.workspace = true
 # Only to drive the Router in tests without binding a real socket.
 tower = { version = "0.5", features = ["util"] }
 # Only for server/tls.rs's tests: a self-signed certificate to serve, and a

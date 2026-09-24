@@ -19,10 +19,15 @@ use crate::now;
 
 mod audit;
 mod devices;
+mod jobs;
 
 pub use audit::{AuditEntry, ConsistencyError, Outcome};
 pub use devices::{
     plain_name, Created, Decision, Inserted, NewAuthkey, NewDevice, NewEnrollment, Poll, Waiting,
+};
+pub use jobs::{
+    clip, Failure, Queued, Retried, Settled, Settlement, MAX_ATTEMPTS, MAX_ERROR_BYTES, MAX_LINKS,
+    MAX_OPEN_JOBS,
 };
 
 /// Frozen: an already-deployed database was created with exactly this.
@@ -47,6 +52,10 @@ pub struct Existing {
     pub content: String,
     /// Whether the row is a tombstone.
     pub deleted: bool,
+    /// The machine that wrote it; empty when none was recorded.
+    pub source_env: String,
+    /// When it was written.
+    pub updated_at: String,
 }
 
 /// The connection, plus the in-memory state built from it: the audit log's
@@ -153,8 +162,14 @@ impl Store {
         // Tables of their own, beside memory_files rather than in it, so a
         // server from before devices existed still opens this file and
         // simply never looks at them: rolling back stays a matter of
-        // starting the older image. Same for audit_log, added here.
+        // starting the older image. Same for audit_log.
         state.conn.execute_batch(devices::SCHEMA)?;
+        // The one change to an existing table the merge queue needs:
+        // devices may now have the worker scope, which SQLite can only
+        // allow by rebuilding the table. Then the queue's own table, beside
+        // the others for the same reason they are.
+        devices::allow_worker_scope(&state.conn)?;
+        state.conn.execute_batch(jobs::SCHEMA)?;
         state.conn.execute_batch(audit::SCHEMA)?;
 
         let loaded = audit::load(&state.conn)?;
@@ -165,20 +180,7 @@ impl Store {
 
     /// Reads one row.
     pub fn get(&self, project_key: &str, file_path: &str) -> Result<Option<Existing>> {
-        let conn = self.lock();
-        let row = conn
-            .query_row(
-                "SELECT content, deleted FROM memory_files WHERE project_key = ?1 AND file_path = ?2",
-                (project_key, file_path),
-                |r| {
-                    Ok(Existing {
-                        content: r.get(0)?,
-                        deleted: r.get::<_, i64>(1)? != 0,
-                    })
-                },
-            )
-            .optional()?;
-        Ok(row)
+        read_file(&self.lock(), project_key, file_path)
     }
 
     /// Writes content, clearing any tombstone, and appends the leaf
@@ -195,16 +197,7 @@ impl Store {
     ) -> Result<String> {
         self.audited(
             |tx, at| {
-                tx.execute(
-                    "INSERT INTO memory_files (project_key, file_path, content, source_env, updated_at, deleted)
-                     VALUES (?1, ?2, ?3, ?4, ?5, 0)
-                     ON CONFLICT(project_key, file_path) DO UPDATE SET
-                         content = excluded.content,
-                         source_env = excluded.source_env,
-                         updated_at = excluded.updated_at,
-                         deleted = 0",
-                    (project_key, file_path, content, nullable(source_env), at),
-                )?;
+                write_file(tx, project_key, file_path, content, source_env, at)?;
                 Ok(Outcome::Commit(at.to_string()))
             },
             |seq, at, _| build_leaf(seq, at),
@@ -214,8 +207,12 @@ impl Store {
     /// Marks a file deleted while deliberately leaving its content in
     /// place: a mistaken delete stays recoverable at the database level,
     /// even though nothing in the app surfaces an undo yet. [`Store::list`]
-    /// withholds the content so a pull can't resurrect it. The leaf, and
-    /// the time answered, as [`Store::upsert_audited`].
+    /// withholds the content so a pull can't resurrect it.
+    ///
+    /// In the same transaction it closes the file's open merge jobs, so
+    /// nothing merges the deleted notes back into a file pushed after it,
+    /// and appends its leaf, answering the time, as
+    /// [`Store::upsert_audited`] does.
     pub fn tombstone_audited(
         &self,
         project_key: &str,
@@ -234,6 +231,7 @@ impl Store {
                          deleted = 1",
                     (project_key, file_path, nullable(source_env), at),
                 )?;
+                jobs::close_for_delete(tx, project_key, file_path, at)?;
                 Ok(Outcome::Commit(at.to_string()))
             },
             |seq, at, _| build_leaf(seq, at),
@@ -417,6 +415,54 @@ pub(crate) fn test_leaf(seq: u64, at: &str) -> Vec<u8> {
         leaf::subject_start("test"),
         None,
     )
+}
+
+/// What [`existing_from`] reads, in its order.
+const EXISTING_COLUMNS: &str = "content, deleted, COALESCE(source_env, ''), updated_at";
+
+fn existing_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<Existing> {
+    Ok(Existing {
+        content: r.get(0)?,
+        deleted: r.get::<_, i64>(1)? != 0,
+        source_env: r.get(2)?,
+        updated_at: r.get(3)?,
+    })
+}
+
+/// One row, on a connection or transaction the caller already holds.
+fn read_file(conn: &Connection, project_key: &str, file_path: &str) -> Result<Option<Existing>> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {EXISTING_COLUMNS} FROM memory_files WHERE project_key = ?1 AND file_path = ?2"),
+            (project_key, file_path),
+            existing_from,
+        )
+        .optional()?)
+}
+
+/// Writes content, clearing any tombstone, on a connection or transaction
+/// the caller already holds: the one statement behind
+/// [`Store::upsert_audited`] and a merged result being applied, each in a
+/// transaction that appends its leaf.
+fn write_file(
+    conn: &Connection,
+    project_key: &str,
+    file_path: &str,
+    content: &str,
+    source_env: &str,
+    updated_at: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO memory_files (project_key, file_path, content, source_env, updated_at, deleted)
+         VALUES (?1, ?2, ?3, ?4, ?5, 0)
+         ON CONFLICT(project_key, file_path) DO UPDATE SET
+             content = excluded.content,
+             source_env = excluded.source_env,
+             updated_at = excluded.updated_at,
+             deleted = 0",
+        (project_key, file_path, content, nullable(source_env), updated_at),
+    )?;
+    Ok(())
 }
 
 /// An absent `source_env` is stored as NULL, not `''` — `admin_stats`

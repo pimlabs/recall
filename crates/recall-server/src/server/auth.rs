@@ -22,7 +22,7 @@ use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
-use recall_wire::devices::{SCOPE_ADMIN, SCOPE_SYNC};
+use recall_wire::devices::{SCOPE_ADMIN, SCOPE_SYNC, SCOPE_WORKER};
 use recall_wire::signature::{
     self, Received, SignatureInput, Target, LABEL, MAX_AHEAD_SECONDS, SIGNATURE_HEADER,
     SIGNATURE_INPUT_HEADER, WINDOW_SECONDS,
@@ -57,7 +57,7 @@ pub(super) enum Caller {
         /// The name it enrolled as. A push it signs is recorded under this,
         /// whatever the push says: the name belongs to the key.
         name: String,
-        /// `sync` or `admin`.
+        /// `sync`, `admin` or `worker`.
         scope: String,
         /// Whether it is removed once idle.
         ephemeral: bool,
@@ -88,6 +88,13 @@ impl Caller {
             Caller::Operator => true,
             Caller::Device { scope, .. } => scope == SCOPE_ADMIN,
         }
+    }
+
+    /// Whether this caller is a worker device: it may claim jobs and post
+    /// their results, and nothing else. Not the operator, who has no
+    /// business holding a lease.
+    pub(super) fn is_worker(&self) -> bool {
+        matches!(self, Caller::Device { scope, .. } if scope == SCOPE_WORKER)
     }
 }
 
@@ -130,14 +137,16 @@ pub(super) struct Checked {
 
 /// Whether this server knows what a device of `scope` may do.
 ///
-/// The rest of the server treats a device that is not `admin` as a `sync`
-/// device, so a scope a later version adds would otherwise be read as
-/// `sync`. A worker device, which a newer server keeps away from memory,
-/// would then read and write every project after a rollback to this
+/// The rest of the server decides by `admin` and `worker` and treats any
+/// other device as a `sync` one, so a scope a later version adds would
+/// otherwise be read as `sync`: a device a newer server kept away from
+/// memory would read and write every project after a rollback to this
 /// version. So a scope this server does not know is refused rather than
-/// guessed at.
+/// guessed at. (Servers from 0.4.1 refuse a worker this way; the one
+/// before them does not, which is why a rollback past the worker revokes
+/// it first.)
 fn known_scope(scope: &str) -> bool {
-    scope == SCOPE_SYNC || scope == SCOPE_ADMIN
+    scope == SCOPE_SYNC || scope == SCOPE_ADMIN || scope == SCOPE_WORKER
 }
 
 fn rejected(why: &dyn std::fmt::Display) -> Refusal {
@@ -664,13 +673,30 @@ mod tests {
         assert!(Caller::Operator.is_admin());
         assert!(device("admin").is_admin());
         assert!(!device("sync").is_admin());
+        assert!(!device("worker").is_admin());
+    }
+
+    #[test]
+    fn only_a_worker_device_is_a_worker() {
+        let device = |scope: &str| Caller::Device {
+            id: "dev_a".into(),
+            name: "worker".into(),
+            scope: scope.into(),
+            ephemeral: false,
+            agent: String::new(),
+        };
+        assert!(device("worker").is_worker());
+        assert!(!device("admin").is_worker());
+        assert!(!device("sync").is_worker());
+        assert!(!Caller::Operator.is_worker());
     }
 
     #[test]
     fn a_scope_this_server_does_not_know_is_not_read_as_sync() {
         assert!(known_scope("sync"));
         assert!(known_scope("admin"));
-        for later in ["worker", "Sync", "", "sync "] {
+        assert!(known_scope("worker"));
+        for later in ["evaluator", "Worker", "Sync", "", "sync "] {
             assert!(!known_scope(later), "{later:?}");
         }
     }

@@ -21,7 +21,8 @@ use axum::Extension;
 use recall_wire::devices::{
     self, displayable, normalize_user_code, ACCESS_DENIED, AUTHKEY_PREFIX, AUTHORIZATION_PENDING,
     CODE_TTL_SECONDS, DEFAULT_MAX_DEVICES, EXPIRED_TOKEN, INVALID_GRANT, MAX_AUTHKEY_DAYS,
-    MAX_TAG_CHARS, POLL_INTERVAL_SECONDS, SCOPE_ADMIN, SCOPE_SYNC, SLOW_DOWN, USER_CODE_ALPHABET,
+    MAX_TAG_CHARS, POLL_INTERVAL_SECONDS, SCOPE_ADMIN, SCOPE_SYNC, SCOPE_WORKER, SLOW_DOWN,
+    USER_CODE_ALPHABET,
 };
 use recall_wire::signature::encode_public_key;
 use recall_wire::{
@@ -123,7 +124,7 @@ fn base32(bytes: &[u8]) -> String {
 }
 
 /// `prefix` and `bytes` random bytes in [`base32`].
-fn new_id(prefix: &str, bytes: usize) -> anyhow::Result<String> {
+pub(super) fn new_id(prefix: &str, bytes: usize) -> anyhow::Result<String> {
     Ok(format!("{prefix}{}", base32(&random(bytes)?)))
 }
 
@@ -433,8 +434,11 @@ pub(super) async fn handle_approve(
         Ok(req) => req,
         Err(refused) => return refused.into_response(),
     };
-    if req.scope != SCOPE_SYNC && req.scope != SCOPE_ADMIN {
-        return error(StatusCode::BAD_REQUEST, "scope must be sync or admin");
+    if ![SCOPE_SYNC, SCOPE_ADMIN, SCOPE_WORKER].contains(&req.scope.as_str()) {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "scope must be sync, admin or worker",
+        );
     }
     let code = match user_code(&req.user_code) {
         Ok(code) => code,
@@ -608,6 +612,10 @@ pub(super) async fn handle_list_devices(State(state): State<Arc<AppState>>) -> R
 
 /// `POST /v1/devices/{id}/revoke`. Revoking twice is not an error; the
 /// first time stands.
+///
+/// Revoking the last worker puts merging back in the server, and what it
+/// left in the queue with it: a drain starts in the background, merging
+/// each job here or, when this server cannot merge, marking it failed.
 pub(super) async fn handle_revoke_device(
     State(state): State<Arc<AppState>>,
     caller: Option<Extension<Caller>>,
@@ -639,7 +647,17 @@ pub(super) async fn handle_revoke_device(
                 request.as_ref(),
             )
         }) {
-        Ok(Some(device)) => json(StatusCode::OK, &device),
+        Ok(Some(device)) => {
+            if device.scope == SCOPE_WORKER {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = super::jobs::drain_without_worker(&state).await {
+                        eprintln!("draining the merge queue failed: {e:#}");
+                    }
+                });
+            }
+            json(StatusCode::OK, &device)
+        }
         Ok(None) => error(StatusCode::NOT_FOUND, "no device has that id"),
         Err(e) => internal(e),
     }

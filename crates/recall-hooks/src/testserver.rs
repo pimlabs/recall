@@ -277,6 +277,7 @@ async fn push(
         deleted: req.deleted,
         merged: false,
         updated_at: "2026-01-01T00:00:00.000Z".into(),
+        merge_job: None,
     };
     state.lock().expect("test lock").pushes.push(req);
     Json(response).into_response()

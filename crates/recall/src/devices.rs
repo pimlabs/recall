@@ -19,7 +19,9 @@ use std::io::{self, IsTerminal};
 use clap::Subcommand;
 use recall_hooks::client::{self, Client};
 use recall_hooks::{exit, ClientConfig};
-use recall_wire::devices::{normalize_user_code, MAX_AUTHKEY_DAYS, SCOPE_ADMIN, SCOPE_SYNC};
+use recall_wire::devices::{
+    normalize_user_code, MAX_AUTHKEY_DAYS, SCOPE_ADMIN, SCOPE_SYNC, SCOPE_WORKER,
+};
 use recall_wire::{ApproveRequest, AuthkeyRequest, Device};
 
 use crate::project as proj;
@@ -38,8 +40,12 @@ pub enum Cmd {
         /// The code the machine shows, such as WDJB-MJHT
         code: String,
         /// Give it the admin scope, so it can approve and revoke devices too
-        #[arg(long)]
+        #[arg(long, conflicts_with = "worker")]
         admin: bool,
+        /// Give it the worker scope: a recall-worker, which may take merge
+        /// jobs and nothing else
+        #[arg(long)]
+        worker: bool,
         /// The fingerprint the machine shows. Refuses to approve a key with
         /// any other
         #[arg(long)]
@@ -116,10 +122,18 @@ pub async fn run(cmd: Cmd) -> anyhow::Result<i32> {
         Cmd::Approve {
             code,
             admin,
+            worker,
             fingerprint,
             yes,
             json,
-        } => approve(&client, &code, admin, fingerprint.as_deref(), yes, json).await,
+        } => {
+            let scope = match (admin, worker) {
+                (true, _) => SCOPE_ADMIN,
+                (_, true) => SCOPE_WORKER,
+                _ => SCOPE_SYNC,
+            };
+            approve(&client, &code, scope, fingerprint.as_deref(), yes, json).await
+        }
         Cmd::Revoke { name, yes, json } => revoke(&cfg, &client, &name, yes, json).await,
     };
     Ok(finish(result))
@@ -319,7 +333,7 @@ async fn list(cfg: &ClientConfig, client: &Client, json: bool) -> Done {
 async fn approve(
     client: &Client,
     code: &str,
-    admin: bool,
+    scope: &str,
     expected: Option<&str>,
     yes: bool,
     json: bool,
@@ -331,7 +345,6 @@ async fn approve(
         );
     };
     let pending = client.pending(&code).await?;
-    let scope = if admin { SCOPE_ADMIN } else { SCOPE_SYNC };
 
     // Shown on stderr, so `--json` leaves stdout for the result alone.
     eprintln!("Code         {}", pending.user_code);

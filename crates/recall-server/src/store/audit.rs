@@ -3,14 +3,17 @@
 //! ([`Store::audited`]) every authenticated state change goes through so
 //! its leaf commits with it.
 //!
-//! Every method on [`Store`] the server uses to change a file, a device or
-//! an authkey takes the leaf it appends as an argument; none can change one
-//! without it. The writes left without a leaf are deliberate, and none is a
-//! change the server makes for a request or on its own: an enrolment
-//! waiting for approval (anyone may ask, and unauthenticated routes append
-//! nothing), a machine's poll for it, a device's `last_seen`, the sweep of
-//! long-expired enrolments, and `recall-server admin`'s changes on the host
-//! (`store/admin.rs`), which run beside the server on the database file.
+//! Every method on [`Store`] the server uses to change a file, a device, an
+//! authkey or a merge job's outcome takes the leaf it appends as an
+//! argument; none can change one without it. The writes left without a
+//! leaf are deliberate, and none changes a file, a credential or what a job
+//! came to: an enrolment waiting for approval (anyone may ask, and
+//! unauthenticated routes append nothing), a machine's poll for it, a
+//! device's `last_seen`, the sweep of long-expired enrolments, the release
+//! of a revoked worker's leases before the server claims them itself
+//! ([`Store::release_open_jobs`]), the pruning of finished jobs, and
+//! `recall-server admin`'s changes on the host (`store/admin.rs`), which
+//! run beside the server on the database file.
 
 use anyhow::{bail, Result};
 use rusqlite::Connection;
@@ -75,8 +78,11 @@ pub(super) struct Loaded {
 /// file changed some other way, by a disk or by hand.
 ///
 /// The hashes are recomputed from the leaves rather than trusted, which
-/// is most of what opening costs: a few seconds for a million leaves, a
-/// gigabyte of them. A server that started anyway would sign every later
+/// is most of what opening costs: measured at 8.5 seconds for a million
+/// leaves (a gigabyte of them) on a small VM, against 1.8 seconds to read
+/// the stored hashes alone, and 64 bytes of memory a leaf for the tree
+/// kept after. A log that size is years of one owner's syncing; the check
+/// is worth its wait. A server that started anyway would sign every later
 /// checkpoint over a tree it had already lost, so it does not start; the
 /// error says to restore the database from a backup.
 pub(super) fn load(conn: &Connection) -> Result<Loaded> {
@@ -329,6 +335,7 @@ mod tests {
                 stored_sha256: "abc",
                 base_sha256: None,
                 merged: false,
+                merge_job: None,
             }),
             None,
         )

@@ -45,6 +45,36 @@ pub struct MergeStatus {
     pub last_merge_at: String,
     /// The last failure, if there has been one since startup.
     pub last_merge_error: Option<MergeError>,
+    /// The worker that merges queued jobs. Omitted while none is enrolled,
+    /// which is also when merges still run inside the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<WorkerStatus>,
+    /// The merge queue. Omitted while no worker is enrolled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<QueueStatus>,
+}
+
+/// The `worker` object inside [`MergeStatus`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorkerStatus {
+    /// When a worker last asked for a job, since this server started.
+    pub last_claim_at: Option<String>,
+    /// Its `User-Agent`, such as `recall-worker/0.4.2 (linux-x86_64)`.
+    pub agent: String,
+}
+
+/// The `queue` object inside [`MergeStatus`]: what is waiting, so a worker
+/// that stopped is noticed rather than silently leaving merges undone.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct QueueStatus {
+    /// Jobs waiting for a worker.
+    pub queued: u64,
+    /// Jobs a worker holds now.
+    pub leased: u64,
+    /// Jobs out of attempts, kept until retried.
+    pub failed: u64,
+    /// When the oldest waiting job was queued; `null` when none waits.
+    pub oldest_queued_at: Option<String>,
 }
 
 /// Body returned by `GET /health`.

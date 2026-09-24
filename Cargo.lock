@@ -1691,6 +1691,8 @@ dependencies = [
  "hyper-util",
  "rcgen",
  "recall-wire",
+ "recall-worker",
+ "reqwest",
  "rusqlite",
  "rustls",
  "rustls-acme",
@@ -1719,6 +1721,22 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "recall-worker"
+version = "0.4.1"
+dependencies = [
+ "base64",
+ "getrandom 0.4.3",
+ "recall-wire",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "time",
+ "tokio",
 ]
 
 [[package]]
