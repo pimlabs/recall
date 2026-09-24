@@ -652,7 +652,10 @@ with `--checkpoint` — that is exactly what a rewritten log looks like: the
 log is shorter than the checkpoint, or no longer extends it. Expected after
 a restore, and worth writing down when you do one, with the time and the
 backup's name, so the failure it causes later is not mistaken for
-tampering. The server itself also refuses to start on a log it did not
+tampering. Every machine that pulled since the backup holds such a
+checkpoint, since each pull saves one: its `recall doctor` fails the
+`audit log` check, and each session's pull warns, until `recall audit
+reset` on that machine, run once you know the restore is why. The server itself also refuses to start on a log it did not
 write (a leaf missing, out of place, or no longer matching its hash); a
 restore from a backup it wrote is the way back from that.
 

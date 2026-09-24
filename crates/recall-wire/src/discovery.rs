@@ -76,6 +76,13 @@ impl Discovery {
     pub fn devices(&self) -> Option<crate::DevicesCapability> {
         serde_json::from_value(self.capabilities.get(CAPABILITY_DEVICES)?.clone()).ok()
     }
+
+    /// The [`CAPABILITY_AUDIT`] capability, read into its type: [`None`]
+    /// from a server that keeps no audit log (one older than 0.4.2), or
+    /// lists one this build cannot read.
+    pub fn audit(&self) -> Option<crate::AuditCapability> {
+        serde_json::from_value(self.capabilities.get(CAPABILITY_AUDIT)?.clone()).ok()
+    }
 }
 
 /// The protocol versions a server speaks.
@@ -132,6 +139,11 @@ pub const CAPABILITY_DEVICES: &str = "devices";
 /// merge worker and has the job routes (see [`crate::jobs`]). A worker
 /// asks for it before enrolling, and works for no server without it.
 pub const CAPABILITY_MERGE_QUEUE: &str = "merge_queue";
+
+/// The capability a server lists when it keeps an audit log (see
+/// [`crate::audit`]); its parameters are a [`crate::AuditCapability`],
+/// which says how large a page of entries may be.
+pub const CAPABILITY_AUDIT: &str = "audit";
 
 /// A build made by the release workflow from a release tag.
 pub const CHANNEL_RELEASE: &str = "release";

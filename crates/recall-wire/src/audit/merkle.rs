@@ -18,6 +18,14 @@
 //! complete subtree, so an append, a root and a consistency proof each cost
 //! a handful of hashes rather than a pass over every leaf.
 //!
+//! It is here, in the contract, rather than in `recall-server` where it was
+//! written, because both halves run it: the server builds its roots and
+//! proofs with it, and the client checks those with [`verify_consistency`]
+//! and rebuilds an export's roots with [`Tree`]. One implementation on both
+//! sides of a proof means a bug in it is one bug to find, not two that agree
+//! with each other by accident; `scripts/audit-verify.py` is the second,
+//! independent implementation that guards against that.
+//!
 //! Known-answer vectors are in `merkle_tests.rs`, from
 //! `transparency-dev/merkle` (`testonly/constants.go` and
 //! `testdata/consistency/`, commit `fbbcd741c3d1c69d8498487baa8edc9e5824847c`)

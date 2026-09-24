@@ -491,7 +491,9 @@ Recall-Audit-Checkpoint: 1042 CsUYapGGPo4dkMgIAUqom/Xajj7h2fB2MPA3j2jxq2I=
 `<tree_size> <root_hash>`, the same two fields [`GET
 /v1/audit/checkpoint`](#get-v1auditcheckpoint) answers with, so every pull
 leaves the client a checkpoint to verify future reads against without
-another request.
+another request. The client saves each one it receives, in
+`~/.recall/audit.json`, and later asks for the proof that the log still
+extends them; see [The client as witness](#the-client-as-witness).
 
 ### Status codes
 
@@ -1084,14 +1086,14 @@ account, as it is for everything else in the file (see "What it protects,
 and what it does not" below).
 
 **What it protects, and what it does not.** A checkpoint — the tree's size
-and root — saved somewhere the server cannot reach lets
-[`scripts/audit-verify.py`](#verifying-offline) show later that the log
+and root — saved somewhere the server cannot reach lets a client, or
+[`scripts/audit-verify.py`](#verifying-offline), show later that the log
 still extends it: removing or rewriting anything before that checkpoint,
-by the server or by anyone with its database, is caught. Nothing saves
-checkpoints automatically yet; the client does not keep them. Until it
-does, it is the owner who saves one (every pull's
-`Recall-Audit-Checkpoint` header is one), and history nobody saved a
-checkpoint of can be rewritten unnoticed. The database refuses any
+by the server or by anyone with its database, is caught. Every client
+saves one at every pull and checks them in `recall doctor` ([The client
+as witness](#the-client-as-witness)); what nobody saved a checkpoint of
+yet, the leaves appended since any client last pulled, can still be
+rewritten unnoticed. The database refuses any
 `UPDATE`, `DELETE` or insert out of order on the log, and the server
 refuses to start on a log whose leaves no longer hash as written, but
 neither stops someone holding the file: they can drop the triggers, or
@@ -1207,17 +1209,25 @@ memory, a few hundred hashes at most, without reading the log.
 
 `GET /v1/audit/checkpoint` and `GET /v1/audit/entries` are all that is
 needed to write an export: a first line holding the checkpoint, then every
-leaf `entries` returns, one per line, in `seq` order. (A CLI command that
-pages through this for you — `recall audit export` — is client work, not
-this release's; today an owner builds the file with `curl` and the two
-routes above, or a short script.) Given such a file, and every checkpoint
-saved earlier,
+leaf `entries` returns, one per line, in `seq` order. `recall audit export`
+pages through them for you, on an admin device or with `RECALL_TOKEN`, a
+page of `max_page` leaves at a time from the discovery document's `audit`
+capability, and carries on from each page's `end` when a page stops early
+at `max_page_bytes`. Given such a file, and every checkpoint saved
+earlier, either of two verifiers checks it offline:
 
 ```sh
+recall audit verify audit.jsonl
 python3 scripts/audit-verify.py audit.jsonl --checkpoint 900:t8Qm…= --checkpoint 1000:Hc0v…=
 ```
 
-recomputes the tree with nothing but the standard library and checks:
+`recall audit verify` holds the file to the checkpoints this machine saved
+for the server in effect, and to any given with `--checkpoint SIZE:ROOT`;
+the script, to those given with `--checkpoint`. The script recomputes the
+tree with nothing but the standard library, the Rust one with the code the
+server builds its tree with (`recall_wire::audit`), and they make the same
+checks, which the server's tests hold them to over every forgery they
+build:
 
 1. Each leaf is version 1 in its action's shape, with no key given twice;
    `seq` is the integer position it is at; `at` never goes back.
@@ -1252,7 +1262,40 @@ changed byte, a removed or swapped leaf, a checkpoint the log does not
 extend, a signature that does not verify, a request replayed or moved onto
 another action — and 2 when it could not check as asked. It is meant to be
 run by the owner against a log exported this way, not by any automated
-pipeline.
+pipeline. `recall audit verify` exits the same three ways. The one place the
+two can differ is an authkey's tag sent decomposed (a letter and its accent
+as two characters): the script composes the body's tag (NFC) as the server
+does before comparing, and the Rust verifier, which carries no Unicode
+tables, compares bytes and refuses it.
+
+### The client as witness
+
+Every response that carries `Recall-Audit-Checkpoint` (every `GET /sync`)
+is saved in `~/.recall/audit.json`, per server, each checkpoint as the
+three lines of a [C2SP
+tlog-checkpoint](https://github.com/C2SP/C2SP/blob/main/tlog-checkpoint.md)
+note: the server's address without its scheme as the origin, the size, the
+root, and no signature, since the owner's devices fetch it over TLS from
+the server they are checking. The hooks only save: a pull that cannot save
+its checkpoint still succeeds, and the check costs no request at session
+start.
+
+`recall doctor`, `recall status` and `recall audit verify` with no file
+then ask for `GET /v1/audit/checkpoint` and, for the newest checkpoint
+proven so far and each one saved since, `GET /v1/audit/consistency` from it
+to the log now, and verify each proof by rebuilding both roots (RFC 9162
+§2.1.4). What is proven is kept, the newest 32, and the log now becomes
+the newest; the first time, with nothing saved, the log is taken as it is.
+`recall audit export` checks the saved checkpoints against the leaves it
+fetched instead, with no proof to ask for.
+
+A log that does not extend one (a proof that does not verify, a log
+shorter than a saved checkpoint, a second root for a size already saved) is
+written into `audit.json` and stays there: `recall doctor` fails on it,
+`recall status` shows it, every session's pull warns about it (and still
+exits 0), and no later checkpoint is taken as the truth until `recall audit
+reset`. Restoring the server from a backup rolls its log back, and is found
+exactly this way; see [`deploy/README.md`](../../deploy/README.md#backups).
 
 ---
 

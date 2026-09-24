@@ -72,6 +72,10 @@ pub struct ClientConfig {
     pub config_file: Option<std::path::PathBuf>,
     /// `~/.recall/device.key`, likewise.
     pub device_file: Option<std::path::PathBuf>,
+    /// `~/.recall/audit.json`, likewise: where every pull saves the
+    /// checkpoint of the server's audit log it received. See
+    /// [`crate::audit`].
+    pub audit_file: Option<std::path::PathBuf>,
     /// This machine's device at [`ClientConfig::url`], when it is enrolled
     /// there. With one, every request is signed with its key and
     /// [`ClientConfig::token`] is not sent at all.
@@ -162,6 +166,7 @@ impl std::fmt::Debug for ClientConfig {
             credentials_file,
             config_file,
             device_file,
+            audit_file,
             device,
             device_error,
             authkey,
@@ -185,6 +190,7 @@ impl std::fmt::Debug for ClientConfig {
             .field("credentials_file", credentials_file)
             .field("config_file", config_file)
             .field("device_file", device_file)
+            .field("audit_file", audit_file)
             .field("device", device)
             .field("device_error", device_error)
             .field("authkey", &authkey.as_deref().map(redacted))
@@ -343,6 +349,7 @@ impl ClientConfig {
             credentials_file: saved.home.as_ref().map(home::Home::credentials_path),
             config_file: saved.home.as_ref().map(home::Home::config_path),
             device_file: saved.home.as_ref().map(home::Home::device_path),
+            audit_file: saved.home.as_ref().map(home::Home::audit_path),
             device,
             device_error: saved.device_error,
             authkey: var(&lookup, crate::device::AUTHKEY_VAR)
@@ -403,7 +410,12 @@ impl ClientConfig {
         if let Some(why) = &self.device_error {
             return Err(ClientError::DeviceFile(why.clone()));
         }
-        let client = crate::client::Client::new(&self.url, &self.token)?;
+        let mut client = crate::client::Client::new(&self.url, &self.token)?;
+        // Every pull then leaves this machine a checkpoint of the server's
+        // audit log, whoever made it.
+        if let Some(file) = &self.audit_file {
+            client = client.with_witness(crate::audit::Witness::new(file, &self.url));
+        }
         match &self.device {
             Some(entry) => {
                 let signer = crate::device::Signer::from_entry(entry)

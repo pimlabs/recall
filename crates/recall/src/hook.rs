@@ -122,14 +122,35 @@ pub async fn pull() -> anyhow::Result<i32> {
         },
         ok => ok,
     };
-    match result {
-        Ok(res) => {
-            eprintln!("{}", res.describe(ctx.project_key()));
-            Ok(exit::OK)
-        }
+    match &result {
+        Ok(res) => eprintln!("{}", res.describe(ctx.project_key())),
         Err(err) => {
-            eprintln!("recall-pull: fetch failed ({err}), leaving local memory untouched");
-            Ok(exit::OK)
+            eprintln!("recall-pull: fetch failed ({err}), leaving local memory untouched")
         }
+    }
+    warn_if_rewritten(&cfg);
+    Ok(exit::OK)
+}
+
+/// Says so at every session start while this machine holds a finding that
+/// the server's audit log no longer extends a checkpoint it saved: loud,
+/// and still exit 0, since a hook must not be what stops a session. Only
+/// reads the file; the pull itself saved its checkpoint through the
+/// client, and checking is `recall doctor`'s (see `recall_hooks::audit`).
+fn warn_if_rewritten(cfg: &recall_hooks::ClientConfig) {
+    let Some(file) = &cfg.audit_file else {
+        return;
+    };
+    let witness = recall_hooks::audit::Witness::new(file, &cfg.url);
+    if let Ok(recall_hooks::audit::Saved {
+        inconsistent: Some(found),
+        ..
+    }) = witness.load()
+    {
+        eprintln!(
+            "recall-pull: WARNING: the server's audit log no longer extends a checkpoint this \
+             machine saved ({}), found {}. Run recall doctor.",
+            found.detail, found.found_at
+        );
     }
 }

@@ -27,6 +27,9 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["time"] }
 # ~/.recall/config.toml and credentials.toml.
 toml.workspace = true
+# When an inconsistency in a server's audit log was found, in the API's
+# timestamp format. Already in the tree through the binary.
+time.workspace = true
 
 [dev-dependencies]
 axum.workspace = true

@@ -97,6 +97,64 @@ pub struct DeviceReport {
     pub check_error: Option<String>,
 }
 
+/// This machine's witness of the server's audit log, as `status --json`
+/// reports it: the checkpoints saved in `~/.recall/audit.json`, and what
+/// checking them found. See `recall_hooks::audit`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct AuditReport {
+    /// `~/.recall/audit.json`.
+    pub file: String,
+    /// Checkpoints a proof has shown the log extends.
+    pub checkpoints: usize,
+    /// Checkpoints saved by pulls and not yet proven.
+    pub unchecked: usize,
+    /// The newest proven one, as `<tree_size> <root_hash>`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub newest: Option<String>,
+    /// Whether the server keeps an audit log, per its discovery document:
+    /// absent when it was not asked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_log: Option<bool>,
+    /// Whether the server just proved its log extends every checkpoint
+    /// saved here: absent when it was not asked, `false` once an
+    /// inconsistency is found.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extends: Option<bool>,
+    /// The server answered, and not with a proof: what it said. Not a
+    /// finding about its log, and not written down, but no proof either.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unproven: Option<String>,
+    /// Why it could not be checked: the server not reached, or the file
+    /// not readable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// What checking found once the log did not extend a checkpoint saved
+    /// here. Kept until `recall audit reset`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inconsistent: Option<recall_hooks::audit::Inconsistency>,
+}
+
+impl AuditReport {
+    /// How many checkpoints are saved, checked or not.
+    pub fn saved(&self) -> usize {
+        self.checkpoints + self.unchecked
+    }
+
+    /// Reads what `witness` holds into the report, keeping what was found
+    /// by asking.
+    fn read(&mut self, witness: &recall_hooks::audit::Witness) {
+        match witness.load() {
+            Ok(saved) => {
+                self.checkpoints = saved.checkpoints.len();
+                self.unchecked = saved.unchecked.len();
+                self.newest = saved.newest().map(|c| c.header());
+                self.inconsistent = saved.inconsistent;
+            }
+            Err(e) => self.error = Some(e.to_string()),
+        }
+    }
+}
+
 /// The `--json` shape. Stable enough to script against; that is the point of
 /// having it at all.
 #[derive(serde::Serialize)]
@@ -290,6 +348,12 @@ pub struct Report {
     /// also what "no off-box backup is configured" looks like.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_offbox_at: Option<String>,
+    /// This machine's witness of the server's audit log, when there is a
+    /// server and a `~/.recall` to keep checkpoints in. Read from the file
+    /// whether or not the server answers, so a rewrite found earlier is
+    /// reported even while it is down.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit: Option<AuditReport>,
 }
 
 /// Collects the report, then prints it as text or JSON.
@@ -438,10 +502,23 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
         synced_files: 0,
         last_synced_at: None,
         last_offbox_at: None,
+        audit: None,
     };
 
     if !rep.url_set {
         return rep;
+    }
+    let witness = cfg
+        .audit_file
+        .as_ref()
+        .map(|file| recall_hooks::audit::Witness::new(file, &cfg.url));
+    if let Some(witness) = &witness {
+        let mut audit = AuditReport {
+            file: witness.file().display().to_string(),
+            ..Default::default()
+        };
+        audit.read(witness);
+        rep.audit = Some(audit);
     }
 
     // A device key that cannot be used is the device's problem, reported as
@@ -484,7 +561,17 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
             // Asked only of a server that answered: an unreachable one has
             // already been reported, and a second error would say nothing new.
             if rep.server_ok {
-                if let Ok(Some(doc)) = client.discover().await {
+                let doc = client.discover().await;
+                if let Some(audit) = rep.audit.as_mut() {
+                    // A server older than the discovery document is older
+                    // than the audit log too.
+                    audit.server_log = match &doc {
+                        Ok(Some(doc)) => Some(doc.audit().is_some()),
+                        Ok(None) => Some(false),
+                        Err(_) => None,
+                    };
+                }
+                if let Ok(Some(doc)) = doc {
                     rep.server_devices = Some(
                         doc.accepts(recall_wire::discovery::AUTH_DEVICE_SIG)
                             && doc.devices().is_some(),
@@ -519,11 +606,39 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
                 if let Ok(resp) = client.pull(&rep.project_key).await {
                     rep.synced_files = resp.files.iter().filter(|f| !f.deleted).count();
                 }
+                // After the pull, which saved the checkpoint it carried: the
+                // check proves that one too. What `recall doctor` is for, per
+                // docs/design/part5-plan.md's "Who witnesses".
+                if let (Some(witness), Some(audit)) = (&witness, rep.audit.as_mut()) {
+                    if audit.server_log == Some(true) && audit.error.is_none() {
+                        witness_check(witness, &client, audit).await;
+                    }
+                }
             }
         }
         Err(err) => rep.server_error = Some(err),
     }
     rep
+}
+
+/// Asks the server to prove its log extends every checkpoint saved here,
+/// and reads what that found into `audit`.
+async fn witness_check(
+    witness: &recall_hooks::audit::Witness,
+    client: &recall_hooks::client::Client,
+    audit: &mut AuditReport,
+) {
+    use recall_hooks::audit::{CheckError, Witnessed};
+    match witness.check(client).await {
+        Ok(Witnessed::Extends { .. }) => audit.extends = Some(true),
+        Ok(Witnessed::Inconsistent(_)) => audit.extends = Some(false),
+        Err(e @ CheckError::File(_)) => audit.error = Some(e.to_string()),
+        Err(e) if e.unanswered() => audit.error = Some(e.to_string()),
+        Err(e) => audit.unproven = Some(e.to_string()),
+    }
+    let error = audit.error.take();
+    audit.read(witness);
+    audit.error = audit.error.take().or(error);
 }
 
 /// Variables in the environment that override a different value in
@@ -655,6 +770,36 @@ fn print_declared_env(rep: &Report) {
         field!(
             "               Claude Code cannot read it either, so nothing it \
 declares is in effect for the hooks."
+        );
+    }
+}
+
+fn print_audit(audit: &AuditReport) {
+    if let Some(found) = &audit.inconsistent {
+        field!(
+            "audit log    : REWRITTEN, found {}: {}; see recall doctor",
+            found.found_at,
+            found.detail
+        );
+    } else if let Some(why) = &audit.unproven {
+        field!("audit log    : NOT PROVEN, the server answered without a proof: {why}");
+    } else if audit.extends == Some(true) {
+        field!(
+            "audit log    : extends every checkpoint saved here ({} kept, newest {})",
+            audit.checkpoints,
+            audit.newest.as_deref().unwrap_or("none")
+        );
+    } else if let Some(err) = &audit.error {
+        field!(
+            "audit log    : not checked ({err}), {} checkpoint(s) saved",
+            audit.saved()
+        );
+    } else if audit.server_log == Some(false) && audit.saved() == 0 {
+        field!("audit log    : not kept by this server (older than 0.4.2)");
+    } else if audit.saved() > 0 {
+        field!(
+            "audit log    : {} checkpoint(s) saved, not checked",
+            audit.saved()
         );
     }
 }
@@ -839,6 +984,11 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
 
     if !rep.url_set {
         return;
+    }
+    // Before the server's lines, and whether or not it answered: a rewrite
+    // found earlier stays found while the server is down.
+    if let Some(audit) = &rep.audit {
+        print_audit(audit);
     }
     if !rep.server_ok {
         field!(

@@ -235,6 +235,7 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
     ));
 
     offbox_finding(rep, &mut out);
+    audit_finding(rep, &mut out);
 
     // ---- is anything quietly going nowhere
     reserved_findings(rep, &mut out);
@@ -699,6 +700,83 @@ fn offbox_finding(rep: &Report, out: &mut Vec<Finding>) {
     }
 }
 
+/// Whether the server's audit log still extends every checkpoint this
+/// machine saved: the plan's "`recall doctor` asks for a consistency proof
+/// from it to the current tree and fails loudly without one".
+///
+/// A rewrite found, now or earlier, fails until `recall audit reset`, and
+/// so does a server that answered without a proof, or that no longer keeps
+/// the log it was witnessed keeping. A server that could not be asked only
+/// warns: nothing about its log follows from that.
+fn audit_finding(rep: &Report, out: &mut Vec<Finding>) {
+    const CHECK: &str = "audit log";
+    let Some(audit) = &rep.audit else {
+        return;
+    };
+    if let Some(found) = &audit.inconsistent {
+        out.push(fail(
+            CHECK,
+            format!(
+                "the server's log no longer extends a checkpoint saved here (found {}): {}",
+                found.found_at, found.detail
+            ),
+            crate::audit::AFTER_A_REWRITE,
+        ));
+        return;
+    }
+    if let Some(why) = &audit.unproven {
+        out.push(fail(
+            CHECK,
+            format!(
+                "the server did not prove its log extends the checkpoints saved here: {why}"
+            ),
+            "recall audit verify; if it persists, recall audit export -o audit.jsonl and              recall audit verify audit.jsonl",
+        ));
+        return;
+    }
+    match (audit.server_log, audit.saved()) {
+        (Some(false), 0) => {
+            out.push(ok(CHECK, "not kept by this server (older than 0.4.2)"));
+            return;
+        }
+        (Some(false), saved) => {
+            out.push(fail(
+                CHECK,
+                format!(
+                    "the server keeps no audit log, and this machine saved {saved}                      checkpoint(s) of one: a server that went back to before 0.4.2 lost it"
+                ),
+                crate::audit::AFTER_A_REWRITE,
+            ));
+            return;
+        }
+        _ => {}
+    }
+    if let Some(err) = &audit.error {
+        out.push(warn(
+            CHECK,
+            format!(
+                "could not check the {} checkpoint(s) saved here: {err}",
+                audit.saved()
+            ),
+            "recall audit verify, once the server answers",
+        ));
+    } else if audit.extends == Some(true) {
+        out.push(ok(
+            CHECK,
+            format!(
+                "extends every checkpoint saved here ({} kept, newest {})",
+                audit.checkpoints,
+                audit.newest.as_deref().unwrap_or("none")
+            ),
+        ));
+    } else if audit.saved() > 0 {
+        out.push(ok(
+            CHECK,
+            format!("{} checkpoint(s) saved, not checked", audit.saved()),
+        ));
+    }
+}
+
 /// How long the oldest merge may wait before it is worth saying so. A
 /// worker drains a job within seconds of the push; an hour means it is not
 /// running, or cannot merge.
@@ -892,6 +970,7 @@ const SECTIONS: &[(&str, &[&str])] = &[
     ),
     ("Scopes", &["global scope", "machine scope"]),
     ("Backup", &["off-box backup"]),
+    ("History", &["audit log"]),
 ];
 
 const OTHER: &str = "Other";
@@ -915,7 +994,9 @@ fn tone_of(f: &Finding) -> ui::Tone {
             if f.detail == "off"
                 || f.detail.starts_with("not needed")
                 || f.detail.starts_with("not available")
-                || f.detail.starts_with("not in a git repository") =>
+                || f.detail.starts_with("not in a git repository")
+                || f.detail.starts_with("not kept by this server")
+                || f.detail.ends_with("not checked") =>
         {
             ui::Tone::Quiet
         }
@@ -1054,6 +1135,14 @@ mod tests {
             // No stamp: the ordinary case for a deployment with no off-box
             // backup, and the one that must stay silent.
             last_offbox_at: None,
+            audit: Some(crate::status::AuditReport {
+                file: "/home/me/.recall/audit.json".into(),
+                checkpoints: 3,
+                newest: Some("1042 CsUYapGGPo4dkMgIAUqom/Xajj7h2fB2MPA3j2jxq2I=".into()),
+                server_log: Some(true),
+                extends: Some(true),
+                ..Default::default()
+            }),
         }
     }
 
@@ -1640,6 +1729,91 @@ mod tests {
         (time::OffsetDateTime::now_utc() - time::Duration::days(days))
             .format(&fmt)
             .unwrap()
+    }
+
+    // ---------------------------------------------------------------- audit log
+
+    fn audit(edit: impl FnOnce(&mut crate::status::AuditReport)) -> Report {
+        let mut rep = healthy();
+        edit(rep.audit.as_mut().unwrap());
+        rep
+    }
+
+    #[test]
+    fn a_log_that_extends_what_was_saved_is_ok() {
+        let found = findings(&healthy());
+        let f = find(&found, "audit log").unwrap();
+        assert_eq!(f.level, Level::Ok);
+        assert!(f.detail.contains("3 kept, newest 1042"), "{}", f.detail);
+    }
+
+    /// The plan's "fails loudly": a rewrite found fails, now and on every
+    /// run after, whatever else was checked, and says what to do.
+    #[test]
+    fn a_rewrite_found_fails_until_it_is_reset() {
+        let rep = audit(|a| {
+            a.extends = None;
+            a.error = Some("could not reach the server".into());
+            a.inconsistent = Some(recall_hooks::audit::Inconsistency {
+                found_at: "2026-10-02T09:14:05.402Z".into(),
+                saved: "r.example\n9\nAAAA\n".into(),
+                seen: "r.example\n5\nBBBB\n".into(),
+                detail: "the log has 5 leaves, fewer than the 9".into(),
+            });
+        });
+        let found = findings(&rep);
+        let f = find(&found, "audit log").unwrap();
+        assert_eq!(f.level, Level::Fail);
+        assert!(f.detail.contains("fewer than the 9"), "{}", f.detail);
+        assert!(f.fix.as_deref().unwrap().contains("recall audit reset"));
+        assert_eq!(verdict(&found), exit::CONFIG);
+    }
+
+    #[test]
+    fn a_server_that_answers_without_a_proof_fails() {
+        let rep = audit(|a| {
+            a.extends = None;
+            a.unproven = Some("server returned 500".into());
+        });
+        assert_eq!(
+            find(&findings(&rep), "audit log").unwrap().level,
+            Level::Fail
+        );
+    }
+
+    /// A server that no longer keeps the log this machine witnessed it
+    /// keeping lost its history; one that never kept one did not.
+    #[test]
+    fn a_log_that_went_away_fails_and_one_never_kept_does_not() {
+        let rep = audit(|a| {
+            a.extends = None;
+            a.server_log = Some(false);
+        });
+        assert_eq!(
+            find(&findings(&rep), "audit log").unwrap().level,
+            Level::Fail
+        );
+        let rep = audit(|a| {
+            *a = crate::status::AuditReport {
+                server_log: Some(false),
+                ..Default::default()
+            }
+        });
+        let found = findings(&rep);
+        let f = find(&found, "audit log").unwrap();
+        assert_eq!(f.level, Level::Ok);
+        assert_eq!(tone_of(f), ui::Tone::Quiet);
+    }
+
+    #[test]
+    fn a_log_that_could_not_be_checked_only_warns() {
+        let rep = audit(|a| {
+            a.extends = None;
+            a.error = Some("server returned 429".into());
+        });
+        let found = findings(&rep);
+        assert_eq!(find(&found, "audit log").unwrap().level, Level::Warn);
+        assert_eq!(verdict(&found), exit::OK);
     }
 
     // ---------------------------------------------------------------- Git Bash

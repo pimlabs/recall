@@ -214,7 +214,7 @@ type Done = Result<i32, Failed>;
 /// operator's token is used instead when this machine has one; without one,
 /// the device's own signature is sent anyway, and the server's refusal says
 /// what is missing better than a guess here could.
-fn admin_client(cfg: &ClientConfig) -> Result<Client, String> {
+pub(crate) fn admin_client(cfg: &ClientConfig) -> Result<Client, String> {
     if cfg.url.is_empty() {
         return Err("no server: run recall connect first, or set RECALL_URL.".to_string());
     }

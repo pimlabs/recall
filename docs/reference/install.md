@@ -802,6 +802,51 @@ cannot act on teaches them to skip the whole report.
 `check`, `detail` and `fix` — for a CI step or a shell prompt that should go
 red when memory stops syncing.
 
+### Holding the server to its history: `recall audit`
+
+The server keeps an append-only log of everything done to it, a Merkle tree
+(see "Audit" in [`api.md`](api.md#audit)), and every pull hands this
+machine a checkpoint of it: the tree's size and root. Each pull saves that
+checkpoint in `~/.recall/audit.json`, and nothing more, so a session start
+costs no extra request. `recall doctor` and `recall status` then ask the
+server to prove its log still extends every checkpoint saved here, and
+`recall doctor` fails the `audit log` check when it does not:
+
+```
+History
+  ✗ audit log   the server's log no longer extends a checkpoint saved here (found 2026-09-24T09:53:53.429Z):
+                the server's proof that its log of 8 leaves extends the 5 saved here does not verify:
+                history before it was rewritten
+                → If the server was restored from a backup, that is why: recall audit reset, and it starts
+                  again from the log as it is. If not, its history was rewritten: keep the evidence first,
+                  recall audit export -o audit-evidence.jsonl
+```
+
+That finding is written into `audit.json` and stays: every later `recall
+doctor` fails on it, `recall status` shows it, and every session's pull
+warns about it (and still exits 0), until you reset it. Restoring the server
+from a backup rolls its log back and looks exactly like this, on purpose.
+
+```sh
+recall audit verify                      # have the server prove it, as doctor does
+recall audit export -o audit.jsonl       # the whole log; an admin device or RECALL_TOKEN
+recall audit verify audit.jsonl          # offline: every leaf, every signature, every saved checkpoint
+recall audit reset                       # forget what was saved for this server, finding included
+```
+
+`export` writes the format `scripts/audit-verify.py` reads (a checkpoint
+line, then one leaf per line), and checks the checkpoints saved here
+against the leaves it fetched. `verify FILE` makes the script's checks,
+with no network: each leaf's shape, the tree's root against the file's
+checkpoint and against every checkpoint saved here that the file is long
+enough to hold, and each device's signature against the key its own
+approve or enroll leaf carries. `--checkpoint SIZE:ROOT`, as the script
+takes it, adds one saved elsewhere. The checkpoints used are the ones saved
+for the server in effect, so `RECALL_URL=… recall audit verify FILE` holds
+an export from another server to that one's. All three exit 0 when
+everything checks out, 1 when something does not, and 2 when it could not
+be checked: the same codes as the script.
+
 ## Cloud environments need the binary too
 
 A claude.ai cloud session runs the hooks from the repo it cloned, but

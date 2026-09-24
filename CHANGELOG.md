@@ -14,6 +14,30 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
+## Unreleased
+
+- **The client keeps the server's audit checkpoints.** Every pull saves
+  the `Recall-Audit-Checkpoint` it receives in a new file,
+  `~/.recall/audit.json`, per server, each as the three lines of a C2SP
+  tlog-checkpoint note. The hooks only save; they make no extra request
+  and never fail for it.
+- **`recall doctor` and `recall status` check them.** They ask the server
+  for an RFC 9162 consistency proof from each saved checkpoint to its log
+  now, and `recall doctor` fails a new `audit log` check when the log no
+  longer extends one: history rewritten, or rolled back by a restore. The
+  finding is kept in `audit.json`: `doctor` keeps failing, `status` keeps
+  showing it, and every session's pull warns about it (still exiting 0),
+  until `recall audit reset`. `recall status --json` gains an `audit`
+  object.
+- **`recall audit`**, with three commands. `export` writes the server's
+  whole log (admin device or `RECALL_TOKEN`) in the format
+  `scripts/audit-verify.py` reads, and checks the saved checkpoints
+  against it. `verify FILE` checks an export offline with the script's
+  checks, in Rust, against every checkpoint saved here; with no file it
+  asks the server for the proofs, as `doctor` does. `reset` forgets what
+  was saved for the server. Exit codes are the script's: 0, 1 when
+  something does not check out, 2 when it could not be checked.
+
 ## 0.4.2 — 2026-09-24
 
 - **Merging can move out of the server, into `recall-worker`.** A new

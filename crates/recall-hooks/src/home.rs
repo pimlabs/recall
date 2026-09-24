@@ -4,6 +4,7 @@
 //! ~/.recall/config.toml        0644  server, machine name — safe to read, edit, back up
 //! ~/.recall/credentials.toml   0600  one token per server — written by `recall connect`
 //! ~/.recall/device.key         0600  this machine's device keys, one per server
+//! ~/.recall/audit.json         0644  checkpoints of each server's audit log, see `crate::audit`
 //! ```
 //!
 //! `device.key` holds what a machine enrolled as a device signs its requests
@@ -399,65 +400,23 @@ impl Home {
     /// key and each enrol one. Holding this across "is there a key, enrol,
     /// save" makes the second find the first one's key instead.
     ///
-    /// A lock file created with `O_EXCL` rather than an OS file lock: the
-    /// standard library's is newer than this workspace's Rust, and this
-    /// needs no crate for what a file created only-if-absent already does.
-    /// What that costs is a lock left behind by a process killed while
-    /// holding it, which is why one older than `LOCK_STALE` is taken over:
-    /// nothing holds it that long on purpose.
+    /// The lock is a file created only if absent, `device.key.lock`, the
+    /// way `audit.json`'s is: no OS file lock, which the standard library
+    /// gained after this workspace's Rust. One left behind by a process
+    /// killed while holding it is taken over once it is older than anything
+    /// holds one on purpose.
     pub fn lock_devices(&self) -> Result<DevicesLock<'_>, Error> {
-        let path = self.dir.join(DEVICE_LOCK_FILE);
-        let err = |source| Error::Write {
-            path: path.display().to_string(),
-            source,
-        };
-        create_private_dir(&self.dir).map_err(err)?;
-        let deadline = std::time::Instant::now() + LOCK_WAIT;
-        let mut denied = 0;
-        loop {
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(_) => return Ok(DevicesLock { home: self, path }),
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                    denied = 0;
-                    let stale = fs::metadata(&path)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|at| at.elapsed().ok())
-                        .is_some_and(|age| age > LOCK_STALE);
-                    if stale {
-                        let _ = fs::remove_file(&path);
-                        continue;
-                    }
-                    if std::time::Instant::now() >= deadline {
-                        return Err(err(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            "another recall held device.key.lock for too long",
-                        )));
-                    }
-                    std::thread::sleep(LOCK_POLL);
-                }
-                // Windows refuses to create a file whose name belongs to one
-                // still being deleted, which the lock is for a moment after
-                // its holder lets go if anything had it open then. That is
-                // the lock being busy, not a permission problem, but only
-                // briefly: a directory this user really cannot write in is
-                // reported after a few refusals in a row rather than waited
-                // on for the whole of LOCK_WAIT.
-                Err(e)
-                    if cfg!(windows)
-                        && e.kind() == io::ErrorKind::PermissionDenied
-                        && denied < 20 =>
-                {
-                    denied += 1;
-                    std::thread::sleep(LOCK_POLL);
-                }
-                Err(e) => return Err(err(e)),
-            }
-        }
+        Ok(DevicesLock {
+            home: self,
+            _lock: FileLock::take(&self.dir, DEVICE_LOCK_FILE, LOCK_WAIT)?,
+        })
+    }
+
+    /// `audit.json`: the checkpoints of each server's audit log this
+    /// machine has seen, and what checking them found. See
+    /// [`crate::audit`].
+    pub fn audit_path(&self) -> PathBuf {
+        self.dir.join(crate::audit::AUDIT_FILE)
     }
 
     /// `credentials.json`, which 0.3.0 wrote and [`Home::migrate_legacy`]
@@ -610,7 +569,7 @@ const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 #[derive(Debug)]
 pub struct DevicesLock<'a> {
     home: &'a Home,
-    path: PathBuf,
+    _lock: FileLock,
 }
 
 impl DevicesLock<'_> {
@@ -639,7 +598,80 @@ impl DevicesLock<'_> {
     }
 }
 
-impl Drop for DevicesLock<'_> {
+/// A lock file in `~/.recall`, held by this process until dropped: what
+/// [`Home::lock_devices`] takes for `device.key`, and [`crate::audit`] for
+/// `audit.json`.
+///
+/// A lock file created with `O_EXCL` rather than an OS file lock: the
+/// standard library's is newer than this workspace's Rust, and this needs
+/// no crate for what a file created only-if-absent already does. What that
+/// costs is a lock left behind by a process killed while holding it, which
+/// is why one older than `LOCK_STALE` is taken over: nothing holds one that
+/// long on purpose.
+#[derive(Debug)]
+pub(crate) struct FileLock {
+    path: PathBuf,
+}
+
+impl FileLock {
+    /// Waits up to `wait` for the lock file `name` in `dir`, and takes it.
+    pub(crate) fn take(dir: &Path, name: &str, wait: std::time::Duration) -> Result<Self, Error> {
+        let path = dir.join(name);
+        let err = |source| Error::Write {
+            path: path.display().to_string(),
+            source,
+        };
+        create_private_dir(dir).map_err(err)?;
+        let deadline = std::time::Instant::now() + wait;
+        let mut denied = 0;
+        loop {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(_) => return Ok(FileLock { path }),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    denied = 0;
+                    let stale = fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|at| at.elapsed().ok())
+                        .is_some_and(|age| age > LOCK_STALE);
+                    if stale {
+                        let _ = fs::remove_file(&path);
+                        continue;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!("another recall held {name} for too long"),
+                        )));
+                    }
+                    std::thread::sleep(LOCK_POLL);
+                }
+                // Windows refuses to create a file whose name belongs to one
+                // still being deleted, which the lock is for a moment after
+                // its holder lets go if anything had it open then. That is
+                // the lock being busy, not a permission problem, but only
+                // briefly: a directory this user really cannot write in is
+                // reported after a few refusals in a row rather than waited
+                // on for the whole wait.
+                Err(e)
+                    if cfg!(windows)
+                        && e.kind() == io::ErrorKind::PermissionDenied
+                        && denied < 20 =>
+                {
+                    denied += 1;
+                    std::thread::sleep(LOCK_POLL);
+                }
+                Err(e) => return Err(err(e)),
+            }
+        }
+    }
+}
+
+impl Drop for FileLock {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }

@@ -2126,6 +2126,7 @@ dependencies = [
  "recall-hooks",
  "recall-server",
  "recall-wire",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
@@ -2146,6 +2147,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "toml",
 ]

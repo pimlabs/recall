@@ -337,14 +337,45 @@ fn verify_with(export: &str, args: &[&str], env: &[(&str, &str)]) -> (i32, Strin
         cmd.env(k, v);
     }
     let out = cmd.output().expect("python3 must be on PATH");
-    (
+    let (code, out) = (
         out.status.code().unwrap_or(-1),
         format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         ),
-    )
+    );
+    agrees_with_the_script(export, args, code, &out);
+    (code, out)
+}
+
+/// `recall audit verify`'s verifier, `recall_wire::audit::verify`, gives
+/// the script's verdict on the same export and the same saved checkpoints:
+/// every honest log and every forgery in this file is also a test of the
+/// second verifier, and a check dropped from either one shows up here as
+/// the two disagreeing. Not asked when the script was told to skip
+/// signatures, which the Rust one never does, or only to test its own
+/// Ed25519, or could not run at all.
+fn agrees_with_the_script(export: &str, args: &[&str], code: i32, out: &str) {
+    let skipped = |a: &&str| matches!(*a, "--no-signatures" | "--self-test");
+    if !matches!(code, 0 | 1) || args.iter().any(skipped) {
+        return;
+    }
+    let saved: Vec<(u64, merkle::Hash)> = args
+        .iter()
+        .filter_map(|a| a.strip_prefix("--checkpoint="))
+        .map(|c| {
+            recall_wire::audit::verify::parse_checkpoint_arg(c)
+                .unwrap_or_else(|| panic!("not a checkpoint: {c}"))
+        })
+        .collect();
+    let verdict = recall_wire::audit::verify::verify_export(export.as_bytes(), &saved);
+    assert_eq!(
+        verdict.ok(),
+        code == 0,
+        "the script said {code}:\n{out}\nand recall audit verify said {:#?}",
+        verdict.problems
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@
 //! install fails at the dependency rather than at the name. `cargo install
 //! recall` is the way in.
 
+mod audit;
 mod backfill;
 mod connect;
 mod devices;
@@ -129,6 +130,10 @@ enum Cmd {
     /// themselves
     #[command(subcommand)]
     Authkey(devices::KeyCmd),
+    /// Hold the server to its history: export its audit log, verify an
+    /// export offline, or check the log still extends what was saved here
+    #[command(subcommand)]
+    Audit(audit::Cmd),
     /// Remove a saved token, and this machine's device key
     Disconnect {
         /// The server; defaults to the one most recently connected
@@ -204,6 +209,7 @@ fn main() {
         Cmd::Disconnect { url } => connect::disconnect(url.as_deref()),
         Cmd::Devices(cmd) => block_on_current(devices::run(cmd)),
         Cmd::Authkey(cmd) => block_on_current(devices::run_authkey(cmd)),
+        Cmd::Audit(cmd) => block_on_current(audit::run(cmd)),
         Cmd::Status { json } => block_on_current(status::run(json)),
         Cmd::Doctor { json } => block_on_current(doctor::run(json)),
         Cmd::Push => block_on_current(hook::push()),
