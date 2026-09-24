@@ -1755,6 +1755,19 @@ async fn a_queue_log_verifies_offline_and_forged_job_leaves_are_refused() {
         &format!("{first} was claimed while dev_"),
     );
     refused(
+        "a worker's claim that was never leased to it, left out",
+        forged(position("job_claim", "device", 1), None),
+        "which does not hold it",
+    );
+    refused(
+        "the worker approved as a sync device",
+        forged(
+            position("approve", "operator", 0),
+            Some(&|l: &mut Value| l["subject"]["scope"] = json!("sync")),
+        ),
+        "whose scope is sync",
+    );
+    refused(
         "an attempt miscounted",
         forged(
             position("job_claim", "device", 1),
