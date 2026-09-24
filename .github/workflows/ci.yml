@@ -213,22 +213,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Toolchain (stable, rustfmt + clippy) and Swatinem/rust-cache, saved
+      # only from main (see .github/actions/rust-setup for why). shared-key
+      # is set so this job's cache stays its own: `windows` below already
+      # keys by `matrix.os`, and without a key here this job's entries would
+      # collide with whatever a same-named job elsewhere in the workflow
+      # set saves.
+      - name: Set up Rust (stable, rustfmt + clippy) and the cache
+        uses: ./.github/actions/rust-setup
         with:
-          components: rustfmt, clippy
-
-      # Every push to main writes the cache (mainline is the one history a
-      # PR's own restore should fall back to); a PR run only ever restores
-      # it. A cache entry per PR branch would otherwise pile up against the
-      # repository's cache quota and start evicting main's, which is the one
-      # entry every other run depends on. shared-key is set so this job's
-      # cache stays its own: `windows` below already keys by `matrix.os`,
-      # and without a key here this job's entries would collide with
-      # whatever a same-named job elsewhere in the workflow set saves.
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: rust-linux
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-shared-key: rust-linux
 
       - name: cargo fmt
         run: cargo fmt --all --check
@@ -510,14 +504,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Toolchain (stable, rustfmt + clippy) and Swatinem/rust-cache, saved
+      # only from main (see .github/actions/rust-setup for why). Keyed by
+      # matrix.os since the two OSes must not share one cache entry.
+      - name: Set up Rust (stable, rustfmt + clippy) and the cache
+        uses: ./.github/actions/rust-setup
         with:
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.os }}
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-key: ${{ matrix.os }}
 
       - name: cargo fmt
         run: cargo fmt --all --check
