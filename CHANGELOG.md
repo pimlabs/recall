@@ -14,7 +14,7 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
-## Unreleased
+## 0.4.3 — 2026-09-24
 
 - **The server keeps its database in SQLite's WAL mode**, with every
   commit synced before the client is answered (`synchronous=FULL`), so a
