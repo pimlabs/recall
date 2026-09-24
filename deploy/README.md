@@ -572,6 +572,18 @@ docker run --rm -v recall_recall-data:/data -v "$(pwd)/backups":/backups:ro \
 docker compose start recall-server
 ```
 
+**Restoring a backup rolls the audit log back with it.** The log lives in
+the same database, so it ends where the backup ends, and every leaf
+appended since is gone. To anyone holding a checkpoint saved after the
+backup was taken — the size and root `scripts/audit-verify.py` is given
+with `--checkpoint` — that is exactly what a rewritten log looks like: the
+log is shorter than the checkpoint, or no longer extends it. Expected after
+a restore, and worth writing down when you do one, with the time and the
+backup's name, so the failure it causes later is not mistaken for
+tampering. The server itself also refuses to start on a log it did not
+write (a leaf missing, out of place, or no longer matching its hash); a
+restore from a backup it wrote is the way back from that.
+
 ## Off-box: `backup-offbox.sh`
 
 ```sh
@@ -844,6 +856,12 @@ Every change does what this section used to ask you to remember:
   the paths and what to run, and exits with status 3: the change was made,
   but needs a look. Interrupting the wait is safe; it only skips the check.
   Stopping the server first avoids the question altogether.
+- **It is not in the audit log.** The log records what the server does, for
+  requests and on its own; these commands run beside it, on the database
+  file, which is the one place the log cannot bind anyone. So a rename,
+  remove or restore leaves no leaf, and the files the log last recorded
+  under the old key are where the log last saw them. The backup each change
+  takes is the record of what was there before.
 
 **A rename only moves rows onto a key that holds none**, even if no path
 overlaps. The primary key is `(project_key, file_path)`, so a rename onto an

@@ -682,7 +682,9 @@ impl Store {
                 build_leaf(
                     seq,
                     at,
-                    device.as_ref().expect("build_leaf runs only on a real revoke"),
+                    device
+                        .as_ref()
+                        .expect("build_leaf runs only on a real revoke"),
                 )
             },
         )
@@ -815,15 +817,19 @@ impl Store {
         let (swept, enrollments) = self.audited_each(
             |tx, _| {
                 let swept: Vec<(String, String)> = {
-                    let mut stmt =
-                        tx.prepare(&format!("SELECT id, name FROM devices WHERE {idle} ORDER BY id"))?;
+                    let mut stmt = tx.prepare(&format!(
+                        "SELECT id, name FROM devices WHERE {idle} ORDER BY id"
+                    ))?;
                     let rows = stmt.query_map((idle_before,), |r| Ok((r.get(0)?, r.get(1)?)))?;
                     rows.collect::<rusqlite::Result<_>>()?
                 };
                 let deleted =
                     tx.execute(&format!("DELETE FROM devices WHERE {idle}"), (idle_before,))?;
                 if deleted != swept.len() {
-                    bail!("the sweep chose {} devices and deleted {deleted}", swept.len());
+                    bail!(
+                        "the sweep chose {} devices and deleted {deleted}",
+                        swept.len()
+                    );
                 }
                 let enrollments = tx.execute(
                     "DELETE FROM device_enrollments WHERE expires_at < ?1",

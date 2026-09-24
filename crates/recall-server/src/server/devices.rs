@@ -627,16 +627,18 @@ pub(super) async fn handle_revoke_device(
     };
     let actor = actor_for(caller.as_ref().map(|Extension(c)| c));
     let request = signed_request_for(signed.as_ref().map(|Extension(s)| s), Some(text));
-    match state.store.revoke_device_audited(&id, &now(), |seq, at, device| {
-        leaf::encode(
-            seq,
-            at,
-            leaf::action::REVOKE,
-            &actor,
-            leaf::subject_device_id(&device.id, &device.name),
-            request.as_ref(),
-        )
-    }) {
+    match state
+        .store
+        .revoke_device_audited(&id, &now(), |seq, at, device| {
+            leaf::encode(
+                seq,
+                at,
+                leaf::action::REVOKE,
+                &actor,
+                leaf::subject_device_id(&device.id, &device.name),
+                request.as_ref(),
+            )
+        }) {
         Ok(Some(device)) => json(StatusCode::OK, &device),
         Ok(None) => error(StatusCode::NOT_FOUND, "no device has that id"),
         Err(e) => internal(e),

@@ -121,8 +121,12 @@ capture with the release capture, stays the only one.
 | Route | Auth | Purpose |
 |---|:---:|---|
 | `GET /v1/audit/checkpoint` | yes | The tree's size and root |
-| `GET /v1/audit/entries?start=&end=` | yes | Leaves `start` to `end - 1`, at most 1,000 |
+| `GET /v1/audit/entries?start=&end=` | admin | Leaves `start` to `end - 1`, at most 1,000 and 2 MiB |
 | `GET /v1/audit/consistency?first=&second=` | yes | The RFC 9162 §2.1.4 proof that `second` extends `first` |
+
+The leaves name every project, file, device and authkey, which the device
+list and `/admin/stats` already keep to the `admin` scope, so `entries` is
+admin too; the checkpoint and the proofs are hashes, for any credential.
 
 ```json
 { "tree_size": 1042, "root_hash": "CsUYapGGPo4dkMgIAUqom/Xajj7h2fB2MPA3j2jxq2I=" }
@@ -148,40 +152,45 @@ Each entry is a leaf exactly as stored; the string's UTF-8 bytes are what is
 hashed, and a client never re-serializes one. Tree hashes are standard
 base64, as in C2SP checkpoints; file hashes stay lowercase hex, as
 `base_sha256` is today. `end` beyond `tree_size`, or a page over 1,000, is a
-`400`. Reading the audit routes appends nothing.
+`400`; a page whose leaves come to more than 2 MiB stops early, its `end`
+saying where. Reading the audit routes appends nothing.
 
 `GET /sync` answers also carry `Recall-Audit-Checkpoint: 1042 CsUY…=`, so
 every pull leaves the client a checkpoint without another request.
 
 **The leaf, version 1.** One per authenticated push, pull and change to a
-device or enrolment key, and one per action the server takes itself.
-Unauthenticated routes and refused requests append nothing, so the internet
-cannot grow the log. Shown indented; stored on one line, compact, in this
-field order:
+device or authkey (an authkey enrolling a device included), and one per
+action the server takes itself. Unauthenticated routes and refused requests
+append nothing, so the internet cannot grow the log. Shown indented; stored
+on one line, compact, in this field order:
 
 ```json
 {"v":1,"seq":1001,"at":"2026-10-02T09:14:05.402Z","action":"push",
  "actor":{"kind":"device","id":"dev_eerivjyffuwecbgzybcesz5hwi","name":"laptop","agent":"recall/0.4.5 (macos-aarch64)"},
  "subject":{"project_key":"acme/app","file_path":"topics/auth.md","deleted":false,
-            "stored_sha256":"4b1f…","base_sha256":"9f2c…","merge_job":null},
+            "stored_sha256":"4b1f…","base_sha256":"9f2c…","merged":false,"merge_job":null},
  "request":{"body_sha256":"47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
-            "signature_base":"\"@method\": POST\n\"@authority\": recall-server.pimlabs.id\n…","signature":"…"}}
+            "signature_base":"\"@method\": POST\n\"@authority\": recall-server.pimlabs.id\n…","signature":"…",
+            "body":null}}
 ```
 
 | Field | Meaning |
 |---|---|
 | `v` | Leaf format, `1`. |
 | `seq` | Its index in the tree, from 0. |
-| `action` | `push`, `delete`, `pull`, `merge`, `approve`, `deny`, `revoke`, `sweep`, `enroll_key_create`, `enroll_key_revoke`, `start`. Later pull requests add `key_create`, `key_grant`, `seal`, `evaluate` and `strict`. |
-| `actor.kind` | `device` (a signed request), `operator` (`RECALL_TOKEN`) or `server` (its own sweeps, and `start`, which records the version it started as). |
-| `subject` | Per action. Device leaves carry the device's `public_key`, and from PR 3 its `encryption_key`, so the log verifies without the `devices` table. |
-| `request` | For a signed request: the SHA-256 of its body in base64, as its `Content-Digest` carries it; the RFC 9421 signature base the server verified; and the signature. `null` otherwise. |
+| `at` | Taken under the store's lock with `seq`, and never below the leaf before it. |
+| `action` | `push`, `delete`, `pull`, `approve`, `enroll`, `deny`, `revoke`, `sweep`, `authkey_create`, `authkey_revoke`, `start`. Later pull requests add `merge`, `key_create`, `key_grant`, `seal`, `evaluate` and `strict`. |
+| `actor.kind` | `device` (a signed request), `operator` (`RECALL_TOKEN`), `authkey` (by id and tag, for the device it enrols) or `server` (its own sweeps, and `start`, which records the version it started as). |
+| `subject` | Per action. `approve` and `enroll` leaves carry the device's `public_key`, and from PR 3 its `encryption_key`, so the log verifies without the `devices` table. A push says whether the server `merged` it inline. |
+| `request` | For a signed request: the SHA-256 of its body in base64, as its `Content-Digest` carries it; the RFC 9421 signature base the server verified; the signature; and the body itself for the device-management actions, whose bodies are small and hold no secret, so what they asked for is bound to the subject. `null` otherwise. A push's body, the file, is not kept: its signature proves the device pushed at that moment, not which file the server says it was. |
 
-Discovery gains `"audit": { "leaf_version": 1, "max_page": 1000 }`.
+Discovery gains `"audit": { "leaf_version": 1, "max_page": 1000,
+"max_page_bytes": 2097152 }`.
 
-Fixtures: `audit_checkpoint_response`, `audit_entries_response`,
+Fixtures, captured from a server with a push `openssl` signed:
+`audit_checkpoint_response`, `audit_entries_response`,
 `audit_consistency_response`, `audit_leaf_push`, `audit_leaf_approve`,
-`discovery`.
+`audit_leaf_enroll`, `discovery`.
 
 ### PR 2: jobs and the worker
 
@@ -551,7 +560,7 @@ it, and an old client does not delete a file for being absent.
 
 | PR | Table | Columns, abridged |
 |---|---|---|
-| 1 | `audit_log` | `seq INTEGER PRIMARY KEY`, `leaf BLOB NOT NULL`, `leaf_hash BLOB NOT NULL`; triggers abort any `UPDATE` or `DELETE` |
+| 1 | `audit_log` | `seq INTEGER PRIMARY KEY`, `leaf BLOB NOT NULL`, `leaf_hash BLOB NOT NULL`; triggers abort any `UPDATE`, `DELETE`, or insert that is not the next `seq` (which also stops `INSERT OR REPLACE`) |
 | 2 | `jobs` | `id`, `kind` (`merge`; `seal` and `evaluate` arrive later, so no `CHECK` on it), `state`, `project_key`, `file_path`, `payload` (JSON), `lease_id`, `lease_expires_at`, `attempt`, `not_before`, `parent_id`, `error`, `created_at`, `updated_at` |
 | 2 | `devices`, rebuilt | the same columns with `scope IN ('sync', 'admin', 'worker')`. SQLite cannot alter a `CHECK`, so the rows are copied into a new table in one transaction, guarded by `PRAGMA user_version`. An older server reads a `worker` row as a device without admin rights, which can sync: acceptable for a device the owner approved |
 | 3 | `devices`, `device_enrollments` | add `encryption_key`, `encryption_key_binding` |
@@ -599,10 +608,24 @@ it was given.
 `SHA-256(0x00 || leaf)`, an inner node as `SHA-256(0x01 || left || right)`,
 and a tree of `n` leaves splits at the largest power of two below `n`. The
 two prefixes are the domain separation the RFC says *"is required to give
-second preimage resistance"*. The server keeps the stack from §2.1.2 in
-memory, rebuilt from `leaf_hash` at start, so an append costs O(log n)
-hashes. Consistency proofs (§2.1.4) are computed from `leaf_hash` on request,
-which for one owner's log is fast enough not to cache.
+second preimage resistance"*. The server keeps the hash of every complete
+subtree in memory, 64 bytes a leaf (64 MB at a million), rebuilt at start
+from the leaves themselves, each rehashed and compared with its stored
+`leaf_hash` (a few seconds at a million; a log that fails to match stops the
+start). An append costs O(log n) hashes, a root O(log n), and a consistency
+proof (§2.1.4) O(log² n), a few hundred, with no read of the database. The
+first version recomputed each proof from every `leaf_hash` under the
+store's one lock, about 2 s at a million leaves, during which no push or
+pull could run: any credential could stall the server that way.
+
+**How a proof is checked.** A verifier rebuilds both roots from the proof —
+the old tree's and the new one's — walking `SUBPROOF`'s recursion, and
+accepts only when the old one is the checkpoint it trusts and the new one
+the root it was given. The first version rebuilt only the new root, and
+looked at the old one only when the first size was a power of two, so a
+proof cut from a tree with its early leaves rewritten verified against the
+honest checkpoint. Every probe in transparency-dev/merkle's
+`testdata/consistency` now gets its verdict.
 
 **Who witnesses.** A Merkle tree proves something only to someone holding an
 earlier root. Every pull stores the `Recall-Audit-Checkpoint` it received in
@@ -623,17 +646,24 @@ line, after a first line holding the checkpoint it exported at.
 2. The root recomputed with §2.1.2 matches the export's checkpoint, and, for
    each checkpoint in `~/.recall/audit.json` at size `m`, the root over the
    first `m` leaves matches it.
-3. Device keys come from the log's own `approve` leaves. Each signed leaf's
-   `signature` verifies over its `signature_base` with that key, the base's
-   `keyid` is the actor, and its `content-digest` line equals
-   `request.body_sha256`.
+3. Device keys come from the log's own `approve` and `enroll` leaves: the
+   one before each signed leaf, of a device not revoked or swept since, and
+   never two for one id. Each signed leaf's `signature` verifies over its
+   `signature_base` with that key, the base's `keyid` is the actor, no
+   `(keyid, nonce)` appears twice, its `content-digest` line equals
+   `request.body_sha256`, its method, path and query are the action's, and
+   a kept body hashes to `body_sha256` and asks for what `subject` records.
+   A device's leaf without a request, or anyone else's with one, fails.
 4. Where `memory_versions` still holds a body (from PR 4), the body hashes to
    `body_sha256` and carries the sealed string whose hash is
    `subject.stored_sha256`.
 
-`scripts/audit-verify.py`, using only `hashlib`, recomputes the root as a
-second implementation; CI runs both over a log the integration tests
-produce.
+`scripts/audit-verify.py` does all but 4 with the standard library alone,
+a second implementation of the tree and of Ed25519 (the `cryptography`
+package, when it works, only speeds the second up); it never skips the
+signatures unless told to. The integration tests run it over a log they
+produce, and over every forgery the review found a server could build from
+it.
 
 ## Keys
 
@@ -926,7 +956,7 @@ durable; that is its job.
 
 | PR | Protects against | Does not protect against |
 |---|---|---|
-| 1 Audit | A server quietly removing or rewriting history a device already holds a checkpoint for; a device's actions being forged, since they are signed | Rewrites before any device saved a checkpoint; entries by the operator or the server, which are unsigned; reading anything |
+| 1 Audit | A server quietly removing or rewriting history someone holds a checkpoint for (until the client keeps them, the owner saving one by hand); a device's requests being forged, since they are signed | Rewrites before anyone saved a checkpoint; entries by the operator or the server, which are unsigned; what the server did with a signed push, which the log states but the signature does not bind; `recall-server admin` changes on the host, which append nothing; reading anything |
 | 2 Worker | A compromise of the API process reaching the `claude` login, which moves to the worker's volume; slow merges holding a hook | Root on the host, which reaches both volumes. Merges still see plaintext |
 | 3 Keys | Nothing new for notes, since none is encrypted yet. It sets up grants a compromised server cannot forge unnoticed | Key substitution for a device enrolling while an attacker holds the API, beyond what trust on first use and `ck_id` catch |
 | 4 Sealed sync | A leaked database, backup or `sqlite-web` view exposing sealed files; the server moving a body between files or versions | Files still in plaintext; forged deletes, while old clients' unsealed tombstones are still honoured; a server serving an older version of a file (visible in the audit log, not prevented); a server withholding files |
@@ -943,13 +973,16 @@ the test fail. A property that no mutation fails is not pinned.
 
 | Property | Mutation that must fail it |
 |---|---|
-| Every authenticated state change appends exactly one leaf, in the same transaction as the change | Drop the append from revoke; append after the commit and inject a failing write |
-| Unauthenticated routes, refused requests and the audit routes append nothing | Append in the rate limiter, or on a `401` |
-| Roots match transparency-dev/merkle's vectors (`testonly/constants.go`; RFC 9162 keeps RFC 6962's tree hash), and every consistency proof between sizes up to 64 verifies | Swap the `0x00` and `0x01` prefixes; split at `n / 2`; an off-by-one in proof generation |
+| Every authenticated state change appends exactly one leaf, in the same transaction as the change, an authkey enrolment included; the store has no way to change a file, device or authkey without one | Drop the append from revoke; append after the commit and inject a failing write; a write method that takes no leaf |
+| Unauthenticated routes, refused requests, the audit routes, and a revoke that changes nothing append nothing | Append in the rate limiter, or on a `401`; append on a second revoke |
+| Roots match transparency-dev/merkle's vectors (`testonly/constants.go`; RFC 9162 keeps RFC 6962's tree hash), every consistency proof between sizes up to 64 verifies, and every one of its `testdata/consistency` probes gets its verdict | Swap the `0x00` and `0x01` prefixes; split at `n / 2`; an off-by-one in proof generation |
+| A proof cut from a tree with any one leaf of the first `first` rewritten fails against the honest checkpoint, for every pair of sizes up to 64 | Check only the second root |
+| A proof costs O(log² n) hashes and reads no table | Hash every leaf per request |
 | Leaves are exported byte for byte | Re-serialize on export, pretty-printed or with keys sorted |
 | `recall audit verify` fails on a changed byte, a missing leaf, two swapped leaves, or a saved checkpoint the log does not extend | Check only the latest root |
+| It fails on a forged export that keeps every checkpoint: a device's leaf with no request, a signature replayed or moved onto another action or subject, a digest or keyid that is not the leaf's, a request signed before its device existed | Check only the tree; take keys from any approve leaf, the latest winning |
 | A signed leaf verifies with nothing but the log, after its device has been swept | Take the key from `devices` |
-| `UPDATE` and `DELETE` on `audit_log` abort | Drop the triggers |
+| `UPDATE`, `DELETE`, `INSERT OR REPLACE` and an out-of-order insert on `audit_log` abort; opening refuses a log whose leaves no longer hash as stored | Drop the triggers; trust `leaf_hash` at open |
 
 **PR 2**
 

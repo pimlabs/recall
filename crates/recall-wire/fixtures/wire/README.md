@@ -18,6 +18,8 @@ newer client keeps reading older servers.
 | `enroll_response_pending`, `enroll_response_approved`, `enroll_poll_response`, `enroll_poll_error`, `device_pending_response`, `device_approve_response`, `device_me_response`, `device_deny_response`, `device_list_response`, `device_revoke_response`, `authkey_create_response`, `authkey_list_response`, `authkey_revoke_response` | The same script: one enrolment followed through, each response a real one from the step before |
 | `push_request`, `push_request_delete` | Written from recall-wire's `PushRequest` at that tag: its field order and its skip rules |
 | `enroll_request`, `enroll_request_with_authkey`, `enroll_poll_request`, `device_approve_request`, `device_deny_request`, `authkey_create_request`, `authkey_revoke_request` | Written the same way, from recall-wire's `devices` types |
+| `audit_checkpoint_response`, `audit_entries_response`, `audit_consistency_response` | The same script, after the enrolment above and a push that device signs: the checkpoint, every leaf, and the proof from size 1, with nothing appended between them |
+| `audit_leaf_push`, `audit_leaf_approve`, `audit_leaf_enroll` | Three of those leaves, byte for byte as the entries page holds them: the signed push, the approve that carries its key, and the enrolment the authkey made. `tests/golden.rs` checks them as the offline verifier would: the push's signature against the approve's key, its digest and keyid, and the page's leaves against the checkpoint's root |
 
 `discovery` exists from the version that introduced `/.well-known/recall`
 onwards; older servers answer 404 and have no file. The device kinds exist
@@ -40,6 +42,15 @@ holding only what 0.4.1 adds or changes (the device kinds, and `discovery`,
 which gained `device-sig-v1` and the `devices` capability). Being
 unreleased, it was captured again as the device shapes changed during
 review; replace it once more from the release archive when 0.4.1 is out.
+
+`0.4.2/` is the audit log's, captured the same way from a development
+build (`./scripts/capture-wire-fixtures.sh 0.4.2
+target/release/recall-server`), holding only what it adds or changes: the
+audit kinds, and `discovery`, which gained the `audit` capability. The
+push in it is signed by `openssl` with `test-key-ed25519`'s published
+private half, like `device_me_response`. The directory is named for the
+release expected to ship it; if another ships first, rename it to the one
+that does, and replace it from the release archive once that is out.
 
 ## Rules
 

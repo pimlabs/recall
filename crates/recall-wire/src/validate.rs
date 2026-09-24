@@ -165,7 +165,13 @@ mod tests {
         let base = crate::content_sha256("hello");
         assert!(validate_base_sha256(&base).is_ok());
         assert!(validate_base_sha256(&base.to_uppercase()).is_ok());
-        for bad in ["", "abc", &base[1..], &format!("{base}0"), &base.replacen('a', "g", 1)] {
+        for bad in [
+            "",
+            "abc",
+            &base[1..],
+            &format!("{base}0"),
+            &base.replacen('a', "g", 1),
+        ] {
             assert_eq!(
                 validate_base_sha256(bad),
                 Err(ValidationError::BaseSha256),

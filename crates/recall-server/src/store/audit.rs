@@ -3,12 +3,14 @@
 //! ([`Store::audited`]) every authenticated state change goes through so
 //! its leaf commits with it.
 //!
-//! Every method on [`Store`] that changes a file, a device or an authkey
-//! takes the leaf it appends as an argument; none can change one without
-//! it. The writes left without a leaf are deliberate, and none is a change
-//! the log is for: an enrolment waiting for approval (anyone may ask, and
-//! unauthenticated routes append nothing), a machine's poll for it, a
-//! device's `last_seen`, and the sweep of long-expired enrolments.
+//! Every method on [`Store`] the server uses to change a file, a device or
+//! an authkey takes the leaf it appends as an argument; none can change one
+//! without it. The writes left without a leaf are deliberate, and none is a
+//! change the server makes for a request or on its own: an enrolment
+//! waiting for approval (anyone may ask, and unauthenticated routes append
+//! nothing), a machine's poll for it, a device's `last_seen`, the sweep of
+//! long-expired enrolments, and `recall-server admin`'s changes on the host
+//! (`store/admin.rs`), which run beside the server on the database file.
 
 use anyhow::{bail, Result};
 use rusqlite::Connection;
@@ -333,8 +335,11 @@ mod tests {
     }
 
     fn append(st: &Store) {
-        st.audited(|_tx, _| Ok(Outcome::Commit(())), |seq, _, ()| push_leaf(seq))
-            .unwrap();
+        st.audited(
+            |_tx, _| Ok(Outcome::Commit(())),
+            |seq, _, ()| push_leaf(seq),
+        )
+        .unwrap();
     }
 
     const INSERT_FILE: &str = "INSERT INTO memory_files \
@@ -400,7 +405,10 @@ mod tests {
             |seq, _, ()| push_leaf(seq),
         );
         assert!(result.is_err(), "the leaf's insert failed");
-        assert!(st.get("a", "b").unwrap().is_none(), "so the row is not there");
+        assert!(
+            st.get("a", "b").unwrap().is_none(),
+            "so the row is not there"
+        );
         assert_eq!(st.audit_checkpoint().0, 0);
     }
 
@@ -437,7 +445,10 @@ mod tests {
             .map(|e| e.seq)
             .collect();
         assert_eq!(seqs, vec![0, 1, 2, 3]);
-        assert_eq!(st.audit_entries(1, 2, usize::MAX).unwrap()[0].leaf, push_leaf(1));
+        assert_eq!(
+            st.audit_entries(1, 2, usize::MAX).unwrap()[0].leaf,
+            push_leaf(1)
+        );
     }
 
     /// `at` is taken under the lock, and never goes back: a leaf written

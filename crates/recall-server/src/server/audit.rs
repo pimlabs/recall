@@ -101,12 +101,7 @@ pub(super) async fn handle_entries(
     for e in entries {
         match String::from_utf8(e.leaf) {
             Ok(leaf) => leaves.push(leaf),
-            Err(_) => {
-                return internal(anyhow::anyhow!(
-                    "audit leaf {} is not valid UTF-8",
-                    e.seq
-                ))
-            }
+            Err(_) => return internal(anyhow::anyhow!("audit leaf {} is not valid UTF-8", e.seq)),
         }
     }
     json(

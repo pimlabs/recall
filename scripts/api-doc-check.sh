@@ -22,6 +22,7 @@ TOKEN="doc-check-token"
 RECALL_TOKEN="$TOKEN" RECALL_PORT="$PORT" RECALL_DB_PATH="$WORK/db.sqlite" \
   RECALL_MERGE_ENABLED=false RECALL_RATE_LIMIT_MAX=1000 "$BIN" >"$WORK/server.log" 2>&1 &
 SERVER=$!
+STARTED=$(date +%s)
 trap 'kill $SERVER 2>/dev/null; rm -rf "$WORK"' EXIT
 
 for _ in $(seq 1 40); do
@@ -60,7 +61,7 @@ import json,sys; print(" ".join(json.load(sys.stdin).keys()))')"
 check "discovery's capabilities" 'audit devices limits merge_base scopes' \
   "$(curl -s "$URL/.well-known/recall" | python3 -c '
 import json,sys; print(" ".join(json.load(sys.stdin)["capabilities"].keys()))')"
-check "the audit capability" '{"leaf_version": 1, "max_page": 1000}' \
+check "the audit capability" '{"leaf_version": 1, "max_page": 1000, "max_page_bytes": 2097152}' \
   "$(curl -s "$URL/.well-known/recall" | python3 -c '
 import json,sys; print(json.dumps(json.load(sys.stdin)["capabilities"]["audit"]))')"
 check "discovery's auth methods" 'bearer device-sig-v1' \
@@ -92,6 +93,12 @@ check "a write with no content is 400" "400" \
   "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${auth[@]}" \
      -H 'Content-Type: application/json' \
      -d '{"project_key":"acme/app","file_path":"a.md"}' "$URL/sync")"
+check "a base_sha256 that is not a SHA-256 is 400" '{"error":"base_sha256 must be 64 hexadecimal characters"}' \
+  "$(curl -s -X POST "${auth[@]}" -H 'Content-Type: application/json' \
+     -d '{"project_key":"acme/app","file_path":"a.md","content":"x","base_sha256":"abc"}' "$URL/sync")"
+check "a project_key over 4096 bytes is 400" '{"error":"project_key must be at most 4096 bytes"}' \
+  "$(python3 -c 'import json; print(json.dumps({"project_key": "k" * 4097, "file_path": "a.md", "content": "x"}))' \
+     | curl -s -X POST "${auth[@]}" -H 'Content-Type: application/json' --data-binary @- "$URL/sync")"
 check "an empty file is accepted" "200" \
   "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${auth[@]}" \
      -H 'Content-Type: application/json' \
@@ -360,6 +367,41 @@ check "first below 1 is 400" '400' \
   "$(curl -s -o /dev/null -w '%{http_code}' "${auth[@]}" "$URL/v1/audit/consistency?first=0&second=$SIZE")"
 check "second past the tree size is 400" '400' \
   "$(curl -s -o /dev/null -w '%{http_code}' "${auth[@]}" "$URL/v1/audit/consistency?first=1&second=$((SIZE + 1))")"
+check "an admin route's body over 8 KiB is 413" '{"error":"request body too large"}' \
+  "$(python3 -c 'import json; print(json.dumps({"tag": "x", "expires_in_days": 1, "padding": "p" * 9000}))' \
+     | curl -s -X POST "${auth[@]}" "${json[@]}" --data-binary @- "$URL/v1/authkeys")"
+
+# The leaves are admin-only; the hashes are for any credential. A device
+# signs here the way the capture script's does: openssl, with the published
+# private half of test-key-ed25519, the $KEY every device above enrolled
+# with. The server refuses signatures dated up to five seconds past its
+# start, so this waits that out first.
+printf '%s\n' '-----BEGIN PRIVATE KEY-----' \
+  'MC4CAQAwBQYDK2VwBCIEIJ+DYvh6SEqVTm50DFtMDoQikTmiCqirVv9mWG9qfSnF' \
+  '-----END PRIVATE KEY-----' >"$WORK/key.pem"
+# From an address of its own: the checks above left this one its five
+# waiting enrolments.
+curl -s -X POST "${json[@]}" -H 'cf-connecting-ip: 192.0.2.77' \
+  -d "{\"name\":\"auditor\",\"public_key\":\"$KEY\"}" "$URL/v1/devices/enroll" >"$WORK/auditor.json"
+approve_code "$(field "$WORK/auditor.json" user_code)" >"$WORK/auditor-device.json"
+AUDITOR=$(field "$WORK/auditor-device.json" id)
+while [ "$(date +%s)" -le $((STARTED + 6)) ]; do sleep 1; done
+signed_status() { # path, query: the status a GET the sync device signs gets
+  local created digest params
+  created=$(date +%s)
+  digest="sha-256=:$(printf '' | openssl dgst -sha256 -binary | base64):"
+  params="(\"@method\" \"@authority\" \"@path\" \"@query\" \"content-digest\" \"recall-protocol\");created=$created;keyid=\"$AUDITOR\";nonce=\"doc-check-$1-$RANDOM$RANDOM\";alg=\"ed25519\""
+  printf '"@method": GET\n"@authority": 127.0.0.1:%s\n"@path": %s\n"@query": ?%s\n"content-digest": %s\n"recall-protocol": 1\n"@signature-params": %s' \
+    "$PORT" "$1" "$2" "$digest" "$params" >"$WORK/base"
+  curl -s -o /dev/null -w '%{http_code}' -H "Recall-Protocol: 1" -H "Content-Digest: $digest" \
+    -H "Signature-Input: sig1=$params" \
+    -H "Signature: sig1=:$(openssl pkeyutl -sign -inkey "$WORK/key.pem" -rawin -in "$WORK/base" | base64 | tr -d '\n'):" \
+    "$URL$1?$2"
+}
+check "entries needs RECALL_TOKEN or an admin device: a sync device is 403" '403' \
+  "$(signed_status /v1/audit/entries 'start=0&end=1')"
+check "the checkpoint and a proof need only a credential: 200 200" '200 200' \
+  "$(signed_status /v1/audit/checkpoint '') $(signed_status /v1/audit/consistency 'first=1&second=2')"
 
 echo "Rate limiting"
 RL_PORT=8932

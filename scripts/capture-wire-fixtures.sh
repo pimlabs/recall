@@ -184,6 +184,10 @@ if curl -s "$URL/.well-known/recall" | grep -q '"devices"'; then
   # by openssl rather than by Recall's own code: the published private half
   # of test-key-ed25519, which the device above enrolled with.
   if command -v openssl >/dev/null 2>&1; then
+    # A server refuses every signature dated up to five seconds past its
+    # start (see crates/recall-server/src/server/auth.rs), and this one
+    # started a moment ago.
+    sleep 6
     printf '%s\n' '-----BEGIN PRIVATE KEY-----' \
       'MC4CAQAwBQYDK2VwBCIEIJ+DYvh6SEqVTm50DFtMDoQikTmiCqirVv9mWG9qfSnF' \
       '-----END PRIVATE KEY-----' >"$WORK/key.pem"
@@ -220,6 +224,50 @@ if curl -s "$URL/.well-known/recall" | grep -q '"devices"'; then
   keep device_list_response.json devices
   fetch keys -H "$AUTH" "$URL/v1/authkeys"
   keep authkey_list_response.json keys
+
+  # The audit log, from the version that added it: a push the device above
+  # signs (openssl again, and that key's published private half), so the
+  # push leaf carries a real signature and the approve leaf the key it
+  # verifies with; then the checkpoint, every leaf, and a proof, with
+  # nothing appended between them, since reading the log appends nothing.
+  if curl -s "$URL/.well-known/recall" | grep -q '"audit"' && command -v openssl >/dev/null 2>&1; then
+    BODY='{"project_key":"acme/app","file_path":"topics/auth.md","content":"- tokens expire after an hour\n"}'
+    CREATED=$(date +%s)
+    DIGEST="sha-256=:$(printf '%s' "$BODY" | openssl dgst -sha256 -binary | base64):"
+    PARAMS="(\"@method\" \"@authority\" \"@path\" \"@query\" \"content-digest\" \"recall-protocol\");created=$CREATED;keyid=\"$(field approve id)\";nonce=\"capture-push-$CREATED\";alg=\"ed25519\""
+    printf '"@method": POST\n"@authority": 127.0.0.1:%s\n"@path": /sync\n"@query": ?\n"content-digest": %s\n"recall-protocol": 1\n"@signature-params": %s' \
+      "$PORT" "$DIGEST" "$PARAMS" >"$WORK/push-base"
+    SIG=$(openssl pkeyutl -sign -inkey "$WORK/key.pem" -rawin -in "$WORK/push-base" | base64 | tr -d '\n')
+    curl -s -o /dev/null -X POST -H "$JSON" -H "Recall-Protocol: 1" -H "Content-Digest: $DIGEST" \
+      -H "Signature-Input: sig1=$PARAMS" -H "Signature: sig1=:$SIG:" -d "$BODY" "$URL/sync"
+
+    fetch checkpoint -H "$AUTH" "$URL/v1/audit/checkpoint"
+    keep audit_checkpoint_response.json checkpoint
+    SIZE=$(field checkpoint tree_size)
+    fetch entries -H "$AUTH" "$URL/v1/audit/entries?start=0&end=$SIZE"
+    keep audit_entries_response.json entries
+    fetch proof -H "$AUTH" "$URL/v1/audit/consistency?first=1&second=$SIZE"
+    keep audit_consistency_response.json proof
+
+    # One leaf of each kind the fixtures pin, exactly as the entries page
+    # holds it: the signed push, the approve that carries its key, and the
+    # enrolment the authkey made.
+    leaf() { # fixture, action, actor kind
+      python3 -c '
+import json, sys
+for leaf in json.load(open(sys.argv[1]))["entries"]:
+    parsed = json.loads(leaf)
+    if parsed["action"] == sys.argv[2] and parsed["actor"]["kind"] == sys.argv[3]:
+        sys.stdout.write(leaf)
+        break' "$WORK/entries" "$2" "$3" >"$WORK/$1"
+      echo 200 >"$WORK/$1.code"
+      [ -s "$WORK/$1" ] || echo 500 >"$WORK/$1.code"
+      keep "$1.json" "$1"
+    }
+    leaf audit_leaf_push push device
+    leaf audit_leaf_approve approve operator
+    leaf audit_leaf_enroll enroll authkey
+  fi
 
   fetch key_revoked -X POST -H "$AUTH" -H "$JSON" -d '{"revoke_devices":false}' \
     "$URL/v1/authkeys/$(field key id)/revoke"
