@@ -804,7 +804,7 @@ by then `U` has already crossed the wire.
 an HTTP client, never on `axum` or `rusqlite`. On first start it generates its
 keys in `/data`, enrols like any device, and prints its user code and
 fingerprint to its log. The owner approves it with
-`recall devices approve <code> --scope worker`, which from PR 3 also grants it
+`recall devices approve <code> --worker`, which from PR 3 also grants it
 the content key, or with `RECALL_TOKEN` and `curl` from the host, which grants
 nothing until a device runs `recall keys grant worker`. It signs every
 request, and it opens no port.
