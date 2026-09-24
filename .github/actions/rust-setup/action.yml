@@ -1,0 +1,50 @@
+name: Rust setup
+description: >-
+  Installs the pinned stable Rust toolchain (with whatever components the
+  caller's checks need) and restores/saves Swatinem/rust-cache. Shared by
+  ci.yml's `rust` and `windows` jobs so the toolchain-plus-cache steps are
+  written once instead of twice. The caller checks out the repository itself
+  first: a local action cannot be loaded before its own checkout.
+
+inputs:
+  components:
+    description: >-
+      Toolchain components to install, comma-separated (dtolnay/rust-toolchain's
+      own `components` input). Both current callers want the same rustfmt and
+      clippy checks, so that is the default; pass '' for a job that needs neither.
+    required: false
+    default: rustfmt, clippy
+  cache-key:
+    description: >-
+      Swatinem/rust-cache's `key`: an extra segment for a job whose cache must
+      stay separate along some axis of its own, e.g. a build matrix's OS. Leave
+      unset (the default) when cache-shared-key is used instead.
+    required: false
+    default: ''
+  cache-shared-key:
+    description: >-
+      Swatinem/rust-cache's `shared-key`: a fixed name for jobs that should all
+      share one cache entry regardless of what else varies about them. Leave
+      unset (the default) when cache-key is used instead.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: ${{ inputs.components }}
+
+    # Every push to main writes the cache (mainline is the one history a
+    # PR's own restore should fall back to); a PR run only ever restores it.
+    # A cache entry per PR branch would otherwise pile up against the
+    # repository's cache quota and start evicting main's, which is the one
+    # entry every other run depends on. cache-key/cache-shared-key above are
+    # how each caller keeps its own cache entry from colliding with any
+    # other job's; see the call site for which one it picked and why.
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ inputs.cache-key }}
+        shared-key: ${{ inputs.cache-shared-key }}
+        save-if: ${{ github.ref == 'refs/heads/main' }}

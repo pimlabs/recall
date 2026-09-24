@@ -96,6 +96,15 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
+      # Not .github/actions/rust-setup (ci.yml's `rust`/`windows` jobs):
+      # that composite bakes in rustfmt+clippy components and a main-only
+      # save-if, and this job needs neither, wanting a cross-compile target
+      # instead of components, and a cache that always saves, since a
+      # release only runs from a tag or a manual dispatch, never a PR
+      # restore-only run that main-only saving exists to protect. Reusing
+      # it here would mean overriding most of what it fixes, so the two
+      # rust-cache steps stay written out plainly instead of threading
+      # exceptions through a composite built for a different shape.
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
