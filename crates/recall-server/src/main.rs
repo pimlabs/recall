@@ -35,12 +35,18 @@ RECALL_TOKEN and that code can then register a first passkey again. Run it
 where the server runs, as the database's owner, such as with
 docker compose exec -u node.";
 
-/// What `recall-server version` prints: the same shape as `recall
-/// version`, so one reading of either tells the same story.
+/// What `recall-server version` prints: the same first line as `recall
+/// version`, so one reading of either tells the same story, then the
+/// optional parts this binary was built with.
+///
+/// The second line is what lets a release be checked for what it must
+/// carry: a server built without `passkeys` starts and syncs as well as
+/// one built with it, and only `/admin` would show the difference. The
+/// release workflow refuses a binary whose line does not name it.
 fn version_line() -> String {
     let version = env!("CARGO_PKG_VERSION");
     let commit = option_env!("RECALL_GIT_COMMIT").unwrap_or("unknown");
-    match recall_wire::discovery::channel() {
+    let first = match recall_wire::discovery::channel() {
         recall_wire::discovery::CHANNEL_RELEASE => {
             format!("recall-server {version} ({commit})")
         }
@@ -48,7 +54,18 @@ fn version_line() -> String {
             "recall-server {version} ({commit}, dev build {})",
             recall_wire::discovery::version()
         ),
-    }
+    };
+    let features: &[&str] = if cfg!(feature = "passkeys") {
+        &["passkeys"]
+    } else {
+        &[]
+    };
+    let features = if features.is_empty() {
+        "none".to_string()
+    } else {
+        features.join(" ")
+    };
+    format!("{first}\nfeatures: {features}")
 }
 
 fn main() -> ExitCode {

@@ -27,7 +27,8 @@ FROM rust:1-alpine AS source
 # /admin needs (webauthn-rs verifies with it). It is vendored: built from
 # source here and linked in statically, so the runtime image needs no
 # OpenSSL of its own. Its Configure script is perl, its build is make, and
-# it includes a few kernel headers.
+# linux-headers is not optional: crypto/mem_sec.c includes <linux/mman.h>
+# whenever <sys/syscall.h> defines SYS_mlock2, which musl's does.
 RUN apk add --no-cache musl-dev perl make linux-headers
 
 WORKDIR /src

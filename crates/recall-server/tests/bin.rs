@@ -45,6 +45,22 @@ fn every_way_of_asking_for_the_version_says_the_same() {
     assert_eq!(answers[0], answers[2]);
 }
 
+/// Verification finding 7: the version names the optional parts built in,
+/// on a line of its own, so the release workflow can refuse a server built
+/// without passkey sign-in, which would otherwise start and sync as usual.
+#[test]
+fn the_version_says_which_features_are_built_in() {
+    let out = run(&["version"], &[]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let features = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("features: "))
+        .unwrap_or_else(|| panic!("no features line in {stdout:?}"));
+    let has_passkeys = features.split(' ').any(|f| f == "passkeys");
+    assert_eq!(has_passkeys, cfg!(feature = "passkeys"), "{stdout:?}");
+    assert_eq!(stdout.lines().count(), 2, "{stdout:?}");
+}
+
 /// Anything else is a usage error, exit 2, and it does not start serving.
 #[test]
 fn an_unknown_argument_is_a_usage_error() {

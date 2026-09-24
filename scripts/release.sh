@@ -209,6 +209,11 @@ case "$built" in
   "recall-server $VERSION"*) ok "server binary reports $VERSION" ;;
   *) die "server binary reports '$built', expected recall-server $VERSION" ;;
 esac
+if printf '%s\n' "$built" | grep -Eq '^features:( [a-z-]+)* passkeys( |$)'; then
+  ok "server binary has passkey sign-in"
+else
+  die "server binary was built without the passkeys feature"
+fi
 
 # --------------------------------------------------------------------------
 step "4/9  crates.io names"
