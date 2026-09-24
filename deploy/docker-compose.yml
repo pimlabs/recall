@@ -86,6 +86,10 @@ services:
   # path to it. The 127.0.0.1 port binding below is the second, independent
   # layer: even on the `db-tools` network alone, it's still unreachable
   # from anywhere but this machine.
+  #
+  # The database is in WAL mode, and a read-only mount cannot create the
+  # recall.db-shm a reader needs, so this reads it while recall-server,
+  # which keeps that file, is running, and can show an error while it is not.
   sqlite-web:
     image: coleifer/sqlite-web
     container_name: recall-sqlite-web

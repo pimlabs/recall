@@ -28,14 +28,17 @@ use rusqlite::{Connection, ErrorCode, OpenFlags};
 use super::jobs::{close_for_admin, AdminClose};
 use super::{Outcome, Store};
 
-/// How long a statement waits on a lock someone else holds (the server
-/// mid-write, its own `VACUUM INTO` backup, sqlite-web mid-read) before
-/// giving up with `SQLITE_BUSY`.
+/// How long a statement waits on a lock someone else holds before giving
+/// up with `SQLITE_BUSY`. In WAL, which the server keeps the file in, that
+/// is only another writer: the server mid-write, or another command. A
+/// reader (sqlite-web, a backup being taken) no longer holds up a write;
+/// under the rollback journal of a file no current server has opened yet,
+/// it still does.
 ///
-/// The server's connection waits the same 5 seconds: rusqlite sets that on
-/// every connection it opens, and `Store::open` does not change it. Stated
-/// here rather than inherited, so a change to that default cannot quietly
-/// change how an admin command behaves against a running server.
+/// The server's connection waits the same 5 seconds: `Store::open` sets
+/// this same constant. Stated rather than inherited from rusqlite's
+/// default, so a change to that default cannot quietly change how either
+/// side behaves beside the other.
 pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Whether an admin command may write to the database it opens.
@@ -548,6 +551,12 @@ impl Store {
         if access == Access::Write && conn.is_readonly(rusqlite::DatabaseName::Main)? {
             bail!("{} is not writable by this user", path.display());
         }
+        // The journal mode is the file's own and is left alone: WAL once a
+        // current server has opened it. How durable a commit is, though, is
+        // this connection's setting, and a change here is acknowledged to
+        // the owner just as a push is to a client, so it is synced as the
+        // server's are (see `use_durable_wal` in the store).
+        conn.execute_batch("PRAGMA synchronous = FULL")?;
 
         let columns =
             memory_files_columns(&conn).with_context(|| format!("reading {}", path.display()))?;
@@ -979,8 +988,9 @@ fn deleted_column(conn: &Connection) -> Result<&'static str> {
 fn busy(err: rusqlite::Error, doing: &str) -> anyhow::Error {
     match err.sqlite_error_code() {
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => anyhow!(
-            "the database stayed locked for {} seconds while {doing} (the server mid-write or \
-             mid-backup, or sqlite-web mid-read). Rolled back. Run the command again",
+            "the database stayed locked for {} seconds while {doing} (another process \
+             mid-write: the server, or another admin command). Rolled back. Run the command \
+             again",
             BUSY_TIMEOUT.as_secs()
         ),
         _ => anyhow::Error::from(err).context(format!("{doing} failed")),

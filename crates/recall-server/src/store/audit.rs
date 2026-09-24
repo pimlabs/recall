@@ -160,8 +160,11 @@ fn last_at(conn: &Connection, size: u64) -> Result<String> {
 /// its lock keeps anything else from appending until then.
 ///
 /// A table that holds fewer leaves than `held` was rolled back under a
-/// running server (a backup restored without stopping it), and nothing
-/// more is appended onto it until the server restarts and reads it afresh.
+/// running server, and nothing more is appended onto it until the server
+/// restarts and reads it afresh. A backup copied over the file of a running
+/// server is not reliably seen here: under WAL the server's connection goes
+/// by its WAL and its cache, not the file, and writes on over the copy.
+/// That is why a restore stops the server first (`deploy/README.md`).
 fn catch_up(conn: &Connection, held: u64) -> Result<(Vec<Hash>, Option<String>)> {
     let stored: i64 =
         conn.query_row("SELECT COALESCE(MAX(seq) + 1, 0) FROM audit_log", [], |r| {
@@ -774,13 +777,15 @@ mod tests {
         blank.lock().audit = Tree::new();
         assert_eq!(blank.audit_append(|seq, _| push_leaf(seq)).unwrap(), 4);
 
-        // The file replaced by an older copy under the running store.
-        let older = dir.path().join("older.db");
-        {
-            let st = Store::open(&older).unwrap();
-            append(&st);
-        }
-        std::fs::copy(&older, &path).unwrap();
+        // The log gone back under the running store. Done through SQLite,
+        // not by copying an older file over this one: under WAL the store
+        // would not see a copy at all (its WAL and cache still describe the
+        // file it had) and would write on over it, which is why a restore
+        // stops the server and moves its WAL aside first.
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("DROP TRIGGER audit_log_no_delete; DELETE FROM audit_log WHERE seq >= 1")
+            .unwrap();
         let err = server.audit_append(|seq, _| push_leaf(seq)).unwrap_err();
         assert!(format!("{err:#}").contains("restart it"), "{err:#}");
     }

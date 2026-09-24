@@ -501,6 +501,15 @@ impl Server {
                     if let Err(e) = jobs::drain_without_worker(&state).await {
                         eprintln!("draining the merge queue failed: {e:#}");
                     }
+                    // The WAL's commits copied back into recall.db, so the
+                    // file on its own is never more than a sweep behind:
+                    // see Store::checkpoint.
+                    let s = state.clone();
+                    if let Ok(Err(e)) =
+                        tokio::task::spawn_blocking(move || s.store.checkpoint()).await
+                    {
+                        eprintln!("checkpointing the WAL failed: {e:#}");
+                    }
                     tokio::time::sleep(SWEEP_EVERY).await;
                 }
             }));
@@ -543,7 +552,8 @@ impl Server {
     }
 
     /// Binds `cfg.addr` and serves until SIGTERM or ctrl-c, then shuts down
-    /// gracefully so an in-flight merge isn't cut off mid-write.
+    /// gracefully so an in-flight merge isn't cut off mid-write, and empties
+    /// the WAL into the database file ([`Store::checkpoint_all`]).
     pub async fn serve(&self) -> Result<()> {
         let listener = TcpListener::bind(&self.state.cfg.addr)
             .await
@@ -620,6 +630,19 @@ impl Server {
         };
         for task in tasks {
             task.abort();
+        }
+        // Last, with every request answered: the WAL emptied into recall.db,
+        // so the file left behind is the whole database, even while
+        // sqlite-web has it open, which keeps closing the connection from
+        // doing the same. Best-effort, like the backups: a WAL it could not
+        // empty is still read on the next start.
+        match self.state.store.checkpoint_all() {
+            Ok(true) => {}
+            Ok(false) => eprintln!(
+                "stopping with commits still in the WAL: a reader held it past the busy \
+                 timeout. Nothing is lost; the next start reads them"
+            ),
+            Err(e) => eprintln!("checkpointing the WAL at shutdown failed: {e:#}"),
         }
         result
     }

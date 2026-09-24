@@ -379,15 +379,17 @@ restore never overwrites a differing live row without `--overwrite`, never
 removes a row, and never turns a live file into a tombstone (a deletion on
 every machine at its next pull) without `--restore-deletions` as well.
 
-It runs beside a live server, not instead of one. The store uses SQLite's
-default rollback journal (`journal_mode=delete`), and rusqlite gives every
-connection a 5-second busy timeout, which the admin connection states
-explicitly rather than inherits. The server's statements are each their own
-transaction. A change's transaction begins with `BEGIN IMMEDIATE`, so it
-holds the write lock before it re-reads anything: it waits behind a
-statement in flight, a statement waits behind it, and neither can deadlock
-the other. A lock that never comes, such as a reader that will not let the
-commit through, rolls the change back and says so.
+It runs beside a live server, not instead of one. The store keeps the file
+in SQLite's WAL mode (see "Storage: WAL, synced at every commit" below),
+and both sides wait on a lock for the same 5 seconds, which each states
+explicitly rather than inheriting rusqlite's default. Every write, the
+server's and a change's, is one transaction that takes the write lock
+before it reads anything: a single statement does by itself, and anything
+longer (every audited write, and a change) begins with `BEGIN IMMEDIATE`.
+So a change waits behind a write in flight, a write waits behind it, and
+neither can deadlock the other. Under WAL only another writer can hold a
+change up; a reader, such as sqlite-web mid-page or a backup being read, no
+longer can. A lock that never comes rolls the change back and says so.
 
 What the lock does not do is order a change against a whole push. A push is
 several statements: the handler reads the stored row, may merge for up to
@@ -401,15 +403,43 @@ committing, the command waits out the merge window (the server's timeout,
 read from the same environment the same way, plus a second) and checks; if
 anything came back it names the paths and the command to run, and exits 3.
 
-The journal mode is left alone: switching a shared production file to WAL is
-a change with consequences of its own, sqlite-web's read-only mount among
-them, and nothing here needs it. Nor is it checked. The modes that cannot
-roll back, `off` and `memory`, are settings of the connection that asks for
-them and are never stored in the file, so the admin connection always gets a
-journal that can. The commands refuse to write as any user but the database
-file's owner, since `docker exec` defaults to root and a root-owned journal
-left by a crash is one the server cannot open; a process that cannot tell who
-it runs as refuses too.
+The commands leave the journal mode alone, and do not check it. The modes
+that cannot roll back, `off` and `memory`, are settings of the connection
+that asks for them and are never stored in the file, so the admin
+connection always gets the file's own: WAL, or the rollback journal of a
+file no current server has opened yet, and both roll back. The commands
+refuse to write as any user but the database file's owner, since `docker
+exec` defaults to root and a root-owned journal left by a crash is one the
+server cannot open; a process that cannot tell who it runs as refuses too.
+
+### Storage: WAL, synced at every commit
+
+`Store::open` puts the file in SQLite's WAL mode, once, with
+`synchronous=FULL` on its connection. WAL for two reasons: a commit appends
+to `recall.db-wal` and syncs that one file, where the rollback journal
+synced a journal, then the database, then deleted the journal, and since
+the audit log every push and every pull is a write transaction; and readers
+(sqlite-web, the admin commands' reads, a backup being taken) stop holding
+up writers. FULL rather than WAL's customary NORMAL, because NORMAL does
+not sync a commit until the next checkpoint, so a power cut or a host crash
+can take back pushes whose client already got `200`, and that client may
+be an ephemeral cloud session whose memory this server was the only copy
+of. The syncing is most of what a push costs, and the price is paid
+deliberately: the numbers are beside `use_durable_wal` in `store.rs`.
+
+What WAL asks in return is that `recall.db` is no longer the whole database
+while the server runs, or after a crash: the newest commits can be only in
+`recall.db-wal`. So nothing copies the file. The server's snapshots and
+every admin change's backup are `VACUUM INTO`, which reads through SQLite
+and writes one self-contained file in the rollback journal's mode, and
+`crates/recall-server/tests/edge_cases.rs` holds a test that a backup
+taken while pushes land restores every push acknowledged before it, which
+a file copy fails. A restore moves `recall.db`, `recall.db-wal` and
+`recall.db-shm` aside together, because SQLite replays a WAL it finds into
+the file beside it, whichever file that is; `deploy/README.md` has the
+procedures, and why the volume has to be a local filesystem. The server
+checkpoints every sweep, so the file alone is never far behind, and empties
+the WAL into the file when it stops; neither is relied on for correctness.
 
 ## Merge strategy
 

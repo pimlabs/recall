@@ -558,8 +558,9 @@ fn open_live(db: &Path, opts: Opts) -> Result<Store> {
     // There is no journal mode to check. `off` and `memory`, the two under
     // which a transaction cannot be rolled back, are settings of the
     // connection that asks for them and are never stored in the file, so
-    // this connection always has the default rollback journal, or WAL,
-    // which is stored and can roll back.
+    // this connection always has the file's own: WAL, which the server
+    // sets and the file keeps, or the rollback journal of a file no current
+    // server has opened yet. Both roll back.
     check_owner(db)?;
     Store::open_existing(db, Access::Write)
 }

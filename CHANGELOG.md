@@ -14,6 +14,33 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
+## Unreleased
+
+- **The server keeps its database in SQLite's WAL mode**, with every
+  commit synced before the client is answered (`synchronous=FULL`), so a
+  `200` still means the push is on disk. The first start converts the
+  existing `recall.db` by itself, once; nothing needs doing first, and an
+  older image still opens the file if you roll back. A push and a pull each
+  take well under half as long on the server as they did (measured
+  in-process, beside `use_durable_wal` in `store.rs`), and a reader such as
+  sqlite-web or an admin command's backup no longer holds up a push or a
+  change, which could fail one after five seconds before.
+- **`recall.db` alone is no longer the whole database.** Beside it in the
+  volume are `recall.db-wal`, which holds the newest commits until they are
+  copied back into it, and `recall.db-shm`. The server's snapshots were
+  always `VACUUM INTO` and stay correct, but anything that copies the file
+  itself, such as a hand-rolled `cp` backup, can now miss the newest
+  pushes. `deploy/README.md` has new procedures that do not: a snapshot
+  with `VACUUM INTO` before switching ingress or editing by hand, and a
+  restore that moves all three files aside together before copying a
+  snapshot in, since a WAL left beside a restored `recall.db` is replayed
+  into it. The volume has to be a local filesystem, never NFS or SMB.
+- **sqlite-web works while the server runs.** On its read-only mount it
+  cannot create `recall.db-shm` itself, so it can show an error while
+  `recall-server` is stopped. With direct TLS, whose sqlite-web mounts the
+  one file, it shows the database as last checkpointed, which the server
+  now does every ten minutes and when it stops.
+
 ## 0.4.2 — 2026-09-24
 
 - **Merging can move out of the server, into `recall-worker`.** A new

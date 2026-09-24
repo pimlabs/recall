@@ -611,10 +611,19 @@ async fn malformed_pushes_are_400() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "pull without project_key");
 }
 
+/// And leaves the WAL empty behind it, the start leaf it wrote copied into
+/// `recall.db`, even with another process holding the file open, as
+/// sqlite-web does: closing the server's connection then does not empty
+/// the WAL, so only the server's own checkpoint as it stops can.
 #[tokio::test]
 async fn serve_shuts_down_cleanly() {
     let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(Store::open(dir.path().join("recall.db")).unwrap());
+    let db = dir.path().join("recall.db");
+    let store = Arc::new(Store::open(&db).unwrap());
+    let reader = rusqlite::Connection::open(&db).unwrap();
+    let _: i64 = reader
+        .query_row("SELECT count(*) FROM audit_log", [], |r| r.get(0))
+        .unwrap();
     let server = Server::new(
         Config {
             token: TEST_TOKEN.to_string(),
@@ -642,6 +651,16 @@ async fn serve_shuts_down_cleanly() {
         .expect("server did not shut down within 5s")
         .expect("serve task panicked");
     assert!(done.is_ok(), "shutdown returned {done:?}");
+
+    let wal = std::fs::metadata(dir.path().join("recall.db-wal")).map_or(0, |m| m.len());
+    assert_eq!(
+        wal, 0,
+        "the WAL was emptied into recall.db as the server stopped"
+    );
+    let leaves: i64 = reader
+        .query_row("SELECT count(*) FROM audit_log", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(leaves, 1, "the start leaf, in the file");
 }
 
 /// A stand-in `claude` that drains stdin, ignores its arguments and prints

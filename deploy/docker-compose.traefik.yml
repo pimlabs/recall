@@ -120,6 +120,10 @@ services:
   # to loopback: reachable only over an SSH tunnel to this machine.
   #
   #   ssh -L 8081:127.0.0.1:8081 user@vps   # then http://localhost:8081
+  #
+  # The database is in WAL mode, and a read-only mount cannot create the
+  # recall.db-shm a reader needs, so this reads it while recall-server,
+  # which keeps that file, is running, and can show an error while it is not.
   sqlite-web:
     image: coleifer/sqlite-web
     container_name: recall-sqlite-web
