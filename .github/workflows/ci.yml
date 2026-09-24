@@ -262,13 +262,15 @@ jobs:
           echo "Changed in this pull request:"
           echo "$changed"
 
-          if printf '%s\n' "$changed" | grep -Eq '^(crates/|deploy/|Cargo\.(toml|lock)$)'; then
+          # This workflow itself counts too: a change to the image step
+          # below is only proven by running it.
+          if printf '%s\n' "$changed" | grep -Eq '^(crates/|deploy/|Cargo\.(toml|lock)$|\.github/workflows/ci\.yml$)'; then
             echo "build=true" >> "$GITHUB_OUTPUT"
           else
             echo "build=false" >> "$GITHUB_OUTPUT"
             # One line on purpose: a `\` continuation inside a quoted
             # string keeps the next line's indentation in the annotation.
-            echo "::notice::Nothing under crates/, deploy/, Cargo.toml or Cargo.lock changed, so the server image build was skipped. It runs unconditionally on every push to main."
+            echo "::notice::Nothing under crates/, deploy/, Cargo.toml, Cargo.lock or this workflow changed, so the server image build was skipped. It runs unconditionally on every push to main."
           fi
 
       # A second, non-default builder, used only by the two `buildx build`
