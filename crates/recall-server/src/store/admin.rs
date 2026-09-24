@@ -6,8 +6,10 @@
 //! transaction, computes the plan again *inside* it, and refuses unless the
 //! two are identical, which closes the gap between what was confirmed and
 //! what is about to happen (the server keeps accepting pushes meanwhile).
-//! It runs the change, and commits only if SQLite's `changes()` equals the
-//! number of rows the plan names; anything else rolls back.
+//! It runs the change, closes the open merge jobs for the rows it touched,
+//! appends the change's audit leaf, and commits only if SQLite's
+//! `changes()` equals the number of rows and jobs the plan names; anything
+//! else rolls back, the leaf included.
 //!
 //! The backup is the caller's job, because `VACUUM INTO` cannot run inside a
 //! transaction.
@@ -21,9 +23,10 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use rusqlite::{Connection, ErrorCode, OpenFlags, TransactionBehavior};
+use rusqlite::{Connection, ErrorCode, OpenFlags};
 
-use super::Store;
+use super::jobs::{close_for_admin, AdminClose};
+use super::{Outcome, Store};
 
 /// How long a statement waits on a lock someone else holds (the server
 /// mid-write, its own `VACUUM INTO` backup, sqlite-web mid-read) before
@@ -67,6 +70,26 @@ pub(crate) struct Summary {
     pub(crate) last_updated_at: String,
 }
 
+/// A job still queued or leased for a row a change touches, which the
+/// change closes (see `close_for_admin` in the store's jobs module).
+///
+/// Two are equal when they are the same job for the same file, whatever
+/// state each was read in: a worker leasing a queued job between showing a
+/// plan and applying it changes nothing about what the change does to it.
+#[derive(Debug, Clone, Eq)]
+pub(crate) struct OpenJob {
+    pub(crate) id: String,
+    pub(crate) file_path: String,
+    /// `queued` or `leased`, as last read.
+    pub(crate) state: String,
+}
+
+impl PartialEq for OpenJob {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.file_path == other.file_path
+    }
+}
+
 /// A change, worked out in full before anything is written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Plan {
@@ -78,11 +101,42 @@ pub(crate) enum Plan {
         rows: Vec<Row>,
         /// Every row already under `to`. Must be empty.
         occupied: Vec<Row>,
+        /// Every open job under `from`: closed.
+        jobs: Vec<OpenJob>,
     },
     /// Delete every row of one key.
-    Remove { key: String, rows: Vec<Row> },
+    Remove {
+        key: String,
+        rows: Vec<Row>,
+        /// Every open job under `key`: closed.
+        jobs: Vec<OpenJob>,
+    },
     /// Copy one key's rows from a backup into the live database.
     Restore(Restore),
+}
+
+/// What [`Store::apply`] did: the rows it changed, and the jobs it closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Applied {
+    pub(crate) rows: usize,
+    pub(crate) jobs: Vec<String>,
+}
+
+/// What a committed change's check afterwards found back on the rows it
+/// touched: see [`Plan::undone`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Undone {
+    /// Paths whose row no longer shows the change.
+    pub(crate) paths: Vec<String>,
+    /// Jobs open for those rows again: each was queued by a push that
+    /// landed after the change committed.
+    pub(crate) jobs: Vec<OpenJob>,
+}
+
+impl Undone {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.paths.is_empty() && self.jobs.is_empty()
+    }
 }
 
 /// What restoring one key from a backup would do, row by row.
@@ -115,6 +169,10 @@ pub(crate) struct Restore {
     /// `--restore-deletions`, which the command accepts only together with
     /// `--overwrite`.
     pub(crate) allow_deletions: bool,
+    /// Every open job under the key for a path this restore writes: closed.
+    /// A job for a path it leaves alone (unchanged, live only, a skipped
+    /// deletion) stays open, since its row is as the job left it.
+    pub(crate) jobs: Vec<OpenJob>,
 }
 
 impl Restore {
@@ -144,7 +202,7 @@ impl Restore {
     }
 
     /// Every row this restore writes, as it will be written.
-    fn written(&self) -> impl Iterator<Item = &Row> {
+    pub(crate) fn written(&self) -> impl Iterator<Item = &Row> {
         self.add.iter().chain(
             self.overwrite
                 .iter()
@@ -183,6 +241,23 @@ impl Plan {
         }
     }
 
+    /// The open jobs the change closes, in the same transaction.
+    pub(crate) fn jobs(&self) -> &[OpenJob] {
+        match self {
+            Plan::Rename { jobs, .. } | Plan::Remove { jobs, .. } => jobs,
+            Plan::Restore(r) => &r.jobs,
+        }
+    }
+
+    /// The key whose rows the change touches: a rename's source.
+    fn key(&self) -> &str {
+        match self {
+            Plan::Rename { from, .. } => from,
+            Plan::Remove { key, .. } => key,
+            Plan::Restore(r) => &r.key,
+        }
+    }
+
     /// Why this change must not happen, if it must not.
     ///
     /// Checked twice: before the owner is asked to confirm, and again inside
@@ -195,6 +270,7 @@ impl Plan {
                 to,
                 rows,
                 occupied,
+                ..
             } => {
                 if from == to {
                     return Some(format!("{from:?} and {to:?} are the same key"));
@@ -238,7 +314,7 @@ impl Plan {
                 }
                 None
             }
-            Plan::Remove { key, rows } => rows.is_empty().then(|| no_such_key(key)),
+            Plan::Remove { key, rows, .. } => rows.is_empty().then(|| no_such_key(key)),
             Plan::Restore(r) => {
                 if r.backup.is_empty() {
                     return Some(format!("the backup holds no rows for {:?}", r.key));
@@ -299,6 +375,7 @@ impl Plan {
                 to,
                 rows,
                 occupied,
+                ..
             } => {
                 let held = snapshot.rows(from)?;
                 let target = snapshot.rows(to)?;
@@ -310,7 +387,7 @@ impl Plan {
                     None
                 }
             }
-            Plan::Remove { key, rows } => {
+            Plan::Remove { key, rows, .. } => {
                 let held = snapshot.rows(key)?;
                 (held != *rows).then(|| differs(key, &held, rows.len()))
             }
@@ -330,7 +407,9 @@ impl Plan {
 
     /// Paths where, some time after this change committed, the database no
     /// longer shows it: rows under the key a rename or remove emptied, or a
-    /// restored row that is no longer what the restore wrote.
+    /// restored row that is no longer what the restore wrote; and the jobs
+    /// open for those rows again, which only a push since can have queued,
+    /// since the change closed every one there was.
     ///
     /// The one cause the admin command waits for is a push that was in
     /// flight: the server reads the stored row, may merge for up to
@@ -339,17 +418,55 @@ impl Plan {
     /// key or over the restored row. The other is a machine still syncing
     /// under the old key, or editing a restored file, which the same check
     /// sees just as well.
-    pub(crate) fn undone(&self, store: &Store) -> Result<Vec<String>> {
+    pub(crate) fn undone(&self, store: &Store) -> Result<Undone> {
+        let conn = store.lock();
         let paths = |rows: Vec<Row>| rows.into_iter().map(|r| r.file_path).collect();
+        let open = open_jobs(&conn, self.key())?;
         Ok(match self {
-            Plan::Rename { from, .. } => paths(store.rows(from)?),
-            Plan::Remove { key, .. } => paths(store.rows(key)?),
+            Plan::Rename { from, .. } => Undone {
+                paths: paths(rows_under(&conn, from)?),
+                jobs: open,
+            },
+            Plan::Remove { key, .. } => Undone {
+                paths: paths(rows_under(&conn, key)?),
+                jobs: open,
+            },
             Plan::Restore(r) => {
-                let live = store.rows(&r.key)?;
-                r.written()
-                    .filter(|w| !live.contains(w))
-                    .map(|w| w.file_path.clone())
-                    .collect()
+                let live = rows_under(&conn, &r.key)?;
+                Undone {
+                    paths: r
+                        .written()
+                        .filter(|w| !live.contains(w))
+                        .map(|w| w.file_path.clone())
+                        .collect(),
+                    jobs: open
+                        .into_iter()
+                        .filter(|j| r.written().any(|w| w.file_path == j.file_path))
+                        .collect(),
+                }
+            }
+        })
+    }
+
+    /// Closes the open jobs for the rows the change touches, stamped `now`,
+    /// returning the sum of `changes()` over every statement it ran.
+    fn close_jobs(&self, conn: &Connection, now: &str) -> Result<usize> {
+        Ok(match self {
+            Plan::Rename { from, to, .. } => {
+                close_for_admin(conn, from, None, &AdminClose::Renamed { to }, now)?
+            }
+            Plan::Remove { key, .. } => {
+                close_for_admin(conn, key, None, &AdminClose::Removed, now)?
+            }
+            Plan::Restore(r) => {
+                let mut paths: Vec<&str> = r.jobs.iter().map(|j| j.file_path.as_str()).collect();
+                paths.dedup();
+                let mut closed = 0;
+                for path in paths {
+                    closed +=
+                        close_for_admin(conn, &r.key, Some(path), &AdminClose::Restored, now)?;
+                }
+                closed
             }
         })
     }
@@ -460,11 +577,26 @@ impl Store {
                 path.display()
             );
         }
-        // The audit tree starts empty rather than read here. The changes
-        // `recall-server admin` makes are not in the audit log (see "Audit"
-        // in docs/reference/api.md); the one audited write made this way,
-        // `reset-passkeys`, reads the whole log in, checked, before it
-        // appends (`Store::audited_each` catches up with the table).
+        // A change closes the jobs open for its rows and appends its leaf,
+        // so the live database needs both tables. The server creates them
+        // on start; a file without them is one no current server has
+        // opened.
+        if access == Access::Write {
+            for table in ["jobs", "audit_log"] {
+                if !has_table(&conn, table)? {
+                    bail!(
+                        "{} has no {table} table. If this is the live database, start the \
+                         server once so it brings the schema up to date",
+                        path.display()
+                    );
+                }
+            }
+        }
+        // The audit tree starts empty rather than read here: listing and a
+        // dry run never append, and a backup's log is not this one. A change
+        // reads the log in, checked, before it appends: most of it ahead of
+        // its transaction (`Store::audit_read_ahead`), the rest under the
+        // write lock, as `Store::audited_each` catches up with the table.
         Ok(Self {
             state: Mutex::new(super::StoreState {
                 conn,
@@ -546,7 +678,9 @@ impl Store {
     }
 
     /// Makes the change `shown` describes, in one transaction, or not at
-    /// all. Returns how many rows changed.
+    /// all: the rows, the open jobs for them closed, and the leaf
+    /// `build_leaf` makes from what it did. Returns how many rows changed
+    /// and which jobs it closed.
     ///
     /// `BEGIN IMMEDIATE` takes the write lock up front, so this waits (for
     /// [`BUSY_TIMEOUT`]) behind a server write rather than failing part way
@@ -561,39 +695,69 @@ impl Store {
     /// remove emptied, or writes a merge of the old row over a restored one.
     /// This function cannot see that, since it happens after it returns; the
     /// command waits out the merge window and checks with [`Plan::undone`].
-    pub(crate) fn apply(&self, shown: &Plan) -> Result<usize> {
-        let mut conn = self.lock();
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|e| Abandoned(format!("{:#}", busy(e, "starting the change"))))?;
+    ///
+    /// A job is different: one open for these rows is closed here, in the
+    /// same transaction, so a worker's result that arrives after the commit
+    /// finds its job settled and changes nothing.
+    ///
+    /// The leaf goes through [`Store::audited_each`], as `reset-passkeys`'s
+    /// does: the transaction first reads in every leaf a running server
+    /// appended since this store last looked, so this one takes the next
+    /// `seq`, and the server reads it in before its own next append. The
+    /// log is read ahead of the transaction first, so the write lock is not
+    /// held for the length of a long one.
+    pub(crate) fn apply(
+        &self,
+        shown: &Plan,
+        build_leaf: impl FnOnce(u64, &str, &Applied) -> Vec<u8>,
+    ) -> Result<Applied> {
+        self.audit_read_ahead()
+            .context("reading the audit log in, before appending this change's leaf")?;
+        self.audited_each_as(
+            |e| Abandoned(format!("{:#}", busy(e, "starting the change"))).into(),
+            |e| busy(e, "committing"),
+            // Any error returned from here drops the transaction, which
+            // rolls it back: rows, jobs and leaf alike.
+            |tx, at| {
+                let now = shown.recompute(tx)?;
+                if now != *shown {
+                    return Err(Abandoned(
+                        "the rows or merge jobs involved changed after they were shown (a push \
+                         arrived meanwhile?). Rolled back. Run the command again to see them as \
+                         they are now"
+                            .into(),
+                    )
+                    .into());
+                }
+                if let Some(why) = now.refusal() {
+                    bail!("refusing: {why}");
+                }
 
-        // From here, any early return drops `tx`, and rusqlite rolls back a
-        // transaction that is dropped without being committed.
-        let now = shown.recompute(&tx)?;
-        if now != *shown {
-            return Err(Abandoned(
-                "the rows involved changed after they were shown (a push arrived meanwhile?). \
-                 Rolled back. Run the command again to see them as they are now"
-                    .into(),
-            )
-            .into());
-        }
-        if let Some(why) = now.refusal() {
-            bail!("refusing: {why}");
-        }
-
-        let changed = shown.execute(&tx)?;
-        let expected = shown.expected_changes();
-        if changed != expected {
-            tx.rollback()?;
-            bail!(
-                "SQLite changed {changed} row(s) where {expected} were expected, so the \
-                 transaction was rolled back. Something other than this command is acting on \
-                 these rows (a trigger?); look before trying again"
-            );
-        }
-        tx.commit().map_err(|e| busy(e, "committing"))?;
-        Ok(changed)
+                let changed = shown.execute(tx)?;
+                let expected = shown.expected_changes();
+                if changed != expected {
+                    bail!(
+                        "SQLite changed {changed} row(s) where {expected} were expected, so the \
+                         transaction was rolled back. Something other than this command is \
+                         acting on these rows (a trigger?); look before trying again"
+                    );
+                }
+                let closed = shown.close_jobs(tx, at)?;
+                let open = shown.jobs().len();
+                if closed != open {
+                    bail!(
+                        "SQLite closed {closed} merge job(s) where {open} were expected, so the \
+                         transaction was rolled back. Something other than this command is \
+                         acting on these jobs (a trigger?); look before trying again"
+                    );
+                }
+                Ok(Outcome::Commit(Applied {
+                    rows: changed,
+                    jobs: shown.jobs().iter().map(|j| j.id.clone()).collect(),
+                }))
+            },
+            |seq, at, applied| vec![build_leaf(seq, at, applied)],
+        )
     }
 }
 
@@ -680,6 +844,7 @@ fn rename_plan(conn: &Connection, from: &str, to: &str) -> Result<Plan> {
         to: to.to_owned(),
         rows: rows_under(conn, from)?,
         occupied: rows_under(conn, to)?,
+        jobs: open_jobs(conn, from)?,
     })
 }
 
@@ -687,6 +852,7 @@ fn remove_plan(conn: &Connection, key: &str) -> Result<Plan> {
     Ok(Plan::Remove {
         key: key.to_owned(),
         rows: rows_under(conn, key)?,
+        jobs: open_jobs(conn, key)?,
     })
 }
 
@@ -720,7 +886,7 @@ fn restore_plan(
         .filter(|r| !backup.iter().any(|b| b.file_path == r.file_path))
         .map(|r| r.file_path.clone())
         .collect();
-    Ok(Restore {
+    let mut restore = Restore {
         key: key.to_owned(),
         backup,
         add,
@@ -730,7 +896,43 @@ fn restore_plan(
         live_only,
         allow_overwrite,
         allow_deletions,
-    })
+        jobs: Vec::new(),
+    };
+    restore.jobs = open_jobs(conn, key)?
+        .into_iter()
+        .filter(|j| restore.written().any(|w| w.file_path == j.file_path))
+        .collect();
+    Ok(restore)
+}
+
+/// Every job still queued or leased under exactly `key`, by path, then
+/// oldest first. None in a database with no jobs table: a dry run against
+/// a live database no current server has opened yet.
+fn open_jobs(conn: &Connection, key: &str) -> Result<Vec<OpenJob>> {
+    if !has_table(conn, "jobs")? {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT id, file_path, state FROM jobs
+         WHERE project_key = ?1 AND state IN ('queued', 'leased')
+         ORDER BY file_path, created_at, id",
+    )?;
+    let jobs = stmt.query_map((key,), |r| {
+        Ok(OpenJob {
+            id: r.get(0)?,
+            file_path: r.get(1)?,
+            state: r.get(2)?,
+        })
+    })?;
+    jobs.collect::<rusqlite::Result<_>>().map_err(Into::into)
+}
+
+fn has_table(conn: &Connection, name: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        (name,),
+        |r| r.get(0),
+    )?)
 }
 
 /// Exact match only: `=`, never `LIKE` or `GLOB`, so a key containing `%`,
@@ -792,6 +994,85 @@ mod tests {
 
     const T0: &str = "2026-09-01T00:00:00.000Z";
 
+    /// A leaf these tests do not look at, for [`Store::apply`].
+    fn leaf(seq: u64, at: &str, _: &Applied) -> Vec<u8> {
+        test_leaf(seq, at)
+    }
+
+    /// A stale push of `content` to `key`/`path`, queued for a worker as
+    /// job `id`.
+    fn queue(st: &Store, key: &str, path: &str, content: &str, id: &str) {
+        let incoming = recall_wire::MergeSide {
+            sha256: recall_wire::content_sha256(content),
+            content: content.into(),
+            source_env: "laptop".into(),
+            updated_at: T0.into(),
+        };
+        let (queued, _) = st
+            .write_and_queue_merge_audited(
+                key,
+                path,
+                &incoming,
+                id,
+                time::OffsetDateTime::now_utc(),
+                |seq, at, _| test_leaf(seq, at),
+            )
+            .unwrap();
+        assert_eq!(queued, crate::store::Queued::Queued(id.into()));
+    }
+
+    /// The jobs a change closes are part of what was shown: one that
+    /// appears after the plan stops the change like a row does, while a
+    /// worker leasing one it showed changes nothing it does.
+    #[test]
+    fn a_job_that_arrives_after_the_plan_was_shown_stops_the_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, st) = live(&dir);
+        let writer = Store::open(&path).unwrap();
+        queue(&writer, "old/key", "a.md", "alpha, edited", "job_1");
+        let plan = st.plan_remove("old/key").unwrap();
+        assert_eq!(plan.jobs().len(), 1);
+        assert_eq!(plan.jobs()[0].state, "queued");
+
+        // A job with no push behind it, so the rows are as they were shown;
+        // with no input either, so not claimable before 2999.
+        writer
+            .with_raw(|c| {
+                c.execute(
+                    "INSERT INTO jobs (id, kind, state, project_key, file_path, payload,
+                                       not_before, created_at, updated_at)
+                     VALUES ('job_2', 'merge', 'queued', 'old/key', 'b.md', '{}', ?1, ?1, ?1)",
+                    ("2999-01-01T00:00:00.000Z",),
+                )
+            })
+            .unwrap();
+        let err = st.apply(&plan, leaf).unwrap_err();
+        assert!(err.is::<Abandoned>(), "{err:#}");
+        assert!(err.to_string().contains("merge jobs"), "{err:#}");
+        assert_eq!(st.rows("old/key").unwrap().len(), 3, "nothing removed");
+
+        let plan = st.plan_remove("old/key").unwrap();
+        writer
+            .claim_job_audited(
+                &["merge".into()],
+                "lease_1",
+                std::time::Duration::from_secs(60),
+                time::OffsetDateTime::now_utc(),
+                |seq, at, _| test_leaf(seq, at),
+            )
+            .unwrap()
+            .unwrap();
+        let applied = st.apply(&plan, leaf).unwrap();
+        assert_eq!(applied.jobs, ["job_1", "job_2"]);
+        let states: Vec<String> = writer
+            .jobs(None, 10)
+            .unwrap()
+            .into_iter()
+            .map(|j| j.state)
+            .collect();
+        assert_eq!(states, ["done", "done"]);
+    }
+
     fn live(dir: &tempfile::TempDir) -> (std::path::PathBuf, Store) {
         let path = dir.path().join("recall.db");
         let st = Store::open(&path).unwrap();
@@ -823,7 +1104,7 @@ mod tests {
             .upsert_audited("old/key", "late.md", "arrived", "laptop", test_leaf)
             .unwrap();
 
-        let err = st.apply(&plan).unwrap_err().to_string();
+        let err = st.apply(&plan, leaf).unwrap_err().to_string();
         assert!(err.contains("changed after they were shown"), "{err}");
         assert_eq!(st.rows("old/key").unwrap().len(), 4, "nothing removed");
     }
@@ -846,12 +1127,12 @@ mod tests {
         };
         assert_eq!(r.overwrite.len(), 1);
         assert_eq!(r.unchanged.len(), 2);
-        let err = st.apply(&plan).unwrap_err().to_string();
+        let err = st.apply(&plan, leaf).unwrap_err().to_string();
         assert!(err.contains("--overwrite"), "{err}");
         assert_eq!(st.rows("old/key").unwrap()[0].content, "alpha");
 
         let plan = st.plan_restore("old/key", backup, true, false).unwrap();
-        assert_eq!(st.apply(&plan).unwrap(), 1);
+        assert_eq!(st.apply(&plan, leaf).unwrap().rows, 1);
         assert_eq!(st.rows("old/key").unwrap()[0].content, "older alpha");
     }
 
@@ -940,6 +1221,7 @@ mod tests {
                 to: to.into(),
                 rows: vec![],
                 occupied: vec![],
+                jobs: vec![],
             };
             let refusal = plan.refusal().unwrap();
             assert!(refusal.contains(why), "{to:?}: {refusal}");
@@ -961,10 +1243,13 @@ mod tests {
             .unwrap()
             .upsert_audited("old/key", "late.md", "arrived", "laptop", test_leaf)
             .unwrap();
-        assert!(st.apply(&plan).unwrap_err().is::<Abandoned>());
+        assert!(st.apply(&plan, leaf).unwrap_err().is::<Abandoned>());
 
         let plan = st.plan_rename("old/key", "other").unwrap();
-        assert!(!st.apply(&plan).unwrap_err().is::<Abandoned>(), "a refusal");
+        assert!(
+            !st.apply(&plan, leaf).unwrap_err().is::<Abandoned>(),
+            "a refusal"
+        );
     }
 
     /// A backup's tombstone does not turn a live file into one, which would
@@ -988,14 +1273,14 @@ mod tests {
         assert_eq!(r.skipped_deletions().len(), 1);
         assert_eq!(r.overwrite.len(), 1, "only b.md");
         assert_eq!(plan.expected_changes(), 1);
-        assert_eq!(st.apply(&plan).unwrap(), 1);
+        assert_eq!(st.apply(&plan, leaf).unwrap().rows, 1);
         let rows = st.rows("old/key").unwrap();
         assert!(!rows[0].deleted, "a.md is still a file");
         assert_eq!(rows[1].content, "older beta");
 
         let plan = st.plan_restore("old/key", backup, true, true).unwrap();
         assert_eq!(plan.expected_changes(), 1);
-        assert_eq!(st.apply(&plan).unwrap(), 1);
+        assert_eq!(st.apply(&plan, leaf).unwrap().rows, 1);
         assert!(st.rows("old/key").unwrap()[0].deleted, "now it is not");
     }
 
@@ -1062,25 +1347,39 @@ mod tests {
         let writer = Store::open(&path).unwrap();
 
         let rename = st.plan_rename("old/key", "new/key").unwrap();
-        st.apply(&rename).unwrap();
+        st.apply(&rename, leaf).unwrap();
         assert!(rename.undone(&st).unwrap().is_empty());
         writer
             .upsert_audited("old/key", "b.md", "late", "x", test_leaf)
             .unwrap();
-        assert_eq!(rename.undone(&st).unwrap(), ["b.md"]);
+        assert_eq!(rename.undone(&st).unwrap().paths, ["b.md"]);
+        assert!(rename.undone(&st).unwrap().jobs.is_empty());
+        // A stale push landing after it queues a job under the old key,
+        // whose result would merge there: named as well as its path.
+        queue(&writer, "old/key", "b.md", "later still", "job_late");
+        let undone = rename.undone(&st).unwrap();
+        assert_eq!(undone.paths, ["b.md"]);
+        assert_eq!(
+            undone
+                .jobs
+                .iter()
+                .map(|j| j.id.as_str())
+                .collect::<Vec<_>>(),
+            ["job_late"]
+        );
 
         let remove = st.plan_remove("new/key").unwrap();
-        st.apply(&remove).unwrap();
+        st.apply(&remove, leaf).unwrap();
         assert!(remove.undone(&st).unwrap().is_empty());
         writer
             .upsert_audited("new/key", "a.md", "late", "x", test_leaf)
             .unwrap();
-        assert_eq!(remove.undone(&st).unwrap(), ["a.md"]);
+        assert_eq!(remove.undone(&st).unwrap().paths, ["a.md"]);
 
         let mut backup = st.rows("other").unwrap();
         backup[0].content = "older".into();
         let restore = st.plan_restore("other", backup, true, false).unwrap();
-        st.apply(&restore).unwrap();
+        st.apply(&restore, leaf).unwrap();
         assert!(restore.undone(&st).unwrap().is_empty());
         writer
             .upsert_audited(
@@ -1091,6 +1390,6 @@ mod tests {
                 test_leaf,
             )
             .unwrap();
-        assert_eq!(restore.undone(&st).unwrap(), ["a.md"]);
+        assert_eq!(restore.undone(&st).unwrap().paths, ["a.md"]);
     }
 }

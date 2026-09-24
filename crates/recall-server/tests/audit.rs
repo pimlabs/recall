@@ -1808,3 +1808,286 @@ async fn a_queue_log_verifies_offline_and_forged_job_leaves_are_refused() {
         "which no push or result queued",
     );
 }
+
+// ---------------------------------------------------------------------------
+// the host's admin commands
+// ---------------------------------------------------------------------------
+
+/// Runs `recall-server admin` on the harness's database file, the way the
+/// owner runs it on the host beside the running server. Answers what it
+/// printed; it must succeed.
+fn admin(h: &Harness, args: &[&str]) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_recall-server"))
+        .arg("admin")
+        .args(args)
+        .env_clear()
+        .env("RECALL_DB_PATH", h.dir.path().join("recall.db"))
+        .env("RECALL_BACKUP_DIR", h.dir.path().join("backups"))
+        .env("RECALL_MERGE_TIMEOUT_MS", "1")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("recall-server runs");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(0), "{args:?}: {said}");
+    said
+}
+
+/// A log with the host's rename, restore and remove in it, each made by
+/// another process while the server runs and appends before and after: a
+/// stale push queued for the worker, which leases it; the rename, which
+/// closes that job, and the worker's result for it, which is answered as
+/// recorded and appends nothing; a push under the new key, queued too; a
+/// restore of the old key from the backup the rename took; a remove of the
+/// new key, which closes the second job; and a pull. Answers the leaves,
+/// the size of the log before the rename, and the two jobs.
+async fn an_admin_log() -> (Harness, Vec<String>, u64, String, String) {
+    let h = harness_with(|cfg| cfg.merge_enabled = true);
+    h.server.set_claude_status(Status {
+        checked_at: "2026-10-02T09:13:40.002Z".into(),
+        available: true,
+        logged_in: false,
+        error: String::new(),
+    });
+    let mut worker = Machine::new(31);
+    h.enrol(&mut worker, "worker", "worker").await;
+    let mut laptop = Machine::new(32);
+    h.enrol(&mut laptop, "laptop", "admin").await;
+    let older = recall_wire::content_sha256("an older version");
+    let push = |key: &str, content: &str| {
+        json!({"project_key": key, "file_path": "topics/auth.md", "content": content,
+               "source_env": "laptop", "base_sha256": older})
+    };
+    assert_eq!(
+        h.call("POST", "/sync", Some(TOKEN), Some(push("acme/app", "A")))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let queued: Value = ok(h
+        .signed(&laptop, "POST", "/sync", Some(push("acme/app", "B")))
+        .await);
+    let first = queued["merge_job"].as_str().unwrap().to_string();
+    let claim = json!({"kinds": ["merge"], "wait_seconds": 0, "lease_seconds": 600});
+    let claimed: Value = ok(h
+        .signed(&worker, "POST", wire_jobs::CLAIM_PATH, Some(claim))
+        .await);
+    assert_eq!(claimed["job"]["id"], json!(first));
+    let lease = claimed["job"]["lease_id"].as_str().unwrap().to_string();
+
+    let before = h.size();
+    let said = admin(&h, &["rename", "acme/app", "acme/renamed", "--yes"]);
+    assert!(
+        said.contains(&format!("leaf {before} (admin_rename)")),
+        "{said}"
+    );
+    assert_eq!(h.size(), before, "the server has not looked yet");
+
+    // The worker's result lands on a job the rename closed.
+    let settled: Value = ok(h
+        .signed(
+            &worker,
+            "POST",
+            &wire_jobs::result_path(&first),
+            Some(json!({"lease_id": lease, "merge": {"content": "A and B"}})),
+        )
+        .await);
+    assert_eq!(settled["state"], json!("done"));
+    assert_eq!(settled["applied"], json!(false));
+    assert_eq!(
+        h.size(),
+        before,
+        "a result already recorded appends nothing"
+    );
+
+    let queued: Value = ok(h
+        .signed(&laptop, "POST", "/sync", Some(push("acme/renamed", "C")))
+        .await);
+    let second = queued["merge_job"].as_str().unwrap().to_string();
+    assert_eq!(h.size(), before + 2, "the rename's leaf, then the push's");
+
+    let backup = std::fs::read_dir(h.dir.path().join("backups/admin"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    admin(
+        &h,
+        &["restore", backup.to_str().unwrap(), "acme/app", "--yes"],
+    );
+    admin(&h, &["remove", "acme/renamed", "--yes"]);
+    let (status, _) = h
+        .call("GET", "/sync?project_key=acme/app", Some(TOKEN), None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let leaves = h.leaf_strings().await;
+    (h, leaves, before, first, second)
+}
+
+/// The host's changes are leaves in the one log the server keeps: each
+/// takes the next seq, and the server's own next leaf follows it rather
+/// than forking the tree, so the server's checkpoint and the file's agree.
+#[tokio::test]
+async fn the_hosts_changes_take_their_place_in_the_servers_log() {
+    let (h, leaves, before, first, second) = an_admin_log().await;
+    let parsed: Vec<Value> = leaves
+        .iter()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let after: Vec<String> = parsed[before as usize..]
+        .iter()
+        .map(|l| {
+            format!(
+                "{} {}",
+                l["action"].as_str().unwrap(),
+                l["actor"]["kind"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(
+        after,
+        [
+            "admin_rename host",
+            "push device",
+            "admin_restore host",
+            "admin_remove host",
+            "pull operator"
+        ]
+    );
+    for (i, l) in parsed.iter().enumerate() {
+        assert_eq!(l["seq"], json!(i));
+    }
+    let rename = &parsed[before as usize]["subject"];
+    assert_eq!(rename["from"], "acme/app");
+    assert_eq!(rename["to"], "acme/renamed");
+    assert_eq!(rename["rows"], 1);
+    assert_eq!(rename["jobs_closed"], json!([first]));
+    let remove = &parsed[before as usize + 3]["subject"];
+    assert_eq!(remove["jobs_closed"], json!([second]));
+    let restore = &parsed[before as usize + 2]["subject"];
+    assert_eq!(restore["added"], 1);
+    assert_eq!(restore["source"], rename["backup"]);
+
+    assert_eq!(
+        h.store.audit_checkpoint(),
+        Store::open(h.dir.path().join("recall.db"))
+            .unwrap()
+            .audit_checkpoint(),
+        "one tree"
+    );
+}
+
+/// A log with the host's changes in it verifies offline through the real
+/// script, and each way of misstating one is refused.
+#[tokio::test]
+async fn a_log_with_the_hosts_changes_verifies_offline_and_forgeries_are_refused() {
+    let (h, honest, before, first, _) = an_admin_log().await;
+    let (code, out) = verify(&h.export().await, &[]);
+    assert_eq!(code, 0, "{out}");
+
+    let parsed: Vec<Value> = honest
+        .iter()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let (rename, restore, remove) = (before as usize, before as usize + 2, before as usize + 3);
+    let forged = |at: usize, edit: &dyn Fn(&mut Value)| -> String {
+        let mut leaves = parsed.clone();
+        edit(&mut leaves[at]);
+        let leaves: Vec<String> = leaves
+            .iter()
+            .map(|l| serde_json::to_string(l).unwrap())
+            .collect();
+        export_of(&leaves)
+    };
+    let refused = |name: &str, export: String, want: &str| {
+        let (code, out) = verify(&export, &[]);
+        assert_eq!(code, 1, "{name} was accepted: {out}");
+        assert!(out.contains(want), "{name}: wanted {want:?} in {out}");
+    };
+
+    refused(
+        "a rename that left its key's job open",
+        forged(rename, &|l| l["subject"]["jobs_closed"] = json!([])),
+        &format!("left {first} open"),
+    );
+    refused(
+        "a rename closing a job no push queued",
+        forged(rename, &|l| {
+            l["subject"]["jobs_closed"] = json!([first.clone(), "job_never"])
+        }),
+        "closed job_never, which no push or result queued",
+    );
+    refused(
+        "a rename of another key closing this key's job",
+        forged(rename, &|l| l["subject"]["from"] = json!("other/key")),
+        "a job of 'acme/app'",
+    );
+    refused(
+        "a remove closing a job already closed",
+        forged(remove, &|l| {
+            l["subject"]["jobs_closed"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!(first.clone()))
+        }),
+        &format!("closed {first} once it was done"),
+    );
+    refused(
+        "a rename credited to the server",
+        forged(rename, &|l| l["actor"] = json!({"kind": "server"})),
+        "a server cannot admin_rename",
+    );
+    refused(
+        "a restore carrying a request",
+        forged(restore, &|l| {
+            l["request"] = json!({"body_sha256": "", "signature_base": "", "signature": "",
+                                  "body": null})
+        }),
+        "the host signs nothing",
+    );
+    refused(
+        "a rename that moved nothing",
+        forged(rename, &|l| l["subject"]["rows"] = json!(0)),
+        "changed no row",
+    );
+    refused(
+        "a restore that changed nothing",
+        forged(restore, &|l| l["subject"]["added"] = json!(0)),
+        "changed no row",
+    );
+    refused(
+        "a negative count",
+        forged(remove, &|l| l["subject"]["rows"] = json!(-1)),
+        "subject.rows is not a count",
+    );
+    refused(
+        "a backup named by its path",
+        forged(remove, &|l| {
+            l["subject"]["backup"] = json!("/backups/admin/recall-x.db")
+        }),
+        "subject.backup is not a file name",
+    );
+    refused(
+        "a rename onto its own key",
+        forged(rename, &|l| l["subject"]["to"] = json!("acme/app")),
+        "a rename onto the key it renames",
+    );
+    refused(
+        "a remove without its backup",
+        forged(remove, &|l| {
+            l["subject"].as_object_mut().unwrap().remove("backup");
+        }),
+        "the subject has the keys",
+    );
+    refused(
+        "a job closed twice in one leaf",
+        forged(rename, &|l| {
+            l["subject"]["jobs_closed"] = json!([first.clone(), first.clone()])
+        }),
+        "names a job twice",
+    );
+}

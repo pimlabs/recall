@@ -13,13 +13,12 @@
 //! long-expired enrolments, an admin session started by a sign-in, used,
 //! ended by a sign-out or swept once idle, a passkey's signature counter,
 //! the release of a revoked worker's leases before the server claims them
-//! itself ([`Store::release_open_jobs`]), the pruning of finished jobs,
-//! and `recall-server admin`'s changes on the host (`store/admin.rs`),
-//! which run beside the server on the database file.
+//! itself ([`Store::release_open_jobs`]), and the pruning of finished jobs.
 //!
 //! Another process may append: `recall-server reset-passkeys` does, on the
-//! host. Every append first reads in any leaf the table holds past this
-//! store's tree, so the two write one log rather than a fork.
+//! host, and so do `recall-server admin`'s renames, removes and restores
+//! (`store/admin.rs`). Every append first reads in any leaf the table holds
+//! past this store's tree, so they all write one log rather than a fork.
 
 use anyhow::{bail, Result};
 use rusqlite::{Connection, TransactionBehavior};
@@ -101,10 +100,16 @@ pub(super) fn load(conn: &Connection) -> Result<Loaded> {
 /// Reads every leaf from `seq` `from` on, in order, checked as [`load`]
 /// describes, handing each one's hash to `each`. What both opening and
 /// [`Store::audited_each`]'s catching up do. Answers how many it read.
-fn read_from(conn: &Connection, from: u64, mut each: impl FnMut(Hash)) -> Result<u64> {
-    let mut stmt =
-        conn.prepare("SELECT seq, leaf, leaf_hash FROM audit_log WHERE seq >= ?1 ORDER BY seq")?;
-    let mut rows = stmt.query((from as i64,))?;
+fn read_from(conn: &Connection, from: u64, each: impl FnMut(Hash)) -> Result<u64> {
+    read_range(conn, from, i64::MAX as u64, each)
+}
+
+/// [`read_from`], stopping after `most` leaves.
+fn read_range(conn: &Connection, from: u64, most: u64, mut each: impl FnMut(Hash)) -> Result<u64> {
+    let mut stmt = conn.prepare(
+        "SELECT seq, leaf, leaf_hash FROM audit_log WHERE seq >= ?1 ORDER BY seq LIMIT ?2",
+    )?;
+    let mut rows = stmt.query((from as i64, most.min(i64::MAX as u64) as i64))?;
     let mut want = from;
     while let Some(row) = rows.next()? {
         let seq: i64 = row.get(0)?;
@@ -148,7 +153,8 @@ fn last_at(conn: &Connection, size: u64) -> Result<String> {
 
 /// The leaves the table holds past the `held` this store's tree has, for
 /// leaves another process appended since this one last looked:
-/// `recall-server reset-passkeys`, run on the host beside a running server.
+/// `recall-server reset-passkeys` or `recall-server admin`, run on the host
+/// beside a running server.
 /// Their hashes, checked as [`load`] checks them, and the newest one's
 /// `at`, for the tree to take once the transaction this runs in commits;
 /// its lock keeps anything else from appending until then.
@@ -257,16 +263,37 @@ impl Store {
         write: impl FnOnce(&rusqlite::Transaction, &str) -> Result<Outcome<T>>,
         build_leaves: impl FnOnce(u64, &str, &T) -> Vec<Vec<u8>>,
     ) -> Result<T> {
+        self.audited_each_as(
+            anyhow::Error::from,
+            anyhow::Error::from,
+            write,
+            build_leaves,
+        )
+    }
+
+    /// [`Store::audited_each`], with the error that starting the
+    /// transaction or committing it becomes chosen by the caller:
+    /// `recall-server admin` tells the owner which of the two it was, and
+    /// that the database stayed locked, since those are the failures they
+    /// can do something about (wait, and run it again).
+    pub(crate) fn audited_each_as<T>(
+        &self,
+        begin_failed: impl FnOnce(rusqlite::Error) -> anyhow::Error,
+        commit_failed: impl FnOnce(rusqlite::Error) -> anyhow::Error,
+        write: impl FnOnce(&rusqlite::Transaction, &str) -> Result<Outcome<T>>,
+        build_leaves: impl FnOnce(u64, &str, &T) -> Vec<Vec<u8>>,
+    ) -> Result<T> {
         let mut state = self.lock();
         let (held, held_at) = (state.audit.size(), state.audit_at.clone());
         // `IMMEDIATE`: the database's write lock from the start, so another
-        // process (`reset-passkeys`) cannot append between the catch-up
-        // below and this transaction's own leaves. The transaction borrows
-        // the whole state, so the tree cannot learn of anything until it
-        // commits.
+        // process (`reset-passkeys`, `admin`) cannot append between the
+        // catch-up below and this transaction's own leaves. The transaction
+        // borrows the whole state, so the tree cannot learn of anything
+        // until it commits.
         let tx = state
             .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(begin_failed)?;
         let (caught, caught_at) = catch_up(&tx, held)?;
         // The position the first leaf will hold if this commits: the size
         // of the tree the table holds, read under the lock the transaction
@@ -288,7 +315,7 @@ impl Store {
             )?;
             hashes.push(leaf_hash);
         }
-        tx.commit()?;
+        tx.commit().map_err(commit_failed)?;
         for leaf_hash in caught.into_iter().chain(hashes) {
             state.audit.append(leaf_hash);
         }
@@ -298,6 +325,43 @@ impl Store {
             state.audit_at = caught_at;
         }
         Ok(value)
+    }
+
+    /// Reads into the tree every leaf the table holds past it, outside any
+    /// write transaction and a few thousand leaves at a time, for a process
+    /// that opened the database without reading its log: `recall-server
+    /// admin`, about to append.
+    ///
+    /// Only to be quick about it. [`Store::audited_each`] catches up with
+    /// the table by itself, but it does so holding the write lock, which a
+    /// running server then waits on for no more than its busy timeout: 5
+    /// seconds, against 8.5 to read a million leaves. Read here first, the
+    /// catch-up under the lock is only the leaves appended since, and each
+    /// read here holds a read lock for a fraction of a second. The leaves
+    /// are checked as [`load`] checks them; the log is append-only, so what
+    /// this reads stays true.
+    pub(crate) fn audit_read_ahead(&self) -> Result<()> {
+        self.audit_read_ahead_by(4096)
+    }
+
+    /// [`Store::audit_read_ahead`], `chunk` leaves at a time.
+    fn audit_read_ahead_by(&self, chunk: u64) -> Result<()> {
+        let mut state = self.lock();
+        loop {
+            let held = state.audit.size();
+            let mut hashes = Vec::new();
+            let read = read_range(&state.conn, held, chunk, |hash| hashes.push(hash))?;
+            if read == 0 {
+                return Ok(());
+            }
+            let at = last_at(&state.conn, held + read)?;
+            for hash in hashes {
+                state.audit.append(hash);
+            }
+            if at > state.audit_at {
+                state.audit_at = at;
+            }
+        }
     }
 
     /// Appends a leaf with no other state to change: a pull, the server's
@@ -719,6 +783,47 @@ mod tests {
         std::fs::copy(&older, &path).unwrap();
         let err = server.audit_append(|seq, _| push_leaf(seq)).unwrap_err();
         assert!(format!("{err:#}").contains("restart it"), "{err:#}");
+    }
+
+    /// Reading ahead, a chunk at a time, leaves the tree where the catch-up
+    /// under the write lock would: the same checkpoint, the same next seq,
+    /// and the newest `at` to hold the next one to. A damaged leaf is
+    /// refused here as at open.
+    #[test]
+    fn reading_ahead_builds_the_tree_catching_up_would() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.db");
+        let server = Store::open(&path).unwrap();
+        for _ in 0..5 {
+            append(&server);
+        }
+        let host = Store::with_connection(Connection::open(&path).unwrap()).unwrap();
+        host.lock().audit = Tree::new();
+        host.lock().audit_at = String::new();
+        host.audit_read_ahead_by(2).unwrap();
+        assert_eq!(host.audit_checkpoint(), server.audit_checkpoint());
+        assert_eq!(host.lock().audit_at, "2026-01-01T00:00:00.000Z");
+        append(&server);
+        host.audit_read_ahead_by(2).unwrap();
+        assert_eq!(host.audit_checkpoint(), server.audit_checkpoint());
+        assert_eq!(host.audit_append(|seq, _| push_leaf(seq)).unwrap(), 6);
+        assert_eq!(server.audit_append(|seq, _| push_leaf(seq)).unwrap(), 7);
+        assert_eq!(host.audit_append(|seq, _| push_leaf(seq)).unwrap(), 8);
+
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "DROP TRIGGER audit_log_no_update;
+             UPDATE audit_log SET leaf = CAST('forged' AS BLOB) WHERE seq = 3",
+        )
+        .unwrap();
+        let blank =
+            Store::with_connection(Connection::open(dir.path().join("x.db")).unwrap()).unwrap();
+        blank.lock().conn = Connection::open(&path).unwrap();
+        let err = blank.audit_read_ahead_by(2).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("leaf 3 no longer hashes"),
+            "{err:#}"
+        );
     }
 
     /// Opening refuses a log changed behind the triggers' back: a leaf

@@ -1038,6 +1038,96 @@ pub(super) fn close_for_delete(
     )?)
 }
 
+/// Why `recall-server admin` closes a job, which decides what it says and
+/// what it keeps. See [`close_for_admin`].
+pub(super) enum AdminClose<'a> {
+    /// `remove`: the file's key is gone.
+    Removed,
+    /// `rename`: the file is under `to` now.
+    Renamed {
+        /// The key the rows moved to.
+        to: &'a str,
+    },
+    /// `restore`: the file holds the backup's version now.
+    Restored,
+}
+
+/// Closes every job still waiting on, or held for, the rows an admin change
+/// touches, in the change's own transaction: every file under
+/// `project_key`, or only `file_path` when one is given. Answers how many
+/// it closed.
+///
+/// Closed as a delete closes them ([`close_for_delete`]): `done`,
+/// unapplied, the lease kept, so a result its holder still posts is
+/// answered as one already recorded and changes nothing. Left open, each
+/// would be settled against a row the change moved, removed or replaced:
+///
+/// - after a remove, its result would be chased onto a file a machine still
+///   syncing under the key pushes later, as a follow-up, bringing the
+///   removed notes back into it;
+/// - after a restore, the file no longer has the hash the job was queued
+///   against, so its result, a merge of the versions the restore replaced,
+///   would be chased onto the restored file as a follow-up, and undo the
+///   restore once that is merged;
+/// - after a rename, the job still names the old key, and its versions are
+///   the old key's rows.
+///
+/// A rename could instead move a job to the new key. It does not, because
+/// what makes a result safe to apply is the compare-and-swap against the
+/// version the job was queued with, under the key it was queued with, and a
+/// rename is the owner saying the old key's history ends here: a job
+/// re-keyed would be applied to a key no push to it ever queued, on the
+/// strength of a hash taken under another, and one whose file has moved on
+/// since (a push after it, a result applied) would be chased across keys.
+/// Closing costs one merge, and nothing is lost: the file keeps the newer
+/// version the push stored, the version it displaced stays in the job
+/// (a rename and a restore keep the job's input; only a remove drops it,
+/// as a delete does), and the backup every change takes holds both.
+pub(super) fn close_for_admin(
+    conn: &Connection,
+    project_key: &str,
+    file_path: Option<&str>,
+    why: &AdminClose<'_>,
+    now: &str,
+) -> Result<usize> {
+    let (error, keep_input) = match why {
+        AdminClose::Removed => (
+            "removed by admin: `recall-server admin remove` deleted this file's project key \
+             before it was merged; the remove stands"
+                .to_string(),
+            false,
+        ),
+        AdminClose::Renamed { to } => (
+            format!(
+                "renamed by admin: `recall-server admin rename` moved this file to {to:?} before \
+                 it was merged; its versions are kept in this job"
+            ),
+            true,
+        ),
+        AdminClose::Restored => (
+            "restored by admin: `recall-server admin restore` put back a backup's version of this \
+             file before it was merged; the restore stands, and the versions this job held are \
+             kept in it"
+                .to_string(),
+            true,
+        ),
+    };
+    Ok(conn.execute(
+        "UPDATE jobs SET state = 'done',
+             payload = CASE WHEN ?4 THEN payload ELSE '{}' END,
+             lease_expires_at = NULL, applied = 0, error = ?3, updated_at = ?5
+         WHERE project_key = ?1 AND (?2 IS NULL OR file_path = ?2)
+           AND state IN ('queued', 'leased')",
+        (
+            project_key,
+            file_path,
+            clip(&error, MAX_ERROR_BYTES),
+            keep_input,
+            now,
+        ),
+    )?)
+}
+
 /// Marks a job settled, keeping the lease it was settled under so the same
 /// result posted again is recognised. A done job's input is dropped: the
 /// file holds what mattered now, and the job need not hold a second copy.
