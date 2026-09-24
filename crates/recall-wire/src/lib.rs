@@ -22,6 +22,7 @@
 //! | [`admin`] | `GET /admin/stats` — what is stored, per project |
 //! | [`discovery`] | `GET /.well-known/recall` — what the server is and speaks |
 //! | [`devices`] | `/v1/devices`, `/v1/authkeys` — enrolling and managing devices |
+//! | [`jobs`] | `/v1/jobs` — the merge queue a worker drains |
 //! | [`signature`] | not an endpoint: how a device signs every request |
 //! | [`validate`] | the rules both halves enforce |
 //!
@@ -48,6 +49,7 @@ pub mod admin;
 pub mod devices;
 pub mod discovery;
 pub mod health;
+pub mod jobs;
 pub mod signature;
 pub mod sync;
 pub mod validate;
@@ -60,7 +62,11 @@ pub use devices::{
     PendingEnrollment,
 };
 pub use discovery::{Discovery, DISCOVERY_PATH, PROTOCOL, PROTOCOL_HEADER};
-pub use health::{ClaudeCliStatus, Health, MergeError, MergeStatus};
+pub use health::{ClaudeCliStatus, Health, MergeError, MergeStatus, QueueStatus, WorkerStatus};
+pub use jobs::{
+    ClaimRequest, ClaimResponse, ClaudeCliReport, Job, JobList, JobSummary, MergeInput,
+    MergeResult, MergeSide, ResultRequest, ResultResponse,
+};
 /// The hash a push names its base by: SHA-256 of the file's exact bytes, as
 /// lowercase hex.
 ///

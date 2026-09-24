@@ -128,6 +128,11 @@ pub const AUTH_DEVICE_SIG: &str = "device-sig-v1";
 /// are a [`crate::DevicesCapability`].
 pub const CAPABILITY_DEVICES: &str = "devices";
 
+/// The capability a server lists when it can queue a stale push for a
+/// merge worker and has the job routes (see [`crate::jobs`]). A worker
+/// asks for it before enrolling, and works for no server without it.
+pub const CAPABILITY_MERGE_QUEUE: &str = "merge_queue";
+
 /// A build made by the release workflow from a release tag.
 pub const CHANNEL_RELEASE: &str = "release";
 

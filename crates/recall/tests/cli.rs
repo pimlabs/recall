@@ -2214,6 +2214,63 @@ fn a_device_signs_its_pushes_and_pulls_and_the_name_belongs_to_the_key() {
     );
 }
 
+/// `approve --worker` approves a merge worker with the worker scope, and
+/// asking for two scopes at once is refused before anything is sent.
+#[test]
+fn devices_approve_can_make_a_worker() {
+    use recall_hooks::client::{Client, Poll};
+    let server = live_server("right");
+    let repo = git_repo();
+    let (_key, pending) = pending_enrollment(&server.url, "worker");
+    let open = Client::new(&server.url, "").unwrap();
+    let env = [
+        ("RECALL_URL", server.url.as_str()),
+        ("RECALL_TOKEN", "right"),
+    ];
+
+    let r = run(
+        &[
+            "devices",
+            "approve",
+            &pending.user_code,
+            "--worker",
+            "--admin",
+            "--yes",
+        ],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(r.code, 2, "stderr: {}", r.stderr);
+    assert!(!matches!(
+        block_on(open.poll(&pending.enrollment_id)).unwrap(),
+        Poll::Approved(_)
+    ));
+
+    let r = run(
+        &[
+            "devices",
+            "approve",
+            &pending.user_code,
+            "--worker",
+            "--yes",
+        ],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(
+        r.stdout.contains("Approved worker (worker)"),
+        "stdout: {}",
+        r.stdout
+    );
+    match block_on(open.poll(&pending.enrollment_id)).unwrap() {
+        Poll::Approved(approved) => assert_eq!(approved.scope, "worker"),
+        other => panic!("expected approval, got {other:?}"),
+    }
+}
+
 /// `approve --fingerprint` compares what the machine shows with what the
 /// code would approve, and a difference approves nothing. So does having
 /// nobody to confirm. The details are shown before anything is decided.

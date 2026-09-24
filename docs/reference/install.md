@@ -290,6 +290,7 @@ On a machine enrolled as admin (or with `RECALL_TOKEN` set):
 recall devices list                          # name, scope, ephemeral, last seen, agent
 recall devices approve WDJB-MJHT             # shows name, agent, fingerprint; asks first
 recall devices approve WDJB-MJHT --admin     # an admin device, which can approve others
+recall devices approve WDJB-MJHT --worker    # a recall-worker, which only merges
 recall devices revoke old-laptop             # its requests are refused from now on
 recall authkey create --tag cloud --expires 90d
 recall authkey list

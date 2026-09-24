@@ -14,6 +14,77 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
+## Unreleased
+
+- **Merging can move out of the server, into `recall-worker`.** A new
+  binary and a second compose service with no port at all: an enrolled
+  device with a new `worker` scope, which claims conflicting pushes from
+  a queue, merges them with its own `claude` CLI, and posts the result
+  back. The `claude` login then lives on the worker's volume, not in the
+  container the internet reaches. The service is opt-in: it starts only
+  with `COMPOSE_PROFILES=worker` in `deploy/.env`, and even then nothing
+  changes until you approve its code with `"scope": "worker"`; see "The
+  merge worker" in `deploy/README.md`. Without an approved worker the
+  server merges inline exactly as before.
+- **`recall-worker` is told its server by `RECALL_WORKER_SERVER`**, and
+  never reads the client's `RECALL_URL`; with only that set it refuses to
+  start. `RECALL_WORKER_DIR` (the image sets `/data`) is required too. It
+  asks for `/.well-known/recall` first and works only for a server that
+  lists `merge_queue`, records that server in its identity file and refuses
+  any other, and treats a refusal no retry will change (a `404` on
+  enrolment among them) as final: it says why once and idles, rather than
+  exiting into a restart loop.
+- **Every merge, the server's inline one included, runs `claude` with no
+  tools, one turn and no saved session** (`--tools "" --max-turns 1
+  --no-session-persistence`), and both images pin the CLI to 2.1.280, the
+  version those flags were checked against, rather than whatever npm
+  resolves on the day of the build.
+- **With a worker, a conflicting push is answered at once.** It is stored
+  as sent, `merged: false`, with a new `merge_job` field naming the queued
+  job, and the merged file arrives with the next pull. A merge is written
+  only if the file has not changed since; otherwise it is merged again
+  with the newer version. An empty merge of two versions that were not
+  both empty is never written: it counts as an error and is retried.
+  Deleting a file closes its waiting jobs in the same transaction, so a
+  file made again after a delete never has the deleted notes merged back
+  in. `merge_job` is omitted when no job was queued, so a server without a
+  worker answers byte for byte as before.
+- **Nothing a worker leaves is stranded.** Revoking the last worker puts
+  merging back in the server with the jobs it left: each is merged by the
+  server's own `claude` CLI, through the same check that the file has not
+  changed, or, when that CLI cannot merge, marked failed, visibly, for a
+  retry later. A worker that has not asked for work in two minutes, or a
+  full queue (1000 jobs), no longer means last-write-wins while the
+  server's CLI is logged in: the server merges new conflicts itself.
+- **New routes:** `POST /v1/jobs/claim` and `POST /v1/jobs/{id}/result` for
+  the worker (a worker device only, not even `RECALL_TOKEN`), and
+  `GET /v1/jobs` and `POST /v1/jobs/{id}/retry` for the owner. A worker
+  device can use nothing else: it cannot pull or push memory, and an
+  authkey never makes one.
+- **`/health`'s `merge` gains `worker` and `queue`**: `worker` while one
+  is enrolled, and `queue` then and whenever the queue holds a job,
+  failed ones included. `claude_cli` is the worker's CLI while there is
+  one. What `last_merge_error` says of a job names the job and never a
+  project or a file, since `/health` answers anyone; `GET /v1/jobs` has
+  those. A worker's error, and its CLI's, are kept to 500 bytes. Discovery
+  lists a new `merge_queue` capability.
+- **`recall status` and `recall doctor` show the merge queue**, and warn
+  when the worker has not asked for work in two minutes (`status` then
+  says `stalled` rather than `ready`, whatever the worker last reported),
+  when any merge has failed, and once the oldest waiting merge is an hour
+  old. `recall status --json` gains `merge_worker`, `merge_queue` and
+  `merge_worker_seen_at`.
+- **`POST /v1/devices/approve` accepts `"scope": "worker"`**, and its
+  refusal of an unknown scope now says `scope must be sync, admin or
+  worker`. `recall devices approve <code> --worker` approves one.
+- **Two database changes, both made on start:** a `jobs` table, and the
+  `devices` table rebuilt so its scope may be `worker`, keeping every row.
+  0.4.1 ignores `jobs` and refuses a worker device, whose scope it does
+  not know, so rolling back to it still works; revoke the worker first
+  all the same (see "Revoking it" in `deploy/README.md`).
+- **Releases publish `recall-worker`** for Linux amd64 and arm64, static,
+  beside `recall-server`, in the same `checksums.txt`, and on crates.io.
+
 ## 0.4.1 — 2026-09-23
 
 0.4.0 was tagged but never published: its release build stopped at a

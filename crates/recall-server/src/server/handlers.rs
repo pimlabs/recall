@@ -14,8 +14,8 @@ use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use recall_wire::discovery::{self, Auth, Build, Protocol, ServerInfo};
 use recall_wire::{
-    AdminStats, ClaudeCliStatus, Health, MergeError, MergeStatus, PushRequest, PushResponse,
-    SyncResponse,
+    AdminStats, ClaudeCliStatus, Health, MergeError, MergeSide, MergeStatus, PushRequest,
+    PushResponse, SyncResponse, WorkerStatus,
 };
 use recall_wire::{Discovery, PROTOCOL};
 
@@ -23,6 +23,7 @@ use super::auth::Caller;
 use super::respond::{error, internal, json};
 use super::AppState;
 use crate::now;
+use crate::store::Queued;
 
 /// The admin page is embedded so the binary stays self-contained — there is
 /// no asset directory to forget to ship.
@@ -35,6 +36,12 @@ const ADMIN_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; script-s
 
 const REQUIRED_FIELDS_MSG: &str =
     "project_key, file_path, and content (string) are required, unless deleted is true";
+
+/// How long a worker may go without claiming before its claims count as
+/// stopped. A running worker claims at least every half minute (a claim
+/// waits 25 seconds), and one busy merging holds a lease, which is looked
+/// at separately.
+pub(super) const WORKER_STALE: std::time::Duration = std::time::Duration::from_secs(120);
 
 pub(super) async fn handle_push(
     State(state): State<Arc<AppState>>,
@@ -104,6 +111,7 @@ pub(super) async fn handle_push(
                 deleted: true,
                 merged: false,
                 updated_at,
+                merge_job: None,
             },
         );
     }
@@ -128,13 +136,33 @@ pub(super) async fn handle_push(
     // intent to discard the old content), or an unchanged re-push all skip
     // straight to a write — cheaper, and it keeps a merge from ever
     // second-guessing content that didn't actually conflict.
-    if let Some(stored) = should_merge(
+    let stale = needs_merge(
         &state,
         existing.as_ref(),
         &incoming,
         req.base_sha256.as_deref(),
-    ) {
-        match state.merger.merge(stored, &incoming).await {
+    );
+    // With a worker enrolled, the merge is its job: the push is stored as
+    // sent and answered at once, and the merged file arrives with a later
+    // pull. Without one, it runs here, exactly as it did before the queue,
+    // and so it does when the worker has stopped taking jobs, or the queue
+    // is full, and this server's own CLI can merge.
+    if stale.is_some() {
+        match state.store.enrolled_worker() {
+            Ok(Some(_)) => match merge_here_instead(&state) {
+                Ok(None) => return queue_merge(&state, req, incoming, updated_at),
+                Ok(Some(why)) => eprintln!(
+                    "{why}, so {}/{} is merged here rather than queued",
+                    req.project_key, req.file_path
+                ),
+                Err(e) => return internal(e),
+            },
+            Ok(None) => {}
+            Err(e) => return internal(e),
+        }
+    }
+    if let Some(stored) = stale.filter(|_| state.read().claude_status.logged_in) {
+        match state.merger.merge(&stored.content, &incoming).await {
             Ok(out) => {
                 content = out;
                 merged = true;
@@ -176,18 +204,111 @@ pub(super) async fn handle_push(
             deleted: false,
             merged,
             updated_at,
+            merge_job: None,
         },
     )
 }
 
-/// Returns the stored content to merge against, or `None` when this push
-/// needs no reconciliation.
-fn should_merge<'a>(
+/// Stores a stale push as sent and queues its merge for the worker, in one
+/// transaction. Answers as a push always has, `merged: false`, which is
+/// exactly what a merge that degraded to last-write-wins looks like, with
+/// the job's id beside it.
+fn queue_merge(
+    state: &AppState,
+    req: PushRequest,
+    incoming: String,
+    updated_at: String,
+) -> Response {
+    let job_id = match super::devices::new_id("job_", 10) {
+        Ok(id) => id,
+        Err(e) => return internal(e),
+    };
+    let side = MergeSide {
+        sha256: recall_wire::content_sha256(&incoming),
+        content: incoming,
+        source_env: req.source_env.clone(),
+        updated_at: updated_at.clone(),
+    };
+    let queued = state.store.write_and_queue_merge(
+        &req.project_key,
+        &req.file_path,
+        &side,
+        &job_id,
+        time::OffsetDateTime::now_utc(),
+    );
+    let merge_job = match queued {
+        Ok(Queued::Queued(id)) => {
+            state.jobs_ready.notify_waiters();
+            Some(id)
+        }
+        Ok(Queued::Nothing) => None,
+        Ok(Queued::Full) => {
+            // /health answers anyone, so it names no project and no file;
+            // the log does.
+            let message = format!(
+                "the merge queue is full ({} jobs), so a conflicting push was stored \
+                 last-write-wins; is the worker running?",
+                crate::store::MAX_OPEN_JOBS,
+            );
+            eprintln!("{message} ({}/{})", req.project_key, req.file_path);
+            state.write().last_merge_error = Some(MergeError { message, at: now() });
+            None
+        }
+        Err(e) => return internal(e),
+    };
+    json(
+        StatusCode::OK,
+        &PushResponse {
+            ok: true,
+            project_key: req.project_key,
+            file_path: req.file_path,
+            deleted: false,
+            merged: false,
+            updated_at,
+            merge_job,
+        },
+    )
+}
+
+/// Why a stale push is merged here even though a worker is enrolled, or
+/// [`None`] to queue it for the worker as usual.
+///
+/// Only ever when this server's own CLI can merge: then a worker whose
+/// claims have stopped (none for [`WORKER_STALE`], and no job held), or a
+/// queue with no room, need not mean last-write-wins. Without the CLI, the
+/// push is queued as always, to wait for the worker, or stored
+/// last-write-wins when the queue is full.
+fn merge_here_instead(state: &AppState) -> anyhow::Result<Option<String>> {
+    if !state.read().claude_status.logged_in {
+        return Ok(None);
+    }
+    super::jobs::expire_leases(state)?;
+    let queue = state.store.queue_status()?;
+    if (queue.queued + queue.leased) as usize >= crate::store::MAX_OPEN_JOBS {
+        return Ok(Some(format!(
+            "the merge queue is full ({} jobs)",
+            crate::store::MAX_OPEN_JOBS
+        )));
+    }
+    let quiet = state.read().worker_last_claim.elapsed();
+    if quiet >= WORKER_STALE && queue.leased == 0 {
+        return Ok(Some(format!(
+            "the merge worker has not asked for work in {}s",
+            quiet.as_secs()
+        )));
+    }
+    Ok(None)
+}
+
+/// The stored version to merge against, or `None` when this push needs no
+/// reconciliation. Whether the merge runs here or is queued for a worker
+/// is decided after.
+fn needs_merge<'a>(
     state: &AppState,
     existing: Option<&'a crate::store::Existing>,
     incoming: &str,
     base_sha256: Option<&str>,
-) -> Option<&'a str> {
+) -> Option<&'a crate::store::Existing> {
     if !state.cfg.merge_enabled {
         return None;
     }
@@ -206,14 +327,11 @@ fn should_merge<'a>(
     }) {
         return None;
     }
-    // Don't even attempt it when the CLI isn't logged in: every attempt
-    // would burn a subprocess and a timeout before failing to the same
-    // place.
-    state
-        .read()
-        .claude_status
-        .logged_in
-        .then_some(stored.content.as_str())
+    // An inline merge is not even attempted when this server's CLI is not
+    // logged in (the caller checks, since a queued merge does not need
+    // it): every attempt would burn a subprocess and a timeout before
+    // failing to the same place.
+    Some(stored)
 }
 
 pub(super) async fn handle_pull(
@@ -263,8 +381,28 @@ pub(super) async fn handle_health(State(state): State<Arc<AppState>>) -> Respons
         Err(e) => return internal(e),
     };
 
+    // With a worker enrolled, the merge is its business: /health shows its
+    // CLI rather than this process's. The queue is shown while there is a
+    // worker, and whenever the queue holds anything, worker or not: jobs a
+    // revoked worker left, waiting to be drained here, or failed ones, are
+    // exactly what must not drop out of sight with it.
+    let worker = match state.store.enrolled_worker() {
+        Ok(w) => w,
+        Err(e) => return internal(e),
+    };
+    if let Err(e) = super::jobs::expire_leases(&state) {
+        return internal(e);
+    }
+    let queue = match state.store.queue_status() {
+        Ok(q) if worker.is_some() || q.queued + q.leased + q.failed > 0 => Some(q),
+        Ok(_) => None,
+        Err(e) => return internal(e),
+    };
+
     let rt = state.read();
-    let claude_cli = if rt.claude_status.checked_at.is_empty() {
+    let claude_cli = if worker.is_some() {
+        rt.worker_cli.clone().unwrap_or_default()
+    } else if rt.claude_status.checked_at.is_empty() {
         ClaudeCliStatus::default()
     } else {
         ClaudeCliStatus {
@@ -274,6 +412,14 @@ pub(super) async fn handle_health(State(state): State<Arc<AppState>>) -> Respons
             error: rt.claude_status.error.clone(),
         }
     };
+    let worker = worker.map(|device| WorkerStatus {
+        last_claim_at: rt.worker_last_claim_at.clone(),
+        agent: if rt.worker_agent.is_empty() {
+            device.agent
+        } else {
+            rt.worker_agent.clone()
+        },
+    });
     let body = Health {
         status: "ok".to_string(),
         git_commit: state.cfg.git_commit.clone(),
@@ -286,6 +432,8 @@ pub(super) async fn handle_health(State(state): State<Arc<AppState>>) -> Respons
             claude_cli,
             last_merge_at: rt.last_merge_at.clone(),
             last_merge_error: rt.last_merge_error.clone(),
+            worker,
+            queue,
         },
     };
     drop(rt);
@@ -315,6 +463,13 @@ pub(super) async fn handle_discovery(State(state): State<Arc<AppState>>) -> Resp
         serde_json::to_value(super::devices::capability()).unwrap_or_default(),
     );
     capabilities.insert("merge_base".to_string(), serde_json::json!({}));
+    // Stale pushes can be queued for a worker, and the job routes exist.
+    // Listed whether or not a worker is enrolled now: it says what this
+    // server can do, and a worker needs it before it enrols.
+    capabilities.insert(
+        discovery::CAPABILITY_MERGE_QUEUE.to_string(),
+        serde_json::json!({}),
+    );
     capabilities.insert(
         "scopes".to_string(),
         serde_json::json!({ "kinds": ["project", "global", "machine"] }),

@@ -2344,22 +2344,24 @@ async fn direct_tls_serves_every_route_group_the_same_way() {
 }
 
 /// A device whose scope this server does not know is refused, not read as
-/// `sync`. A later version adds a `worker` scope that it keeps away from
-/// memory; after a rollback to this version the worker's row is still
-/// there, and must not be able to read or write every project.
+/// `sync`. A later version may add a scope it keeps away from memory, as
+/// `worker` is; after a rollback to this version that device's row is
+/// still there, and must not be able to read or write every project. (The
+/// worker scope this version knows, and keeps to the job routes: see
+/// `a_worker_can_do_nothing_but_its_jobs` in `tests/jobs.rs`.)
 #[tokio::test]
 async fn a_device_with_a_scope_this_server_does_not_know_is_refused() {
     let h = harness(|_| {});
     let mut worker = Machine::new(40);
     stored_device(&h, &mut worker, "sync");
 
-    // This version's schema only admits `sync` and `admin`; a later one
+    // This version's schema only admits the scopes it knows; a later one
     // widens it. Standing in for that database, as a rollback leaves it.
     let db = rusqlite::Connection::open(h.dir.path().join("recall.db")).unwrap();
     db.execute_batch("PRAGMA ignore_check_constraints = ON;")
         .unwrap();
     db.execute(
-        "UPDATE devices SET scope = 'worker' WHERE id = ?1",
+        "UPDATE devices SET scope = 'evaluator' WHERE id = ?1",
         [&worker.id],
     )
     .unwrap();

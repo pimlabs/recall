@@ -23,9 +23,10 @@ use std::path::{Path, PathBuf};
 
 use recall_wire::{
     AdminStats, ApproveRequest, Authkey, AuthkeyCreated, AuthkeyList, AuthkeyRequest,
-    AuthkeyRevokeRequest, DenyRequest, DenyResponse, Device, DeviceIdentity, DeviceList, Discovery,
-    EnrollApproved, EnrollPending, EnrollPollRequest, EnrollPollResponse, EnrollRequest,
-    ErrorResponse, Health, PendingEnrollment, PushRequest, PushResponse, SyncResponse,
+    AuthkeyRevokeRequest, ClaimRequest, ClaimResponse, DenyRequest, DenyResponse, Device,
+    DeviceIdentity, DeviceList, Discovery, EnrollApproved, EnrollPending, EnrollPollRequest,
+    EnrollPollResponse, EnrollRequest, ErrorResponse, Health, JobList, PendingEnrollment,
+    PushRequest, PushResponse, ResultRequest, ResultResponse, SyncResponse,
 };
 use serde_json::Value;
 
@@ -70,7 +71,9 @@ fn round_trip(kind: &str, bytes: &[u8]) -> Result<Value, String> {
             req.validate().map_err(|e| e.to_string())?;
             serde_json::to_value(req).map_err(|e| e.to_string())
         }
-        "push_response" | "push_response_delete" => go::<PushResponse>(bytes),
+        "push_response" | "push_response_delete" | "push_response_queued" => {
+            go::<PushResponse>(bytes)
+        }
         "sync_response" => go::<SyncResponse>(bytes),
         "health" => go::<Health>(bytes),
         "admin_stats" => go::<AdminStats>(bytes),
@@ -95,7 +98,7 @@ fn round_trip(kind: &str, bytes: &[u8]) -> Result<Value, String> {
         "enroll_poll_response" => go::<EnrollPollResponse>(bytes),
         // RFC 8628's error codes travel in the one error shape.
         "enroll_poll_error" => go::<ErrorResponse>(bytes),
-        "device_approve_request" => go::<ApproveRequest>(bytes),
+        "device_approve_request" | "device_approve_request_worker" => go::<ApproveRequest>(bytes),
         "device_approve_response" | "device_revoke_response" => go::<Device>(bytes),
         "device_pending_response" => go::<PendingEnrollment>(bytes),
         "device_me_response" => go::<DeviceIdentity>(bytes),
@@ -107,6 +110,18 @@ fn round_trip(kind: &str, bytes: &[u8]) -> Result<Value, String> {
         "authkey_create_response" => go::<AuthkeyCreated>(bytes),
         "authkey_list_response" => go::<AuthkeyList>(bytes),
         "authkey_revoke_response" => go::<Authkey>(bytes),
+        "job_claim_request" => go::<ClaimRequest>(bytes),
+        "job_claim_response" | "job_claim_response_empty" => go::<ClaimResponse>(bytes),
+        "job_result_request" | "job_result_request_error" => {
+            let req: ResultRequest = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+            // What the server refuses with a 400: neither, or both.
+            if req.merge.is_some() == req.error.is_some() {
+                return Err("a result carries exactly one of merge and error".to_string());
+            }
+            serde_json::to_value(req).map_err(|e| e.to_string())
+        }
+        "job_result_response" => go::<ResultResponse>(bytes),
+        "job_list_response" => go::<JobList>(bytes),
         other => Err(format!("no type is known for the fixture kind {other:?}")),
     }
 }
@@ -201,6 +216,15 @@ fn every_kind_has_a_fixture() {
         "authkey_create_response",
         "authkey_list_response",
         "authkey_revoke_response",
+        "job_claim_request",
+        "job_claim_response",
+        "job_claim_response_empty",
+        "job_result_request",
+        "job_result_request_error",
+        "job_result_response",
+        "job_list_response",
+        "push_response_queued",
+        "device_approve_request_worker",
     ] {
         assert!(
             all.iter().any(|(_, k, _)| k == kind),

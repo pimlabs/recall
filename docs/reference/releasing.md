@@ -126,9 +126,12 @@ Done once per repository; nothing here needs repeating per release.
    publishing* → GitHub Actions: organization `pimlabs`, repository `recall`,
    workflow `release.yml`, environment `release`.
 3. **crates.io** — for **each** of `recall-wire`, `recall-hooks`,
-   `recall-server` and `recall`: the crate's *Settings → Trusted Publishing →
-   Add*, with repository owner `pimlabs`, repository `recall`, workflow
-   `release.yml`, environment `release`.
+   `recall-worker`, `recall-server` and `recall`: the crate's *Settings →
+   Trusted Publishing → Add*, with repository owner `pimlabs`, repository
+   `recall`, workflow `release.yml`, environment `release`. A crate's first
+   version has no settings page yet, so `recall-worker`, new with the merge
+   queue, is published once from a laptop (below) and then given its
+   trusted publisher like the others; the name was free on 2026-09-23.
 4. **Homebrew tap** — a fine-grained personal access token with *Contents:
    read and write* on `pimlabs/homebrew-tap` **only**, saved as the secret
    `HOMEBREW_TAP_TOKEN` on the `release` environment (not the repository),
@@ -200,7 +203,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
 cargo build --release
 ./scripts/compat-check.sh target/release/recall-server     # 19 checks
-./scripts/api-doc-check.sh target/release/recall-server    # 72 checks
+./scripts/api-doc-check.sh target/release/recall-server    # 92 checks
 ./scripts/trusted-ip-check.sh target/release/recall-server # 9 checks
 ```
 
@@ -398,7 +401,7 @@ crate names are global and first-come, and a half-published set is awkward to
 back out of:
 
 ```sh
-for n in recall-wire recall-hooks recall-server recall; do
+for n in recall-wire recall-hooks recall-worker recall-server recall; do
   a=$(echo "$n" | cut -c1-2); b=$(echo "$n" | cut -c3-4)
   printf '%-16s %s\n' "$n" \
     "$(curl -s -o /dev/null -w '%{http_code}' "https://index.crates.io/$a/$b/$n")"
@@ -424,6 +427,7 @@ Then, bottom-up:
 ```sh
 cargo publish -p recall-wire
 cargo publish -p recall-hooks
+cargo publish -p recall-worker
 cargo publish -p recall-server
 cargo publish -p recall
 ```
