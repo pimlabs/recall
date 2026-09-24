@@ -17,7 +17,8 @@ use recall_wire::{
 use rusqlite::{Connection, OptionalExtension, Row};
 use time::OffsetDateTime;
 
-use super::{read_file, write_file, Store};
+use super::{read_file, write_file, Outcome, Store};
+use crate::audit::leaf;
 use crate::format_timestamp;
 
 /// Created with the other tables, every time the store opens.
@@ -379,150 +380,208 @@ fn insert_merge_job(
 
 impl Store {
     /// Stores `incoming` as the file's content, last-write-wins, and queues
-    /// a merge of it with whatever it displaced, in one transaction: the
-    /// job's `stored` side is read under the same lock as the write, so it
-    /// is exactly the version this push replaced.
-    pub fn write_and_queue_merge(
+    /// a merge of it with whatever it displaced, in one transaction with
+    /// the push's leaf, which `build_leaf` makes knowing what was queued:
+    /// the job's `stored` side is read under the same lock as the write, so
+    /// it is exactly the version this push replaced. Answers what was
+    /// queued and the write's `updated_at`, which is its leaf's `at`, as
+    /// every audited write's is; `incoming.updated_at` is not used.
+    pub fn write_and_queue_merge_audited(
         &self,
         project_key: &str,
         file_path: &str,
         incoming: &MergeSide,
         job_id: &str,
         now: OffsetDateTime,
-    ) -> Result<Queued> {
-        let mut conn = self.lock();
-        let tx = conn.transaction()?;
-        let displaced = read_file(&tx, project_key, file_path)?
-            .filter(|e| !e.deleted && e.content != incoming.content);
-        write_file(
-            &tx,
-            project_key,
-            file_path,
-            &incoming.content,
-            &incoming.source_env,
-            &incoming.updated_at,
+        build_leaf: impl FnOnce(u64, &str, &Queued) -> Vec<u8>,
+    ) -> Result<(Queued, String)> {
+        let mut stamped = None;
+        let queued = self.audited(
+            |tx, at| {
+                stamped = Some(at.to_string());
+                let incoming = MergeSide {
+                    updated_at: at.to_string(),
+                    ..incoming.clone()
+                };
+                let displaced = read_file(tx, project_key, file_path)?
+                    .filter(|e| !e.deleted && e.content != incoming.content);
+                write_file(
+                    tx,
+                    project_key,
+                    file_path,
+                    &incoming.content,
+                    &incoming.source_env,
+                    at,
+                )?;
+                let Some(displaced) = displaced else {
+                    return Ok(Outcome::Commit(Queued::Nothing));
+                };
+                let open: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM jobs WHERE state IN ('queued', 'leased')",
+                    [],
+                    |r| r.get(0),
+                )?;
+                if open as usize >= MAX_OPEN_JOBS {
+                    return Ok(Outcome::Commit(Queued::Full));
+                }
+                let input = MergeInput {
+                    project_key: project_key.to_string(),
+                    file_path: file_path.to_string(),
+                    stored: side_of(
+                        &displaced.content,
+                        &displaced.source_env,
+                        &displaced.updated_at,
+                    ),
+                    incoming,
+                };
+                insert_merge_job(tx, job_id, &input, None, now)?;
+                Ok(Outcome::Commit(Queued::Queued(job_id.to_string())))
+            },
+            build_leaf,
         )?;
-        let Some(displaced) = displaced else {
-            tx.commit()?;
-            return Ok(Queued::Nothing);
-        };
-        let open: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM jobs WHERE state IN ('queued', 'leased')",
-            [],
-            |r| r.get(0),
-        )?;
-        if open as usize >= MAX_OPEN_JOBS {
-            tx.commit()?;
-            return Ok(Queued::Full);
-        }
-        let input = MergeInput {
-            project_key: project_key.to_string(),
-            file_path: file_path.to_string(),
-            stored: side_of(
-                &displaced.content,
-                &displaced.source_env,
-                &displaced.updated_at,
-            ),
-            incoming: incoming.clone(),
-        };
-        insert_merge_job(&tx, job_id, &input, None, now)?;
-        tx.commit()?;
-        Ok(Queued::Queued(job_id.to_string()))
+        Ok((queued, stamped.context("the write ran")?))
     }
 
     /// Puts every job whose lease ran out back in the queue, or fails it
     /// when that was its last attempt. Answers each job it failed.
-    pub fn expire_leases(&self, now: OffsetDateTime) -> Result<Vec<Failure>> {
-        let mut conn = self.lock();
-        let tx = conn.transaction()?;
-        let expired: Vec<JobRow> = {
-            let mut stmt = tx.prepare(&format!(
-                "SELECT {JOB_COLUMNS} FROM jobs WHERE state = 'leased' AND lease_expires_at <= ?1"
-            ))?;
-            let rows = stmt.query_map((ts(now),), row_from)?;
-            rows.collect::<rusqlite::Result<_>>()?
-        };
-        let mut failed = Vec::new();
-        for job in &expired {
-            if let Some(error) = after_failure(
-                &tx,
-                job,
-                "the worker did not report back before its lease ended",
-                now,
-                false,
-            )? {
-                failed.push(error);
-            }
-        }
-        tx.commit()?;
+    ///
+    /// Each job whose lease ran out gets a `job_result` leaf, which
+    /// `build_leaf` makes, in the same transaction: the attempt ended with
+    /// no result, and the job waits for another or has failed. A call that
+    /// finds no lease run out changes nothing and appends nothing.
+    pub fn expire_leases_audited(
+        &self,
+        now: OffsetDateTime,
+        build_leaf: impl Fn(u64, &str, &leaf::JobChange<'_>) -> Vec<u8>,
+    ) -> Result<Vec<Failure>> {
+        let (failed, _) = self.audited_each(
+            |tx, _| {
+                let expired: Vec<JobRow> = {
+                    let mut stmt = tx.prepare(&format!(
+                        "SELECT {JOB_COLUMNS} FROM jobs WHERE state = 'leased' AND lease_expires_at <= ?1"
+                    ))?;
+                    let rows = stmt.query_map((ts(now),), row_from)?;
+                    rows.collect::<rusqlite::Result<_>>()?
+                };
+                if expired.is_empty() {
+                    return Ok(Outcome::Refuse((Vec::new(), Vec::new())));
+                }
+                let mut failed = Vec::new();
+                let mut ended = Vec::new();
+                for job in expired {
+                    let failure = after_failure(
+                        tx,
+                        &job,
+                        "the worker did not report back before its lease ended",
+                        now,
+                        false,
+                    )?;
+                    let state = if failure.is_some() {
+                        STATE_FAILED
+                    } else {
+                        STATE_QUEUED
+                    };
+                    failed.extend(failure);
+                    ended.push((job.id, job.project_key, job.file_path, state));
+                }
+                Ok(Outcome::Commit((failed, ended)))
+            },
+            |seq, at, (_, ended)| {
+                ended
+                    .iter()
+                    .zip(seq..)
+                    .map(|((job_id, project_key, file_path, state), seq)| {
+                        build_leaf(
+                            seq,
+                            at,
+                            &leaf::JobChange {
+                                job_id,
+                                project_key,
+                                file_path,
+                                state,
+                                stored_sha256: None,
+                                follow_up: None,
+                            },
+                        )
+                    })
+                    .collect()
+            },
+        )?;
         Ok(failed)
     }
 
     /// Leases the oldest queued job of one of `kinds` that may run now,
-    /// for `lease` from `now`, under `lease_id`.
-    pub fn claim_job(
+    /// for `lease` from `now`, under `lease_id`, and appends the
+    /// `job_claim` leaf `build_leaf` makes in the same transaction. Finding
+    /// nothing to lease changes nothing and appends nothing.
+    pub fn claim_job_audited(
         &self,
         kinds: &[String],
         lease_id: &str,
         lease: Duration,
         now: OffsetDateTime,
+        build_leaf: impl FnOnce(u64, &str, &Job) -> Vec<u8>,
     ) -> Result<Option<Job>> {
         if kinds.is_empty() {
             return Ok(None);
         }
-        let mut conn = self.lock();
-        let tx = conn.transaction()?;
-        // Kinds come from the request, so they are bound, never spliced.
-        let marks = (0..kinds.len())
-            .map(|i| format!("?{}", i + 2))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let now_text = ts(now);
-        let mut params: Vec<&dyn rusqlite::ToSql> = vec![&now_text];
-        for kind in kinds {
-            params.push(kind);
-        }
-        let job = tx
-            .query_row(
-                &format!(
-                    "SELECT {JOB_COLUMNS} FROM jobs
-                     WHERE state = 'queued' AND not_before <= ?1 AND kind IN ({marks})
-                     ORDER BY created_at, id LIMIT 1"
-                ),
-                params.as_slice(),
-                row_from,
-            )
-            .optional()?;
-        let Some(job) = job else {
-            return Ok(None);
-        };
-        let expires = ts(now + lease);
-        tx.execute(
-            "UPDATE jobs SET state = 'leased', lease_id = ?2, lease_expires_at = ?3,
-                 attempt = attempt + 1, updated_at = ?4
-             WHERE id = ?1",
-            (&job.id, lease_id, &expires, &now_text),
-        )?;
-        tx.commit()?;
-        let merge = match job.kind.as_str() {
-            KIND_MERGE => Some(job.merge_input()?),
-            _ => None,
-        };
-        Ok(Some(Job {
-            id: job.id,
-            kind: job.kind,
-            lease_id: lease_id.to_string(),
-            lease_expires_at: expires,
-            attempt: job.attempt + 1,
-            merge,
-        }))
+        self.audited(
+            |tx, _| {
+                // Kinds come from the request, so they are bound, never
+                // spliced.
+                let marks = (0..kinds.len())
+                    .map(|i| format!("?{}", i + 2))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let now_text = ts(now);
+                let mut params: Vec<&dyn rusqlite::ToSql> = vec![&now_text];
+                for kind in kinds {
+                    params.push(kind);
+                }
+                let job = tx
+                    .query_row(
+                        &format!(
+                            "SELECT {JOB_COLUMNS} FROM jobs
+                             WHERE state = 'queued' AND not_before <= ?1 AND kind IN ({marks})
+                             ORDER BY created_at, id LIMIT 1"
+                        ),
+                        params.as_slice(),
+                        row_from,
+                    )
+                    .optional()?;
+                let Some(job) = job else {
+                    return Ok(Outcome::Refuse(None));
+                };
+                let expires = ts(now + lease);
+                tx.execute(
+                    "UPDATE jobs SET state = 'leased', lease_id = ?2, lease_expires_at = ?3,
+                         attempt = attempt + 1, updated_at = ?4
+                     WHERE id = ?1",
+                    (&job.id, lease_id, &expires, &now_text),
+                )?;
+                let merge = match job.kind.as_str() {
+                    KIND_MERGE => Some(job.merge_input()?),
+                    _ => None,
+                };
+                Ok(Outcome::Commit(Some(Job {
+                    id: job.id,
+                    kind: job.kind,
+                    lease_id: lease_id.to_string(),
+                    lease_expires_at: expires,
+                    attempt: job.attempt + 1,
+                    merge,
+                })))
+            },
+            |seq, at, job| build_leaf(seq, at, job.as_ref().expect("a leaf only for a lease")),
+        )
     }
 
-    /// Records a worker's result for job `id`.
+    /// Records a worker's result for job `id`, with the `job_result` leaf
+    /// `build_leaf` makes from what it changed, in one transaction.
     ///
     /// A result counts only under the job's current, unexpired lease. The
     /// same result posted again under the lease that settled it changes
-    /// nothing and answers as the first did.
+    /// nothing, answers as the first did, and appends nothing.
     ///
     /// A merge is applied as a compare-and-swap: only if the file still
     /// has the hash of the version the job stored, and then attributed to
@@ -531,89 +590,125 @@ impl Store {
     /// against the newer version, at most [`MAX_LINKS`] deep. An empty
     /// merge of two versions that were not empty is never applied: it is
     /// taken as an error, and retried.
-    pub fn settle_job(
+    pub fn settle_job_audited(
         &self,
         id: &str,
         result: &ResultRequest,
         worker: &str,
         follow_up_id: &str,
         now: OffsetDateTime,
+        build_leaf: impl FnOnce(u64, &str, &leaf::JobChange<'_>) -> Vec<u8>,
     ) -> Result<Settlement> {
-        let mut conn = self.lock();
-        let tx = conn.transaction()?;
-        let Some(job) = get_job(&tx, id)? else {
-            return Ok(Settlement::NotFound);
-        };
-        if job.lease_id.as_deref() != Some(result.lease_id.as_str()) {
-            return Ok(Settlement::LeaseEnded);
-        }
-        if job.state != STATE_LEASED {
-            // Settled already, under this very lease: the repeat of a
-            // result that was recorded.
-            return Ok(Settlement::Recorded(Settled {
-                response: job.outcome(),
-                applied: false,
-                queued: false,
-                failed: None,
-            }));
-        }
-        if job
-            .lease_expires_at
-            .as_deref()
-            .is_none_or(|at| at <= ts(now).as_str())
-        {
-            return Ok(Settlement::LeaseEnded);
-        }
-
-        let settled = match (&result.merge, &result.error) {
-            (_, Some(error)) => {
-                let failed = after_failure(&tx, &job, error, now, true)?.map(Box::new);
-                Settled {
-                    response: ResultResponse::default(),
-                    applied: false,
-                    queued: false,
-                    failed,
+        let (settlement, _) = self.audited(
+            |tx, _| {
+                let refuse = |s: Settlement| Ok(Outcome::Refuse((s, None)));
+                let Some(job) = get_job(tx, id)? else {
+                    return refuse(Settlement::NotFound);
+                };
+                if job.lease_id.as_deref() != Some(result.lease_id.as_str()) {
+                    return refuse(Settlement::LeaseEnded);
                 }
-            }
-            (Some(merged), None) => {
-                if job.kind != KIND_MERGE {
-                    return Ok(Settlement::WrongKind);
-                }
-                let input = job.merge_input()?;
-                // Nothing from two versions that had something is not a
-                // merge but a malfunction, as the inline merge treats it:
-                // retried like an error, and never written, where it would
-                // replace both machines' notes with an empty file.
-                let emptied = merged.content.trim().is_empty()
-                    && !(input.stored.content.trim().is_empty()
-                        && input.incoming.content.trim().is_empty());
-                if emptied {
-                    Settled {
-                        response: ResultResponse::default(),
+                if job.state != STATE_LEASED {
+                    // Settled already, under this very lease: the repeat
+                    // of a result that was recorded.
+                    return refuse(Settlement::Recorded(Settled {
+                        response: job.outcome(),
                         applied: false,
                         queued: false,
-                        failed: after_failure(&tx, &job, EMPTY_RESULT, now, true)?.map(Box::new),
-                    }
-                } else {
-                    apply_merge(
-                        &tx,
-                        &job,
-                        &input,
-                        &merged.content,
-                        worker,
-                        follow_up_id,
-                        now,
-                    )?
+                        failed: None,
+                    }));
                 }
-            }
-            (None, None) => anyhow::bail!("a result carries a merge or an error"),
-        };
-        let response = get_job(&tx, id)?.expect("the job was read above").outcome();
-        tx.commit()?;
-        Ok(Settlement::Recorded(Settled {
-            response,
-            ..settled
-        }))
+                if job
+                    .lease_expires_at
+                    .as_deref()
+                    .is_none_or(|at| at <= ts(now).as_str())
+                {
+                    return refuse(Settlement::LeaseEnded);
+                }
+
+                let mut stored = None;
+                let settled = match (&result.merge, &result.error) {
+                    (_, Some(error)) => {
+                        let failed = after_failure(tx, &job, error, now, true)?.map(Box::new);
+                        Settled {
+                            response: ResultResponse::default(),
+                            applied: false,
+                            queued: false,
+                            failed,
+                        }
+                    }
+                    (Some(merged), None) => {
+                        if job.kind != KIND_MERGE {
+                            return refuse(Settlement::WrongKind);
+                        }
+                        let input = job.merge_input()?;
+                        // Nothing from two versions that had something is
+                        // not a merge but a malfunction, as the inline merge
+                        // treats it: retried like an error, and never
+                        // written, where it would replace both machines'
+                        // notes with an empty file.
+                        let emptied = merged.content.trim().is_empty()
+                            && !(input.stored.content.trim().is_empty()
+                                && input.incoming.content.trim().is_empty());
+                        if emptied {
+                            Settled {
+                                response: ResultResponse::default(),
+                                applied: false,
+                                queued: false,
+                                failed: after_failure(tx, &job, EMPTY_RESULT, now, true)?
+                                    .map(Box::new),
+                            }
+                        } else {
+                            let settled = apply_merge(
+                                tx,
+                                &job,
+                                &input,
+                                &merged.content,
+                                worker,
+                                follow_up_id,
+                                now,
+                            )?;
+                            if settled.applied {
+                                stored = Some(content_sha256(&merged.content));
+                            }
+                            settled
+                        }
+                    }
+                    (None, None) => anyhow::bail!("a result carries a merge or an error"),
+                };
+                let response = get_job(tx, id)?
+                    .context("the job was read above")?
+                    .outcome();
+                let change = (job.project_key, job.file_path, stored);
+                Ok(Outcome::Commit((
+                    Settlement::Recorded(Settled {
+                        response,
+                        ..settled
+                    }),
+                    Some(change),
+                )))
+            },
+            |seq, at, (settlement, change)| {
+                let (Settlement::Recorded(s), Some((project_key, file_path, stored))) =
+                    (settlement, change)
+                else {
+                    unreachable!("a leaf only for a recorded result");
+                };
+                build_leaf(
+                    seq,
+                    at,
+                    &leaf::JobChange {
+                        job_id: &s.response.id,
+                        project_key,
+                        file_path,
+                        state: &s.response.state,
+                        stored_sha256: stored.as_deref(),
+                        follow_up: s.response.follow_up.as_deref(),
+                    },
+                )
+            },
+        )?;
+        Ok(settlement)
     }
 
     /// Jobs, newest first, at most `limit`, in `state` when given.
@@ -629,45 +724,57 @@ impl Store {
             .collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Queues a failed job again, with its attempts counted afresh.
+    /// Queues a failed job again, with its attempts counted afresh, and
+    /// appends the `job_retry` leaf `build_leaf` makes in the same
+    /// transaction.
     ///
     /// A job that failed because the file kept changing kept its result:
     /// it is queued as a merge of that result with the file as it is now,
     /// which is the merge that was never finished.
-    pub fn retry_job(&self, id: &str, now: OffsetDateTime) -> Result<Retried> {
-        let mut conn = self.lock();
-        let tx = conn.transaction()?;
-        let Some(job) = get_job(&tx, id)? else {
-            return Ok(Retried::NotFound);
-        };
-        if job.state != STATE_FAILED {
-            return Ok(Retried::NotFailed(job.state));
-        }
-        let mut payload = job.payload.clone();
-        if let (Some(kept), KIND_MERGE) = (&job.result, job.kind.as_str()) {
-            let kept: MergeSide = serde_json::from_str(kept)?;
-            if let Some(file) =
-                read_file(&tx, &job.project_key, &job.file_path)?.filter(|e| !e.deleted)
-            {
-                payload = serde_json::to_string(&MergeInput {
-                    project_key: job.project_key.clone(),
-                    file_path: job.file_path.clone(),
-                    stored: kept,
-                    incoming: side_of(&file.content, &file.source_env, &file.updated_at),
-                })?;
-            }
-        }
-        let now = ts(now);
-        tx.execute(
-            "UPDATE jobs SET state = 'queued', payload = ?2, lease_id = NULL,
-                 lease_expires_at = NULL, attempt = 0, not_before = ?3, link = 0,
-                 error = NULL, result = NULL, applied = 0, follow_up = NULL, updated_at = ?3
-             WHERE id = ?1",
-            (id, &payload, &now),
-        )?;
-        let job = get_job(&tx, id)?.expect("the job was read above");
-        tx.commit()?;
-        Ok(Retried::Queued(job.summary()))
+    pub fn retry_job_audited(
+        &self,
+        id: &str,
+        now: OffsetDateTime,
+        build_leaf: impl FnOnce(u64, &str, &JobSummary) -> Vec<u8>,
+    ) -> Result<Retried> {
+        self.audited(
+            |tx, _| {
+                let Some(job) = get_job(tx, id)? else {
+                    return Ok(Outcome::Refuse(Retried::NotFound));
+                };
+                if job.state != STATE_FAILED {
+                    return Ok(Outcome::Refuse(Retried::NotFailed(job.state)));
+                }
+                let mut payload = job.payload.clone();
+                if let (Some(kept), KIND_MERGE) = (&job.result, job.kind.as_str()) {
+                    let kept: MergeSide = serde_json::from_str(kept)?;
+                    if let Some(file) =
+                        read_file(tx, &job.project_key, &job.file_path)?.filter(|e| !e.deleted)
+                    {
+                        payload = serde_json::to_string(&MergeInput {
+                            project_key: job.project_key.clone(),
+                            file_path: job.file_path.clone(),
+                            stored: kept,
+                            incoming: side_of(&file.content, &file.source_env, &file.updated_at),
+                        })?;
+                    }
+                }
+                let now = ts(now);
+                tx.execute(
+                    "UPDATE jobs SET state = 'queued', payload = ?2, lease_id = NULL,
+                         lease_expires_at = NULL, attempt = 0, not_before = ?3, link = 0,
+                         error = NULL, result = NULL, applied = 0, follow_up = NULL, updated_at = ?3
+                     WHERE id = ?1",
+                    (id, &payload, &now),
+                )?;
+                let job = get_job(tx, id)?.context("the job was read above")?;
+                Ok(Outcome::Commit(Retried::Queued(job.summary())))
+            },
+            |seq, at, retried| match retried {
+                Retried::Queued(job) => build_leaf(seq, at, job),
+                _ => unreachable!("a leaf only for a retry"),
+            },
+        )
     }
 
     /// Makes every open job claimable at once: a leased one is released,
@@ -679,6 +786,10 @@ impl Store {
     /// out, and a job waiting out a delay the worker's failure set has no
     /// worker left to wait for. Attempts still count, so a job that keeps
     /// failing here is failed all the same.
+    ///
+    /// Not in the audit log: it changes no file, and what it frees is
+    /// recorded around it — the `revoke` of the worker that held a lease
+    /// before, and the server's own `job_claim` of each job after.
     pub fn release_open_jobs(&self, now: OffsetDateTime) -> Result<usize> {
         Ok(self.lock().execute(
             "UPDATE jobs SET state = 'queued', lease_id = NULL, lease_expires_at = NULL,
@@ -691,24 +802,63 @@ impl Store {
     /// Marks every open job failed, with `why` as its error, for a queue
     /// nothing is left to drain. Each keeps its input, so a retry merges it
     /// once something can. Answers their ids.
-    pub fn fail_open_jobs(&self, why: &str, now: OffsetDateTime) -> Result<Vec<String>> {
-        let mut conn = self.lock();
-        let tx = conn.transaction()?;
-        let ids = {
-            let mut stmt = tx.prepare(
-                "SELECT id FROM jobs WHERE state IN ('queued', 'leased') ORDER BY created_at, id",
-            )?;
-            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        tx.execute(
-            "UPDATE jobs SET state = 'failed', lease_id = NULL, lease_expires_at = NULL,
-                 error = ?1, applied = 0, updated_at = ?2
-             WHERE state IN ('queued', 'leased')",
-            (clip(why, MAX_ERROR_BYTES), ts(now)),
+    ///
+    /// Each job gets a `job_result` leaf, which `build_leaf` makes, in the
+    /// same transaction, as a lease that ran out on a last attempt does.
+    pub fn fail_open_jobs_audited(
+        &self,
+        why: &str,
+        now: OffsetDateTime,
+        build_leaf: impl Fn(u64, &str, &leaf::JobChange<'_>) -> Vec<u8>,
+    ) -> Result<Vec<String>> {
+        let jobs = self.audited_each(
+            |tx, _| {
+                let jobs = {
+                    let mut stmt = tx.prepare(
+                        "SELECT id, project_key, file_path FROM jobs
+                         WHERE state IN ('queued', 'leased') ORDER BY created_at, id",
+                    )?;
+                    let rows = stmt.query_map([], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                        ))
+                    })?;
+                    rows.collect::<rusqlite::Result<Vec<_>>>()?
+                };
+                if jobs.is_empty() {
+                    return Ok(Outcome::Refuse(jobs));
+                }
+                tx.execute(
+                    "UPDATE jobs SET state = 'failed', lease_id = NULL, lease_expires_at = NULL,
+                         error = ?1, applied = 0, updated_at = ?2
+                     WHERE state IN ('queued', 'leased')",
+                    (clip(why, MAX_ERROR_BYTES), ts(now)),
+                )?;
+                Ok(Outcome::Commit(jobs))
+            },
+            |seq, at, jobs| {
+                jobs.iter()
+                    .zip(seq..)
+                    .map(|((job_id, project_key, file_path), seq)| {
+                        build_leaf(
+                            seq,
+                            at,
+                            &leaf::JobChange {
+                                job_id,
+                                project_key,
+                                file_path,
+                                state: STATE_FAILED,
+                                stored_sha256: None,
+                                follow_up: None,
+                            },
+                        )
+                    })
+                    .collect()
+            },
         )?;
-        tx.commit()?;
-        Ok(ids)
+        Ok(jobs.into_iter().map(|(id, _, _)| id).collect())
     }
 
     /// What `/health` says about the queue.
@@ -736,6 +886,8 @@ impl Store {
 
     /// Removes jobs that finished before `before`. Failed jobs stay until
     /// someone retries them: each may hold a result nobody has seen.
+    ///
+    /// Not in the audit log: the leaves of the jobs removed stay in it.
     pub fn prune_jobs(&self, before: &str) -> Result<usize> {
         Ok(self.lock().execute(
             "DELETE FROM jobs WHERE state = 'done' AND updated_at < ?1",
@@ -927,7 +1079,92 @@ fn finish(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::test_leaf;
     use recall_wire::MergeResult;
+
+    /// The audited writes, with a leaf these tests do not look at, under
+    /// the names the tests read best with. A file written here keeps the
+    /// `updated_at` a test gives it, since these tests move the clock.
+    impl Store {
+        fn upsert(&self, pk: &str, fp: &str, content: &str, env: &str, at: &str) -> Result<()> {
+            self.audited(
+                |tx, _| {
+                    write_file(tx, pk, fp, content, env, at)?;
+                    Ok(Outcome::Commit(()))
+                },
+                |seq, at, ()| test_leaf(seq, at),
+            )
+        }
+
+        fn tombstone(&self, pk: &str, fp: &str, env: &str, at: &str) -> Result<()> {
+            self.audited(
+                |tx, _| {
+                    tx.execute(
+                        "INSERT INTO memory_files
+                             (project_key, file_path, content, source_env, updated_at, deleted)
+                         VALUES (?1, ?2, '', ?3, ?4, 1)
+                         ON CONFLICT(project_key, file_path) DO UPDATE SET
+                             source_env = excluded.source_env,
+                             updated_at = excluded.updated_at,
+                             deleted = 1",
+                        (pk, fp, env, at),
+                    )?;
+                    close_for_delete(tx, pk, fp, at)?;
+                    Ok(Outcome::Commit(()))
+                },
+                |seq, at, ()| test_leaf(seq, at),
+            )
+        }
+
+        fn write_and_queue_merge(
+            &self,
+            pk: &str,
+            fp: &str,
+            incoming: &MergeSide,
+            job_id: &str,
+            now: OffsetDateTime,
+        ) -> Result<Queued> {
+            self.write_and_queue_merge_audited(pk, fp, incoming, job_id, now, |seq, at, _| {
+                test_leaf(seq, at)
+            })
+            .map(|(queued, _)| queued)
+        }
+
+        fn claim_job(
+            &self,
+            kinds: &[String],
+            lease_id: &str,
+            lease: Duration,
+            now: OffsetDateTime,
+        ) -> Result<Option<Job>> {
+            self.claim_job_audited(kinds, lease_id, lease, now, |seq, at, _| test_leaf(seq, at))
+        }
+
+        fn settle_job(
+            &self,
+            id: &str,
+            result: &ResultRequest,
+            worker: &str,
+            follow_up_id: &str,
+            now: OffsetDateTime,
+        ) -> Result<Settlement> {
+            self.settle_job_audited(id, result, worker, follow_up_id, now, |seq, at, _| {
+                test_leaf(seq, at)
+            })
+        }
+
+        fn retry_job(&self, id: &str, now: OffsetDateTime) -> Result<Retried> {
+            self.retry_job_audited(id, now, |seq, at, _| test_leaf(seq, at))
+        }
+
+        fn expire_leases(&self, now: OffsetDateTime) -> Result<Vec<Failure>> {
+            self.expire_leases_audited(now, |seq, at, _| test_leaf(seq, at))
+        }
+
+        fn fail_open_jobs(&self, why: &str, now: OffsetDateTime) -> Result<Vec<String>> {
+            self.fail_open_jobs_audited(why, now, |seq, at, _| test_leaf(seq, at))
+        }
+    }
 
     const P: &str = "acme/app";
     const F: &str = "topics/auth.md";
@@ -1003,7 +1240,15 @@ mod tests {
             ("A", "laptop")
         );
         assert_eq!(m.stored.sha256, content_sha256("A"));
-        assert_eq!(m.incoming, side("B", "cloud", 1));
+        // Stamped as the file it stored was: with its leaf's `at`.
+        let stored = st.get(P, F).unwrap().unwrap();
+        assert_eq!(
+            m.incoming,
+            MergeSide {
+                updated_at: stored.updated_at,
+                ..side("B", "cloud", 1)
+            }
+        );
         // Leased: nobody else gets it.
         assert!(st
             .claim_job(&merge_kinds(), "lse_2", Duration::from_secs(120), at(3))

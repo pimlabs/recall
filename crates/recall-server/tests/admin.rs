@@ -45,17 +45,19 @@ impl Fixture {
     /// unrelated project that must never be touched.
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let st = Store::open(dir.path().join("recall.db")).unwrap();
-        st.upsert(OLD, "MEMORY.md", "- [notes](notes.md)\n", "laptop", T0)
-            .unwrap();
-        st.upsert(OLD, "notes.md", "a fact\n", "", T1).unwrap();
-        st.upsert(OLD, "old.md", "kept after delete\n", "laptop", T0)
-            .unwrap();
-        st.tombstone(OLD, "old.md", "laptop", T1).unwrap();
-        st.upsert("me/thing", "MEMORY.md", "- other\n", "cloud", T1)
-            .unwrap();
-        st.upsert("acme/app", "unrelated.md", "leave me\n", "cloud", T0)
-            .unwrap();
+        // The server creates the schema; the rows go in by hand, since
+        // their exact timestamps are what the listings below are checked
+        // against, and the store stamps what it writes with the time.
+        drop(Store::open(dir.path().join("recall.db")).unwrap());
+        let conn = Connection::open(dir.path().join("recall.db")).unwrap();
+        conn.execute_batch(&format!(
+            "INSERT INTO memory_files VALUES ('{OLD}', 'MEMORY.md', '- [notes](notes.md)\n', 'laptop', '{T0}', 0);
+             INSERT INTO memory_files VALUES ('{OLD}', 'notes.md', 'a fact\n', NULL, '{T1}', 0);
+             INSERT INTO memory_files VALUES ('{OLD}', 'old.md', 'kept after delete\n', 'laptop', '{T1}', 1);
+             INSERT INTO memory_files VALUES ('me/thing', 'MEMORY.md', '- other\n', 'cloud', '{T1}', 0);
+             INSERT INTO memory_files VALUES ('acme/app', 'unrelated.md', 'leave me\n', 'cloud', '{T0}', 0);"
+        ))
+        .unwrap();
         Self { dir }
     }
 

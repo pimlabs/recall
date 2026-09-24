@@ -87,7 +87,7 @@ fn reset_passkeys_empties_the_passkeys_and_prints_a_bootstrap_code() {
 
     let store = recall_server::Store::open(&db).unwrap();
     store
-        .add_admin_credential(
+        .add_admin_credential_audited(
             &recall_server::store::NewAdminCredential {
                 id: "cred",
                 user_handle: "u",
@@ -97,8 +97,22 @@ fn reset_passkeys_empties_the_passkeys_and_prints_a_bootstrap_code() {
                 created_at: "2026-09-23T10:00:00.000Z",
             },
             None,
+            |seq, at| {
+                use recall_server::audit::leaf;
+                leaf::encode(
+                    seq,
+                    at,
+                    leaf::action::PASSKEY_ADD,
+                    &leaf::Actor::Session {
+                        credential_id: "cred",
+                    },
+                    leaf::subject_passkey("cred", "phone", Some(false)),
+                    None,
+                )
+            },
         )
         .unwrap();
+    let before = store.audit_checkpoint().0;
     drop(store);
     let out = run(&["reset-passkeys"], &[("RECALL_DB_PATH", &db_str)]);
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -106,6 +120,13 @@ fn reset_passkeys_empties_the_passkeys_and_prints_a_bootstrap_code() {
     assert!(stdout.contains("Removed 1 passkey"), "{stdout}");
     let store = recall_server::Store::open(&db).unwrap();
     assert!(!store.has_admin_credentials().unwrap());
+    // And its leaf, the host's, is the next in the log.
+    assert_eq!(store.audit_checkpoint().0, before + 1);
+    let entry = store.audit_entries(before, before + 1, usize::MAX).unwrap();
+    let leaf: serde_json::Value = serde_json::from_slice(&entry[0].leaf).unwrap();
+    assert_eq!(leaf["action"], "passkey_reset");
+    assert_eq!(leaf["actor"], serde_json::json!({"kind": "host"}));
+    assert_eq!(leaf["subject"]["passkeys_removed"], 1);
 
     // The code it printed is the one the bootstrap will take.
     let code = stdout

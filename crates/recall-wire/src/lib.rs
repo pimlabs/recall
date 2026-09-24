@@ -46,6 +46,7 @@
 #![deny(missing_docs)]
 
 pub mod admin;
+pub mod audit;
 pub mod devices;
 pub mod discovery;
 pub mod health;
@@ -55,6 +56,7 @@ pub mod sync;
 pub mod validate;
 
 pub use admin::{AdminStats, AdminTotals, ProjectStats};
+pub use audit::{AuditCapability, AuditCheckpoint, AuditConsistencyResponse, AuditEntriesResponse};
 pub use devices::{
     ApproveRequest, Authkey, AuthkeyCreated, AuthkeyList, AuthkeyRequest, AuthkeyRevokeRequest,
     DenyRequest, DenyResponse, Device, DeviceIdentity, DeviceList, DevicesCapability,
@@ -106,7 +108,10 @@ mod hash_tests {
 }
 
 pub use sync::{File, PushRequest, PushResponse, SyncResponse};
-pub use validate::{validate_file_path, ValidationError};
+pub use validate::{
+    validate_base_sha256, validate_file_path, validate_project_key, ValidationError,
+    MAX_FILE_PATH_BYTES, MAX_PROJECT_KEY_BYTES,
+};
 
 use serde::{Deserialize, Serialize};
 

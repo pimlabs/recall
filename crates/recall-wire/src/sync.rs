@@ -55,10 +55,12 @@ impl PushRequest {
     /// of the wire: the client refuses to send what the server would refuse
     /// to accept, so the user sees the real reason rather than a 400.
     pub fn validate(&self) -> Result<(), ValidationError> {
-        if self.project_key.is_empty() {
-            return Err(ValidationError::MissingProjectKey);
+        crate::validate_project_key(&self.project_key)?;
+        crate::validate_file_path(&self.file_path)?;
+        match &self.base_sha256 {
+            Some(base) => crate::validate_base_sha256(base),
+            None => Ok(()),
         }
-        crate::validate_file_path(&self.file_path)
     }
 }
 

@@ -9,19 +9,20 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::Response;
 use axum::Extension;
 use recall_wire::discovery::{self, Auth, Build, Protocol, ServerInfo};
+use recall_wire::{content_sha256, Discovery, PROTOCOL};
 use recall_wire::{
     AdminStats, ClaudeCliStatus, Health, MergeError, MergeSide, MergeStatus, PushRequest,
     PushResponse, SyncResponse, WorkerStatus,
 };
-use recall_wire::{Discovery, PROTOCOL};
 
-use super::auth::Caller;
+use super::auth::{Caller, SignedRequestInfo};
 use super::respond::{error, internal, json};
 use super::AppState;
+use crate::audit::leaf;
 use crate::now;
 use crate::store::Queued;
 
@@ -37,6 +38,7 @@ pub(super) const WORKER_STALE: std::time::Duration = std::time::Duration::from_s
 pub(super) async fn handle_push(
     State(state): State<Arc<AppState>>,
     caller: Option<Extension<Caller>>,
+    signed: Option<Extension<SignedRequestInfo>>,
     body: Bytes,
 ) -> Response {
     let mut req: PushRequest = match serde_json::from_slice(&body) {
@@ -67,32 +69,73 @@ pub(super) async fn handle_push(
     if req.project_key.is_empty() || req.file_path.is_empty() {
         return error(StatusCode::BAD_REQUEST, REQUIRED_FIELDS_MSG);
     }
-    if recall_wire::validate_file_path(&req.file_path).is_err() {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "file_path must be relative, no traversal",
-        );
+    match recall_wire::validate_file_path(&req.file_path) {
+        Ok(()) => {}
+        Err(e @ recall_wire::ValidationError::FilePathTooLong) => {
+            return error(StatusCode::BAD_REQUEST, &e.to_string())
+        }
+        Err(_) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "file_path must be relative, no traversal",
+            )
+        }
+    }
+    // Both end up in this push's audit leaf, so both are held to what a
+    // real client sends: a key no longer than a path, and a base that is a
+    // SHA-256, stored in the leaf as lowercase hex whatever case it came in.
+    if let Err(e) = recall_wire::validate_project_key(&req.project_key) {
+        return error(StatusCode::BAD_REQUEST, &e.to_string());
+    }
+    if let Some(base) = &mut req.base_sha256 {
+        if let Err(e) = recall_wire::validate_base_sha256(base) {
+            return error(StatusCode::BAD_REQUEST, &e.to_string());
+        }
+        base.make_ascii_lowercase();
     }
 
     // The name belongs to the key. A push a device signed is recorded under
     // the name that device enrolled as, whatever the body claims, so one
     // machine cannot write as another. A bearer push has no key to go by
     // and keeps the label it sent, exactly as before devices existed.
-    if let Some(Extension(Caller::Device { name, .. })) = caller {
-        req.source_env = name;
+    if let Some(Extension(Caller::Device { name, .. })) = &caller {
+        req.source_env.clone_from(name);
     }
-
-    let updated_at = now();
+    let caller_ref = caller.as_ref().map(|Extension(c)| c);
+    let signed_ref = signed.as_ref().map(|Extension(s)| s);
+    let actor = super::audit::actor_for(caller_ref);
+    // A push's body is the file, and a delete's names it: neither is kept
+    // in the leaf (see `leaf::SignedRequest`).
+    let request = super::audit::signed_request_for(signed_ref, None);
 
     if req.deleted {
-        if let Err(e) = state.store.tombstone(
+        let result = state.store.tombstone_audited(
             &req.project_key,
             &req.file_path,
             &req.source_env,
-            &updated_at,
-        ) {
-            return internal(e);
-        }
+            |seq, at| {
+                leaf::encode(
+                    seq,
+                    at,
+                    leaf::action::DELETE,
+                    &actor,
+                    leaf::subject_file(&leaf::FileChange {
+                        project_key: &req.project_key,
+                        file_path: &req.file_path,
+                        deleted: true,
+                        stored_sha256: &content_sha256(""),
+                        base_sha256: req.base_sha256.as_deref(),
+                        merged: false,
+                        merge_job: None,
+                    }),
+                    request.as_ref(),
+                )
+            },
+        );
+        let updated_at = match result {
+            Ok(at) => at,
+            Err(e) => return internal(e),
+        };
         return json(
             StatusCode::OK,
             &PushResponse {
@@ -141,7 +184,7 @@ pub(super) async fn handle_push(
     if stale.is_some() {
         match state.store.enrolled_worker() {
             Ok(Some(_)) => match merge_here_instead(&state) {
-                Ok(None) => return queue_merge(&state, req, incoming, updated_at),
+                Ok(None) => return queue_merge(&state, req, incoming, &actor, request.as_ref()),
                 Ok(Some(why)) => eprintln!(
                     "{why}, so {}/{} is merged here rather than queued",
                     req.project_key, req.file_path
@@ -177,15 +220,34 @@ pub(super) async fn handle_push(
         }
     }
 
-    if let Err(e) = state.store.upsert(
+    let result = state.store.upsert_audited(
         &req.project_key,
         &req.file_path,
         &content,
         &req.source_env,
-        &updated_at,
-    ) {
-        return internal(e);
-    }
+        |seq, at| {
+            leaf::encode(
+                seq,
+                at,
+                leaf::action::PUSH,
+                &actor,
+                leaf::subject_file(&leaf::FileChange {
+                    project_key: &req.project_key,
+                    file_path: &req.file_path,
+                    deleted: false,
+                    stored_sha256: &content_sha256(&content),
+                    base_sha256: req.base_sha256.as_deref(),
+                    merged,
+                    merge_job: None,
+                }),
+                request.as_ref(),
+            )
+        },
+    );
+    let updated_at = match result {
+        Ok(at) => at,
+        Err(e) => return internal(e),
+    };
     json(
         StatusCode::OK,
         &PushResponse {
@@ -208,32 +270,61 @@ fn queue_merge(
     state: &AppState,
     req: PushRequest,
     incoming: String,
-    updated_at: String,
+    actor: &leaf::Actor<'_>,
+    request: Option<&leaf::SignedRequest<'_>>,
 ) -> Response {
     let job_id = match super::devices::new_id("job_", 10) {
         Ok(id) => id,
         Err(e) => return internal(e),
     };
+    // Stamped with the push's leaf's `at` in the store.
     let side = MergeSide {
         sha256: recall_wire::content_sha256(&incoming),
         content: incoming,
         source_env: req.source_env.clone(),
-        updated_at: updated_at.clone(),
+        updated_at: String::new(),
     };
-    let queued = state.store.write_and_queue_merge(
+    // The push's leaf: what it stored is what it sent, and, when it was
+    // queued, the job that will merge it.
+    let queued = state.store.write_and_queue_merge_audited(
         &req.project_key,
         &req.file_path,
         &side,
         &job_id,
         time::OffsetDateTime::now_utc(),
+        |seq, at, queued| {
+            leaf::encode(
+                seq,
+                at,
+                leaf::action::PUSH,
+                actor,
+                leaf::subject_file(&leaf::FileChange {
+                    project_key: &req.project_key,
+                    file_path: &req.file_path,
+                    deleted: false,
+                    stored_sha256: &side.sha256,
+                    base_sha256: req.base_sha256.as_deref(),
+                    merged: false,
+                    merge_job: match queued {
+                        Queued::Queued(id) => Some(id),
+                        Queued::Nothing | Queued::Full => None,
+                    },
+                }),
+                request,
+            )
+        },
     );
+    let (queued, updated_at) = match queued {
+        Ok(done) => done,
+        Err(e) => return internal(e),
+    };
     let merge_job = match queued {
-        Ok(Queued::Queued(id)) => {
+        Queued::Queued(id) => {
             state.jobs_ready.notify_waiters();
             Some(id)
         }
-        Ok(Queued::Nothing) => None,
-        Ok(Queued::Full) => {
+        Queued::Nothing => None,
+        Queued::Full => {
             // /health answers anyone, so it names no project and no file;
             // the log does.
             let message = format!(
@@ -245,7 +336,6 @@ fn queue_merge(
             state.write().last_merge_error = Some(MergeError { message, at: now() });
             None
         }
-        Err(e) => return internal(e),
     };
     json(
         StatusCode::OK,
@@ -327,6 +417,8 @@ fn needs_merge<'a>(
 
 pub(super) async fn handle_pull(
     State(state): State<Arc<AppState>>,
+    caller: Option<Extension<Caller>>,
+    signed: Option<Extension<SignedRequestInfo>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let Some(project_key) = params.get("project_key").filter(|k| !k.is_empty()) else {
@@ -335,16 +427,56 @@ pub(super) async fn handle_pull(
             "project_key query param is required",
         );
     };
-    match state.store.list(project_key) {
-        Ok(files) => json(
-            StatusCode::OK,
-            &SyncResponse {
-                project_key: project_key.clone(),
-                files,
-            },
-        ),
-        Err(e) => internal(e),
+    // It is named in this pull's audit leaf, so it is held to the length a
+    // push's is.
+    if let Err(e) = recall_wire::validate_project_key(project_key) {
+        return error(StatusCode::BAD_REQUEST, &e.to_string());
     }
+    let files = match state.store.list(project_key) {
+        Ok(files) => files,
+        Err(e) => return internal(e),
+    };
+
+    // A pull gets a leaf too — the design's own call, so a witness of the
+    // log (a checkpoint saved from an earlier pull) has something to check
+    // reads against, not only writes.
+    let caller_ref = caller.as_ref().map(|Extension(c)| c);
+    let signed_ref = signed.as_ref().map(|Extension(s)| s);
+    let actor = super::audit::actor_for(caller_ref);
+    // A pull has no body; its signature binds the project through @query.
+    let request = super::audit::signed_request_for(signed_ref, None);
+    if let Err(e) = state.store.audit_append(|seq, at| {
+        leaf::encode(
+            seq,
+            at,
+            leaf::action::PULL,
+            &actor,
+            leaf::subject_pull(project_key),
+            request.as_ref(),
+        )
+    }) {
+        return internal(e);
+    }
+
+    let mut resp = json(
+        StatusCode::OK,
+        &SyncResponse {
+            project_key: project_key.clone(),
+            files,
+        },
+    );
+    // So every pull leaves the client a checkpoint without another
+    // request — see docs/design/part5-plan.md's "Who witnesses".
+    let (tree_size, root) = state.store.audit_checkpoint();
+    let checkpoint = recall_wire::AuditCheckpoint {
+        tree_size,
+        root_hash: super::audit::base64_hash(&root),
+    };
+    if let Ok(value) = HeaderValue::from_str(&checkpoint.to_header_value()) {
+        resp.headers_mut()
+            .insert(recall_wire::audit::CHECKPOINT_HEADER, value);
+    }
+    resp
 }
 
 /// The stamp `deploy/backup-offbox.sh` writes after a verified copy.
@@ -460,6 +592,15 @@ pub(super) async fn handle_discovery(State(state): State<Arc<AppState>>) -> Resp
     capabilities.insert(
         discovery::CAPABILITY_MERGE_QUEUE.to_string(),
         serde_json::json!({}),
+    );
+    capabilities.insert(
+        "audit".to_string(),
+        serde_json::to_value(recall_wire::AuditCapability {
+            leaf_version: recall_wire::audit::LEAF_VERSION,
+            max_page: recall_wire::audit::MAX_PAGE,
+            max_page_bytes: recall_wire::audit::MAX_PAGE_BYTES as u64,
+        })
+        .unwrap_or_default(),
     );
     capabilities.insert(
         "scopes".to_string(),

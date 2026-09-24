@@ -18,6 +18,8 @@ newer client keeps reading older servers.
 | `enroll_response_pending`, `enroll_response_approved`, `enroll_poll_response`, `enroll_poll_error`, `device_pending_response`, `device_approve_response`, `device_me_response`, `device_deny_response`, `device_list_response`, `device_revoke_response`, `authkey_create_response`, `authkey_list_response`, `authkey_revoke_response` | The same script: one enrolment followed through, each response a real one from the step before |
 | `push_request`, `push_request_delete` | Written from recall-wire's `PushRequest` at that tag: its field order and its skip rules |
 | `enroll_request`, `enroll_request_with_authkey`, `enroll_poll_request`, `device_approve_request`, `device_deny_request`, `authkey_create_request`, `authkey_revoke_request` | Written the same way, from recall-wire's `devices` types |
+| `audit_checkpoint_response`, `audit_entries_response`, `audit_consistency_response` | The same script, after the enrolment above and a push that device signs: the checkpoint, every leaf, and the proof from size 1, with nothing appended between them |
+| `audit_leaf_push`, `audit_leaf_approve`, `audit_leaf_enroll` | Three of those leaves, byte for byte as the entries page holds them: the signed push, the approve that carries its key, and the enrolment the authkey made. `tests/golden.rs` checks them as the offline verifier would: the push's signature against the approve's key, its digest and keyid, and the page's leaves against the checkpoint's root |
 | `push_response_queued`, `job_claim_response`, `job_claim_response_empty`, `job_result_response`, `job_list_response` | The same script: one conflict queued for a worker enrolled on a second scratch server, claimed and merged, each response a real one |
 | `job_claim_request`, `job_result_request`, `job_result_request_error`, `device_approve_request_worker` | Written from recall-wire's `jobs` and `devices` types |
 
@@ -43,15 +45,16 @@ which gained `device-sig-v1` and the `devices` capability). Being
 unreleased, it was captured again as the device shapes changed during
 review; replace it once more from the release archive when 0.4.1 is out.
 
-`0.4.2/` holds what the merge queue adds or changes: the job kinds,
-`push_response_queued` (a push answered with the `merge_job` it queued),
-`health` (with the `worker` and `queue` members a server with a worker
-reports), `discovery` (with `merge_queue`) and
-`device_approve_request_worker`. It was captured from a development build
-with `./scripts/capture-wire-fixtures.sh 0.4.2 target/release/recall-server`,
-so its versions say `-dev`; replace it from the release archive of the
-release that ships the queue. Its worker signs with the same published
-test key the device kinds use.
+`0.4.2/` holds what the merge queue and the audit log add or change: the
+job kinds, `push_response_queued` (a push answered with the `merge_job` it
+queued), `health` (with the `worker` and `queue` members a server with a
+worker reports), `device_approve_request_worker`, the audit kinds, and
+`discovery` (with `merge_queue` and `audit`). It was captured from a
+development build with `./scripts/capture-wire-fixtures.sh 0.4.2
+target/release/recall-server`, so its versions say `-dev`; replace it from
+the release archive of the release that ships them. Its worker, and the
+push in the audit kinds, sign with the same published test key the device
+kinds use, with `openssl`.
 
 ## Rules
 

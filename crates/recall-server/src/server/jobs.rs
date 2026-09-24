@@ -24,12 +24,14 @@ use recall_wire::{
 };
 use time::OffsetDateTime;
 
-use super::auth::Caller;
+use super::audit::{actor_for, signed_request_for};
+use super::auth::{Caller, SignedRequestInfo};
 use super::devices::new_id;
 use super::handlers::not_found;
 use super::middleware::{admin_only, guard, worker_only};
 use super::respond::{error, internal, json};
 use super::AppState;
+use crate::audit::leaf;
 use crate::store::{clip, Failure, Retried, Settled, Settlement, MAX_ERROR_BYTES};
 use crate::{format_timestamp, now};
 
@@ -79,10 +81,27 @@ pub(super) fn routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
 /// Releases every lease that ran out, and records in `/health` any job
 /// that had no attempt left.
 pub(super) fn expire_leases(state: &AppState) -> anyhow::Result<()> {
-    for failure in state.store.expire_leases(OffsetDateTime::now_utc())? {
+    let expired = state
+        .store
+        .expire_leases_audited(OffsetDateTime::now_utc(), server_result);
+    for failure in expired? {
         record_failure(state, &failure);
     }
     Ok(())
+}
+
+/// The `job_result` leaf of a job the server itself settled: a merge it
+/// did with no worker left to, a lease that ran out, a job failed for want
+/// of anything to merge it.
+fn server_result(seq: u64, at: &str, change: &leaf::JobChange<'_>) -> Vec<u8> {
+    leaf::encode(
+        seq,
+        at,
+        leaf::action::JOB_RESULT,
+        &leaf::Actor::Server,
+        leaf::subject_job_result(change),
+        None,
+    )
 }
 
 /// Logs a failed job with its file, and shows it in `/health` without:
@@ -120,6 +139,7 @@ fn bad(message: &str) -> Response {
 pub(super) async fn handle_claim(
     State(state): State<Arc<AppState>>,
     Extension(caller): Extension<Caller>,
+    signed: Option<Extension<SignedRequestInfo>>,
     headers: HeaderMap,
     bytes: Bytes,
 ) -> Response {
@@ -175,10 +195,26 @@ pub(super) async fn handle_claim(
             Ok(id) => id,
             Err(e) => return internal(e),
         };
-        match state
-            .store
-            .claim_job(&req.kinds, &lease_id, lease, OffsetDateTime::now_utc())
-        {
+        // The claim that leases a job is recorded, with the request the
+        // worker signed; one that finds nothing changes nothing.
+        let actor = actor_for(Some(&caller));
+        let request = signed_request_for(signed.as_ref().map(|Extension(s)| s), None);
+        match state.store.claim_job_audited(
+            &req.kinds,
+            &lease_id,
+            lease,
+            OffsetDateTime::now_utc(),
+            |seq, at, job| {
+                leaf::encode(
+                    seq,
+                    at,
+                    leaf::action::JOB_CLAIM,
+                    &actor,
+                    leaf::subject_job_claim(job),
+                    request.as_ref(),
+                )
+            },
+        ) {
             Ok(Some(job)) => return json(StatusCode::OK, &ClaimResponse { job: Some(job) }),
             Ok(None) => {}
             Err(e) => return internal(e),
@@ -199,6 +235,7 @@ pub(super) async fn handle_claim(
 pub(super) async fn handle_result(
     State(state): State<Arc<AppState>>,
     Extension(caller): Extension<Caller>,
+    signed: Option<Extension<SignedRequestInfo>>,
     Path(id): Path<String>,
     bytes: Bytes,
 ) -> Response {
@@ -219,9 +256,27 @@ pub(super) async fn handle_result(
         Ok(id) => id,
         Err(e) => return internal(e),
     };
-    let settled = state
-        .store
-        .settle_job(&id, &req, worker, &follow_up, OffsetDateTime::now_utc());
+    // A result's body is the merged file, so its leaf keeps the digest the
+    // worker signed, not the body; `stored_sha256` says what the file became.
+    let actor = actor_for(Some(&caller));
+    let request = signed_request_for(signed.as_ref().map(|Extension(s)| s), None);
+    let settled = state.store.settle_job_audited(
+        &id,
+        &req,
+        worker,
+        &follow_up,
+        OffsetDateTime::now_utc(),
+        |seq, at, change| {
+            leaf::encode(
+                seq,
+                at,
+                leaf::action::JOB_RESULT,
+                &actor,
+                leaf::subject_job_result(change),
+                request.as_ref(),
+            )
+        },
+    );
     match settled {
         Ok(Settlement::Recorded(s)) => {
             self::settled(&state, &s);
@@ -261,9 +316,25 @@ pub(super) async fn handle_list(
 /// `POST /v1/jobs/{id}/retry`: queues a failed job again.
 pub(super) async fn handle_retry(
     State(state): State<Arc<AppState>>,
+    caller: Option<Extension<Caller>>,
+    signed: Option<Extension<SignedRequestInfo>>,
     Path(id): Path<String>,
 ) -> Response {
-    match state.store.retry_job(&id, OffsetDateTime::now_utc()) {
+    let actor = actor_for(caller.as_ref().map(|Extension(c)| c));
+    let request = signed_request_for(signed.as_ref().map(|Extension(s)| s), None);
+    let retried = state
+        .store
+        .retry_job_audited(&id, OffsetDateTime::now_utc(), |seq, at, job| {
+            leaf::encode(
+                seq,
+                at,
+                leaf::action::JOB_RETRY,
+                &actor,
+                leaf::subject_job_retry(job),
+                request.as_ref(),
+            )
+        });
+    match retried {
         Ok(Retried::Queued(job)) => {
             state.jobs_ready.notify_waiters();
             json(StatusCode::OK, &job)
@@ -329,7 +400,10 @@ pub(super) async fn drain_without_worker(state: &Arc<AppState>) -> anyhow::Resul
             "no worker is enrolled to merge this, and merging is turned off on this server \
              (RECALL_MERGE_ENABLED); retry it once a worker is enrolled"
         };
-        let ids = state.store.fail_open_jobs(why, OffsetDateTime::now_utc())?;
+        let ids =
+            state
+                .store
+                .fail_open_jobs_audited(why, OffsetDateTime::now_utc(), server_result)?;
         eprintln!(
             "no worker is enrolled and this server cannot merge: marked {} waiting merge \
              jobs failed: {}",
@@ -359,10 +433,22 @@ pub(super) async fn drain_without_worker(state: &Arc<AppState>) -> anyhow::Resul
             return Ok(());
         }
         let lease_id = new_id("lse_", 16)?;
-        let Some(job) =
-            state
-                .store
-                .claim_job(&kinds, &lease_id, lease, OffsetDateTime::now_utc())?
+        let Some(job) = state.store.claim_job_audited(
+            &kinds,
+            &lease_id,
+            lease,
+            OffsetDateTime::now_utc(),
+            |seq, at, job| {
+                leaf::encode(
+                    seq,
+                    at,
+                    leaf::action::JOB_CLAIM,
+                    &leaf::Actor::Server,
+                    leaf::subject_job_claim(job),
+                    None,
+                )
+            },
+        )?
         else {
             return Ok(());
         };
@@ -397,12 +483,13 @@ pub(super) async fn drain_without_worker(state: &Arc<AppState>) -> anyhow::Resul
             }
         };
         let follow_up = new_id("job_", 10)?;
-        match state.store.settle_job(
+        match state.store.settle_job_audited(
             &job.id,
             &result,
             &m.incoming.source_env,
             &follow_up,
             OffsetDateTime::now_utc(),
+            server_result,
         )? {
             Settlement::Recorded(s) => settled(state, &s),
             other => eprintln!("merge job {} was not settled here: {other:?}", job.id),

@@ -14,12 +14,15 @@ use anyhow::{Context, Result};
 use recall_wire::{AdminTotals, File, ProjectStats};
 use rusqlite::{Connection, OptionalExtension};
 
+use crate::audit::merkle::Tree;
 use crate::now;
 
+mod audit;
 mod devices;
 mod jobs;
 mod passkeys;
 
+pub use audit::{AuditEntry, ConsistencyError, Outcome};
 pub use devices::{
     plain_name, Created, Decision, Inserted, NewAuthkey, NewDevice, NewEnrollment, Poll, Waiting,
 };
@@ -60,12 +63,44 @@ pub struct Existing {
     pub updated_at: String,
 }
 
+/// The connection, plus the in-memory state built from it: the audit log's
+/// [`Tree`], rebuilt at open from `audit_log`, so an append, a checkpoint
+/// and a consistency proof each cost a few hashes rather than a pass over
+/// the whole table; and the newest leaf's `at`, which the next may not go
+/// below.
+///
+/// [`std::ops::Deref`] and [`std::ops::DerefMut`] to [`Connection`] mean
+/// every existing call site — `conn.execute(...)`, `conn.transaction()` —
+/// keeps compiling unchanged; only the audit-specific code reaches `audit`
+/// directly.
+struct StoreState {
+    conn: Connection,
+    audit: Tree,
+    audit_at: String,
+}
+
+impl std::ops::Deref for StoreState {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.conn
+    }
+}
+
+impl std::ops::DerefMut for StoreState {
+    fn deref_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+}
+
 /// The SQLite database, and every query the server makes against it.
 pub struct Store {
     // A single connection behind a mutex. This is a single-owner server
     // against a local file; a pool would buy nothing and SQLite would
-    // serialize the writes anyway.
-    conn: Mutex<Connection>,
+    // serialize the writes anyway. The audit log's append-then-commit
+    // relies on this too: every write already goes through this one lock,
+    // so a leaf and the state change it records are never interleaved with
+    // another request's.
+    state: Mutex<StoreState>,
 }
 
 impl Store {
@@ -78,17 +113,21 @@ impl Store {
             }
         }
         let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
-        let store = Self {
-            conn: Mutex::new(conn),
-        };
-        store.migrate()?;
-        Ok(store)
+        Self::with_connection(conn)
     }
 
     /// An in-memory database, for tests.
     pub fn open_in_memory() -> Result<Self> {
+        Self::with_connection(Connection::open_in_memory()?)
+    }
+
+    fn with_connection(conn: Connection) -> Result<Self> {
         let store = Self {
-            conn: Mutex::new(Connection::open_in_memory()?),
+            state: Mutex::new(StoreState {
+                conn,
+                audit: Tree::new(),
+                audit_at: String::new(),
+            }),
         };
         store.migrate()?;
         Ok(store)
@@ -97,18 +136,18 @@ impl Store {
     // A panic in one request must not render the whole store unusable, and
     // nothing here leaves the database in a half-written state, so a
     // poisoned mutex is recovered rather than propagated.
-    fn lock(&self) -> MutexGuard<'_, Connection> {
-        self.conn.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock(&self) -> MutexGuard<'_, StoreState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn migrate(&self) -> Result<()> {
-        let conn = self.lock();
-        conn.execute_batch(SCHEMA)?;
+        let mut state = self.lock();
+        state.conn.execute_batch(SCHEMA)?;
 
         // Databases created before tombstones existed have no `deleted`
         // column. Adding it is safe and idempotent when guarded like this.
         let has_deleted = {
-            let mut stmt = conn.prepare("PRAGMA table_info(memory_files)")?;
+            let mut stmt = state.conn.prepare("PRAGMA table_info(memory_files)")?;
             let mut rows = stmt.query([])?;
             let mut found = false;
             while let Some(row) = rows.next()? {
@@ -119,7 +158,7 @@ impl Store {
             found
         };
         if !has_deleted {
-            conn.execute(
+            state.conn.execute(
                 "ALTER TABLE memory_files ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
@@ -128,15 +167,20 @@ impl Store {
         // Tables of their own, beside memory_files rather than in it, so a
         // server from before devices existed still opens this file and
         // simply never looks at them: rolling back stays a matter of
-        // starting the older image.
-        conn.execute_batch(devices::SCHEMA)?;
-        conn.execute_batch(passkeys::SCHEMA)?;
+        // starting the older image. Same for audit_log.
+        state.conn.execute_batch(devices::SCHEMA)?;
+        state.conn.execute_batch(passkeys::SCHEMA)?;
         // The one change to an existing table the merge queue needs:
         // devices may now have the worker scope, which SQLite can only
         // allow by rebuilding the table. Then the queue's own table, beside
         // the others for the same reason they are.
-        devices::allow_worker_scope(&conn)?;
-        conn.execute_batch(jobs::SCHEMA)?;
+        devices::allow_worker_scope(&state.conn)?;
+        state.conn.execute_batch(jobs::SCHEMA)?;
+        state.conn.execute_batch(audit::SCHEMA)?;
+
+        let loaded = audit::load(&state.conn)?;
+        state.audit = loaded.tree;
+        state.audit_at = loaded.last_at;
         Ok(())
     }
 
@@ -145,22 +189,24 @@ impl Store {
         read_file(&self.lock(), project_key, file_path)
     }
 
-    /// Writes content, clearing any tombstone.
-    pub fn upsert(
+    /// Writes content, clearing any tombstone, and appends the leaf
+    /// `build_leaf` makes from its `seq` and `at` in the same transaction.
+    /// Answers the time it was written, which is that `at`: the row's
+    /// `updated_at` and its leaf's `at` are one timestamp.
+    pub fn upsert_audited(
         &self,
         project_key: &str,
         file_path: &str,
         content: &str,
         source_env: &str,
-        updated_at: &str,
-    ) -> Result<()> {
-        write_file(
-            &self.lock(),
-            project_key,
-            file_path,
-            content,
-            source_env,
-            updated_at,
+        build_leaf: impl FnOnce(u64, &str) -> Vec<u8>,
+    ) -> Result<String> {
+        self.audited(
+            |tx, at| {
+                write_file(tx, project_key, file_path, content, source_env, at)?;
+                Ok(Outcome::Commit(at.to_string()))
+            },
+            |seq, at, _| build_leaf(seq, at),
         )
     }
 
@@ -170,28 +216,32 @@ impl Store {
     /// withholds the content so a pull can't resurrect it.
     ///
     /// In the same transaction it closes the file's open merge jobs, so
-    /// nothing merges the deleted notes back into a file pushed after it.
-    pub fn tombstone(
+    /// nothing merges the deleted notes back into a file pushed after it,
+    /// and appends its leaf, answering the time, as
+    /// [`Store::upsert_audited`] does.
+    pub fn tombstone_audited(
         &self,
         project_key: &str,
         file_path: &str,
         source_env: &str,
-        updated_at: &str,
-    ) -> Result<()> {
-        let mut conn = self.lock();
-        let tx = conn.transaction()?;
-        tx.execute(
-            "INSERT INTO memory_files (project_key, file_path, content, source_env, updated_at, deleted)
-             VALUES (?1, ?2, '', ?3, ?4, 1)
-             ON CONFLICT(project_key, file_path) DO UPDATE SET
-                 source_env = excluded.source_env,
-                 updated_at = excluded.updated_at,
-                 deleted = 1",
-            (project_key, file_path, nullable(source_env), updated_at),
-        )?;
-        jobs::close_for_delete(&tx, project_key, file_path, updated_at)?;
-        tx.commit()?;
-        Ok(())
+        build_leaf: impl FnOnce(u64, &str) -> Vec<u8>,
+    ) -> Result<String> {
+        self.audited(
+            |tx, at| {
+                tx.execute(
+                    "INSERT INTO memory_files (project_key, file_path, content, source_env, updated_at, deleted)
+                     VALUES (?1, ?2, '', ?3, ?4, 1)
+                     ON CONFLICT(project_key, file_path) DO UPDATE SET
+                         source_env = excluded.source_env,
+                         updated_at = excluded.updated_at,
+                         deleted = 1",
+                    (project_key, file_path, nullable(source_env), at),
+                )?;
+                jobs::close_for_delete(tx, project_key, file_path, at)?;
+                Ok(Outcome::Commit(at.to_string()))
+            },
+            |seq, at, _| build_leaf(seq, at),
+        )
     }
 
     /// Every file for a project, tombstones included so a pulling client
@@ -345,6 +395,34 @@ impl Store {
     }
 }
 
+#[cfg(test)]
+impl Store {
+    /// Test-only: runs `f` against the raw connection. Used to assert things
+    /// no public method goes anywhere near on purpose, such as the audit
+    /// log's append-only triggers refusing a raw `UPDATE` or `DELETE`.
+    pub(crate) fn with_raw<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+    ) -> rusqlite::Result<T> {
+        f(&self.lock())
+    }
+}
+
+/// Test-only: a leaf for the store's own tests, which are about rows rather
+/// than what a leaf says. The store has no way to write without one.
+#[cfg(test)]
+pub(crate) fn test_leaf(seq: u64, at: &str) -> Vec<u8> {
+    use crate::audit::leaf;
+    leaf::encode(
+        seq,
+        at,
+        leaf::action::START,
+        &leaf::Actor::Server,
+        leaf::subject_start("test"),
+        None,
+    )
+}
+
 /// What [`existing_from`] reads, in its order.
 const EXISTING_COLUMNS: &str = "content, deleted, COALESCE(source_env, ''), updated_at";
 
@@ -368,8 +446,10 @@ fn read_file(conn: &Connection, project_key: &str, file_path: &str) -> Result<Op
         .optional()?)
 }
 
-/// Writes content, clearing any tombstone: [`Store::upsert`], on a
-/// connection or transaction the caller already holds.
+/// Writes content, clearing any tombstone, on a connection or transaction
+/// the caller already holds: the one statement behind
+/// [`Store::upsert_audited`] and a merged result being applied, each in a
+/// transaction that appends its leaf.
 fn write_file(
     conn: &Connection,
     project_key: &str,
@@ -415,17 +495,37 @@ mod tests {
         Store::open_in_memory().unwrap()
     }
 
+    fn put(st: &Store, project_key: &str, file_path: &str, content: &str, source_env: &str) {
+        st.upsert_audited(project_key, file_path, content, source_env, test_leaf)
+            .unwrap();
+    }
+
+    fn del(st: &Store, project_key: &str, file_path: &str, source_env: &str) {
+        st.tombstone_audited(project_key, file_path, source_env, test_leaf)
+            .unwrap();
+    }
+
+    /// The row's `updated_at` is its leaf's `at`: one moment, taken under
+    /// the lock the write holds, answered to the caller.
+    #[test]
+    fn a_write_is_stamped_with_its_leafs_at() {
+        let st = store();
+        let mut leaf_at = String::new();
+        let updated_at = st
+            .upsert_audited("acme/app", "a.md", "x", "laptop", |seq, at| {
+                leaf_at = at.to_string();
+                test_leaf(seq, at)
+            })
+            .unwrap();
+        assert_eq!(updated_at, leaf_at);
+        assert_eq!(st.list("acme/app").unwrap()[0].updated_at, updated_at);
+        assert_eq!(st.audit_checkpoint().0, 1);
+    }
+
     #[test]
     fn upsert_get_and_list_round_trip() {
         let st = store();
-        st.upsert(
-            "acme/app",
-            "MEMORY.md",
-            "hello",
-            "laptop",
-            "2026-01-01T00:00:00.000Z",
-        )
-        .unwrap();
+        put(&st, "acme/app", "MEMORY.md", "hello", "laptop");
 
         let got = st.get("acme/app", "MEMORY.md").unwrap().unwrap();
         assert_eq!(got.content, "hello");
@@ -443,16 +543,8 @@ mod tests {
     #[test]
     fn tombstone_preserves_content_but_list_withholds_it() {
         let st = store();
-        st.upsert(
-            "acme/app",
-            "gone.md",
-            "secret",
-            "laptop",
-            "2026-01-01T00:00:00.000Z",
-        )
-        .unwrap();
-        st.tombstone("acme/app", "gone.md", "laptop", "2026-01-01T00:00:01.000Z")
-            .unwrap();
+        put(&st, "acme/app", "gone.md", "secret", "laptop");
+        del(&st, "acme/app", "gone.md", "laptop");
 
         let row = st.get("acme/app", "gone.md").unwrap().unwrap();
         assert_eq!(row.content, "secret", "content must stay recoverable");
@@ -472,16 +564,8 @@ mod tests {
     #[test]
     fn upsert_clears_a_tombstone() {
         let st = store();
-        st.tombstone("acme/app", "f.md", "laptop", "2026-01-01T00:00:00.000Z")
-            .unwrap();
-        st.upsert(
-            "acme/app",
-            "f.md",
-            "back",
-            "laptop",
-            "2026-01-01T00:00:01.000Z",
-        )
-        .unwrap();
+        del(&st, "acme/app", "f.md", "laptop");
+        put(&st, "acme/app", "f.md", "back", "laptop");
         let row = st.get("acme/app", "f.md").unwrap().unwrap();
         assert!(!row.deleted);
         assert_eq!(row.content, "back");
@@ -497,14 +581,7 @@ mod tests {
     #[test]
     fn admin_stats_keeps_commas_inside_a_source_env() {
         let st = store();
-        st.upsert(
-            "acme/app",
-            "a.md",
-            "x",
-            "laptop,evil",
-            "2026-01-01T00:00:00.000Z",
-        )
-        .unwrap();
+        put(&st, "acme/app", "a.md", "x", "laptop,evil");
         let (projects, _) = st.admin_stats().unwrap();
         assert_eq!(projects[0].sources, vec!["laptop,evil".to_string()]);
     }

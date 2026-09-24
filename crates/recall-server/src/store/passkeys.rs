@@ -10,9 +10,9 @@
 //! Timestamps are [`crate::now`]'s format, so they compare as strings.
 
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, Row};
 
-use super::Store;
+use super::{Outcome, Store};
 
 /// Created alongside the other tables, every time the store opens.
 pub(super) const SCHEMA: &str = "
@@ -214,50 +214,55 @@ impl Store {
         Ok(n > 0)
     }
 
-    /// Stores a passkey.
+    /// Stores a passkey, with the `passkey_add` leaf `build_leaf` makes, in
+    /// one transaction.
     ///
     /// With `first`, only while none is stored, and only with the bootstrap
     /// code outstanding, which it uses up. All three are one transaction,
     /// so two bootstraps at once cannot both be the first, nor one code
-    /// register two passkeys. `IMMEDIATE`, so the write lock is taken before
-    /// anything is read: `reset-passkeys` writes from another process.
-    pub fn add_admin_credential(
+    /// register two passkeys. It takes the write lock before anything is
+    /// read, as every audited write does: `reset-passkeys` writes from
+    /// another process.
+    pub fn add_admin_credential_audited(
         &self,
         c: &NewAdminCredential<'_>,
         first: Option<FirstPasskey<'_>>,
+        build_leaf: impl FnOnce(u64, &str) -> Vec<u8>,
     ) -> Result<AddedCredential> {
-        let mut conn = self.lock();
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if get_credential(&tx, c.id)?.is_some() {
-            return Ok(AddedCredential::Duplicate);
-        }
-        if let Some(first) = first {
-            let n: i64 =
-                tx.query_row("SELECT COUNT(*) FROM admin_credentials", [], |r| r.get(0))?;
-            if n > 0 {
-                return Ok(AddedCredential::NotFirst);
-            }
-            match bootstrap_code(&tx, first.code_sha256, first.now)? {
-                BootstrapCode::Valid => {}
-                refused => return Ok(AddedCredential::Code(refused)),
-            }
-            tx.execute("DELETE FROM admin_bootstrap", [])?;
-        }
-        tx.execute(
-            "INSERT INTO admin_credentials
-                 (id, user_handle, name, passkey, sign_count, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            (
-                c.id,
-                c.user_handle,
-                c.name,
-                c.passkey,
-                c.sign_count,
-                c.created_at,
-            ),
-        )?;
-        tx.commit()?;
-        Ok(AddedCredential::Added)
+        self.audited(
+            |tx, _| {
+                if get_credential(tx, c.id)?.is_some() {
+                    return Ok(Outcome::Refuse(AddedCredential::Duplicate));
+                }
+                if let Some(first) = first {
+                    let n: i64 =
+                        tx.query_row("SELECT COUNT(*) FROM admin_credentials", [], |r| r.get(0))?;
+                    if n > 0 {
+                        return Ok(Outcome::Refuse(AddedCredential::NotFirst));
+                    }
+                    match bootstrap_code(tx, first.code_sha256, first.now)? {
+                        BootstrapCode::Valid => {}
+                        refused => return Ok(Outcome::Refuse(AddedCredential::Code(refused))),
+                    }
+                    tx.execute("DELETE FROM admin_bootstrap", [])?;
+                }
+                tx.execute(
+                    "INSERT INTO admin_credentials
+                         (id, user_handle, name, passkey, sign_count, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    (
+                        c.id,
+                        c.user_handle,
+                        c.name,
+                        c.passkey,
+                        c.sign_count,
+                        c.created_at,
+                    ),
+                )?;
+                Ok(Outcome::Commit(AddedCredential::Added))
+            },
+            |seq, at, _| build_leaf(seq, at),
+        )
     }
 
     /// Whether `code_sha256` is the bootstrap code outstanding at `now`.
@@ -266,9 +271,22 @@ impl Store {
     }
 
     /// Makes `code_sha256` the one bootstrap code, until `expires_at`,
-    /// replacing any other.
-    pub fn set_bootstrap_code(&self, code_sha256: &str, now: &str, expires_at: &str) -> Result<()> {
-        set_bootstrap_code(&self.lock(), code_sha256, now, expires_at)
+    /// replacing any other, with the `bootstrap_code` leaf `build_leaf`
+    /// makes.
+    pub fn set_bootstrap_code_audited(
+        &self,
+        code_sha256: &str,
+        now: &str,
+        expires_at: &str,
+        build_leaf: impl FnOnce(u64, &str) -> Vec<u8>,
+    ) -> Result<()> {
+        self.audited(
+            |tx, _| {
+                set_bootstrap_code(tx, code_sha256, now, expires_at)?;
+                Ok(Outcome::Commit(()))
+            },
+            |seq, at, ()| build_leaf(seq, at),
+        )
     }
 
     /// One passkey.
@@ -312,43 +330,63 @@ impl Store {
     }
 
     /// Removes a passkey and every session it signed in, unless it is the
-    /// last one.
-    pub fn remove_admin_credential(&self, id: &str) -> Result<RemovedCredential> {
-        let mut conn = self.lock();
-        let tx = conn.transaction()?;
-        let Some(credential) = get_credential(&tx, id)? else {
-            return Ok(RemovedCredential::NotFound);
-        };
-        let n: i64 = tx.query_row("SELECT COUNT(*) FROM admin_credentials", [], |r| r.get(0))?;
-        if n <= 1 {
-            return Ok(RemovedCredential::Last);
-        }
-        tx.execute("DELETE FROM admin_credentials WHERE id = ?1", (id,))?;
-        tx.execute("DELETE FROM admin_sessions WHERE credential_id = ?1", (id,))?;
-        tx.commit()?;
-        Ok(RemovedCredential::Removed(credential))
+    /// last one, with the `passkey_remove` leaf `build_leaf` makes from it.
+    pub fn remove_admin_credential_audited(
+        &self,
+        id: &str,
+        build_leaf: impl FnOnce(u64, &str, &AdminCredential) -> Vec<u8>,
+    ) -> Result<RemovedCredential> {
+        self.audited(
+            |tx, _| {
+                let Some(credential) = get_credential(tx, id)? else {
+                    return Ok(Outcome::Refuse(RemovedCredential::NotFound));
+                };
+                let n: i64 =
+                    tx.query_row("SELECT COUNT(*) FROM admin_credentials", [], |r| r.get(0))?;
+                if n <= 1 {
+                    return Ok(Outcome::Refuse(RemovedCredential::Last));
+                }
+                tx.execute("DELETE FROM admin_credentials WHERE id = ?1", (id,))?;
+                tx.execute("DELETE FROM admin_sessions WHERE credential_id = ?1", (id,))?;
+                Ok(Outcome::Commit(RemovedCredential::Removed(credential)))
+            },
+            |seq, at, removed| match removed {
+                RemovedCredential::Removed(credential) => build_leaf(seq, at, credential),
+                _ => unreachable!("a leaf only for a removal"),
+            },
+        )
     }
 
     /// Removes every passkey and every session, and makes `code_sha256`
     /// the bootstrap code until `expires_at`: what `recall-server
     /// reset-passkeys` does, for an owner who has lost them all. One
-    /// transaction, and it creates the tables first if this database has
-    /// never been opened by a server that has them. Answers how many
-    /// passkeys went.
-    pub fn reset_admin_credentials(
+    /// transaction with the `passkey_reset` leaf `build_leaf` makes from how
+    /// many passkeys went, which it answers, and it creates the tables
+    /// first if this database has never been opened by a server that has
+    /// them.
+    ///
+    /// Run from another process than the server's, on the same file: the
+    /// leaf takes the next `seq` the table has, and a running server reads
+    /// it into its tree before its own next append (see
+    /// [`Store::audited_each`]).
+    pub fn reset_admin_credentials_audited(
         &self,
         code_sha256: &str,
         now: &str,
         expires_at: &str,
+        build_leaf: impl FnOnce(u64, &str, usize) -> Vec<u8>,
     ) -> Result<usize> {
-        let mut conn = self.lock();
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute_batch(SCHEMA)?;
-        let n = tx.execute("DELETE FROM admin_credentials", [])?;
-        tx.execute("DELETE FROM admin_sessions", [])?;
-        set_bootstrap_code(&tx, code_sha256, now, expires_at)?;
-        tx.commit()?;
-        Ok(n)
+        self.lock().execute_batch(super::audit::SCHEMA)?;
+        self.audited(
+            |tx, _| {
+                tx.execute_batch(SCHEMA)?;
+                let n = tx.execute("DELETE FROM admin_credentials", [])?;
+                tx.execute("DELETE FROM admin_sessions", [])?;
+                set_bootstrap_code(tx, code_sha256, now, expires_at)?;
+                Ok(Outcome::Commit(n))
+            },
+            |seq, at, n| build_leaf(seq, at, *n),
+        )
     }
 
     /// Stores a new session, only if the passkey that signed it in is still
@@ -403,13 +441,28 @@ impl Store {
         Ok(())
     }
 
-    /// Ends every session but `keep`. Answers how many ended.
-    pub fn delete_other_admin_sessions(&self, keep: &str) -> Result<usize> {
-        let conn = self.lock();
-        Ok(conn.execute(
-            "DELETE FROM admin_sessions WHERE token_sha256 != ?1",
-            (keep,),
-        )?)
+    /// Ends every session but `keep`, with the `sessions_end` leaf
+    /// `build_leaf` makes from how many ended, which it answers. Ending none
+    /// changes nothing and appends nothing.
+    pub fn delete_other_admin_sessions_audited(
+        &self,
+        keep: &str,
+        build_leaf: impl FnOnce(u64, &str, usize) -> Vec<u8>,
+    ) -> Result<usize> {
+        self.audited(
+            |tx, _| {
+                let n = tx.execute(
+                    "DELETE FROM admin_sessions WHERE token_sha256 != ?1",
+                    (keep,),
+                )?;
+                Ok(if n == 0 {
+                    Outcome::Refuse(0)
+                } else {
+                    Outcome::Commit(n)
+                })
+            },
+            |seq, at, n| build_leaf(seq, at, *n),
+        )
     }
 
     /// Ends a session.
@@ -436,6 +489,42 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::test_leaf;
+
+    /// The audited writes, with a leaf these tests do not look at, under
+    /// the names the tests read best with.
+    impl Store {
+        fn add_admin_credential(
+            &self,
+            c: &NewAdminCredential<'_>,
+            first: Option<FirstPasskey<'_>>,
+        ) -> Result<AddedCredential> {
+            self.add_admin_credential_audited(c, first, test_leaf)
+        }
+
+        fn set_bootstrap_code(&self, code_sha256: &str, now: &str, expires_at: &str) -> Result<()> {
+            self.set_bootstrap_code_audited(code_sha256, now, expires_at, test_leaf)
+        }
+
+        fn remove_admin_credential(&self, id: &str) -> Result<RemovedCredential> {
+            self.remove_admin_credential_audited(id, |seq, at, _| test_leaf(seq, at))
+        }
+
+        fn reset_admin_credentials(
+            &self,
+            code_sha256: &str,
+            now: &str,
+            expires_at: &str,
+        ) -> Result<usize> {
+            self.reset_admin_credentials_audited(code_sha256, now, expires_at, |seq, at, _| {
+                test_leaf(seq, at)
+            })
+        }
+
+        fn delete_other_admin_sessions(&self, keep: &str) -> Result<usize> {
+            self.delete_other_admin_sessions_audited(keep, |seq, at, _| test_leaf(seq, at))
+        }
+    }
 
     fn credential<'a>(id: &'a str, created_at: &'a str) -> NewAdminCredential<'a> {
         NewAdminCredential {

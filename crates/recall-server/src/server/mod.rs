@@ -8,8 +8,9 @@
 //! | `GET /admin` | none — static markup, no data |
 //! | `GET /.well-known/recall` | none — a client asks before it can authenticate |
 //! | `POST /sync`, `GET /sync`, `GET /v1/devices/me` | bearer token, or the signature of any device but a worker |
+//! | `GET /v1/audit/checkpoint`, `GET /v1/audit/consistency` | bearer token, or any device's signature |
 //! | `POST /v1/devices/enroll`, `POST /v1/devices/enroll/poll` | none, but rate limited, and small bodies only |
-//! | `GET /admin/stats`, the rest of `/v1/devices`, and `/v1/authkeys` | bearer token, an admin device's signature, or the admin page's passkey session (with its CSRF header on a POST) |
+//! | `GET /admin/stats`, the rest of `/v1/devices`, `/v1/authkeys`, and `GET /v1/audit/entries` | bearer token, an admin device's signature, or the admin page's passkey session (with its CSRF header on a POST); small bodies only |
 //! | `GET /v1/jobs`, `POST /v1/jobs/{id}/retry` | bearer token, or an admin device's signature |
 //! | `POST /v1/jobs/claim`, `POST /v1/jobs/{id}/result` | a worker device's signature, and nothing else |
 //! | `GET /admin/session`, `POST /admin/login/start`, `POST /admin/login/finish` | none, but rate limited |
@@ -58,6 +59,7 @@ use crate::{format_timestamp, now, Config, Store};
 // that makes one goes unused; the half that checks one still runs.
 #[cfg_attr(not(feature = "passkeys"), allow(dead_code))]
 mod admin;
+mod audit;
 mod auth;
 mod devices;
 mod handlers;
@@ -69,6 +71,7 @@ mod passkeys;
 mod respond;
 mod tls;
 
+use audit::{handle_checkpoint, handle_consistency, handle_entries};
 #[cfg(feature = "passkeys")]
 use passkeys::Passkeys;
 #[cfg(not(feature = "passkeys"))]
@@ -124,6 +127,11 @@ const MAX_BODY_BYTES: usize = 5 << 20;
 /// a key and an agent, and a poll is an id; nobody who has not proved
 /// anything gets to make the server hold megabytes.
 const ENROLL_BODY_BYTES: usize = 8 << 10;
+
+/// Bounds a request to the admin routes. Each body is a code, a scope, a
+/// fingerprint or a tag, and a signed one is kept whole in its audit leaf,
+/// so none may be more than a few kilobytes.
+const ADMIN_BODY_BYTES: usize = 8 << 10;
 
 /// Bounds a request to the admin page's sign-in and passkey routes. A
 /// passkey's answer is a few kilobytes at most, attestation certificates
@@ -222,7 +230,9 @@ pub struct Server {
 }
 
 impl Server {
-    /// Builds a server around an already-open store.
+    /// Builds a server around an already-open store. Nothing is recorded
+    /// yet: the `start` leaf waits until the server is serving (see
+    /// [`Server::serve_with_shutdown`]).
     pub fn new(cfg: Config, store: Arc<Store>) -> Self {
         let limiter = RateLimiter::new(cfg.rate_limit_window, cfg.rate_limit_max);
         let merger = Merger::new(cfg.claude_bin.clone(), cfg.merge_timeout);
@@ -292,8 +302,30 @@ impl Server {
                 "/v1/authkeys/{id}/revoke",
                 post(handle_revoke_authkey).fallback(not_found),
             )
+            // The leaves themselves: every project, file, device and
+            // authkey the log names, which is what the device list and the
+            // stats already keep to this scope. The checkpoint and the
+            // proofs, hashes only, stay open to any credential below.
+            .route(
+                recall_wire::audit::ENTRIES_PATH,
+                get(handle_entries).fallback(not_found),
+            )
+            .route_layer(DefaultBodyLimit::max(ADMIN_BODY_BYTES))
             .route_layer(from_fn(admin_only))
             .route_layer(from_fn_with_state(state.clone(), admin_guard));
+        // The audit log's hashes: any credential, a worker's included, since
+        // a checkpoint and a proof name nothing (the leaves themselves are
+        // admin, above).
+        let audit_routes = Router::new()
+            .route(
+                recall_wire::audit::CHECKPOINT_PATH,
+                get(handle_checkpoint).fallback(not_found),
+            )
+            .route(
+                recall_wire::audit::CONSISTENCY_PATH,
+                get(handle_consistency).fallback(not_found),
+            )
+            .route_layer(from_fn_with_state(state.clone(), guard));
         // Enrolling: a machine has no credential yet, so no auth, but the
         // same rate limit and protocol check as everything else, and a
         // body limit sized for what an enrolment is. The inner limit wins
@@ -331,6 +363,7 @@ impl Server {
             .route_layer(from_fn(not_worker))
             .route_layer(from_fn_with_state(state.clone(), guard))
             .merge(admin)
+            .merge(audit_routes)
             .merge(enrolment)
             .merge(page)
             .merge(sign_in_routes(&state))
@@ -521,6 +554,16 @@ impl Server {
     /// Serves on an already-bound listener until `shutdown` resolves, in
     /// whichever transport `cfg.tls` names (see `server/tls.rs`; plain HTTP,
     /// the default, still goes through `axum::serve` directly, unchanged).
+    ///
+    /// Once the transport is ready, records a `start` leaf in the audit
+    /// log: the server's own doing, so its actor is
+    /// [`crate::audit::leaf::Actor::Server`], and its subject the version
+    /// that started. Here rather than in [`Server::new`] so that only a
+    /// server that got its port, and its certificate, records one: one that
+    /// failed to bind because another was still running, or to load its
+    /// key, leaves nothing. Best-effort — a store the audit table somehow
+    /// cannot be written to still serves sync, the same way a failed backup
+    /// does not take the server down.
     pub async fn serve_with_shutdown<F>(&self, listener: TcpListener, shutdown: F) -> Result<()>
     where
         F: Future<Output = ()> + Send + 'static,
@@ -543,6 +586,9 @@ impl Server {
                 .map_or("plain http", tls::Prepared::description),
             self.state.cfg.db_path
         );
+        if let Err(e) = record_start(&self.state.store) {
+            eprintln!("recording server start in the audit log: {e:#}");
+        }
         let tasks = self.start_background();
         let state = self.state.clone();
         let shutdown = async move {
@@ -577,6 +623,22 @@ impl Server {
         }
         result
     }
+}
+
+/// Appends the `start` leaf [`Server::serve_with_shutdown`] records.
+fn record_start(store: &Store) -> Result<()> {
+    let version = recall_wire::discovery::version();
+    store.audit_append(|seq, at| {
+        crate::audit::leaf::encode(
+            seq,
+            at,
+            crate::audit::leaf::action::START,
+            &crate::audit::leaf::Actor::Server,
+            crate::audit::leaf::subject_start(&version),
+            None,
+        )
+    })?;
+    Ok(())
 }
 
 /// The passkey routes: signing in, the bootstrap, and what a signed-in
@@ -669,7 +731,7 @@ fn sweep_devices(state: &AppState) -> Result<(usize, usize)> {
     ) {
         eprintln!("admin session sweep failed: {e:#}");
     }
-    state.store.sweep_devices(
+    state.store.sweep_devices_audited(
         &format_timestamp(now - state.cfg.ephemeral_device_ttl),
         &format_timestamp(now - devices::EXPIRED_ENROLLMENT_KEPT),
     )

@@ -1885,3 +1885,201 @@ async fn a_passkey_the_browser_says_was_not_kept_is_refused() {
         .contains("credProps.rk is false"));
     assert!(!h.store.has_admin_credentials().unwrap());
 }
+
+/// What the owner does with passkeys, and what a session does with
+/// devices, is in the audit log, named by the passkey and never the token
+/// or the cookie; and a log with it all verifies offline, while one that
+/// credits a passkey the log never added, or a first passkey no bootstrap
+/// code let in, does not.
+#[tokio::test]
+async fn passkey_actions_and_a_sessions_changes_are_in_the_audit_log() {
+    let h = harness();
+    let mut phone = phone();
+    let first = h.bootstrap(&mut phone).await;
+    let phone_id = first.body["id"].as_str().unwrap().to_string();
+    let session = h.sign_in(&mut phone).await;
+
+    let (code, _) = enrolling(&h, 1, "laptop").await;
+    let approved = h
+        .call(
+            "POST",
+            "/v1/devices/approve",
+            session.with_csrf(),
+            Some(json!({ "user_code": code })),
+        )
+        .await;
+    assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
+
+    let started = h
+        .call(
+            "POST",
+            "/admin/passkeys/register",
+            session.with_csrf(),
+            None,
+        )
+        .await;
+    let mut tablet = phone_two();
+    let credential = create(&mut tablet, &started.body["options"]).await;
+    let added = h
+        .call(
+            "POST",
+            "/admin/passkeys/register/finish",
+            session.with_csrf(),
+            Some(json!({
+                "ceremony_id": started.body["ceremony_id"],
+                "name": "iPad",
+                "credential": credential,
+            })),
+        )
+        .await;
+    assert_eq!(added.status, StatusCode::OK, "{}", added.body);
+    let tablet_id = added.body["id"].as_str().unwrap().to_string();
+    let tablet_session = h.sign_in(&mut tablet).await;
+    let others = h
+        .call(
+            "POST",
+            "/admin/logout/others",
+            tablet_session.with_csrf(),
+            None,
+        )
+        .await;
+    assert_eq!(others.body["other_sessions_ended"], 1, "{}", others.body);
+    // Nothing left to end: no leaf.
+    let again = h
+        .call(
+            "POST",
+            "/admin/logout/others",
+            tablet_session.with_csrf(),
+            None,
+        )
+        .await;
+    assert_eq!(again.body["other_sessions_ended"], 0, "{}", again.body);
+    let removed = h
+        .call(
+            "POST",
+            &format!("/admin/passkeys/{phone_id}/remove"),
+            tablet_session.with_csrf(),
+            None,
+        )
+        .await;
+    assert_eq!(removed.status, StatusCode::OK, "{}", removed.body);
+
+    let (size, root) = h.store.audit_checkpoint();
+    let leaves: Vec<String> = h
+        .store
+        .audit_entries(0, size, usize::MAX)
+        .unwrap()
+        .into_iter()
+        .map(|e| String::from_utf8(e.leaf).unwrap())
+        .collect();
+    let parsed: Vec<Value> = leaves
+        .iter()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let seen: Vec<String> = parsed
+        .iter()
+        .map(|l| {
+            let actor = &l["actor"];
+            let who = match actor["kind"].as_str().unwrap() {
+                "session" if actor["credential_id"] == phone_id.as_str() => "session:phone",
+                "session" if actor["credential_id"] == tablet_id.as_str() => "session:tablet",
+                kind => kind,
+            };
+            format!("{} {who}", l["action"].as_str().unwrap())
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            "bootstrap_code server",
+            "passkey_add operator",
+            "approve session:phone",
+            "passkey_add session:phone",
+            "sessions_end session:tablet",
+            "passkey_remove session:tablet",
+        ],
+        "{parsed:#?}"
+    );
+    assert_eq!(parsed[1]["subject"]["first"], true);
+    assert_eq!(parsed[1]["subject"]["credential_id"], phone_id.as_str());
+    assert_eq!(parsed[3]["subject"]["first"], false);
+    assert_eq!(parsed[3]["subject"]["name"], "iPad");
+    assert_eq!(parsed[4]["subject"]["ended"], 1);
+    assert_eq!(parsed[5]["subject"]["credential_id"], phone_id.as_str());
+    for (l, raw) in parsed.iter().zip(&leaves) {
+        assert_eq!(l["request"], Value::Null, "a session signs nothing");
+        assert!(!raw.contains(&h.code.replace('-', "")) && !raw.contains(&h.code));
+        assert!(!raw.contains(&session.cookie) && !raw.contains(&tablet_session.cookie));
+    }
+
+    // Offline, as the owner would check an export.
+    let export = |leaves: &[String]| -> String {
+        use base64::Engine;
+        let hashes: Vec<_> = leaves
+            .iter()
+            .map(|l| recall_server::audit::merkle::hash_leaf(l.as_bytes()))
+            .collect();
+        let root = recall_server::audit::merkle::root(&hashes);
+        let mut out = format!(
+            "{} {}\n",
+            leaves.len(),
+            base64::engine::general_purpose::STANDARD.encode(root)
+        );
+        for l in leaves {
+            out.push_str(l);
+            out.push('\n');
+        }
+        out
+    };
+    assert_eq!(
+        recall_server::audit::merkle::root(
+            &leaves
+                .iter()
+                .map(|l| recall_server::audit::merkle::hash_leaf(l.as_bytes()))
+                .collect::<Vec<_>>()
+        ),
+        root
+    );
+    let verify = |export: &str| -> (i32, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        std::fs::write(&path, export).unwrap();
+        let script =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/audit-verify.py");
+        let out = std::process::Command::new("python3")
+            .arg(script)
+            .arg(&path)
+            .arg("--ed25519=builtin")
+            .output()
+            .expect("python3 must be on PATH");
+        (
+            out.status.code().unwrap_or(-1),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )
+    };
+    let (code, out) = verify(&export(&leaves));
+    assert_eq!(code, 0, "{out}");
+
+    let forged = |at: usize, edit: &dyn Fn(&mut Value)| -> String {
+        let mut leaves = leaves.clone();
+        let mut leaf: Value = serde_json::from_str(&leaves[at]).unwrap();
+        edit(&mut leaf);
+        leaves[at] = serde_json::to_string(&leaf).unwrap();
+        export(&leaves)
+    };
+    let (code, out) = verify(&forged(2, &|l: &mut Value| {
+        l["actor"]["credential_id"] = json!("a-passkey-nobody-added")
+    }));
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("which the log never added"), "{out}");
+    let (code, out) = verify(&forged(0, &|l: &mut Value| {
+        l["action"] = json!("start");
+        l["subject"] = json!({ "version": "0.0.0" });
+    }));
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("no bootstrap code outstanding"), "{out}");
+}

@@ -35,7 +35,8 @@ getrandom.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# The admin session's token hash, and the admin page's CSP hashes.
+# The Merkle tree hash for the audit log (RFC 9162 §2.1.1), the admin
+# session's token hash, and the admin page's CSP hashes.
 sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true

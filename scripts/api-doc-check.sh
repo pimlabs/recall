@@ -22,6 +22,7 @@ TOKEN="doc-check-token"
 RECALL_TOKEN="$TOKEN" RECALL_PORT="$PORT" RECALL_DB_PATH="$WORK/db.sqlite" \
   RECALL_MERGE_ENABLED=false RECALL_RATE_LIMIT_MAX=1000 "$BIN" >"$WORK/server.log" 2>&1 &
 SERVER=$!
+STARTED=$(date +%s)
 trap 'kill $SERVER 2>/dev/null; rm -rf "$WORK"' EXIT
 
 for _ in $(seq 1 40); do
@@ -57,9 +58,12 @@ check "discovery needs no token" "200" \
 check "discovery's top-level keys" 'protocol server min_client auth capabilities' \
   "$(curl -s "$URL/.well-known/recall" | python3 -c '
 import json,sys; print(" ".join(json.load(sys.stdin).keys()))')"
-check "discovery's capabilities" 'devices limits merge_base merge_queue scopes' \
+check "discovery's capabilities" 'audit devices limits merge_base merge_queue scopes' \
   "$(curl -s "$URL/.well-known/recall" | python3 -c '
 import json,sys; print(" ".join(json.load(sys.stdin)["capabilities"].keys()))')"
+check "the audit capability" '{"leaf_version": 1, "max_page": 1000, "max_page_bytes": 2097152}' \
+  "$(curl -s "$URL/.well-known/recall" | python3 -c '
+import json,sys; print(json.dumps(json.load(sys.stdin)["capabilities"]["audit"]))')"
 check "discovery's auth methods" 'bearer device-sig-v1' \
   "$(curl -s "$URL/.well-known/recall" | python3 -c '
 import json,sys; print(" ".join(json.load(sys.stdin)["auth"]["methods"]))')"
@@ -89,6 +93,12 @@ check "a write with no content is 400" "400" \
   "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${auth[@]}" \
      -H 'Content-Type: application/json' \
      -d '{"project_key":"acme/app","file_path":"a.md"}' "$URL/sync")"
+check "a base_sha256 that is not a SHA-256 is 400" '{"error":"base_sha256 must be 64 hexadecimal characters"}' \
+  "$(curl -s -X POST "${auth[@]}" -H 'Content-Type: application/json' \
+     -d '{"project_key":"acme/app","file_path":"a.md","content":"x","base_sha256":"abc"}' "$URL/sync")"
+check "a project_key over 4096 bytes is 400" '{"error":"project_key must be at most 4096 bytes"}' \
+  "$(python3 -c 'import json; print(json.dumps({"project_key": "k" * 4097, "file_path": "a.md", "content": "x"}))' \
+     | curl -s -X POST "${auth[@]}" -H 'Content-Type: application/json' --data-binary @- "$URL/sync")"
 check "an empty file is accepted" "200" \
   "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${auth[@]}" \
      -H 'Content-Type: application/json' \
@@ -130,6 +140,16 @@ check "file field order" 'file_path content source_env updated_at deleted' \
   "$(python3 -c '
 import json,sys
 print(" ".join(json.load(open(sys.argv[1]))["files"][0].keys()))' "$WORK/pull.json")"
+check "a pull carries a checkpoint header" 'True' \
+  "$(curl -s -D - -o /dev/null "${auth[@]}" "$URL/sync?project_key=acme/app" \
+     | tr -d '\r' | python3 -c '
+import re,sys
+for line in sys.stdin:
+    if line.lower().startswith("recall-audit-checkpoint:"):
+        print(bool(re.fullmatch(r"[0-9]+ \S+", line.split(":",1)[1].strip())))
+        break
+else:
+    print(False)')"
 
 echo "GET /health"
 curl -s "$URL/health" >"$WORK/health.json"
@@ -311,6 +331,77 @@ for n in 1 2 3 4 5; do v6_enroll "2001:db8:5:5::$n" "v6-$n" >/dev/null; done
 check "every IPv6 address in one /64 is one address: the sixth waiting is 429" '429 200' \
   "$(v6_enroll 2001:db8:5:5:ffff:ffff:ffff:ffff v6-6) $(v6_enroll 2001:db8:5:6::1 v6-7)"
 
+echo "Audit"
+check "the checkpoint needs a credential" '401' \
+  "$(curl -s -o /dev/null -w '%{http_code}' "$URL/v1/audit/checkpoint")"
+curl -s "${auth[@]}" "$URL/v1/audit/checkpoint" >"$WORK/checkpoint.json"
+check "checkpoint field order" 'tree_size root_hash' \
+  "$(keys "$WORK/checkpoint.json")"
+SIZE=$(field "$WORK/checkpoint.json" tree_size)
+check "the tree has grown past the actions above" 'True' \
+  "$(python3 -c 'import sys; print(int(sys.argv[1]) > 5)' "$SIZE")"
+
+curl -s "${auth[@]}" "$URL/v1/audit/entries?start=0&end=$SIZE" >"$WORK/entries.json"
+check "entries field order" 'start end tree_size entries' \
+  "$(keys "$WORK/entries.json")"
+check "entries count matches the range asked for" 'True' \
+  "$(python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(len(d["entries"]) == d["end"] - d["start"])' "$WORK/entries.json")"
+check "the first entry is a v1 leaf with a seq and an action" 'True' \
+  "$(python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+leaf=json.loads(d["entries"][0])
+print(leaf["v"] == 1 and leaf["seq"] == 0 and "action" in leaf)' "$WORK/entries.json")"
+check "end past the tree size is 400" '400' \
+  "$(curl -s -o /dev/null -w '%{http_code}' "${auth[@]}" "$URL/v1/audit/entries?start=0&end=$((SIZE + 1))")"
+check "end before start is 400" '400' \
+  "$(curl -s -o /dev/null -w '%{http_code}' "${auth[@]}" "$URL/v1/audit/entries?start=2&end=1")"
+
+curl -s "${auth[@]}" "$URL/v1/audit/consistency?first=1&second=$SIZE" >"$WORK/consistency.json"
+check "consistency field order" 'first second proof' \
+  "$(keys "$WORK/consistency.json")"
+check "first below 1 is 400" '400' \
+  "$(curl -s -o /dev/null -w '%{http_code}' "${auth[@]}" "$URL/v1/audit/consistency?first=0&second=$SIZE")"
+check "second past the tree size is 400" '400' \
+  "$(curl -s -o /dev/null -w '%{http_code}' "${auth[@]}" "$URL/v1/audit/consistency?first=1&second=$((SIZE + 1))")"
+check "an admin route's body over 8 KiB is 413" '{"error":"request body too large"}' \
+  "$(python3 -c 'import json; print(json.dumps({"tag": "x", "expires_in_days": 1, "padding": "p" * 9000}))' \
+     | curl -s -X POST "${auth[@]}" "${json[@]}" --data-binary @- "$URL/v1/authkeys")"
+
+# The leaves are admin-only; the hashes are for any credential. A device
+# signs here the way the capture script's does: openssl, with the published
+# private half of test-key-ed25519, the $KEY every device above enrolled
+# with. The server refuses signatures dated up to five seconds past its
+# start, so this waits that out first.
+printf '%s\n' '-----BEGIN PRIVATE KEY-----' \
+  'MC4CAQAwBQYDK2VwBCIEIJ+DYvh6SEqVTm50DFtMDoQikTmiCqirVv9mWG9qfSnF' \
+  '-----END PRIVATE KEY-----' >"$WORK/key.pem"
+# From an address of its own: the checks above left this one its five
+# waiting enrolments.
+curl -s -X POST "${json[@]}" -H 'cf-connecting-ip: 192.0.2.77' \
+  -d "{\"name\":\"auditor\",\"public_key\":\"$KEY\"}" "$URL/v1/devices/enroll" >"$WORK/auditor.json"
+approve_code "$(field "$WORK/auditor.json" user_code)" >"$WORK/auditor-device.json"
+AUDITOR=$(field "$WORK/auditor-device.json" id)
+while [ "$(date +%s)" -le $((STARTED + 6)) ]; do sleep 1; done
+signed_status() { # path, query: the status a GET the sync device signs gets
+  local created digest params
+  created=$(date +%s)
+  digest="sha-256=:$(printf '' | openssl dgst -sha256 -binary | base64):"
+  params="(\"@method\" \"@authority\" \"@path\" \"@query\" \"content-digest\" \"recall-protocol\");created=$created;keyid=\"$AUDITOR\";nonce=\"doc-check-$1-$RANDOM$RANDOM\";alg=\"ed25519\""
+  printf '"@method": GET\n"@authority": 127.0.0.1:%s\n"@path": %s\n"@query": ?%s\n"content-digest": %s\n"recall-protocol": 1\n"@signature-params": %s' \
+    "$PORT" "$1" "$2" "$digest" "$params" >"$WORK/base"
+  curl -s -o /dev/null -w '%{http_code}' -H "Recall-Protocol: 1" -H "Content-Digest: $digest" \
+    -H "Signature-Input: sig1=$params" \
+    -H "Signature: sig1=:$(openssl pkeyutl -sign -inkey "$WORK/key.pem" -rawin -in "$WORK/base" | base64 | tr -d '\n'):" \
+    "$URL$1?$2"
+}
+check "entries needs RECALL_TOKEN or an admin device: a sync device is 403" '403' \
+  "$(signed_status /v1/audit/entries 'start=0&end=1')"
+check "the checkpoint and a proof need only a credential: 200 200" '200 200' \
+  "$(signed_status /v1/audit/checkpoint '') $(signed_status /v1/audit/consistency 'first=1&second=2')"
 echo "The admin page and passkey sign-in"
 curl -s -D "$WORK/page.headers" -o /dev/null "$URL/admin"
 header() { # file, name
@@ -383,6 +474,18 @@ CODE=$(code_in "$WORK/reset.out")
 check "reset-passkeys prints a new code, and the one before stops working" 'True 403' \
   "$(python3 -c 'import sys; print(len(sys.argv[1]) == 19 and sys.argv[1] != sys.argv[2])' "$CODE" "$OLD_CODE") $(curl -s -o /dev/null -w '%{http_code}' -X POST "${json[@]}" "${auth[@]}" \
      -d "{\"bootstrap_code\":\"$OLD_CODE\"}" "$PK_URL/admin/bootstrap/register")"
+# The reset ran in a process of its own, beside the running server: its
+# leaf is the host's, and the server's next leaf (this pull's) follows it.
+curl -s -o /dev/null "${auth[@]}" "$PK_URL/sync?project_key=a/b"
+check "the audit log has both codes and the reset, and neither code" \
+  'bootstrap_code:server start:server passkey_reset:host pull:operator False' \
+  "$(size=$(curl -s "${auth[@]}" "$PK_URL/v1/audit/checkpoint" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tree_size"])')
+     curl -s "${auth[@]}" "$PK_URL/v1/audit/entries?start=0&end=$size" | python3 -c '
+import json,sys
+entries=json.load(sys.stdin)["entries"]; codes=sys.argv[1:]
+leaves=[json.loads(e) for e in entries]
+print(" ".join(l["action"] + ":" + l["actor"]["kind"] for l in leaves),
+      any(c in e or c.replace("-", "") in e for c in codes for e in entries))' "$CODE" "$OLD_CODE")"
 curl -s -D "$WORK/boot.headers" -X POST "${json[@]}" "${auth[@]}" -d "{\"bootstrap_code\":\"$CODE\"}" \
   "$PK_URL/admin/bootstrap/register" >"$WORK/boot.json"
 check "the bootstrap answers with a ceremony and a discoverable-credential challenge" \
@@ -434,9 +537,11 @@ for _ in $(seq 1 40); do curl -sf "$JQ/health" >/dev/null 2>&1 && break; sleep 0
 merge_keys() {
   curl -s "$JQ/health" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["merge"].keys()))'
 }
-jq_push() { # content, base
+jq_push() { # content, base (none when empty: a base is a SHA-256 or absent)
+  local base=""
+  [ -n "$2" ] && base=",\"base_sha256\":\"$2\""
   curl -s -X POST "${auth[@]}" "${json[@]}" \
-    -d "{\"project_key\":\"acme/app\",\"file_path\":\"topics/auth.md\",\"content\":\"$1\",\"source_env\":\"laptop\",\"base_sha256\":\"$2\"}" \
+    -d "{\"project_key\":\"acme/app\",\"file_path\":\"topics/auth.md\",\"content\":\"$1\",\"source_env\":\"laptop\"$base}" \
     "$JQ/sync"
 }
 OLDER=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
@@ -485,6 +590,18 @@ check "health names the failed job, and no project or file" 'True False' \
   "$(curl -s "$JQ/health" | python3 -c '
 import json,sys; m=json.load(sys.stdin)["merge"]["last_merge_error"]["message"]
 print("see GET /v1/jobs?state=failed" in m, "acme" in m or "topics" in m)')"
+check "the worker revoked, the server fails its waiting job in the audit log" \
+  'revoke job_result:server:failed' \
+  "$(size=$(curl -s "${auth[@]}" "$JQ/v1/audit/checkpoint" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tree_size"])')
+     curl -s "${auth[@]}" "$JQ/v1/audit/entries?start=$((size - 2))&end=$size" | python3 -c '
+import json,sys
+out=[]
+for e in json.load(sys.stdin)["entries"]:
+    l=json.loads(e); a=l["action"]
+    if a != "revoke": a += ":" + l["actor"]["kind"]
+    if l["action"] == "job_result": a += ":" + l["subject"]["state"]
+    out.append(a)
+print(" ".join(out))')"
 check "the worker revoked: a stale push answers as before" \
   'ok project_key file_path deleted merged updated_at' \
   "$(jq_push "# Auth, once more\\n" "$OLDER" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin).keys()))')"

@@ -138,6 +138,59 @@ break will be described here in full rather than smoothed over.
   the passkey verification needs. The client does not.
   Building the server from source needs perl and make as well as a C
   compiler, and Rust 1.88.
+- **The server keeps an audit log**: a Merkle tree (RFC 9162) over every
+  authenticated push, pull, delete, and change to a device or authkey,
+  including a device an authkey enrols, and over the merge queue's claims,
+  results and retries, the server's own when it merges without a worker,
+  and over the admin page's passkeys: each one added or removed, other
+  sessions signed out, a bootstrap code issued, and `recall-server
+  reset-passkeys`. What a passkey session does is credited to its passkey,
+  never to the token. A push queued for the worker names its job. Each
+  leaf records who acted, what changed, and a content hash — never the
+  content itself. A change and its leaf commit in one transaction, and
+  the table refuses any `UPDATE`, `DELETE`, or insert that is not the
+  next leaf.
+- **What it protects against today, and what it does not.** A checkpoint
+  (the tree's size and root) that the owner saves somewhere the server
+  cannot reach lets `scripts/audit-verify.py` show later that the log
+  still extends it: removing or rewriting anything before that checkpoint,
+  by the server or by anyone with its database, is caught. Nothing saves
+  checkpoints automatically yet — the client does not keep them — so until
+  it does, history no one saved a checkpoint of can be rewritten
+  unnoticed. A device's leaves carry its signed request and the log
+  carries its public key, so what a device sent can be checked from the
+  log alone, even after the device is revoked or swept; what the server
+  says it did with a push is still the server's word (see "Audit" in
+  `docs/reference/api.md`).
+- **New routes:** `GET /v1/audit/checkpoint` (the tree's size and root)
+  and `GET /v1/audit/consistency` (the proof that one size extends
+  another), any credential; `GET /v1/audit/entries` (the leaves, 1,000 or
+  2 MiB at a time), `RECALL_TOKEN`, an admin device or the admin page's
+  session only, since the leaves name every project, file, device and
+  authkey. `GET /sync` answers now carry a `Recall-Audit-Checkpoint`
+  header.
+- **`GET /.well-known/recall` lists an `audit` capability**, `{
+  "leaf_version": 1, "max_page": 1000, "max_page_bytes": 2097152 }`.
+- **`scripts/audit-verify.py`** checks an exported log offline: the tree
+  with nothing but Python's standard library, and every device signature,
+  with the `cryptography` package when it works and a built-in Ed25519
+  otherwise (slower, never skipped unless `--no-signatures` says so). Page
+  through `GET /v1/audit/checkpoint` and `/entries` into a file (one
+  checkpoint line, then one leaf per line) and run
+  `python3 scripts/audit-verify.py that-file --checkpoint SIZE:ROOT` with
+  each checkpoint you saved. A CLI command that does the paging itself is
+  client work, not this release's.
+- **A new table, `audit_log`**, created on start, and read back in full
+  when the server starts: a leaf missing, out of place, or no longer
+  matching its hash stops the server from starting until the database is
+  restored from a backup. An older server ignores the table, so rolling
+  back still works. Restoring a backup truncates the log, which any
+  checkpoint saved since will report as a rewrite; see `deploy/README.md`.
+- **Tighter limits on requests the log records.** A push's `base_sha256`
+  must be 64 hex digits (what every client has always sent), `project_key`
+  and `file_path` at most 4096 bytes, and a body on the admin routes at
+  most 8 KiB. Revoking an authkey's devices after the key was revoked on
+  its own now revokes them.
 
 ## 0.4.1 — 2026-09-23
 

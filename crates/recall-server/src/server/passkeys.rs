@@ -56,6 +56,7 @@ use super::admin::{
 use super::auth::Caller;
 use super::respond::{error, internal, json, Refusal};
 use super::AppState;
+use crate::audit::leaf;
 use crate::format_timestamp;
 use crate::store::{
     AddedCredential, AdminCredential, BootstrapCode, FirstPasskey, NewAdminCredential,
@@ -549,6 +550,7 @@ fn register(
     user_handle: Uuid,
     finish: &FinishRegistration,
     first: Option<&str>,
+    actor: &leaf::Actor<'_>,
 ) -> Result<AdminCredential, Refusal> {
     let site = state.passkeys.site()?;
     let name = passkey_name(&finish.name)?;
@@ -581,7 +583,7 @@ fn register(
     let (_, now) = now_at(state);
     let added = state
         .store
-        .add_admin_credential(
+        .add_admin_credential_audited(
             &NewAdminCredential {
                 id: &id,
                 user_handle: &user_handle.to_string(),
@@ -594,6 +596,16 @@ fn register(
                 code_sha256,
                 now: &now,
             }),
+            |seq, at| {
+                leaf::encode(
+                    seq,
+                    at,
+                    leaf::action::PASSKEY_ADD,
+                    actor,
+                    leaf::subject_passkey(&id, &name, Some(first.is_some())),
+                    None,
+                )
+            },
         )
         .map_err(Refusal::internal)?;
     match added {
@@ -719,6 +731,7 @@ pub(super) async fn handle_bootstrap_finish(
             *user_handle,
             &finish,
             Some(code_sha256),
+            &leaf::Actor::Operator,
         )?;
         Ok(json(StatusCode::OK, &PasskeyView::of(credential, None)))
     };
@@ -909,10 +922,22 @@ pub(super) async fn handle_sign_out_others(
     if let Err(refused) = require_recent_sign_in(&state, &session) {
         return refused.into_response();
     }
-    match state
-        .store
-        .delete_other_admin_sessions(&session.token_sha256)
-    {
+    let ended =
+        state
+            .store
+            .delete_other_admin_sessions_audited(&session.token_sha256, |seq, at, ended| {
+                leaf::encode(
+                    seq,
+                    at,
+                    leaf::action::SESSIONS_END,
+                    &leaf::Actor::Session {
+                        credential_id: &session.credential_id,
+                    },
+                    leaf::subject_sessions_end(ended),
+                    None,
+                )
+            });
+    match ended {
         Ok(n) => json(
             StatusCode::OK,
             &serde_json::json!({ "other_sessions_ended": n }),
@@ -991,7 +1016,17 @@ pub(super) async fn handle_add_finish(
         if *started_by != session.token_sha256 {
             return Err(wrong_ceremony());
         }
-        let credential = register(&state, &ceremony, registration, *user_handle, &finish, None)?;
+        let credential = register(
+            &state,
+            &ceremony,
+            registration,
+            *user_handle,
+            &finish,
+            None,
+            &leaf::Actor::Session {
+                credential_id: &session.credential_id,
+            },
+        )?;
         Ok(json(
             StatusCode::OK,
             &PasskeyView::of(credential, Some(&session.credential_id)),
@@ -1010,7 +1045,21 @@ pub(super) async fn handle_remove(
     if let Err(refused) = require_recent_sign_in(&state, &session) {
         return refused.into_response();
     }
-    match state.store.remove_admin_credential(&id) {
+    let removed = state
+        .store
+        .remove_admin_credential_audited(&id, |seq, at, credential| {
+            leaf::encode(
+                seq,
+                at,
+                leaf::action::PASSKEY_REMOVE,
+                &leaf::Actor::Session {
+                    credential_id: &session.credential_id,
+                },
+                leaf::subject_passkey(&credential.id, &credential.name, None),
+                None,
+            )
+        });
+    match removed {
         Ok(RemovedCredential::Removed(credential)) => {
             let own = credential.id == session.credential_id;
             let mut resp = json(

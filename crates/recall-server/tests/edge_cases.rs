@@ -19,6 +19,20 @@ use tower::ServiceExt;
 
 const TOKEN: &str = "edge-token";
 
+/// A leaf for the tests that write through the store directly, which are
+/// about rows: the store writes nothing without one.
+fn start_leaf(seq: u64, at: &str) -> Vec<u8> {
+    use recall_server::audit::leaf;
+    leaf::encode(
+        seq,
+        at,
+        leaf::action::START,
+        &leaf::Actor::Server,
+        leaf::subject_start("test"),
+        None,
+    )
+}
+
 struct Harness {
     server: Server,
     // Both are held only to keep the database file and the stand-in `claude`
@@ -629,7 +643,7 @@ fn a_backup_into_an_uncreatable_directory_fails_without_panicking() {
 
     // And the store still works afterwards.
     store
-        .upsert("acme/app", "MEMORY.md", "still fine", "test", &now())
+        .upsert_audited("acme/app", "MEMORY.md", "still fine", "test", start_leaf)
         .unwrap();
     assert_eq!(store.list("acme/app").unwrap().len(), 1);
 }
@@ -644,10 +658,10 @@ fn data_survives_closing_and_reopening_the_database() {
     {
         let store = Store::open(&path).unwrap();
         store
-            .upsert("acme/app", "MEMORY.md", "durable\n", "laptop", &now())
+            .upsert_audited("acme/app", "MEMORY.md", "durable\n", "laptop", start_leaf)
             .unwrap();
         store
-            .tombstone("acme/app", "gone.md", "laptop", &now())
+            .tombstone_audited("acme/app", "gone.md", "laptop", start_leaf)
             .unwrap();
     }
 

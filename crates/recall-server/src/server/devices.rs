@@ -33,10 +33,12 @@ use recall_wire::{
 use serde::de::DeserializeOwned;
 use time::OffsetDateTime;
 
-use super::auth::Caller;
+use super::audit::{actor_for, signed_request_for};
+use super::auth::{Caller, SignedRequestInfo};
 use super::middleware::{too_large, ClientIp};
 use super::respond::{error, internal, json, Refusal};
 use super::AppState;
+use crate::audit::leaf;
 use crate::store::{
     plain_name, Created, Decision, Inserted, NewAuthkey, NewDevice, NewEnrollment, Poll,
 };
@@ -75,6 +77,15 @@ fn small_body(bytes: Result<Bytes, BytesRejection>) -> Result<Bytes, Refusal> {
         StatusCode::PAYLOAD_TOO_LARGE => too_large(),
         status => Refusal::new(status, "could not read the request body"),
     })
+}
+
+/// A device-management request's body, as the text its audit leaf keeps
+/// beside the signature (see `leaf::SignedRequest::body`). Any JSON body
+/// is UTF-8 already; this refuses the one route that reads none, revoking
+/// a device, a body that is not.
+fn body_text(bytes: &Bytes) -> Result<&str, Refusal> {
+    std::str::from_utf8(bytes)
+        .map_err(|_| Refusal::new(StatusCode::BAD_REQUEST, "the request body must be UTF-8"))
 }
 
 /// A reply that carries a secret, which RFC 6749 §5.1 says no cache may
@@ -240,6 +251,11 @@ pub(super) async fn handle_enroll(
 /// Nobody looks at a device enrolled this way before it exists, so it does
 /// not choose its name: it is the key's tag and the start of its id, such
 /// as `cloud-k3jz9w2q`, and cannot pass for the owner's laptop.
+///
+/// The device and its `enroll` leaf commit together. The leaf's actor is
+/// the key, by id and tag — never the key itself — and it carries the
+/// device's public key, as an `approve` leaf does, so what the device
+/// signs can be checked from the log alone after it is swept.
 fn enroll_with_authkey(state: &AppState, authkey: &str, public_key: &str, agent: &str) -> Response {
     let refused = |why: &str| {
         error(
@@ -276,7 +292,7 @@ fn enroll_with_authkey(state: &AppState, authkey: &str, public_key: &str, agent:
     // The short name first; the whole id only in the one-in-a-trillion
     // case that the short one is taken.
     for name in [format!("{tag}-{}", &random[..8]), format!("{tag}-{random}")] {
-        let inserted = state.store.insert_device(
+        let inserted = state.store.enroll_device_audited(
             &NewDevice {
                 id: &device_id,
                 name: &name,
@@ -288,6 +304,19 @@ fn enroll_with_authkey(state: &AppState, authkey: &str, public_key: &str, agent:
                 created_at: &now,
             },
             Some(max_devices),
+            |seq, at, device| {
+                leaf::encode(
+                    seq,
+                    at,
+                    leaf::action::ENROLL,
+                    &leaf::Actor::Authkey {
+                        id: &key.id,
+                        tag: &key.tag,
+                    },
+                    leaf::subject_device(device, None),
+                    None,
+                )
+            },
         );
         match inserted {
             Ok(Inserted::Done(device)) => {
@@ -391,7 +420,16 @@ fn undecided<T>(decision: Decision<T>) -> Result<T, Refusal> {
 }
 
 /// `POST /v1/devices/approve`.
-pub(super) async fn handle_approve(State(state): State<Arc<AppState>>, bytes: Bytes) -> Response {
+pub(super) async fn handle_approve(
+    State(state): State<Arc<AppState>>,
+    caller: Option<Extension<Caller>>,
+    signed: Option<Extension<SignedRequestInfo>>,
+    bytes: Result<Bytes, BytesRejection>,
+) -> Response {
+    let bytes = match small_body(bytes) {
+        Ok(bytes) => bytes,
+        Err(refused) => return refused.into_response(),
+    };
     let req: ApproveRequest = match body(&bytes) {
         Ok(req) => req,
         Err(refused) => return refused.into_response(),
@@ -410,14 +448,30 @@ pub(super) async fn handle_approve(State(state): State<Arc<AppState>>, bytes: By
         Ok(id) => id,
         Err(e) => return internal(e),
     };
+    let text = match body_text(&bytes) {
+        Ok(text) => text,
+        Err(refused) => return refused.into_response(),
+    };
+    let actor = actor_for(caller.as_ref().map(|Extension(c)| c));
+    let request = signed_request_for(signed.as_ref().map(|Extension(s)| s), Some(text));
     match state
         .store
-        .approve_enrollment(
+        .approve_enrollment_audited(
             &code,
             &device_id,
             &req.scope,
             &now(),
             req.fingerprint.as_deref(),
+            |seq, at, device| {
+                leaf::encode(
+                    seq,
+                    at,
+                    leaf::action::APPROVE,
+                    &actor,
+                    leaf::subject_device(device, Some(&code)),
+                    request.as_ref(),
+                )
+            },
         )
         .map(undecided)
     {
@@ -428,7 +482,16 @@ pub(super) async fn handle_approve(State(state): State<Arc<AppState>>, bytes: By
 }
 
 /// `POST /v1/devices/deny`.
-pub(super) async fn handle_deny(State(state): State<Arc<AppState>>, bytes: Bytes) -> Response {
+pub(super) async fn handle_deny(
+    State(state): State<Arc<AppState>>,
+    caller: Option<Extension<Caller>>,
+    signed: Option<Extension<SignedRequestInfo>>,
+    bytes: Result<Bytes, BytesRejection>,
+) -> Response {
+    let bytes = match small_body(bytes) {
+        Ok(bytes) => bytes,
+        Err(refused) => return refused.into_response(),
+    };
     let req: DenyRequest = match body(&bytes) {
         Ok(req) => req,
         Err(refused) => return refused.into_response(),
@@ -437,7 +500,26 @@ pub(super) async fn handle_deny(State(state): State<Arc<AppState>>, bytes: Bytes
         Ok(code) => code,
         Err(refused) => return refused.into_response(),
     };
-    match state.store.deny_enrollment(&code, &now()).map(undecided) {
+    let text = match body_text(&bytes) {
+        Ok(text) => text,
+        Err(refused) => return refused.into_response(),
+    };
+    let actor = actor_for(caller.as_ref().map(|Extension(c)| c));
+    let request = signed_request_for(signed.as_ref().map(|Extension(s)| s), Some(text));
+    match state
+        .store
+        .deny_enrollment_audited(&code, &now(), |seq, at, name| {
+            leaf::encode(
+                seq,
+                at,
+                leaf::action::DENY,
+                &actor,
+                leaf::subject_denied(&code, name),
+                request.as_ref(),
+            )
+        })
+        .map(undecided)
+    {
         Ok(Ok(name)) => json(
             StatusCode::OK,
             &DenyResponse {
@@ -503,6 +585,7 @@ pub(super) async fn handle_me(Extension(caller): Extension<Caller>) -> Response 
             name,
             scope,
             ephemeral,
+            ..
         } => json(
             StatusCode::OK,
             &DeviceIdentity {
@@ -542,9 +625,35 @@ pub(super) async fn handle_list_devices(State(state): State<Arc<AppState>>) -> R
 /// each job here or, when this server cannot merge, marking it failed.
 pub(super) async fn handle_revoke_device(
     State(state): State<Arc<AppState>>,
+    caller: Option<Extension<Caller>>,
+    signed: Option<Extension<SignedRequestInfo>>,
     Path(id): Path<String>,
+    bytes: Result<Bytes, BytesRejection>,
 ) -> Response {
-    match state.store.revoke_device(&id, &now()) {
+    // Nothing is read from the body; it is only kept, as every
+    // device-management request's is, in the leaf.
+    let bytes = match small_body(bytes) {
+        Ok(bytes) => bytes,
+        Err(refused) => return refused.into_response(),
+    };
+    let text = match body_text(&bytes) {
+        Ok(text) => text,
+        Err(refused) => return refused.into_response(),
+    };
+    let actor = actor_for(caller.as_ref().map(|Extension(c)| c));
+    let request = signed_request_for(signed.as_ref().map(|Extension(s)| s), Some(text));
+    match state
+        .store
+        .revoke_device_audited(&id, &now(), |seq, at, device| {
+            leaf::encode(
+                seq,
+                at,
+                leaf::action::REVOKE,
+                &actor,
+                leaf::subject_device_id(&device.id, &device.name),
+                request.as_ref(),
+            )
+        }) {
         Ok(Some(device)) => {
             if device.scope == SCOPE_WORKER {
                 let state = state.clone();
@@ -564,8 +673,14 @@ pub(super) async fn handle_revoke_device(
 /// `POST /v1/authkeys`.
 pub(super) async fn handle_create_authkey(
     State(state): State<Arc<AppState>>,
-    bytes: Bytes,
+    caller: Option<Extension<Caller>>,
+    signed: Option<Extension<SignedRequestInfo>>,
+    bytes: Result<Bytes, BytesRejection>,
 ) -> Response {
+    let bytes = match small_body(bytes) {
+        Ok(bytes) => bytes,
+        Err(refused) => return refused.into_response(),
+    };
     let req: AuthkeyRequest = match body(&bytes) {
         Ok(req) => req,
         Err(refused) => return refused.into_response(),
@@ -594,15 +709,34 @@ pub(super) async fn handle_create_authkey(
     let expires_at = later(Duration::from_secs(
         u64::from(req.expires_in_days) * 24 * 60 * 60,
     ));
-    let stored = state.store.insert_authkey(&NewAuthkey {
-        id: &id,
-        key_sha256: &recall_wire::content_sha256(&secret),
-        tag: &plain_name(&req.tag),
-        ephemeral: req.ephemeral,
-        max_devices: Some(max_devices),
-        created_at: &now(),
-        expires_at: &expires_at,
-    });
+    // No secret in it: the key is made here, after the body was sent.
+    let text = match body_text(&bytes) {
+        Ok(text) => text,
+        Err(refused) => return refused.into_response(),
+    };
+    let actor = actor_for(caller.as_ref().map(|Extension(c)| c));
+    let request = signed_request_for(signed.as_ref().map(|Extension(s)| s), Some(text));
+    let stored = state.store.insert_authkey_audited(
+        &NewAuthkey {
+            id: &id,
+            key_sha256: &recall_wire::content_sha256(&secret),
+            tag: &plain_name(&req.tag),
+            ephemeral: req.ephemeral,
+            max_devices: Some(max_devices),
+            created_at: &now(),
+            expires_at: &expires_at,
+        },
+        |seq, at, key| {
+            leaf::encode(
+                seq,
+                at,
+                leaf::action::AUTHKEY_CREATE,
+                &actor,
+                leaf::subject_authkey(&key.id, &key.tag, key.ephemeral, key.max_devices),
+                request.as_ref(),
+            )
+        },
+    );
     match stored {
         Ok(key) => no_store(json(
             StatusCode::OK,
@@ -633,9 +767,15 @@ pub(super) async fn handle_list_authkeys(State(state): State<Arc<AppState>>) -> 
 /// revoked too; the body may be empty.
 pub(super) async fn handle_revoke_authkey(
     State(state): State<Arc<AppState>>,
+    caller: Option<Extension<Caller>>,
+    signed: Option<Extension<SignedRequestInfo>>,
     Path(id): Path<String>,
-    bytes: Bytes,
+    bytes: Result<Bytes, BytesRejection>,
 ) -> Response {
+    let bytes = match small_body(bytes) {
+        Ok(bytes) => bytes,
+        Err(refused) => return refused.into_response(),
+    };
     let req: AuthkeyRevokeRequest = if bytes.iter().all(u8::is_ascii_whitespace) {
         AuthkeyRevokeRequest::default()
     } else {
@@ -644,7 +784,28 @@ pub(super) async fn handle_revoke_authkey(
             Err(refused) => return refused.into_response(),
         }
     };
-    match state.store.revoke_authkey(&id, &now(), req.revoke_devices) {
+    let text = match body_text(&bytes) {
+        Ok(text) => text,
+        Err(refused) => return refused.into_response(),
+    };
+    let actor = actor_for(caller.as_ref().map(|Extension(c)| c));
+    let request = signed_request_for(signed.as_ref().map(|Extension(s)| s), Some(text));
+    let revoke_devices = req.revoke_devices;
+    match state.store.revoke_authkey_audited(
+        &id,
+        &now(),
+        revoke_devices,
+        |seq, at, key, revoked| {
+            leaf::encode(
+                seq,
+                at,
+                leaf::action::AUTHKEY_REVOKE,
+                &actor,
+                leaf::subject_authkey_revoke(&key.id, revoke_devices, revoked),
+                request.as_ref(),
+            )
+        },
+    ) {
         Ok(Some(key)) => json(StatusCode::OK, &key),
         Ok(None) => error(StatusCode::NOT_FOUND, "no authkey has that id"),
         Err(e) => internal(e),

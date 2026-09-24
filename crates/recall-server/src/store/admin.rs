@@ -460,8 +460,17 @@ impl Store {
                 path.display()
             );
         }
+        // The audit tree starts empty rather than read here. The changes
+        // `recall-server admin` makes are not in the audit log (see "Audit"
+        // in docs/reference/api.md); the one audited write made this way,
+        // `reset-passkeys`, reads the whole log in, checked, before it
+        // appends (`Store::audited_each` catches up with the table).
         Ok(Self {
-            conn: Mutex::new(conn),
+            state: Mutex::new(super::StoreState {
+                conn,
+                audit: crate::audit::merkle::Tree::new(),
+                audit_at: String::new(),
+            }),
         })
     }
 
@@ -779,16 +788,20 @@ fn busy(err: rusqlite::Error, doing: &str) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::test_leaf;
 
     const T0: &str = "2026-09-01T00:00:00.000Z";
 
     fn live(dir: &tempfile::TempDir) -> (std::path::PathBuf, Store) {
         let path = dir.path().join("recall.db");
         let st = Store::open(&path).unwrap();
-        st.upsert("old/key", "a.md", "alpha", "laptop", T0).unwrap();
-        st.upsert("old/key", "b.md", "beta", "", T0).unwrap();
-        st.tombstone("old/key", "c.md", "cloud", T0).unwrap();
-        st.upsert("other", "a.md", "other alpha", "laptop", T0)
+        st.upsert_audited("old/key", "a.md", "alpha", "laptop", test_leaf)
+            .unwrap();
+        st.upsert_audited("old/key", "b.md", "beta", "", test_leaf)
+            .unwrap();
+        st.tombstone_audited("old/key", "c.md", "cloud", test_leaf)
+            .unwrap();
+        st.upsert_audited("other", "a.md", "other alpha", "laptop", test_leaf)
             .unwrap();
         drop(st);
         let st = Store::open_existing(&path, Access::Write).unwrap();
@@ -807,7 +820,7 @@ mod tests {
 
         Store::open(&path)
             .unwrap()
-            .upsert("old/key", "late.md", "arrived", "laptop", T0)
+            .upsert_audited("old/key", "late.md", "arrived", "laptop", test_leaf)
             .unwrap();
 
         let err = st.apply(&plan).unwrap_err().to_string();
@@ -946,7 +959,7 @@ mod tests {
         let plan = st.plan_rename("old/key", "new/key").unwrap();
         Store::open(&path)
             .unwrap()
-            .upsert("old/key", "late.md", "arrived", "laptop", T0)
+            .upsert_audited("old/key", "late.md", "arrived", "laptop", test_leaf)
             .unwrap();
         assert!(st.apply(&plan).unwrap_err().is::<Abandoned>());
 
@@ -996,13 +1009,17 @@ mod tests {
         // The same content at another path, under another key, counts.
         Store::open(dir.path().join("recall.db"))
             .unwrap()
-            .upsert("copy", "moved/b.md", "beta", "laptop", T0)
+            .upsert_audited("copy", "moved/b.md", "beta", "laptop", test_leaf)
             .unwrap();
         assert_eq!(st.unique_live_paths("old/key").unwrap(), ["a.md"]);
         // A tombstone holding it does not.
         let other = Store::open(dir.path().join("recall.db")).unwrap();
-        other.upsert("gone", "a.md", "alpha", "laptop", T0).unwrap();
-        other.tombstone("gone", "a.md", "laptop", T0).unwrap();
+        other
+            .upsert_audited("gone", "a.md", "alpha", "laptop", test_leaf)
+            .unwrap();
+        other
+            .tombstone_audited("gone", "a.md", "laptop", test_leaf)
+            .unwrap();
         assert_eq!(st.unique_live_paths("old/key").unwrap(), ["a.md"]);
     }
 
@@ -1025,7 +1042,9 @@ mod tests {
         }
 
         let writer = Store::open(&path).unwrap();
-        writer.upsert("old/key", "b.md", "edited", "x", T0).unwrap();
+        writer
+            .upsert_audited("old/key", "b.md", "edited", "x", test_leaf)
+            .unwrap();
         let bad = Store::open_existing(&st.backup(dir.path().join("b"), 9).unwrap(), Access::Read)
             .unwrap();
         for plan in [&remove, &rename, &restore] {
@@ -1045,13 +1064,17 @@ mod tests {
         let rename = st.plan_rename("old/key", "new/key").unwrap();
         st.apply(&rename).unwrap();
         assert!(rename.undone(&st).unwrap().is_empty());
-        writer.upsert("old/key", "b.md", "late", "x", T0).unwrap();
+        writer
+            .upsert_audited("old/key", "b.md", "late", "x", test_leaf)
+            .unwrap();
         assert_eq!(rename.undone(&st).unwrap(), ["b.md"]);
 
         let remove = st.plan_remove("new/key").unwrap();
         st.apply(&remove).unwrap();
         assert!(remove.undone(&st).unwrap().is_empty());
-        writer.upsert("new/key", "a.md", "late", "x", T0).unwrap();
+        writer
+            .upsert_audited("new/key", "a.md", "late", "x", test_leaf)
+            .unwrap();
         assert_eq!(remove.undone(&st).unwrap(), ["a.md"]);
 
         let mut backup = st.rows("other").unwrap();
@@ -1060,7 +1083,13 @@ mod tests {
         st.apply(&restore).unwrap();
         assert!(restore.undone(&st).unwrap().is_empty());
         writer
-            .upsert("other", "a.md", "older, merged with an edit", "x", T0)
+            .upsert_audited(
+                "other",
+                "a.md",
+                "older, merged with an edit",
+                "x",
+                test_leaf,
+            )
             .unwrap();
         assert_eq!(restore.undone(&st).unwrap(), ["a.md"]);
     }

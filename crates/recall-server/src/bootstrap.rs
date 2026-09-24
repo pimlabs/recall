@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use recall_wire::devices::USER_CODE_ALPHABET;
 use time::OffsetDateTime;
 
+use crate::audit::leaf;
 use crate::{format_timestamp, Store};
 
 /// How long a code works for. Restarting a server that has no passkey, or
@@ -50,22 +51,50 @@ impl BootstrapCode {
     }
 }
 
-/// Makes a new code the only one, until [`TTL`] after `now`.
+/// Makes a new code the only one, until [`TTL`] after `now`, with the
+/// server's `bootstrap_code` leaf, which says until when and never the
+/// code.
 pub fn issue(store: &Store, now: OffsetDateTime) -> Result<BootstrapCode> {
     let (code, hash) = generate()?;
     let expires_at = format_timestamp(now + TTL);
     store
-        .set_bootstrap_code(&hash, &format_timestamp(now), &expires_at)
+        .set_bootstrap_code_audited(&hash, &format_timestamp(now), &expires_at, |seq, at| {
+            leaf::encode(
+                seq,
+                at,
+                leaf::action::BOOTSTRAP_CODE,
+                &leaf::Actor::Server,
+                leaf::subject_bootstrap(None, &expires_at),
+                None,
+            )
+        })
         .context("storing the bootstrap code")?;
     Ok(BootstrapCode { code, expires_at })
 }
 
 /// Removes every passkey and admin session, and makes a new code the only
 /// one: `recall-server reset-passkeys`. Answers how many passkeys went.
+///
+/// Its `passkey_reset` leaf names the host as the actor: whoever ran it had
+/// a shell where the server runs, which no route gives.
 pub fn reset(store: &Store, now: OffsetDateTime) -> Result<(usize, BootstrapCode)> {
     let (code, hash) = generate()?;
     let expires_at = format_timestamp(now + TTL);
-    let removed = store.reset_admin_credentials(&hash, &format_timestamp(now), &expires_at)?;
+    let removed = store.reset_admin_credentials_audited(
+        &hash,
+        &format_timestamp(now),
+        &expires_at,
+        |seq, at, removed| {
+            leaf::encode(
+                seq,
+                at,
+                leaf::action::PASSKEY_RESET,
+                &leaf::Actor::Host,
+                leaf::subject_bootstrap(Some(removed), &expires_at),
+                None,
+            )
+        },
+    )?;
     Ok((removed, BootstrapCode { code, expires_at }))
 }
 
