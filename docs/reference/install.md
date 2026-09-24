@@ -943,6 +943,12 @@ Each release publishes it for Linux, amd64 and arm64, as
 `recall-server_linux_<arch>.tar.gz`; `cargo install recall-server` builds it
 anywhere else.
 
+`RECALL_DB_PATH` has to be on a local filesystem, never NFS or SMB: the
+server keeps the database in SQLite's WAL mode, with `recall.db-wal` and
+`recall.db-shm` beside the file. That also means `recall.db` on its own is
+not a backup; see "The database files" in
+[`deploy/README.md`](../../deploy/README.md#the-database-files).
+
 In practice it runs in Docker, most often behind an ingress — a Cloudflare
 Tunnel or an existing Traefik, one compose file each — but it can also
 terminate TLS itself (`RECALL_TLS_CERT`/`RECALL_TLS_KEY`, or

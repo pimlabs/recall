@@ -13,6 +13,15 @@ client's `RECALL_URL`. Each of those is one line in a YAML file that a later
 edit could add without anyone noticing, so each is asserted here, for both
 compose files, the way wrangler-check.py asserts the installer's config.
 
+Two more are asserted for all three compose files, direct TLS included,
+because procedures in deploy/README.md depend on them: `recall-server` and
+`sqlite-web` keep the container names `recall-server` and
+`recall-sqlite-web`, which the restore stops and starts by name, needing no
+`-f`; and `recall-server` has a `stop_grace_period` of at least 60 seconds,
+so a stop lets a merge in flight finish and reaches the checkpoint that
+empties the WAL into recall.db, rather than being killed at Docker's
+default of 10.
+
 The checks are also run against copies of each file with one of those lines
 added, and each copy must fail: a check that can never fail is not one.
 
@@ -22,6 +31,7 @@ Reads the files with PyYAML when it is installed, and otherwise through
 import copy
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -31,7 +41,13 @@ FILES = {
     'deploy/docker-compose.yml': 'tunnel',
     'deploy/docker-compose.traefik.yml': 'traefik',
 }
+# Every compose file, for the checks every deployment's procedures rely on.
+ALL_FILES = list(FILES) + ['deploy/docker-compose.direct.yml']
 SERVER, WORKER, BACKEND = 'recall-server', 'recall-worker', 'backend'
+SQLITE_WEB = 'sqlite-web'
+# The names deploy/README.md's restore stops and starts the containers by.
+CONTAINER_NAMES = {SERVER: 'recall-server', SQLITE_WEB: 'recall-sqlite-web'}
+GRACE_SECONDS = 60
 PROFILE = 'worker'
 # Each of these reaches past the worker's own container.
 ESCAPES = ('privileged', 'pid', 'ipc', 'network_mode', 'cap_add', 'devices')
@@ -144,6 +160,51 @@ def problems(doc, ingress):
     return found
 
 
+def seconds(duration):
+    """A compose duration ("60s", "1m", "1m30s", or "1m0s" as `docker compose
+    config` writes it back) in seconds; None if it is not one."""
+    if isinstance(duration, (int, float)):
+        return float(duration)
+    parts = re.findall(r'(\d+(?:\.\d+)?)(h|ms|us|ns|m|s)', str(duration or ''))
+    if not parts or ''.join(n + u for n, u in parts) != str(duration):
+        return None
+    scale = {'h': 3600, 'm': 60, 's': 1, 'ms': 1e-3, 'us': 1e-6, 'ns': 1e-9}
+    return sum(float(n) * scale[u] for n, u in parts)
+
+
+def server_problems(doc):
+    """What every compose file must have for deploy/README.md's procedures."""
+    found = []
+    services = doc.get('services') or {}
+    for service, name in CONTAINER_NAMES.items():
+        got = (services.get(service) or {}).get('container_name')
+        if got != name:
+            found.append(f'{service} is container_name: {name}, which the restore stops '
+                         f'and starts it by, not {got!r}')
+    grace = seconds((services.get(SERVER) or {}).get('stop_grace_period'))
+    if grace is None or grace < GRACE_SECONDS:
+        found.append(f'{SERVER} has stop_grace_period of at least {GRACE_SECONDS}s, so a '
+                     'stop reaches the checkpoint that empties the WAL')
+    return found
+
+
+def server_mutations(doc):
+    """Copies of `doc`, each with one thing server_problems must refuse."""
+    def changed(label, service, change):
+        d = copy.deepcopy(doc)
+        change(d['services'][service])
+        return label, d
+
+    return [
+        changed('no stop_grace_period', SERVER, lambda s: s.pop('stop_grace_period', None)),
+        changed('Docker\'s default grace', SERVER,
+                lambda s: s.__setitem__('stop_grace_period', '10s')),
+        changed('a renamed server container', SERVER,
+                lambda s: s.__setitem__('container_name', 'recall-recall-server-1')),
+        changed('no sqlite-web container name', SQLITE_WEB, lambda s: s.pop('container_name')),
+    ]
+
+
 def mutations(doc, ingress):
     """Copies of `doc`, each with one thing the checks must refuse."""
     def changed(label, change):
@@ -208,6 +269,20 @@ def mutations(doc, ingress):
 
 def main():
     fails = 0
+    for path in ALL_FILES:
+        doc = load(path)
+        found = server_problems(doc)
+        for p in found:
+            print(f'  FAIL {path}: {p}')
+        if not found:
+            print(f'  ok   {path}: container names and stop_grace_period')
+        fails += len(found)
+        for label, bad in server_mutations(doc):
+            if server_problems(bad):
+                print(f'  ok   {path} with {label} is refused')
+            else:
+                print(f'  FAIL {path} with {label} passes the checks')
+                fails += 1
     for path, ingress in FILES.items():
         doc = load(path)
         found = problems(doc, ingress)

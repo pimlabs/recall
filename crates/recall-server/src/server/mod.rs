@@ -478,6 +478,7 @@ impl Server {
         {
             let state = self.state.clone();
             tasks.push(tokio::spawn(async move {
+                let mut wal = WalWatch::default();
                 loop {
                     let s = state.clone();
                     match tokio::task::spawn_blocking(move || sweep_devices(&s)).await {
@@ -500,6 +501,19 @@ impl Server {
                     // them to the drain that check starts.
                     if let Err(e) = jobs::drain_without_worker(&state).await {
                         eprintln!("draining the merge queue failed: {e:#}");
+                    }
+                    // The WAL's commits copied back into recall.db, so the
+                    // file on its own is never more than a sweep behind:
+                    // see Store::checkpoint.
+                    let s = state.clone();
+                    match tokio::task::spawn_blocking(move || s.store.checkpoint()).await {
+                        Ok(Ok(complete)) => {
+                            if let Some(said) = wal.record(complete) {
+                                eprintln!("{said}");
+                            }
+                        }
+                        Ok(Err(e)) => eprintln!("checkpointing the WAL failed: {e:#}"),
+                        Err(_) => {}
                     }
                     tokio::time::sleep(SWEEP_EVERY).await;
                 }
@@ -543,7 +557,8 @@ impl Server {
     }
 
     /// Binds `cfg.addr` and serves until SIGTERM or ctrl-c, then shuts down
-    /// gracefully so an in-flight merge isn't cut off mid-write.
+    /// gracefully so an in-flight merge isn't cut off mid-write, and empties
+    /// the WAL into the database file ([`Store::checkpoint_all`]).
     pub async fn serve(&self) -> Result<()> {
         let listener = TcpListener::bind(&self.state.cfg.addr)
             .await
@@ -620,6 +635,19 @@ impl Server {
         };
         for task in tasks {
             task.abort();
+        }
+        // Last, with every request answered: the WAL emptied into recall.db,
+        // so the file left behind is the whole database, even while
+        // sqlite-web has it open, which keeps closing the connection from
+        // doing the same. Best-effort, like the backups: a WAL it could not
+        // empty is still read on the next start.
+        match self.state.store.checkpoint_all() {
+            Ok(true) => {}
+            Ok(false) => eprintln!(
+                "stopping with commits still in the WAL: a reader held it past the busy \
+                 timeout. Nothing is lost; the next start reads them"
+            ),
+            Err(e) => eprintln!("checkpointing the WAL at shutdown failed: {e:#}"),
         }
         result
     }
@@ -737,6 +765,43 @@ fn sweep_devices(state: &AppState) -> Result<(usize, usize)> {
     )
 }
 
+/// Counts the sweeps in a row whose checkpoint could not copy the whole WAL
+/// back into `recall.db`, and says so once that has lasted long enough to
+/// be a reader holding a transaction open rather than a page being read.
+///
+/// Only a log line, not a `/health` field: `Health` is a frozen shape
+/// released clients read, and this is something for the owner looking at
+/// the server's own output, which is where the other background failures
+/// are reported too.
+#[derive(Debug, Default)]
+struct WalWatch {
+    behind: u32,
+}
+
+impl WalWatch {
+    /// How many sweeps in a row, of `SWEEP_EVERY` each, before it is said.
+    const SWEEPS: u32 = 3;
+
+    /// Records one sweep's checkpoint; answers what to log, if anything:
+    /// every [`Self::SWEEPS`] sweeps while it lasts, and once when it ends.
+    fn record(&mut self, complete: bool) -> Option<String> {
+        if complete {
+            let was = std::mem::take(&mut self.behind);
+            return (was >= Self::SWEEPS)
+                .then(|| "the WAL is fully checkpointed into recall.db again".to_string());
+        }
+        self.behind += 1;
+        self.behind.is_multiple_of(Self::SWEEPS).then(|| {
+            format!(
+                "the WAL has not been fully checkpointed into recall.db for {} sweeps in a \
+                 row: a reader is keeping a transaction open (sqlite-web on a page, a \
+                 `sqlite3` shell), and recall.db-wal grows until it ends. Nothing is lost",
+                self.behind
+            )
+        })
+    }
+}
+
 fn run_backup(state: &AppState) {
     if state.cfg.backup_dir.is_empty() {
         return;
@@ -772,5 +837,96 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {}
         _ = terminate => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Server, WalWatch};
+    use crate::{Config, Store};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// The background sweep checkpoints the WAL, so `recall.db` on its own,
+    /// which is all sqlite-web's single-file mount has, catches up within a
+    /// sweep rather than whenever SQLite's own threshold of 1000 pages comes
+    /// round. The file alone is copied out and opened with no WAL beside
+    /// it, the copy made holding the store's lock, which the checkpoint
+    /// takes too, so it is never of a file a checkpoint is half way through
+    /// writing.
+    #[tokio::test]
+    async fn the_sweep_checkpoints_the_wal_into_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("recall.db");
+        let store = Arc::new(Store::open(&db).unwrap());
+        let server = Server::new(
+            Config {
+                token: "sweep-token".into(),
+                merge_enabled: false,
+                ..Config::default()
+            },
+            store.clone(),
+        );
+        // The schema into the file first, so the file alone opens, and what
+        // it lacks below is only the rows.
+        assert!(store.checkpoint_all().unwrap());
+        for i in 0..5 {
+            store
+                .upsert_audited(
+                    "acme/app",
+                    &format!("f{i}.md"),
+                    "x",
+                    "",
+                    crate::store::test_leaf,
+                )
+                .unwrap();
+        }
+        let alone = || -> i64 {
+            let copy = tempfile::tempdir().unwrap();
+            let file = copy.path().join("recall.db");
+            store
+                .with_raw(|_| {
+                    std::fs::copy(&db, &file).unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            rusqlite::Connection::open(&file)
+                .unwrap()
+                .query_row("SELECT count(*) FROM memory_files", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(alone(), 0, "the rows are only in the WAL before the sweep");
+
+        let tasks = server.start_background();
+        let started = Instant::now();
+        while alone() != 5 {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the first sweep did not checkpoint: the file alone has {}",
+                alone()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        for t in tasks {
+            t.abort();
+        }
+    }
+
+    /// Said after three sweeps behind in a row and every three after, said
+    /// once more when it catches up, and not at all for a sweep or two.
+    #[test]
+    fn a_wal_held_back_for_several_sweeps_is_reported_and_so_is_its_end() {
+        let mut w = WalWatch::default();
+        assert_eq!(w.record(false), None);
+        assert_eq!(w.record(true), None, "one sweep behind is nothing");
+        assert_eq!(w.record(false), None);
+        assert_eq!(w.record(false), None);
+        let said = w.record(false).expect("three in a row");
+        assert!(said.contains("for 3 sweeps"), "{said}");
+        assert_eq!(w.record(false), None);
+        assert_eq!(w.record(false), None);
+        assert!(w.record(false).unwrap().contains("for 6 sweeps"));
+        assert!(w.record(true).unwrap().contains("again"));
+        assert_eq!(w.record(true), None);
     }
 }

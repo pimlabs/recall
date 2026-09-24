@@ -122,11 +122,14 @@ jobs:
             echo "::notice::Nothing under crates/, deploy/, Cargo.toml, Cargo.lock or this workflow changed, so the server image build was skipped. It runs unconditionally on every push to main."
           fi
 
-          if printf '%s\n' "$changed" | grep -Eq '^(crates/|Cargo\.(toml|lock)$|install\.ps1$|\.github/workflows/ci\.yml$)'; then
+          # .github/actions/ too: the windows jobs set up Rust through the
+          # local rust-setup action, so a change there is only proven on
+          # Windows by running them.
+          if printf '%s\n' "$changed" | grep -Eq '^(crates/|Cargo\.(toml|lock)$|install\.ps1$|\.github/workflows/ci\.yml$|\.github/actions/)'; then
             echo "windows=true" >> "$GITHUB_OUTPUT"
           else
             echo "windows=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Nothing under crates/, Cargo.toml, Cargo.lock, install.ps1 or this workflow changed, so the Windows jobs were skipped. They run unconditionally on every push to main."
+            echo "::notice::Nothing under crates/, .github/actions/, Cargo.toml, Cargo.lock, install.ps1 or this workflow changed, so the Windows jobs were skipped. They run unconditionally on every push to main."
           fi
 
   # Seven checks that are plain scripts against files already in the
@@ -153,8 +156,10 @@ jobs:
       # beside the server only while it has no port, no ingress label or
       # network, and no volume the server has. One YAML line undoes any of
       # those, so each is asserted, and each assertion is shown to fail on a
-      # copy of the file with that line added.
-      - name: The merge worker stays unreachable in both compose files
+      # copy of the file with that line added. The same for what the
+      # database procedures rely on in all three files: the container names
+      # the restore stops by, and the server's stop grace period.
+      - name: The compose files keep the worker unreachable and the procedures' names
         run: python3 scripts/compose-check.py
 
       # Not a style check. The doc set has been reorganised twice — `docs/`
@@ -171,6 +176,7 @@ jobs:
           bash -n scripts/api-doc-check.sh
           bash -n scripts/trusted-ip-check.sh
           bash -n scripts/tls-trusted-ip-check.sh
+          bash -n scripts/restore-check.sh
           bash -n scripts/release.sh
           bash -n deploy/backup-offbox.sh
           bash -n scripts/backup-offbox-check.sh
@@ -213,22 +219,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Toolchain (stable, rustfmt + clippy) and Swatinem/rust-cache, saved
+      # only from main (see .github/actions/rust-setup for why). shared-key
+      # is set so this job's cache stays its own: `windows` below already
+      # keys by `matrix.os`, and without a key here this job's entries would
+      # collide with whatever a same-named job elsewhere in the workflow
+      # set saves.
+      - name: Set up Rust (stable, rustfmt + clippy) and the cache
+        uses: ./.github/actions/rust-setup
         with:
-          components: rustfmt, clippy
-
-      # Every push to main writes the cache (mainline is the one history a
-      # PR's own restore should fall back to); a PR run only ever restores
-      # it. A cache entry per PR branch would otherwise pile up against the
-      # repository's cache quota and start evicting main's, which is the one
-      # entry every other run depends on. shared-key is set so this job's
-      # cache stays its own: `windows` below already keys by `matrix.os`,
-      # and without a key here this job's entries would collide with
-      # whatever a same-named job elsewhere in the workflow set saves.
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: rust-linux
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-shared-key: rust-linux
 
       - name: cargo fmt
         run: cargo fmt --all --check
@@ -303,6 +303,14 @@ jobs:
       - name: Rate-limit bucket cannot be chosen by the client, over direct TLS
         run: ./scripts/tls-trusted-ip-check.sh target/release/recall-server
 
+      # The restore, the backups taken by hand and the switch back to the
+      # rollback journal are what an owner pastes when something is already
+      # wrong, and under WAL their mistakes are silent: a WAL left beside a
+      # restored file brings back the database it replaced. So deploy/README.md's
+      # own blocks are run, against a real server, through a stand-in `docker`.
+      - name: The database procedures in deploy/README.md work as written
+        run: ./scripts/restore-check.sh target/release/recall-server
+
   # 124 seconds of a 177-second run — 70% of the whole thing — went into the
   # steps below, on runs that could not possibly have learned anything from
   # them. Of the eight pull requests merged on 2026-09-18, five (#58, #61,
@@ -355,7 +363,7 @@ jobs:
       # pointed at the original builder rather than this new one.
       - name: Set up a cache-backed builder for the source build
         id: buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
         with:
           use: false
 
@@ -366,7 +374,7 @@ jobs:
       # token. It exports those values into the environment of the steps
       # after it, and nothing else.
       - name: Expose the Actions cache service to the build step
-        uses: crazy-max/ghaction-github-runtime@v3
+        uses: crazy-max/ghaction-github-runtime@v4
 
       # The image, both ways it can be built. This is where a crate rename
       # slipped through once: the Dockerfile has no file extension and was
@@ -388,10 +396,18 @@ jobs:
       # works the same way for this Dockerfile: a layer is skipped when
       # neither its instructions nor its input changed, so a docs-only push
       # to main (the image still builds unconditionally there) replays every
-      # layer from cache, and a PR that does touch crates/ still keeps the
-      # base image, apk/npm layers untouched by the diff. `mode=max` on both
-      # so the cache holds every intermediate layer (recall-server's own
-      # compile included), not only the ones the final image is made of.
+      # layer from cache. The Dockerfile's `source` stage uses cargo-chef so
+      # this pays off for ordinary code changes too, not just docs-only
+      # ones: a PR that touches crates/ without touching Cargo.toml/
+      # Cargo.lock keeps the base image, apk/npm layers AND the `cargo chef
+      # cook` layer (dependencies, compiled once and keyed on the recipe
+      # alone) from cache, and only recompiles the crates that actually
+      # changed. Before cargo-chef, any crates/ change invalidated the one
+      # layer that both compiled dependencies and the crates, so a doc
+      # comment change here paid for a full dependency rebuild same as a
+      # real code change did. `mode=max` on both so the cache holds every
+      # intermediate layer (the cook layer and recall-server's own compile
+      # included), not only the ones the final image is made of.
       - name: Server image builds, from source and from a release
         env:
           BUILDER: ${{ steps.buildx.outputs.name }}
@@ -510,14 +526,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Toolchain (stable, rustfmt + clippy) and Swatinem/rust-cache, saved
+      # only from main (see .github/actions/rust-setup for why). Keyed by
+      # matrix.os since the two OSes must not share one cache entry.
+      - name: Set up Rust (stable, rustfmt + clippy) and the cache
+        uses: ./.github/actions/rust-setup
         with:
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.os }}
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-key: ${{ matrix.os }}
 
       - name: cargo fmt
         run: cargo fmt --all --check

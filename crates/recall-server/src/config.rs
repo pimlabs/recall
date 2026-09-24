@@ -137,7 +137,9 @@ pub struct Config {
     /// The single bearer token. There is no second one, by design.
     pub token: String,
     /// The SQLite file. Opened, never created from a schema migration — it
-    /// is the same file the Node server wrote.
+    /// is the same file the Node server wrote. Kept in WAL mode, with its
+    /// `-wal` and `-shm` files beside it, so it must be on a local
+    /// filesystem (see [`Store::open`](crate::Store::open)).
     pub db_path: String,
     /// Reported by `GET /health` so a deploy can be confirmed from outside.
     /// A release binary knows its own commit, stamped at build time; the

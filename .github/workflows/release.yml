@@ -96,6 +96,15 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
+      # Not .github/actions/rust-setup (ci.yml's `rust`/`windows` jobs):
+      # that composite bakes in rustfmt+clippy components and a main-only
+      # save-if, and this job needs neither, wanting a cross-compile target
+      # instead of components, and a cache that always saves, since a
+      # release only runs from a tag or a manual dispatch, never a PR
+      # restore-only run that main-only saving exists to protect. Reusing
+      # it here would mean overriding most of what it fixes, so the two
+      # rust-cache steps stay written out plainly instead of threading
+      # exceptions through a composite built for a different shape.
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -172,7 +181,7 @@ jobs:
           Compress-Archive -Path "dist/recall.exe" -DestinationPath "dist/${{ matrix.asset }}.zip"
           Remove-Item "dist/recall.exe"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.asset }}
           path: |
@@ -272,7 +281,7 @@ jobs:
             rm "dist/$asset"
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: recall-server-and-worker_linux_${{ matrix.arch }}
           path: dist/*.tar.gz
@@ -286,7 +295,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -294,7 +303,7 @@ jobs:
       - name: Checksums
         run: cd dist && sha256sum *.tar.gz *.zip > checksums.txt && cat checksums.txt
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: dist/*
@@ -322,7 +331,7 @@ jobs:
       # No `registry-url`: that writes an .npmrc expecting NODE_AUTH_TOKEN,
       # and there is deliberately no token to give it. npm finds the OIDC
       # credential on its own.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
       # Trusted publishing needs npm 11.5.1 or later; do not rely on
@@ -431,7 +440,7 @@ jobs:
       # generated from, so it has to follow — but a job that can push to
       # main is a larger grant than this one needs. The rewritten file is
       # kept as an artifact, and the step summary says a PR is owed.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: steps.token.outputs.configured == 'true'
         with:
           name: formula

@@ -766,6 +766,11 @@ fn no_backup_means_no_change() {
 #[test]
 fn a_backup_cut_short_leaves_no_partial_file_and_changes_nothing() {
     let fx = Fixture::new();
+    // Beside a running server, as it usually is. The command then maps the
+    // server's WAL index (`recall.db-shm`, 32 KiB) rather than creating
+    // one, which the file size limit below would refuse before the backup
+    // is ever reached.
+    let _server = Running::start(&fx.db());
     let before = fx.dump();
     let out = Command::new("/bin/sh")
         .arg("-c")
@@ -1519,26 +1524,28 @@ fn a_change_works_while_a_server_is_serving_the_same_file() {
     assert_eq!(push(addr, "me/new", "after.md"), 200);
 }
 
-/// The case that has to fail cleanly: a reader that never lets go, so the
-/// commit cannot get its exclusive lock. The command waits out the busy
-/// timeout, rolls back, says so, and leaves the file as it found it, with
-/// no journal behind and the server still serving.
+/// The case that has to fail cleanly: a writer that never lets go, so the
+/// command cannot get the write lock. (Under WAL, which the server keeps
+/// the file in, nothing else can hold a change up: a reader no longer
+/// blocks a commit.) The command waits out the busy timeout, rolls back,
+/// says so, and leaves the file as it found it, with the server still
+/// serving.
 #[test]
 fn a_lock_held_past_the_busy_timeout_fails_cleanly() {
     let fx = Fixture::new();
     let server = Running::start(&fx.db());
     let before = fx.dump();
 
-    let reader = Connection::open(fx.db()).unwrap();
-    reader.execute_batch("BEGIN").unwrap();
-    let _: i64 = reader
-        .query_row("SELECT count(*) FROM memory_files", [], |r| r.get(0))
+    let writer = Connection::open(fx.db()).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    writer
+        .execute_batch("UPDATE memory_files SET content = 'uncommitted' WHERE deleted = 0")
         .unwrap();
 
     let started = Instant::now();
     let out = fx.admin(&["remove", OLD, "--yes"]);
     let waited = started.elapsed();
-    reader.execute_batch("COMMIT").unwrap();
+    writer.execute_batch("ROLLBACK").unwrap();
 
     assert_exit(&out, 1);
     let (_, stderr) = text(&out);
@@ -1559,6 +1566,91 @@ fn a_lock_held_past_the_busy_timeout_fails_cleanly() {
     assert_eq!(ok, "ok");
     assert_eq!(push(server.addr, OLD, "after.md"), 200);
     assert_eq!(pulled(server.addr, OLD), 4);
+}
+
+/// The other case that stays locked: a file still in the rollback journal,
+/// which an admin command leaves as it finds it (only a server switches a
+/// file to WAL), where a reader mid-read does hold a change up past the
+/// busy timeout. The message names that case too, rather than sending the
+/// owner to look for a writer that is not there.
+#[test]
+fn a_reader_holds_up_a_change_on_a_file_still_in_the_rollback_journal() {
+    let fx = Fixture::new();
+    let before = fx.dump();
+    let mode: String = Connection::open(fx.db())
+        .unwrap()
+        .query_row("PRAGMA journal_mode = DELETE", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(mode, "delete");
+
+    let reader = Connection::open(fx.db()).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let _: i64 = reader
+        .query_row("SELECT count(*) FROM memory_files", [], |r| r.get(0))
+        .unwrap();
+    let out = fx.admin(&["remove", OLD, "--yes"]);
+    reader.execute_batch("COMMIT").unwrap();
+
+    assert_exit(&out, 1);
+    let (_, stderr) = text(&out);
+    assert!(stderr.contains("stayed locked"), "{stderr}");
+    assert!(
+        stderr.contains("still in the rollback journal") && stderr.contains("a reader too"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("The database was not changed."), "{stderr}");
+    assert_eq!(fx.dump(), before);
+    let mode: String = Connection::open(fx.db())
+        .unwrap()
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(mode, "delete", "the command left the journal mode alone");
+}
+
+/// What WAL changed for these commands: a reader mid-read, as sqlite-web
+/// is while a page loads, no longer holds a change up (under the rollback
+/// journal this was the case that timed out). The change commits at once,
+/// the reader goes on seeing the moment it began at until it is done, the
+/// server keeps serving throughout, and `list` works beside all three.
+#[test]
+fn a_reader_mid_read_no_longer_holds_up_a_change() {
+    let fx = Fixture::new();
+    let server = Running::start(&fx.db());
+    let count = |c: &Connection| -> i64 {
+        c.query_row(
+            "SELECT count(*) FROM memory_files WHERE project_key = ?1",
+            (OLD,),
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+
+    let reader = Connection::open(fx.db()).unwrap();
+    let mode: String = reader
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal", "the server left the file in WAL");
+    reader.execute_batch("BEGIN").unwrap();
+    assert_eq!(count(&reader), 3);
+
+    let started = Instant::now();
+    let out = fx.admin(&["remove", OLD, "--yes"]);
+    assert_exit(&out, 0);
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "it did not wait out the busy timeout behind a reader: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(count(&reader), 3, "the reader's moment, unchanged");
+    let listed = fx.admin(&["list"]);
+    assert_exit(&listed, 0);
+    assert!(!text(&listed).0.contains(OLD), "{}", text(&listed).0);
+    assert_eq!(push(server.addr, "me/thing", "during.md"), 200);
+
+    reader.execute_batch("COMMIT").unwrap();
+    assert_eq!(count(&reader), 0);
+    assert_eq!(pulled(server.addr, OLD), 0);
+    assert_eq!(pulled(server.addr, "me/thing"), 2);
 }
 
 /// A stand-in `claude` that takes `seconds` to merge, which is how long a

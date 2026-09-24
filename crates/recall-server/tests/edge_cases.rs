@@ -685,3 +685,218 @@ fn data_survives_closing_and_reopening_the_database() {
             .deleted
     );
 }
+
+/// A snapshot is what a restore restores, so it has to hold every push the
+/// server answered 200 before it began. Under WAL those can be only in
+/// `recall.db-wal`, and more pushes land while it runs. Restored as
+/// `deploy/README.md` says (the snapshot alone, copied in as `recall.db`
+/// with no WAL beside it), it opens, which re-checks its whole audit log;
+/// its log and its rows agree; it holds every one of those pushes; and of
+/// the pushes that raced it, an unbroken run from the first, which is what
+/// one consistent moment looks like.
+///
+/// The test a backup "simplified" to copying `recall.db` fails: the file
+/// alone does not have what the WAL holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_backup_taken_during_pushes_restores_every_acknowledged_one() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const BEFORE: usize = 40;
+    const DURING: usize = 300;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("recall.db");
+    let store = Arc::new(Store::open(&db).unwrap());
+    let server = Server::new(
+        Config {
+            token: TOKEN.to_string(),
+            merge_enabled: false,
+            rate_limit_max: 1_000_000,
+            ..Config::default()
+        },
+        store.clone(),
+    );
+    let router = server.router();
+    let push = |i: usize| {
+        let body = PushRequest {
+            project_key: "acme/app".into(),
+            file_path: format!("f{i:04}.md"),
+            content: Some(format!("fact {i}\n")),
+            source_env: "test".into(),
+            deleted: false,
+            base_sha256: None,
+        };
+        Request::builder()
+            .method("POST")
+            .uri("/sync")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
+    };
+
+    for i in 0..BEFORE {
+        let resp = router.clone().oneshot(push(i)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+    let wal = std::fs::metadata(dir.path().join("recall.db-wal")).map_or(0, |m| m.len());
+    assert!(wal > 0, "the acknowledged pushes are still only in the WAL");
+
+    let acked = Arc::new(AtomicUsize::new(0));
+    let pushing = {
+        let (router, acked) = (router.clone(), acked.clone());
+        tokio::spawn(async move {
+            for i in BEFORE..BEFORE + DURING {
+                let resp = router.clone().oneshot(push(i)).await.unwrap();
+                assert_eq!(resp.status(), StatusCode::OK);
+                acked.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+    };
+    // Some of them in, and the rest still coming, as the backup starts.
+    let started = std::time::Instant::now();
+    while acked.load(Ordering::SeqCst) < 5 {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "pushes stalled"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    let snapshot = {
+        let (store, dest) = (store.clone(), dir.path().join("backups"));
+        tokio::task::spawn_blocking(move || store.backup(dest, 7))
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    pushing.await.unwrap();
+
+    let restored_dir = tempfile::tempdir().unwrap();
+    let restored = restored_dir.path().join("recall.db");
+    std::fs::copy(&snapshot, &restored).unwrap();
+    let st = Store::open(&restored).expect("the restored audit log checks out");
+    let files: std::collections::HashMap<String, Option<String>> = st
+        .list("acme/app")
+        .unwrap()
+        .into_iter()
+        .map(|f| (f.file_path, f.content))
+        .collect();
+
+    for i in 0..BEFORE {
+        assert_eq!(
+            files.get(&format!("f{i:04}.md")),
+            Some(&Some(format!("fact {i}\n"))),
+            "push {i} was answered 200 before the backup began, and the restore lacks it"
+        );
+    }
+    let raced = (BEFORE..BEFORE + DURING)
+        .take_while(|i| files.contains_key(&format!("f{i:04}.md")))
+        .count();
+    assert_eq!(
+        files.len(),
+        BEFORE + raced,
+        "the snapshot holds a push without every push answered before it"
+    );
+
+    let conn = rusqlite::Connection::open(&restored).unwrap();
+    let ok: String = conn
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(ok, "ok");
+    let push_leaves: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM audit_log
+             WHERE json_extract(CAST(leaf AS TEXT), '$.action') = 'push'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        push_leaves,
+        files.len() as i64,
+        "one push leaf for every row"
+    );
+}
+
+/// A restore run without stopping the server: the live files moved aside
+/// and a snapshot copied in as `recall.db`, as the restore block does, but
+/// under a server still serving. Its connection still has the moved file,
+/// so it would answer 200 to pushes written into a file nobody reads any
+/// more. It answers 500 instead, to pushes and pulls alike, and writes
+/// nothing, into either file; the client keeps its copy and pushes again
+/// once the server is restarted.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_server_whose_database_was_moved_aside_refuses_to_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let db = data.join("recall.db");
+    let store = Arc::new(Store::open(&db).unwrap());
+    let server = Server::new(
+        Config {
+            token: TOKEN.to_string(),
+            merge_enabled: false,
+            rate_limit_max: 10_000,
+            ..Config::default()
+        },
+        store.clone(),
+    );
+    let push = |path: &str| {
+        let body = PushRequest {
+            project_key: "acme/app".into(),
+            file_path: path.into(),
+            content: Some("fact\n".into()),
+            source_env: "test".into(),
+            deleted: false,
+            base_sha256: None,
+        };
+        Request::builder()
+            .method("POST")
+            .uri("/sync")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
+    };
+    let pull = || {
+        Request::builder()
+            .uri("/sync?project_key=acme/app")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let router = server.router();
+    let status = |req: Request<Body>| {
+        let router = router.clone();
+        async move { router.oneshot(req).await.unwrap().status() }
+    };
+    assert_eq!(status(push("before.md")).await, StatusCode::OK);
+    let snapshot = store.backup(dir.path().join("backups"), 7).unwrap();
+
+    let aside = data.join("replaced");
+    std::fs::create_dir(&aside).unwrap();
+    for f in ["recall.db", "recall.db-wal", "recall.db-shm"] {
+        if data.join(f).exists() {
+            std::fs::rename(data.join(f), aside.join(f)).unwrap();
+        }
+    }
+    std::fs::copy(&snapshot, &db).unwrap();
+
+    assert_eq!(
+        status(push("after.md")).await,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(status(pull()).await, StatusCode::INTERNAL_SERVER_ERROR);
+    drop(server);
+    drop(store);
+
+    for file in [aside.join("recall.db"), db] {
+        let names: Vec<String> = Store::open(&file)
+            .unwrap()
+            .list("acme/app")
+            .unwrap()
+            .into_iter()
+            .map(|f| f.file_path)
+            .collect();
+        assert_eq!(names, ["before.md"], "{}", file.display());
+    }
+}
