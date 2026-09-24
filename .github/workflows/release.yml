@@ -144,11 +144,16 @@ jobs:
       - name: Built for the right architecture
         if: runner.os == 'macOS'
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          want=$(case "${{ matrix.target }}" in x86_64-*) echo x86_64 ;; aarch64-*) echo arm64 ;; esac)
-          got=$(lipo -archs "target/${{ matrix.target }}/release/recall")
-          echo "${{ matrix.target }}: $got"
+          # An if, not `$(case ... ;; esac)`: the bash 3.2 that macOS
+          # runners ship cannot parse a case's `)` inside `$( )`, which is
+          # what stopped v0.4.3 at this step before anything was published.
+          if [[ "$TARGET" == x86_64-* ]]; then want=x86_64; else want=arm64; fi
+          got=$(lipo -archs "target/$TARGET/release/recall")
+          echo "$TARGET: $got"
           [ "$got" = "$want" ] || { echo "::error::expected $want, the binary is $got"; exit 1; }
 
       # Unix packaging: a tar.gz containing the binary renamed to the asset
