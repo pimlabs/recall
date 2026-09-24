@@ -56,6 +56,19 @@ pub mod action {
     pub const JOB_RESULT: &str = "job_result";
     /// A failed job was queued again.
     pub const JOB_RETRY: &str = "job_retry";
+    /// A passkey was registered for the admin page: the first, with
+    /// `RECALL_TOKEN` and the bootstrap code, or another, from a session.
+    pub const PASSKEY_ADD: &str = "passkey_add";
+    /// A passkey was removed, and every session it signed in with it.
+    pub const PASSKEY_REMOVE: &str = "passkey_remove";
+    /// Every admin session but the one asking was ended.
+    pub const SESSIONS_END: &str = "sessions_end";
+    /// The server issued a bootstrap code, at start, with no passkey
+    /// registered.
+    pub const BOOTSTRAP_CODE: &str = "bootstrap_code";
+    /// `recall-server reset-passkeys` removed every passkey and session and
+    /// issued a new bootstrap code.
+    pub const PASSKEY_RESET: &str = "passkey_reset";
 }
 
 /// Who did it (`actor.kind`).
@@ -79,9 +92,18 @@ pub enum Actor<'a> {
         /// Its label.
         tag: &'a str,
     },
-    /// The server's own doing: a sweep, `start`, or merging a queued job
-    /// itself once no worker is left to.
+    /// The admin page's passkey session, named by the passkey it signed in
+    /// with, never by its token.
+    Session {
+        /// The passkey's credential id.
+        credential_id: &'a str,
+    },
+    /// The server's own doing: a sweep, `start`, a bootstrap code, or
+    /// settling a queued job itself once no worker is left to.
     Server,
+    /// A command run where the server runs, on its database file:
+    /// `recall-server reset-passkeys`.
+    Host,
 }
 
 impl Actor<'_> {
@@ -102,8 +124,15 @@ impl Actor<'_> {
                 m.insert("id".into(), json!(id));
                 m.insert("tag".into(), json!(tag));
             }
+            Actor::Session { credential_id } => {
+                m.insert("kind".into(), json!("session"));
+                m.insert("credential_id".into(), json!(credential_id));
+            }
             Actor::Server => {
                 m.insert("kind".into(), json!("server"));
+            }
+            Actor::Host => {
+                m.insert("kind".into(), json!("host"));
             }
         }
         Value::Object(m)
@@ -280,6 +309,41 @@ pub fn subject_job_retry(job: &recall_wire::JobSummary) -> Value {
     m.insert("kind".into(), json!(job.kind));
     m.insert("project_key".into(), json!(job.project_key));
     m.insert("file_path".into(), json!(job.file_path));
+    Value::Object(m)
+}
+
+/// `subject` for [`action::PASSKEY_ADD`] and [`action::PASSKEY_REMOVE`]:
+/// which passkey, by its credential id and name, and, when added, whether
+/// it was the first, registered with the bootstrap code. Never the key
+/// itself: a passkey signs in to the admin page, not requests this log
+/// checks.
+pub fn subject_passkey(credential_id: &str, name: &str, first: Option<bool>) -> Value {
+    let mut m = Map::new();
+    m.insert("credential_id".into(), json!(credential_id));
+    m.insert("name".into(), json!(name));
+    if let Some(first) = first {
+        m.insert("first".into(), json!(first));
+    }
+    Value::Object(m)
+}
+
+/// `subject` for [`action::SESSIONS_END`]: how many sessions ended.
+pub fn subject_sessions_end(ended: usize) -> Value {
+    let mut m = Map::new();
+    m.insert("ended".into(), json!(ended));
+    Value::Object(m)
+}
+
+/// `subject` for [`action::BOOTSTRAP_CODE`], and with `removed` for
+/// [`action::PASSKEY_RESET`]: until when the code holds, and how many
+/// passkeys went. Never the code, nor its hash, which a code this short
+/// would not survive.
+pub fn subject_bootstrap(removed: Option<usize>, expires_at: &str) -> Value {
+    let mut m = Map::new();
+    if let Some(removed) = removed {
+        m.insert("passkeys_removed".into(), json!(removed));
+    }
+    m.insert("expires_at".into(), json!(expires_at));
     Value::Object(m)
 }
 

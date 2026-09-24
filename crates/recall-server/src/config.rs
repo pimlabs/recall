@@ -105,6 +105,7 @@ pub enum ConfigError {
 /// | [`claude_bin`] | `RECALL_CLAUDE_BIN` | `claude` |
 /// | [`claude_status_interval`] | `RECALL_CLAUDE_STATUS_INTERVAL_MS` | 30m |
 /// | [`ephemeral_device_ttl`] | `RECALL_EPHEMERAL_DEVICE_TTL_HOURS` | 24h |
+/// | [`public_url`] | `RECALL_PUBLIC_URL` | unset: passkey sign-in off |
 /// | [`tls`] | `RECALL_TLS_CERT`/`RECALL_TLS_KEY`, or `RECALL_TLS_ACME_DOMAINS`/`RECALL_TLS_ACME_EMAIL`/`RECALL_TLS_ACME_DIR`/`RECALL_TLS_ACME_STAGING` | off |
 /// | [`tls_max_connections`] | `RECALL_TLS_MAX_CONNECTIONS` | 512 |
 ///
@@ -126,6 +127,7 @@ pub enum ConfigError {
 /// [`claude_bin`]: Config::claude_bin
 /// [`claude_status_interval`]: Config::claude_status_interval
 /// [`ephemeral_device_ttl`]: Config::ephemeral_device_ttl
+/// [`public_url`]: Config::public_url
 /// [`tls`]: Config::tls
 /// [`tls_max_connections`]: Config::tls_max_connections
 #[derive(Debug, Clone)]
@@ -198,6 +200,16 @@ pub struct Config {
     /// in its container stops working within a day of its last use.
     pub ephemeral_device_ttl: Duration,
 
+    /// The address people reach this server at, such as
+    /// `https://recall.example.com`: an origin, with no path.
+    ///
+    /// Passkeys are bound to a site, and the server cannot learn which one
+    /// from a request: behind Traefik it sees plain HTTP, and a `Host`
+    /// header is whatever the client sent. So the site is configured. The
+    /// WebAuthn relying party id is its host and the origin a passkey must
+    /// be used from is the whole of it. Empty leaves passkey sign-in on
+    /// `/admin` off, and the page says so; nothing else depends on it.
+    pub public_url: String,
     /// Whether this server terminates TLS itself. Off by default: the two
     /// existing deployments (`deploy/docker-compose.yml`,
     /// `docker-compose.traefik.yml`) put an ingress in front instead, and
@@ -281,6 +293,7 @@ impl Default for Config {
             claude_bin: "claude".to_string(),
             claude_status_interval: Duration::from_secs(30 * 60),
             ephemeral_device_ttl: DEFAULT_EPHEMERAL_DEVICE_TTL,
+            public_url: String::new(),
             tls: TlsMode::Off,
             tls_max_connections: DEFAULT_TLS_MAX_CONNECTIONS,
         }
@@ -435,6 +448,12 @@ impl Config {
             ephemeral_device_ttl: Duration::from_secs(
                 num("RECALL_EPHEMERAL_DEVICE_TTL_HOURS", 24).saturating_mul(3600),
             ),
+            // Checked when the server starts, not here: a bad value turns
+            // passkey sign-in off with the reason on the page, rather than
+            // keeping a server that syncs fine from starting.
+            public_url: get("RECALL_PUBLIC_URL")
+                .map(|v| v.trim().to_string())
+                .unwrap_or_default(),
             tls,
             tls_max_connections: num(
                 "RECALL_TLS_MAX_CONNECTIONS",
@@ -533,6 +552,7 @@ mod tests {
             ("RECALL_CLAUDE_BIN", "/usr/bin/claude"),
             ("RECALL_CLAUDE_STATUS_INTERVAL_MS", "60000"),
             ("RECALL_EPHEMERAL_DEVICE_TTL_HOURS", "2"),
+            ("RECALL_PUBLIC_URL", " https://recall.example.com "),
         ]))
         .unwrap();
 
@@ -548,6 +568,7 @@ mod tests {
         assert_eq!(cfg.claude_bin, "/usr/bin/claude");
         assert_eq!(cfg.claude_status_interval, Duration::from_millis(60_000));
         assert_eq!(cfg.ephemeral_device_ttl, Duration::from_secs(2 * 3600));
+        assert_eq!(cfg.public_url, "https://recall.example.com");
     }
 
     #[test]

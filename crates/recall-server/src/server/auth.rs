@@ -64,6 +64,12 @@ pub(super) enum Caller {
         /// The `agent` it enrolled with, for an audit leaf's `actor.agent`.
         agent: String,
     },
+    /// Signed in to the admin page with a passkey: the owner, on the routes
+    /// that manage devices and nowhere else.
+    Owner {
+        /// The passkey the session signed in with.
+        credential_id: String,
+    },
 }
 
 /// What a signed request's audit leaf records under `request`: enough for
@@ -85,7 +91,7 @@ impl Caller {
     /// the stats.
     pub(super) fn is_admin(&self) -> bool {
         match self {
-            Caller::Operator => true,
+            Caller::Operator | Caller::Owner { .. } => true,
             Caller::Device { scope, .. } => scope == SCOPE_ADMIN,
         }
     }
@@ -671,6 +677,10 @@ mod tests {
             agent: String::new(),
         };
         assert!(Caller::Operator.is_admin());
+        assert!(Caller::Owner {
+            credential_id: "c".into()
+        }
+        .is_admin());
         assert!(device("admin").is_admin());
         assert!(!device("sync").is_admin());
         assert!(!device("worker").is_admin());

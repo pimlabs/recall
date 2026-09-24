@@ -44,6 +44,9 @@ services:
       RECALL_BACKUP_DIR: /backups
       RECALL_BACKUP_INTERVAL_HOURS: "24"
       RECALL_BACKUP_KEEP: "7"
+      # The address /admin is opened at, such as https://recall.example.com.
+      # Passkeys are bound to it; empty leaves passkey sign-in off.
+      RECALL_PUBLIC_URL: ${RECALL_PUBLIC_URL:-}
       # Not cosmetic. Rate limiting keys off this header, and rate limiting
       # runs before auth so a flood of invalid tokens is limited too. Traefik
       # sets x-real-ip to the real client address; leave this as the tunnel's

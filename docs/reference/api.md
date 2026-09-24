@@ -2,11 +2,13 @@
 
 Recall's server exposes six routes for memory and the deployment, and, since
 0.4.1, ten under `/v1` for devices, four for the merge queue, and, since
-0.4.2, three for the audit log. Two carry memory files, two are for looking
-at the deployment, one says what the server is and speaks, one is a browser
+0.4.2, eleven under `/admin` for the admin page's passkey sign-in and
+three for the audit log. Two carry memory files, two are for looking at
+the deployment, one says what the server is and speaks, one is a browser
 page, the device routes enrol machines and manage them, the job routes are
 how a worker merges conflicts away from the process that faces the
-internet, and the audit routes read the Merkle tree kept over every
+internet, the passkey routes let the owner sign in to that page from a
+phone, and the audit routes read the Merkle tree kept over every
 authenticated action.
 
 This is a **frozen** surface: field names, field order, and the difference
@@ -27,7 +29,11 @@ exception is signed requests, which take a signing client rather than
 for the job routes a worker signs
 [`crates/recall-server/tests/jobs.rs`](../../crates/recall-server/tests/jobs.rs),
 and [`tests/audit.rs`](../../crates/recall-server/tests/audit.rs)
-assert what this page says about them.
+assert what this page says about them. Passkey ceremonies are the same:
+they take an authenticator, so
+[`crates/recall-server/tests/passkeys.rs`](../../crates/recall-server/tests/passkeys.rs)
+drives them with a software one, and the script checks everything around
+them that `curl` can reach.
 
 | Route | Auth | Purpose |
 |---|:---:|---|
@@ -52,15 +58,30 @@ assert what this page says about them.
 | [`POST /v1/jobs/{id}/result`](#post-v1jobsidresult) | worker | Hand back a merge, or the error it met |
 | [`GET /v1/jobs`](#get-v1jobs-and-post-v1jobsidretry) | admin | Jobs, newest first, without file content |
 | [`POST /v1/jobs/{id}/retry`](#get-v1jobs-and-post-v1jobsidretry) | admin | Queue a failed job again |
+| [`GET /admin/session`](#get-adminsession) | **no** | Whether passkey sign-in is on, and the session this browser holds |
+| [`POST /admin/bootstrap/register`](#post-adminbootstrapregister-and-finish) | token, once | Register the first passkey |
+| [`POST /admin/bootstrap/register/finish`](#post-adminbootstrapregister-and-finish) | token, once | Finish registering it |
+| [`POST /admin/login/start`](#post-adminloginstart-and-finish) | **no** | Start a passkey sign-in |
+| [`POST /admin/login/finish`](#post-adminloginstart-and-finish) | **no** | Finish it, and get a session |
+| [`POST /admin/logout`](#post-adminlogout-and-post-adminlogoutothers) | session | End the session |
+| [`POST /admin/logout/others`](#post-adminlogout-and-post-adminlogoutothers) | session, recent | End every other session |
+| [`GET /admin/passkeys`](#passkeys-get-adminpasskeys-and-the-rest) | session | Every passkey |
+| [`POST /admin/passkeys/register`](#passkeys-get-adminpasskeys-and-the-rest) | session, recent | Add another passkey |
+| [`POST /admin/passkeys/register/finish`](#passkeys-get-adminpasskeys-and-the-rest) | session | Finish adding it |
+| [`POST /admin/passkeys/{id}/remove`](#passkeys-get-adminpasskeys-and-the-rest) | session, recent | Remove one, never the last |
 | [`GET /v1/audit/checkpoint`](#get-v1auditcheckpoint) | any | The audit tree's size and root |
 | [`GET /v1/audit/entries`](#get-v1auditentries) | admin | Leaves `start` to `end - 1` |
 | [`GET /v1/audit/consistency`](#get-v1auditconsistency) | any | The proof that `second` extends `first` |
 
 "yes" is either credential below, except that a `worker` device may not
 use them; "any" is either credential, a worker's included; "admin" is
-`RECALL_TOKEN` or a device approved with the `admin` scope; "device" is any
-device's signature but a worker's; "worker" is a device approved with the
-`worker` scope, and nothing else, not even the token.
+`RECALL_TOKEN`, a device approved with the `admin` scope, or, everywhere
+but `/v1/jobs`, the admin page's [passkey session](#the-admin-session);
+"device" is any device's signature but a worker's; "worker" is a device
+approved with the `worker` scope, and nothing else, not even the token;
+"session" is the passkey session alone, and "recent" one that signed in
+within the last five minutes; "token, once" is `RECALL_TOKEN` with the
+one-time bootstrap code, and only until a passkey exists.
 `/admin/stats` was "yes" until 0.4.1, and still is for the token: only a
 `sync` device is refused there.
 
@@ -69,7 +90,9 @@ device's signature but a worker's; "worker" is a device approved with the
 ## Authentication
 
 Two credentials are accepted on every authenticated route: the one bearer
-token, and, from 0.4.1, a request signed by an enrolled device.
+token, and, from 0.4.1, a request signed by an enrolled device. The routes
+marked "admin" also accept a third, from 0.4.2: the [admin
+session](#the-admin-session) a passkey sign-in gives the `/admin` page.
 
 ### The bearer token
 
@@ -189,6 +212,8 @@ always.
 | One device signing more than its share of nonces | `429` | `{"error":"too many signed requests from this device, try again later"}` |
 | Too many signed requests from every device together to remember their nonces | `503` | `{"error":"too many signed requests at once, try again later"}` |
 | Too many requests | `429` | `{"error":"rate limit exceeded, try again later"}`, plus a `Retry-After` header |
+| An admin session cookie naming no live session, on an admin route | `401` | `{"error":"unauthorized: the admin session has ended; sign in again"}` |
+| An admin session on a `POST` without its `X-Recall-CSRF` header, or with the wrong one | `403` | `{"error":"forbidden: this needs the admin session's X-Recall-CSRF header"}` |
 
 ### Rate limiting
 
@@ -680,10 +705,29 @@ server knows it with [`GET /v1/devices/me`](#get-v1devicesme).
 
 ## `GET /admin`
 
-The same numbers as an HTML page, for a browser. Unauthenticated because it
-ships no data of its own — it fetches `/admin/stats` from the browser, which
-means the person looking at it still needs the token. Served under a strict
-CSP that allows no external anything.
+The admin page, for a browser, and made to work on a phone: a Devices tab
+(approve a machine by its code, list and revoke devices, make and revoke
+authkeys), the same numbers as `/admin/stats`, and the owner's
+passkeys. Unauthenticated because it ships no data of its own: it signs in
+with a passkey (see [the admin page's passkey
+sign-in](#the-admin-pages-passkey-sign-in)), or takes `RECALL_TOKEN` as it
+always has, and fetches everything else from the browser.
+
+Its script and stylesheet are inline, and nothing is loaded from anywhere
+else. It is served with:
+
+| Header | Value |
+|---|---|
+| `Content-Security-Policy` | `default-src 'none'; script-src 'sha256-…'; style-src 'sha256-…'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'` |
+| `X-Frame-Options` | `DENY` |
+| `Referrer-Policy` | `no-referrer` |
+| `X-Content-Type-Options` | `nosniff` |
+| `Cache-Control` | `no-cache` |
+
+The inline script and stylesheet are allowed by their SHA-256, which the
+server computes from the page it embeds, not by `'unsafe-inline'`, and
+nothing allows `eval`. So a script injected into the page would not run,
+and one that did could send nothing anywhere but this server.
 
 ---
 
@@ -1005,22 +1049,34 @@ a key revoked earlier on its own revokes them as well. `404` with
 ## Audit
 
 Since 0.4.2. Every authenticated push, pull and delete, every change to a
-device or authkey — an authkey enrolling a device included — and every
-merge job leased, settled or retried, the server's own included, appends
-one **leaf** to an append-only Merkle tree: RFC 9162 §2.1 exactly, SHA-256,
+device or authkey — an authkey enrolling a device included — every merge
+job leased, settled or retried, the server's own included, and every
+change to the admin page's passkeys and sessions but a sign-in or a
+sign-out, `recall-server reset-passkeys` included, appends one **leaf** to
+an append-only Merkle tree: RFC 9162 §2.1 exactly, SHA-256,
 the same tree Certificate Transparency and Sigstore Rekor use. A leaf
 hashes as `SHA-256(0x00 || leaf)`, an inner node as `SHA-256(0x01 || left
 || right)`, and the tree splits at the largest power of two below its
 size. The leaf and the state change it records commit in one transaction,
 so the log never shows an action that did not happen, or misses one the
 server made. Unauthenticated routes, refused requests, and the audit
-routes themselves append nothing — reading the log does not grow it — and
-neither do the host's own `recall-server admin` commands, which change the
-database file beside the server rather than through it (see
-[`deploy/README.md`](../../deploy/README.md#renaming-removing-or-restoring-a-project)),
-nor the queue's own housekeeping, which changes no file and no job's
-outcome: a revoked worker's leases released for the server's claim that
-follows, and finished jobs pruned after 30 days.
+routes themselves append nothing — reading the log does not grow it —
+and neither do:
+
+- the host's own `recall-server admin` commands, which change the database
+  file beside the server rather than through it (see
+  [`deploy/README.md`](../../deploy/README.md#renaming-removing-or-restoring-a-project));
+- signing in to the admin page and signing out of it, which start and end
+  a session without changing what it may do (what a session then changes
+  is in the log, credited to its passkey);
+- the queue's own housekeeping, which changes no file and no job's
+  outcome: a revoked worker's leases released for the server's claim that
+  follows, and finished jobs pruned after 30 days.
+
+`reset-passkeys` also runs on the host, in a process of its own, and does
+append its leaf: the next `seq` in the table. A running server reads any
+leaf it did not write into its tree before its own next append, so the
+two never fork; its checkpoint catches up at that append.
 
 **What it protects, and what it does not.** A checkpoint — the tree's size
 and root — saved somewhere the server cannot reach lets
@@ -1057,10 +1113,10 @@ a re-serialization:
 | `v` | The leaf format, `1`. |
 | `seq` | Its index in the tree, from 0. |
 | `at` | When it was appended, taken under the lock the append holds, so it never goes back along `seq`. A push's or delete's `updated_at` is the same moment. |
-| `action` | `push`, `delete`, `pull`, `approve`, `enroll`, `deny`, `revoke`, `sweep`, `authkey_create`, `authkey_revoke`, `start`, `job_claim`, `job_result`, or `job_retry`. |
-| `actor` | Who did it, by `kind`: `device`, with its `id`, `name` and `agent`, for a signed request; `operator` for `RECALL_TOKEN`; `authkey`, with its `id` and `tag` (never the key), for the device it enrols; `server` for a sweep, for `start`, which the server appends once it is serving, naming the version it started as, and for a job it claims or settles itself: a merge it does with no worker left, a lease that ran out (`job_result` with the job `queued` again or `failed`), a job it fails for want of anything to merge it. |
-| `subject` | What changed, and the hash of what is now stored — never the content. By `action`: for `push` and `delete`, the file's `project_key`, `file_path`, `deleted`, `stored_sha256`, `base_sha256` (lowercase), `merged` (the server merged the push with what it held, so `stored_sha256` is not the hash of what was sent) and `merge_job` (the job queued to merge it with the version it displaced, or `null`); `project_key` for `pull`; for `job_claim`, the `job_id`, `kind`, `attempt`, `lease_expires_at`, and, for a merge, its `project_key` and `file_path` (never the lease id); for `job_result`, the `job_id`, `project_key`, `file_path`, the `state` it is in now (`done`, `queued` for another attempt, or `failed`), `stored_sha256` (what the file became, when this result wrote the merge to it, `null` otherwise) and `follow_up` (the job that merges it again with a newer version, or `null`); for `job_retry`, the `job_id`, `kind`, `project_key` and `file_path`; for `approve` and `enroll`, the device's `device_id`, `name`, `scope`, `public_key`, `fingerprint`, `ephemeral`, `authkey_id` (the key an `enroll` came by) and `user_code` (the code an `approve` decided) — the key a signature it makes is checked with, after the device row is gone too; `device_id`/`name` for `revoke` and `sweep`; `user_code`/`name` for `deny`; `authkey_id`/`tag`/`ephemeral`/`max_devices` for `authkey_create`; `authkey_id`/`revoke_devices`/`revoked_devices` (the ids this revoked) for `authkey_revoke`; `version` for `start`. |
-| `request` | For a device's signed request: the SHA-256 of its body as `Content-Digest` carried it, standard base64; the exact RFC 9421 §2.5 signature base the device's signature verified against; the signature, standard base64; and `body`, the request body itself for `approve`, `deny`, `revoke`, `authkey_create` and `authkey_revoke`, whose bodies are a few bytes with no secret in them, `null` for the rest, a job result's merged file among them. `null` for everyone but a device, who sign nothing. |
+| `action` | `push`, `delete`, `pull`, `approve`, `enroll`, `deny`, `revoke`, `sweep`, `authkey_create`, `authkey_revoke`, `start`, `job_claim`, `job_result`, `job_retry`, `passkey_add`, `passkey_remove`, `sessions_end`, `bootstrap_code`, or `passkey_reset`. |
+| `actor` | Who did it, by `kind`: `device`, with its `id`, `name` and `agent`, for a signed request; `operator` for `RECALL_TOKEN`; `session`, with the `credential_id` of the passkey it signed in with (never its cookie), for the admin page; `authkey`, with its `id` and `tag` (never the key), for the device it enrols; `server` for a sweep, for `start`, which the server appends once it is serving, naming the version it started as, for a bootstrap code it issues, and for a job it claims or settles itself: a merge it does with no worker left, a lease that ran out (`job_result` with the job `queued` again or `failed`), a job it fails for want of anything to merge it; `host` for `recall-server reset-passkeys`. |
+| `subject` | What changed, and the hash of what is now stored — never the content. By `action`: for `push` and `delete`, the file's `project_key`, `file_path`, `deleted`, `stored_sha256`, `base_sha256` (lowercase), `merged` (the server merged the push with what it held, so `stored_sha256` is not the hash of what was sent) and `merge_job` (the job queued to merge it with the version it displaced, or `null`); `project_key` for `pull`; for `job_claim`, the `job_id`, `kind`, `attempt`, `lease_expires_at`, and, for a merge, its `project_key` and `file_path` (never the lease id); for `job_result`, the `job_id`, `project_key`, `file_path`, the `state` it is in now (`done`, `queued` for another attempt, or `failed`), `stored_sha256` (what the file became, when this result wrote the merge to it, `null` otherwise) and `follow_up` (the job that merges it again with a newer version, or `null`); for `job_retry`, the `job_id`, `kind`, `project_key` and `file_path`; for `approve` and `enroll`, the device's `device_id`, `name`, `scope`, `public_key`, `fingerprint`, `ephemeral`, `authkey_id` (the key an `enroll` came by) and `user_code` (the code an `approve` decided) — the key a signature it makes is checked with, after the device row is gone too; `device_id`/`name` for `revoke` and `sweep`; `user_code`/`name` for `deny`; `authkey_id`/`tag`/`ephemeral`/`max_devices` for `authkey_create`; `authkey_id`/`revoke_devices`/`revoked_devices` (the ids this revoked) for `authkey_revoke`; `version` for `start`; `credential_id`/`name`/`first` (the first passkey, which the token and the bootstrap code register) for `passkey_add`, and `credential_id`/`name` for `passkey_remove`, never the key; `ended`, how many other sessions, for `sessions_end`; `expires_at` for `bootstrap_code`, and `passkeys_removed`/`expires_at` for `passkey_reset`, never the code nor its hash. |
+| `request` | For a device's signed request: the SHA-256 of its body as `Content-Digest` carried it, standard base64; the exact RFC 9421 §2.5 signature base the device's signature verified against; the signature, standard base64; and `body`, the request body itself for `approve`, `deny`, `revoke`, `authkey_create` and `authkey_revoke`, whose bodies are a few bytes with no secret in them, `null` for the rest, a job result's merged file among them. `null` for everyone but a device: the operator, a session, an authkey, the server and the host sign nothing. |
 
 **What a signature proves.** That the device sent a request with this
 method, path, query and body digest — not what the server did with it. A
@@ -1176,7 +1232,10 @@ recomputes the tree with nothing but the standard library and checks:
    that names it, a worker signs its claims and results and nothing else,
    a result comes from the worker holding the job, no one claims it while
    a live worker holds it or once it is settled, each claim is the next
-   attempt, and only a failed job is retried.
+   attempt, and only a failed job is retried. A session acts with a
+   passkey the log added and has not removed; the first passkey takes a
+   bootstrap code the log issued and no other passkey beside it; the
+   last passkey is never removed; a reset counts the passkeys it removed.
 
 Signatures are checked with the `cryptography` package when it works, and
 otherwise with an Ed25519 of the script's own (RFC 8032, some milliseconds
@@ -1363,6 +1422,241 @@ answers with the job as listed. A job that failed because the file kept
 changing is queued as a merge of its kept result with the file as it is
 now. `404` with `{"error":"no job has that id"}`; `409` for a job that has
 not failed, such as `{"error":"only a failed job can be retried; this one is leased"}`.
+
+---
+
+## The admin page's passkey sign-in
+
+From 0.4.2 the `/admin` page signs in with a **passkey** (WebAuthn), so an
+owner with only a phone can manage devices: no password, and bound to this
+site, so a copy of the page on another site cannot use it. There is one
+owner, so signing in is usernameless: the phone offers the passkey it holds.
+
+Passkeys are bound to the address people reach the server at, which the
+server cannot learn from a request behind a proxy, so it is configured:
+`RECALL_PUBLIC_URL`, such as `https://recall.example.com` (an origin, with no
+path; `http://` only for `localhost`, and the server warns at start that
+such passkeys work only from a browser on the same machine). Its host is
+the WebAuthn relying party id, so it must be a full domain name, with no
+trailing dot, or `localhost`. Unset or unusable, passkey sign-in is off,
+`GET /admin/session` says why, and the routes below that need it answer
+`503`. Nothing else depends on it: the bearer token works on the page and
+everywhere else as before.
+
+Each ceremony is two requests: a start that answers with a `ceremony_id`
+and the `options` to hand `navigator.credentials.create()` or `.get()`
+(WebAuthn's JSON form, binary values in base64url), and a finish that
+sends the `ceremony_id` back with the browser's answer. The server keeps
+nothing when a ceremony starts: the `ceremony_id` is the ceremony's state,
+sealed (AES-256-GCM, under a key the process makes when it starts), so the
+browser can neither read nor change it, and starting any number of them
+takes nothing from anyone else. A ceremony can be finished within five
+minutes of its start, by the server's clock, and only once: the server
+remembers each one whose answer verified until it would have expired. A
+restart ends every ceremony in flight. An id that is not one, has
+expired, or was finished already is `400` with
+`{"error":"this ceremony has expired or was already used; start again"}`.
+Starts and finishes are answered with `Cache-Control: no-store`, and their
+bodies are limited to 64 KiB.
+
+Every start and finish must be sent with `Content-Type: application/json`
+(parameters such as `charset` are fine). Anything else, or none, is `415`
+with `{"error":"this needs Content-Type: application/json"}`, checked after
+the rate limit and, on the routes that need one, the credential. A page on
+another site can send a POST without the browser asking this server first
+only with a type that is not JSON, so it cannot start a ceremony blind.
+
+### The admin session
+
+Signing in sets a cookie:
+
+```
+Set-Cookie: __Host-recall_admin=<43 characters>; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=2592000
+```
+
+Its value is 256 random bits, and the server stores only its SHA-256. A
+session ends after **12 hours unused** (each use moves that on), **30 days
+after it began** however much it is used, when the passkey that signed it
+in is removed, when it signs out, when another session [signs out the
+others](#post-adminlogout-and-post-adminlogoutothers), and when the same
+browser signs in again: a sign-in that arrives with a session's cookie
+replaces that session. `__Host-` means no other host, not even a
+subdomain, can set or shadow it.
+
+**A recent sign-in.** Adding a passkey, removing one, and signing out the
+other sessions also need the session to have signed in within the last
+**five minutes**, since those are what a copied cookie would need to keep
+the owner out. An older session gets `403` with
+`{"error":"forbidden: this needs a sign-in in the last five minutes; sign in with a passkey again"}`,
+and the page then signs in again, which asks for the passkey, and retries.
+
+The session is accepted on the routes marked "admin" above, and on the
+passkey routes below. It is **not** accepted on `/sync` or
+`/v1/devices/me`, which answer a request carrying only the cookie with the
+usual `{"error":"unauthorized"}`. A request that carries an
+`Authorization` header or a signature is judged by that alone, cookie or
+not: a wrong token or a bad signature beside a live cookie is `401`, and a
+`sync` device's signature beside one is that device's `403`.
+
+**CSRF.** Besides `SameSite=Strict`, every state-changing request (anything
+but `GET` and `HEAD`) made with the session must carry its CSRF token:
+
+```
+X-Recall-CSRF: <csrf_token>
+```
+
+The token comes back from signing in and from `GET /admin/session`, never
+in a cookie; the page keeps it in a variable. It is derived from the
+cookie's value, so it changes with the session, and it is compared in
+constant time. Missing or wrong is `403`.
+
+## `GET /admin/session`
+
+Unauthenticated, rate limited. What the page needs to decide what to show:
+
+```json
+{
+  "passkeys": { "enabled": true, "origin": "https://recall.example.com", "reason": null },
+  "bootstrapped": true,
+  "session": {
+    "csrf_token": "q3…",
+    "expires_at": "2026-10-23T09:00:00.000Z",
+    "idle_expires_at": "2026-09-23T21:00:00.000Z"
+  }
+}
+```
+
+`passkeys.reason` says why sign-in is off, when it is, and `origin` is
+`null` then. `bootstrapped` is whether any passkey is registered.
+`session` is `null` unless the request carries a live session's cookie; a
+cookie naming no live session also gets a `Set-Cookie` that clears it.
+
+## `POST /admin/bootstrap/register` and `…/finish`
+
+`RECALL_TOKEN` only (not a device, not a session), with a **one-time
+bootstrap code**, and only while **no passkey exists**. Once one does, both
+answer `403` with
+`{"error":"forbidden: a passkey is registered already, and RECALL_TOKEN cannot register another; sign in with the passkey to add more"}`,
+whatever token is presented, so a token that leaks later cannot register a
+"first" passkey of its own. The check is repeated in the transaction that
+stores the passkey, so two bootstraps at once cannot both succeed. A device
+with the `admin` scope gets `403` with
+`{"error":"forbidden: registering the first passkey needs RECALL_TOKEN"}`.
+
+**The bootstrap code** is what keeps the token alone from being enough.
+The server prints one to its log when it starts with passkey sign-in on and
+no passkey registered, and `recall-server reset-passkeys` prints one too:
+sixteen letters, shown as `BCDF-GHJK-LMNP-QRST`, read without regard to
+case, dashes or spaces. It works for **an hour**, and once: registering the
+first passkey uses it up, and a new one (a restart, or another
+`reset-passkeys`) replaces it. The server stores only its SHA-256. So
+someone holding a leaked token still needs to read the server's log, or run
+a command on it, to plant a passkey.
+
+The start takes `{"bootstrap_code": "BCDF-GHJK-LMNP-QRST"}` and answers
+`{"ceremony_id", "options"}`. A missing, mistyped or replaced code is
+`403` with
+`{"error":"forbidden: registering the first passkey needs the one-time bootstrap code the server printed where it runs, as well as RECALL_TOKEN"}`,
+and one past its hour
+`{"error":"forbidden: that bootstrap code has expired; restart the server, or run recall-server reset-passkeys where it runs, for a new one"}`.
+The ceremony is bound to the code it started with, and the finish answers
+the same way if that code has since expired or been replaced. The options
+ask for a discoverable credential (`residentKey: "required"`) and user
+verification. The finish takes:
+
+```json
+{ "ceremony_id": "cer_…", "name": "iPhone", "credential": { "id": "…", "rawId": "…", "type": "public-key", "response": { "attestationObject": "…", "clientDataJSON": "…" } } }
+```
+
+and answers with the passkey as [`GET /admin/passkeys`](#passkeys-get-adminpasskeys-and-the-rest)
+lists it. `name` is optional: at most 64 characters, none of them
+invisible. The page sends `credential.clientExtensionResults` as the
+browser gave them; when they say the authenticator did not keep the
+credential (`credProps.rk` is `false`), which a usernameless sign-in cannot
+use, registering is `400`. Registering does not sign in; the page signs in
+straight after, which also proves the passkey works.
+
+An owner who has lost every passkey runs `recall-server reset-passkeys`
+where the server runs, as the database's owner (for example
+`docker compose exec -u node recall-server recall-server reset-passkeys`).
+It removes every passkey and session, and prints a new bootstrap code. That
+takes a shell on the server, which is more than the token gives. If the
+page ever offers to sign in though the owner never registered a passkey,
+someone else did: rotate `RECALL_TOKEN` before resetting.
+
+## `POST /admin/login/start` and `…/finish`
+
+Unauthenticated, rate limited. The start takes no body and answers
+`{"ceremony_id", "options"}` for `navigator.credentials.get()`, with no
+`allowCredentials`: the authenticator offers the owner's passkey. It is
+`409` when no passkey is registered yet. The finish takes
+`{"ceremony_id", "credential"}`, where `credential` has `id`, `rawId`,
+`type` and a `response` of `authenticatorData`, `clientDataJSON`,
+`signature` and `userHandle`, and answers with the session cookie and:
+
+```json
+{ "csrf_token": "q3…", "expires_at": "2026-10-23T09:00:00.000Z", "idle_expires_at": "2026-09-23T21:00:00.000Z" }
+```
+
+| Failure | Status | Body |
+|---|:---:|---|
+| No such ceremony, expired, or already finished | `400` | `{"error":"this ceremony has expired or was already used; start again"}` |
+| A passkey this server does not have | `401` | `{"error":"unauthorized: that passkey is not registered here"}` |
+| The answer does not verify: wrong origin, challenge or signature, or no user verification | `401` | `{"error":"unauthorized: the passkey's answer did not verify: …"}` |
+| The signature counter did not move forward | `401` | `{"error":"unauthorized: this passkey's signature counter did not move forward, which can mean a copy of it exists; sign-in refused"}` |
+| Passkey sign-in is off | `503` | `{"error":"passkey sign-in is off: …"}` |
+
+**The signature counter.** WebAuthn §7.2: when the stored counter or the
+new one is nonzero, the new one must be greater. Both zero, which synced
+passkeys report every time, is accepted. The check and the update of the
+stored counter are one statement, so two sign-ins racing with the same
+counter cannot both pass.
+
+## `POST /admin/logout` and `POST /admin/logout/others`
+
+The session, with its CSRF header. `/admin/logout` removes the session at
+the server and answers `{"signed_out": true}`, with a `Set-Cookie` that
+clears it.
+
+`/admin/logout/others` ends every other session, such as one on a device
+the owner no longer has, and keeps this one. It needs a [recent
+sign-in](#the-admin-session). It answers how many ended:
+
+```json
+{ "other_sessions_ended": 2 }
+```
+
+## Passkeys: `GET /admin/passkeys` and the rest
+
+The session only, with its CSRF header on a `POST`. Neither the token nor
+a device can manage passkeys: a leaked token that could add one would have
+a way in that outlasts rotating it. Without a session they answer `401`
+with `{"error":"unauthorized: this needs an admin session; sign in with a passkey"}`.
+
+`GET /admin/passkeys`:
+
+```json
+{
+  "passkeys": [
+    { "id": "base64url credential id", "name": "iPhone", "created_at": "2026-09-23T09:00:00.000Z", "last_used_at": "2026-09-23T09:00:05.000Z", "current": true }
+  ]
+}
+```
+
+`current` marks the passkey this session signed in with.
+
+`POST /admin/passkeys/register` and `…/register/finish` add another, as the
+bootstrap does, for the same owner, with no code. The start needs a
+[recent sign-in](#the-admin-session); the finish only the session that
+started it, and any other session's finish is `400`. The options exclude
+the passkeys already registered, so a phone that has one is not asked to
+replace it. A passkey registered already is `409`.
+
+`POST /admin/passkeys/{id}/remove` removes one, and ends every session it
+signed in, clearing the cookie if that is this one. It needs a recent
+sign-in. The last one is `409`
+with `{"error":"that is the only passkey; add another before removing it"}`,
+and an id that is not there is `404`.
 
 ---
 

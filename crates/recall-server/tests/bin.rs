@@ -45,6 +45,22 @@ fn every_way_of_asking_for_the_version_says_the_same() {
     assert_eq!(answers[0], answers[2]);
 }
 
+/// Verification finding 7: the version names the optional parts built in,
+/// on a line of its own, so the release workflow can refuse a server built
+/// without passkey sign-in, which would otherwise start and sync as usual.
+#[test]
+fn the_version_says_which_features_are_built_in() {
+    let out = run(&["version"], &[]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let features = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("features: "))
+        .unwrap_or_else(|| panic!("no features line in {stdout:?}"));
+    let has_passkeys = features.split(' ').any(|f| f == "passkeys");
+    assert_eq!(has_passkeys, cfg!(feature = "passkeys"), "{stdout:?}");
+    assert_eq!(stdout.lines().count(), 2, "{stdout:?}");
+}
+
 /// Anything else is a usage error, exit 2, and it does not start serving.
 #[test]
 fn an_unknown_argument_is_a_usage_error() {
@@ -52,6 +68,79 @@ fn an_unknown_argument_is_a_usage_error() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(2), "stderr: {stderr}");
     assert!(stderr.contains("Usage: recall-server"), "stderr: {stderr}");
+}
+
+/// The way back in for an owner who lost every passkey: a command run where
+/// the database is, never a route the token can reach. It prints a new
+/// bootstrap code, and refuses a database that is not there rather than
+/// making one.
+#[test]
+fn reset_passkeys_empties_the_passkeys_and_prints_a_bootstrap_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("r.db");
+    let db_str = db.to_string_lossy().to_string();
+    let out = run(&["reset-passkeys"], &[("RECALL_DB_PATH", &db_str)]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "no database there yet");
+    assert!(stderr.contains("there is no database at"), "{stderr}");
+    assert!(!db.exists(), "and it did not make one");
+
+    let store = recall_server::Store::open(&db).unwrap();
+    store
+        .add_admin_credential_audited(
+            &recall_server::store::NewAdminCredential {
+                id: "cred",
+                user_handle: "u",
+                name: "phone",
+                passkey: "{}",
+                sign_count: 0,
+                created_at: "2026-09-23T10:00:00.000Z",
+            },
+            None,
+            |seq, at| {
+                use recall_server::audit::leaf;
+                leaf::encode(
+                    seq,
+                    at,
+                    leaf::action::PASSKEY_ADD,
+                    &leaf::Actor::Session {
+                        credential_id: "cred",
+                    },
+                    leaf::subject_passkey("cred", "phone", Some(false)),
+                    None,
+                )
+            },
+        )
+        .unwrap();
+    let before = store.audit_checkpoint().0;
+    drop(store);
+    let out = run(&["reset-passkeys"], &[("RECALL_DB_PATH", &db_str)]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("Removed 1 passkey"), "{stdout}");
+    let store = recall_server::Store::open(&db).unwrap();
+    assert!(!store.has_admin_credentials().unwrap());
+    // And its leaf, the host's, is the next in the log.
+    assert_eq!(store.audit_checkpoint().0, before + 1);
+    let entry = store.audit_entries(before, before + 1, usize::MAX).unwrap();
+    let leaf: serde_json::Value = serde_json::from_slice(&entry[0].leaf).unwrap();
+    assert_eq!(leaf["action"], "passkey_reset");
+    assert_eq!(leaf["actor"], serde_json::json!({"kind": "host"}));
+    assert_eq!(leaf["subject"]["passkeys_removed"], 1);
+
+    // The code it printed is the one the bootstrap will take.
+    let code = stdout
+        .lines()
+        .map(str::trim)
+        .find(|l| l.len() == 19 && l.matches('-').count() == 3)
+        .unwrap_or_else(|| panic!("no code in {stdout}"));
+    let hash = recall_server::bootstrap::sha256(code).unwrap();
+    assert_eq!(
+        store
+            .check_bootstrap_code(&hash, &recall_server::now())
+            .unwrap(),
+        recall_server::store::BootstrapCode::Valid
+    );
 }
 
 /// Half a TLS pair, either kind, refuses to start rather than falling back

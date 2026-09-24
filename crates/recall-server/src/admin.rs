@@ -35,6 +35,10 @@
 //! order a change against a whole push, though, which reads, merges with no
 //! lock held, and then writes: step 4 is there for the push that read before
 //! the change and writes after it. The store's admin module has the detail.
+//!
+//! [`reset_passkeys`] is here for the same reasons: it is the way back into
+//! `/admin` for an owner who lost every passkey, so it must take a shell on
+//! the host, and it is held to the same owner check and lock wait.
 
 use std::borrow::Cow;
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -489,6 +493,51 @@ fn list(ctx: &mut Ctx, backup: Option<&Path>, key: Option<&str>) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// Runs `recall-server reset-passkeys`: removes every passkey and admin
+/// session from the database at `RECALL_DB_PATH`, and prints a new
+/// bootstrap code, which with `RECALL_TOKEN` registers a first passkey
+/// again.
+///
+/// A command rather than a route on purpose: the one way back in after the
+/// last passkey is lost must not be something `RECALL_TOKEN` can do over the
+/// network, or a leaked token could replace the owner's passkeys. It is
+/// held to what a change made by `admin` is held to: it runs as the
+/// database's owner, and waits out a server mid-write rather than failing.
+/// Exits 0 when done, 1 when refused or failed.
+pub fn reset_passkeys() -> ExitCode {
+    let db = PathBuf::from(
+        std::env::var("RECALL_DB_PATH")
+            .ok()
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| "data/recall.db".into()),
+    );
+    match reset_passkeys_at(&db) {
+        Ok(said) => {
+            println!("{said}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("recall-server reset-passkeys: {err:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn reset_passkeys_at(db: &Path) -> Result<String> {
+    check_owner(db)?;
+    // Not `Store::open`, which would create a database at a mistyped path.
+    // `open_existing` also sets the same busy timeout the other commands
+    // wait on a running server with.
+    let store = Store::open_existing(db, Access::Write)?;
+    let (removed, code) = crate::bootstrap::reset(&store, time::OffsetDateTime::now_utc())
+        .with_context(|| format!("resetting the passkeys in {}", db.display()))?;
+    Ok(format!(
+        "Removed {removed} passkey(s) and every admin session from {}.\n\n{}",
+        db.display(),
+        code.instructions(None)
+    ))
 }
 
 /// Opens the live database: read-only for a dry run, which then provably

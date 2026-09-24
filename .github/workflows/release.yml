@@ -219,6 +219,11 @@ jobs:
       # A static binary is the promise the images rely on; a dynamic one
       # would build here and fail to start in Alpine.
       #
+      # So is passkey sign-in on /admin: a server built without the
+      # `passkeys` feature starts and syncs like any other, and only the
+      # admin page would show it is missing. `version` names the features
+      # built in, and the release refuses one that does not name it.
+      #
       # Asked of the ELF headers, not of `file`'s wording: `file` says
       # "static-pie linked" for the amd64 build and "statically linked" for
       # the arm64 one, and matching only the first is what failed v0.4.0's
@@ -227,6 +232,11 @@ jobs:
       - name: Package
         run: |
           set -euo pipefail
+          bin="target/${{ matrix.target }}/release/recall-server"
+          if ! "$bin" version | grep -Eq '^features:( [a-z-]+)* passkeys( |$)'; then
+            echo "::error::$bin was built without passkey sign-in (the passkeys feature)"
+            exit 1
+          fi
           mkdir -p dist
           for name in recall-server recall-worker; do
             bin="target/${{ matrix.target }}/release/$name"

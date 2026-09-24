@@ -36,7 +36,14 @@ FROM rust:1-alpine AS source
 # rusqlite's `bundled` feature compiles the SQLite amalgamation from C, so
 # the build stage needs a C toolchain even though nothing here is C. musl
 # specifically, so the result runs on the Alpine-based runtime below.
-RUN apk add --no-cache musl-dev
+#
+# perl, make and linux-headers are for OpenSSL, which the passkey sign-in on
+# /admin needs (webauthn-rs verifies with it). It is vendored: built from
+# source here and linked in statically, so the runtime image needs no
+# OpenSSL of its own. Its Configure script is perl, its build is make, and
+# linux-headers is not optional: crypto/mem_sec.c includes <linux/mman.h>
+# whenever <sys/syscall.h> defines SYS_mlock2, which musl's does.
+RUN apk add --no-cache musl-dev perl make linux-headers
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./

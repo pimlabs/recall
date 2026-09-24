@@ -196,7 +196,8 @@ body on a GET, so no request is signed without its body.
 (`signature`, `devices`) and the server's enrolment, approval, revocation,
 authkeys, signature checks and ephemeral sweep, documented in
 [`../reference/api.md`](../reference/api.md), which is now the authority for
-them. The admin page's Devices tab and passkeys are not built yet.
+them. The admin page's Devices tab and its passkey sign-in followed (see
+"Without a terminal" below).
 
 **Built (client side, 0.4.1):** `recall connect` enrols a machine when the
 server's discovery lists `device-sig-v1`, approving the first one with the
@@ -287,6 +288,46 @@ Setting up cloud sessions from a phone is then: open `/admin`, create an
 authkey, paste it into the cloud environment's variables as
 `RECALL_AUTHKEY`. That is the same one step as pasting `RECALL_TOKEN`
 today.
+
+**As built (server, 0.4.2):** the page has the Devices tab and signs in
+with a passkey through `webauthn-rs` (usernameless, user verification
+required). What the sketch left open was settled this way:
+
+- The site a passkey is bound to is configured, as `RECALL_PUBLIC_URL`,
+  since behind Traefik the server cannot learn it from a request. Unset,
+  passkeys are off, the page says why, and the token still works.
+- The bootstrap is `POST /admin/bootstrap/register` with `RECALL_TOKEN`
+  and a one-time code the server prints where it runs (in its log when it
+  starts with no passkey, and from `reset-passkeys`), good for an hour and
+  stored only as a hash. It refuses in code once any passkey exists,
+  whatever it is shown. More passkeys are added only from a signed-in
+  session. So the bootstrap secret need not be disabled for a leak of it
+  to stop mattering here, and a leaked token alone never could plant a
+  passkey; recovering from losing every passkey is `recall-server
+  reset-passkeys`, which needs a shell on the server.
+- A session is a `__Host-` cookie, `HttpOnly`, `Secure`,
+  `SameSite=Strict`, of which the server keeps only the SHA-256: 12 hours
+  idle, 30 days at most. Every state-changing request also carries a CSRF
+  token in a header. It is a third credential on the device routes only,
+  never on `/sync`. Adding or removing a passkey, and signing out the other
+  sessions, need a sign-in in the last five minutes, so a copied cookie
+  cannot lock the owner out.
+- The signature counter is checked and moved forward in one statement, so
+  a cloned authenticator racing the real one is caught, and a refusal is
+  logged.
+- A ceremony's state is not held on the server: it is sealed (AES-256-GCM,
+  under a key made at start) into the id the page sends back, and only the
+  ceremonies that finished are remembered, until they expire. Starting a
+  sign-in, which anyone may do, therefore costs the server nothing, and
+  nobody can fill a table to keep the owner out. Every start and finish
+  must be `Content-Type: application/json`, which a cross-site page cannot
+  send blind.
+- The page's script is inline, allowed by its hash in a CSP with no
+  `unsafe-inline` or `unsafe-eval`.
+- This is where OpenSSL enters the codebase (webauthn-rs-core needs it),
+  vendored into the server binary only; the client stays on rustls.
+
+[`../reference/api.md`](../reference/api.md) describes the routes.
 
 ### Owner commands
 

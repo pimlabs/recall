@@ -460,11 +460,11 @@ impl Store {
                 path.display()
             );
         }
-        // The audit tree is not loaded, since nothing opened this way
-        // appends a leaf: the changes these commands make are not in the
-        // audit log (see "Audit" in docs/reference/api.md). Were anything
-        // to try, it would name a seq the tree does not have, and the
-        // `audit_log` insert trigger refuses a leaf out of place.
+        // The audit tree starts empty rather than read here. The changes
+        // `recall-server admin` makes are not in the audit log (see "Audit"
+        // in docs/reference/api.md); the one audited write made this way,
+        // `reset-passkeys`, reads the whole log in, checked, before it
+        // appends (`Store::audited_each` catches up with the table).
         Ok(Self {
             state: Mutex::new(super::StoreState {
                 conn,

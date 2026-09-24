@@ -10,8 +10,12 @@
 //! | `POST /sync`, `GET /sync`, `GET /v1/devices/me` | bearer token, or the signature of any device but a worker |
 //! | `GET /v1/audit/checkpoint`, `GET /v1/audit/consistency` | bearer token, or any device's signature |
 //! | `POST /v1/devices/enroll`, `POST /v1/devices/enroll/poll` | none, but rate limited, and small bodies only |
-//! | `GET /admin/stats`, the rest of `/v1/devices`, `/v1/authkeys`, `GET /v1/audit/entries`, `GET /v1/jobs`, `POST /v1/jobs/{id}/retry` | bearer token, or an admin device's signature; small bodies only on the device routes |
+//! | `GET /admin/stats`, the rest of `/v1/devices`, `/v1/authkeys`, and `GET /v1/audit/entries` | bearer token, an admin device's signature, or the admin page's passkey session (with its CSRF header on a POST); small bodies only |
+//! | `GET /v1/jobs`, `POST /v1/jobs/{id}/retry` | bearer token, or an admin device's signature |
 //! | `POST /v1/jobs/claim`, `POST /v1/jobs/{id}/result` | a worker device's signature, and nothing else |
+//! | `GET /admin/session`, `POST /admin/login/start`, `POST /admin/login/finish` | none, but rate limited |
+//! | `POST /admin/bootstrap/register` and `…/finish` | bearer token only, with the one-time bootstrap code, and only while no passkey exists |
+//! | `GET /admin/passkeys`, `POST /admin/passkeys/…`, `POST /admin/logout`, `POST /admin/logout/others` | the passkey session only, with its CSRF header on a POST; adding or removing a passkey and signing out the others also need a sign-in in the last five minutes |
 //! | anything else | 404 JSON |
 //!
 //! This module owns the shared state, the router, and the background jobs.
@@ -19,12 +23,14 @@
 //! own tests: `middleware.rs` (rate limiting, then the protocol check, then
 //! auth), `auth.rs` (device signatures and the replay cache),
 //! `handlers.rs` (one function per route), `devices.rs` (the device
-//! routes), `jobs.rs` (the merge queue's routes and its drain),
-//! `respond.rs` (the JSON shape of every reply, errors included), `limit.rs`
-//! (the per-IP window the middleware consults) and `tls.rs` (the direct-TLS
-//! accept loop, used only when `Config::tls` is on; plain HTTP, the default,
-//! never touches it). Both transports serve the one router
-//! [`Server::router`] builds, every route group and layer included.
+//! routes), `jobs.rs` (the merge queue's routes and its drain), `admin.rs`
+//! (the admin page and its session), `passkeys.rs` (the WebAuthn ceremonies
+//! that start a session), `respond.rs` (the JSON shape of every reply,
+//! errors included), `limit.rs` (the per-IP window the middleware consults)
+//! and `tls.rs` (the direct-TLS accept loop, used only when `Config::tls`
+//! is on; plain HTTP, the default, never touches it). Both transports serve
+//! the one router [`Server::router`] builds, every route group and layer
+//! included.
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -49,6 +55,10 @@ use crate::config::TlsMode;
 use crate::merge::{Merger, Status};
 use crate::{format_timestamp, now, Config, Store};
 
+// Without passkeys nothing starts a session, so the half of this module
+// that makes one goes unused; the half that checks one still runs.
+#[cfg_attr(not(feature = "passkeys"), allow(dead_code))]
+mod admin;
 mod audit;
 mod auth;
 mod devices;
@@ -56,10 +66,42 @@ mod handlers;
 mod jobs;
 mod limit;
 mod middleware;
+#[cfg(feature = "passkeys")]
+mod passkeys;
 mod respond;
 mod tls;
 
 use audit::{handle_checkpoint, handle_consistency, handle_entries};
+#[cfg(feature = "passkeys")]
+use passkeys::Passkeys;
+#[cfg(not(feature = "passkeys"))]
+use without_passkeys::Passkeys;
+
+/// What stands in for `passkeys.rs` in a build without the feature: sign-in
+/// is off, and the page says so.
+#[cfg(not(feature = "passkeys"))]
+mod without_passkeys {
+    pub(super) struct Passkeys;
+
+    impl Passkeys {
+        pub(super) fn new(_public_url: &str) -> Self {
+            Self
+        }
+
+        pub(super) fn status(&self) -> super::admin::PasskeyStatus {
+            super::admin::PasskeyStatus {
+                enabled: false,
+                origin: None,
+                reason: Some("this recall-server was built without passkey support".to_string()),
+            }
+        }
+
+        pub(super) fn prune(&self, _now: i64) -> usize {
+            0
+        }
+    }
+}
+
 use auth::ReplayCache;
 use devices::{
     handle_approve, handle_create_authkey, handle_deny, handle_enroll, handle_list_authkeys,
@@ -67,11 +109,10 @@ use devices::{
     handle_revoke_device,
 };
 use handlers::{
-    handle_admin_page, handle_admin_stats, handle_discovery, handle_health, handle_pull,
-    handle_push, not_found,
+    handle_admin_stats, handle_discovery, handle_health, handle_pull, handle_push, not_found,
 };
 use limit::RateLimiter;
-use middleware::{admin_only, guard, limited, not_worker};
+use middleware::{admin_guard, admin_only, guard, limited, limited_sign_in, not_worker};
 
 /// How often idle ephemeral devices and long-expired enrolments are swept
 /// away. Removal is at most this late, which against a TTL counted in
@@ -91,6 +132,11 @@ const ENROLL_BODY_BYTES: usize = 8 << 10;
 /// fingerprint or a tag, and a signed one is kept whole in its audit leaf,
 /// so none may be more than a few kilobytes.
 const ADMIN_BODY_BYTES: usize = 8 << 10;
+
+/// Bounds a request to the admin page's sign-in and passkey routes. A
+/// passkey's answer is a few kilobytes at most, attestation certificates
+/// included.
+const SIGN_IN_BODY_BYTES: usize = 64 << 10;
 
 struct Runtime {
     last_backup_at: String,
@@ -124,6 +170,8 @@ struct AppState {
     runtime: RwLock<Runtime>,
     limiter: RateLimiter,
     replay: ReplayCache,
+    /// Passkey sign-in for the admin page, and the ceremonies it finished.
+    passkeys: Passkeys,
     /// Wakes waiting claims when a job is queued.
     jobs_ready: Notify,
     /// Set once shutdown begins, so waiting claims answer at once rather
@@ -145,6 +193,12 @@ impl AppState {
     /// The UNIX time signatures are judged by.
     fn now(&self) -> i64 {
         unix_now() + self.clock_offset.load(Ordering::Relaxed)
+    }
+
+    /// The same clock, as the moment admin sessions are judged by.
+    fn clock(&self) -> time::OffsetDateTime {
+        time::OffsetDateTime::now_utc()
+            + time::Duration::seconds(self.clock_offset.load(Ordering::Relaxed))
     }
 
     /// When this process started, as a UNIX time.
@@ -183,6 +237,7 @@ impl Server {
         let limiter = RateLimiter::new(cfg.rate_limit_window, cfg.rate_limit_max);
         let merger = Merger::new(cfg.claude_bin.clone(), cfg.merge_timeout);
         let replay = ReplayCache::new(auth::WINDOW, nonces_per_device(&cfg));
+        let passkeys = Passkeys::new(&cfg.public_url);
         Self {
             state: Arc::new(AppState {
                 cfg,
@@ -203,6 +258,7 @@ impl Server {
                 }),
                 limiter,
                 replay,
+                passkeys,
                 jobs_ready: Notify::new(),
                 closing: AtomicBool::new(false),
                 draining: AtomicBool::new(false),
@@ -256,7 +312,7 @@ impl Server {
             )
             .route_layer(DefaultBodyLimit::max(ADMIN_BODY_BYTES))
             .route_layer(from_fn(admin_only))
-            .route_layer(from_fn_with_state(state.clone(), guard));
+            .route_layer(from_fn_with_state(state.clone(), admin_guard));
         // The audit log's hashes: any credential, a worker's included, since
         // a checkpoint and a proof name nothing (the leaves themselves are
         // admin, above).
@@ -282,6 +338,14 @@ impl Server {
             )
             .route_layer(DefaultBodyLimit::max(ENROLL_BODY_BYTES))
             .route_layer(from_fn_with_state(state.clone(), limited));
+        // What the admin page asks before it knows who is looking: open to
+        // anyone, rate limited.
+        let page = Router::new()
+            .route(
+                "/admin/session",
+                get(admin::handle_session_status).fallback(not_found),
+            )
+            .route_layer(from_fn_with_state(state.clone(), limited_sign_in));
         Router::new()
             // Go's mux dispatched every method through one guarded handler
             // and 404'd the ones it didn't implement; the method fallbacks
@@ -301,13 +365,15 @@ impl Server {
             .merge(admin)
             .merge(audit_routes)
             .merge(enrolment)
+            .merge(page)
+            .merge(sign_in_routes(&state))
             .merge(jobs::routes(state.clone()))
             .route("/health", get(handle_health).fallback(not_found))
             .route(
                 recall_wire::DISCOVERY_PATH,
                 get(handle_discovery).fallback(not_found),
             )
-            .route("/admin", get(handle_admin_page).fallback(not_found))
+            .route("/admin", get(admin::handle_admin_page).fallback(not_found))
             .fallback(not_found)
             .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
             .with_state(state)
@@ -378,6 +444,22 @@ impl Server {
     /// visible through `/health`'s `last_backup_at` going stale.
     pub fn run_backup(&self) {
         run_backup(&self.state);
+    }
+
+    /// Issues a new bootstrap code, when passkey sign-in is on and no
+    /// passkey is registered: the one-time code that, with `RECALL_TOKEN`,
+    /// registers the first. [`None`] otherwise. `recall-server` calls it on
+    /// start and prints what it gets; see [`crate::bootstrap`].
+    pub fn issue_bootstrap_code(&self) -> Result<Option<crate::bootstrap::BootstrapCode>> {
+        if !self.state.passkeys.status().enabled || self.state.store.has_admin_credentials()? {
+            return Ok(None);
+        }
+        crate::bootstrap::issue(&self.state.store, self.state.clock()).map(Some)
+    }
+
+    /// Where the admin page is, when `RECALL_PUBLIC_URL` says.
+    pub fn public_url(&self) -> Option<&str> {
+        Some(self.state.cfg.public_url.as_str()).filter(|u| !u.is_empty())
     }
 
     /// Removes ephemeral devices idle for longer than
@@ -559,8 +641,96 @@ fn record_start(store: &Store) -> Result<()> {
     Ok(())
 }
 
+/// The passkey routes: signing in, the bootstrap, and what a signed-in
+/// owner does with passkeys. None of them exists in a build without the
+/// feature, where each is the usual 404.
+#[cfg(feature = "passkeys")]
+fn sign_in_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
+    use passkeys::{
+        handle_add_finish, handle_add_start, handle_bootstrap_finish, handle_bootstrap_start,
+        handle_list_passkeys, handle_remove, handle_sign_in_finish, handle_sign_in_start,
+        handle_sign_out, handle_sign_out_others, json_only,
+    };
+    // Every ceremony's start and finish takes JSON and says so, which a
+    // cross-site form or a blind `no-cors` fetch cannot. The last layer
+    // added runs first, so each router's own check comes before this one.
+    //
+    // Anyone may try to sign in; only a registered passkey finishes.
+    let sign_in = Router::new()
+        .route(
+            "/admin/login/start",
+            post(handle_sign_in_start).fallback(not_found),
+        )
+        .route(
+            "/admin/login/finish",
+            post(handle_sign_in_finish).fallback(not_found),
+        )
+        .route_layer(from_fn(json_only))
+        .route_layer(DefaultBodyLimit::max(SIGN_IN_BODY_BYTES))
+        .route_layer(from_fn_with_state(state.clone(), limited_sign_in));
+    // The first passkey: the operator's token, and the handlers refuse it
+    // once any passkey exists, whatever the token.
+    let bootstrap = Router::new()
+        .route(
+            "/admin/bootstrap/register",
+            post(handle_bootstrap_start).fallback(not_found),
+        )
+        .route(
+            "/admin/bootstrap/register/finish",
+            post(handle_bootstrap_finish).fallback(not_found),
+        )
+        .route_layer(from_fn(json_only))
+        .route_layer(DefaultBodyLimit::max(SIGN_IN_BODY_BYTES))
+        .route_layer(from_fn_with_state(state.clone(), guard));
+    // Only a signed-in owner: never the token, never a device.
+    let adding = Router::new()
+        .route(
+            "/admin/passkeys/register",
+            post(handle_add_start).fallback(not_found),
+        )
+        .route(
+            "/admin/passkeys/register/finish",
+            post(handle_add_finish).fallback(not_found),
+        )
+        .route_layer(from_fn(json_only))
+        .route_layer(DefaultBodyLimit::max(SIGN_IN_BODY_BYTES))
+        .route_layer(from_fn_with_state(state.clone(), admin::owner_only));
+    let owner = Router::new()
+        .route(
+            "/admin/passkeys",
+            get(handle_list_passkeys).fallback(not_found),
+        )
+        .route(
+            "/admin/passkeys/{id}/remove",
+            post(handle_remove).fallback(not_found),
+        )
+        .route("/admin/logout", post(handle_sign_out).fallback(not_found))
+        .route(
+            "/admin/logout/others",
+            post(handle_sign_out_others).fallback(not_found),
+        )
+        .route_layer(DefaultBodyLimit::max(SIGN_IN_BODY_BYTES))
+        .route_layer(from_fn_with_state(state.clone(), admin::owner_only));
+    sign_in.merge(bootstrap).merge(adding).merge(owner)
+}
+
+#[cfg(not(feature = "passkeys"))]
+fn sign_in_routes(_state: &Arc<AppState>) -> Router<Arc<AppState>> {
+    Router::new()
+}
+
 fn sweep_devices(state: &AppState) -> Result<(usize, usize)> {
     let now = time::OffsetDateTime::now_utc();
+    // The admin page's leftovers go on the same round: ceremonies finished
+    // that would have expired by now, and sessions that have ended.
+    state.passkeys.prune(state.now());
+    let clock = state.clock();
+    if let Err(e) = state.store.sweep_admin_sessions(
+        &format_timestamp(clock),
+        &format_timestamp(clock - admin::SESSION_IDLE),
+    ) {
+        eprintln!("admin session sweep failed: {e:#}");
+    }
     state.store.sweep_devices_audited(
         &format_timestamp(now - state.cfg.ephemeral_device_ttl),
         &format_timestamp(now - devices::EXPIRED_ENROLLMENT_KEPT),

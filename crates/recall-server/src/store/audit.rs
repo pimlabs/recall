@@ -4,19 +4,25 @@
 //! its leaf commits with it.
 //!
 //! Every method on [`Store`] the server uses to change a file, a device, an
-//! authkey or a merge job's outcome takes the leaf it appends as an
-//! argument; none can change one without it. The writes left without a
-//! leaf are deliberate, and none changes a file, a credential or what a job
-//! came to: an enrolment waiting for approval (anyone may ask, and
-//! unauthenticated routes append nothing), a machine's poll for it, a
-//! device's `last_seen`, the sweep of long-expired enrolments, the release
-//! of a revoked worker's leases before the server claims them itself
-//! ([`Store::release_open_jobs`]), the pruning of finished jobs, and
-//! `recall-server admin`'s changes on the host (`store/admin.rs`), which
-//! run beside the server on the database file.
+//! authkey, a passkey, a bootstrap code or a merge job's outcome takes the
+//! leaf it appends as an argument; none can change one without it. The
+//! writes left without a leaf are deliberate, and none changes a file, a
+//! credential or what a job came to: an enrolment waiting for approval
+//! (anyone may ask, and unauthenticated routes append nothing), a
+//! machine's poll for it, a device's `last_seen`, the sweep of
+//! long-expired enrolments, an admin session started by a sign-in, used,
+//! ended by a sign-out or swept once idle, a passkey's signature counter,
+//! the release of a revoked worker's leases before the server claims them
+//! itself ([`Store::release_open_jobs`]), the pruning of finished jobs,
+//! and `recall-server admin`'s changes on the host (`store/admin.rs`),
+//! which run beside the server on the database file.
+//!
+//! Another process may append: `recall-server reset-passkeys` does, on the
+//! host. Every append first reads in any leaf the table holds past this
+//! store's tree, so the two write one log rather than a fork.
 
 use anyhow::{bail, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 
 use super::{Store, StoreState};
 use crate::audit::merkle::{self, Hash, Tree};
@@ -86,9 +92,19 @@ pub(super) struct Loaded {
 /// checkpoint over a tree it had already lost, so it does not start; the
 /// error says to restore the database from a backup.
 pub(super) fn load(conn: &Connection) -> Result<Loaded> {
-    let mut stmt = conn.prepare("SELECT seq, leaf, leaf_hash FROM audit_log ORDER BY seq")?;
-    let mut rows = stmt.query([])?;
     let mut tree = Tree::new();
+    read_into(conn, &mut tree)?;
+    let last_at = last_at(conn, tree.size())?;
+    Ok(Loaded { tree, last_at })
+}
+
+/// Reads every leaf past the ones `tree` already holds into it, in order,
+/// checked as [`load`] describes. What both opening and
+/// [`Store::audited_each`]'s catching up do.
+fn read_into(conn: &Connection, tree: &mut Tree) -> Result<()> {
+    let mut stmt =
+        conn.prepare("SELECT seq, leaf, leaf_hash FROM audit_log WHERE seq >= ?1 ORDER BY seq")?;
+    let mut rows = stmt.query((tree.size() as i64,))?;
     while let Some(row) = rows.next()? {
         let want = tree.size();
         let seq: i64 = row.get(0)?;
@@ -108,23 +124,54 @@ pub(super) fn load(conn: &Connection) -> Result<Loaded> {
         }
         tree.append(hash);
     }
-    let last_at = match tree.size() {
-        0 => String::new(),
-        n => {
-            let leaf: Vec<u8> = conn.query_row(
-                "SELECT leaf FROM audit_log WHERE seq = ?1",
-                (n as i64 - 1,),
-                |r| r.get(0),
-            )?;
-            // Every leaf `leaf::encode` wrote has one; one that somehow does
-            // not only means the next `at` is not held to it.
-            serde_json::from_slice::<serde_json::Value>(&leaf)
-                .ok()
-                .and_then(|v| v.get("at")?.as_str().map(str::to_string))
-                .unwrap_or_default()
+    Ok(())
+}
+
+/// The `at` of the newest of `size` leaves, or empty for none.
+fn last_at(conn: &Connection, size: u64) -> Result<String> {
+    if size == 0 {
+        return Ok(String::new());
+    }
+    let leaf: Vec<u8> = conn.query_row(
+        "SELECT leaf FROM audit_log WHERE seq = ?1",
+        (size as i64 - 1,),
+        |r| r.get(0),
+    )?;
+    // Every leaf `leaf::encode` wrote has one; one that somehow does not
+    // only means the next `at` is not held to it.
+    Ok(serde_json::from_slice::<serde_json::Value>(&leaf)
+        .ok()
+        .and_then(|v| v.get("at")?.as_str().map(str::to_string))
+        .unwrap_or_default())
+}
+
+/// Brings `tree` up to the table, for leaves another process appended
+/// since this one last looked: `recall-server reset-passkeys`, run on the
+/// host beside a running server. Run inside the write transaction, whose
+/// lock keeps anything else from appending until it commits. A table that
+/// holds fewer leaves than `tree` was rolled back under a running server
+/// (a backup restored without stopping it), and nothing more is appended
+/// onto it until the server restarts and reads it afresh.
+fn catch_up(conn: &Connection, tree: &mut Tree, audit_at: &mut String) -> Result<()> {
+    let stored: i64 =
+        conn.query_row("SELECT COALESCE(MAX(seq) + 1, 0) FROM audit_log", [], |r| {
+            r.get(0)
+        })?;
+    let held = tree.size() as i64;
+    if stored < held {
+        bail!(
+            "the audit log holds {stored} leaves, fewer than the {held} this server appended: \
+             the database was replaced under a running server; restart it"
+        );
+    }
+    if stored > held {
+        read_into(conn, tree)?;
+        let newest = last_at(conn, tree.size())?;
+        if newest > *audit_at {
+            *audit_at = newest;
         }
-    };
-    Ok(Loaded { tree, last_at })
+    }
+    Ok(())
 }
 
 /// What [`Store::audited`]'s write closure hands back.
@@ -160,18 +207,16 @@ pub enum ConsistencyError {
     SecondBeyondTreeSize,
 }
 
-impl StoreState {
-    /// The `at` the next leaf carries: now, or the newest leaf's `at` if
-    /// the clock has gone back since — so `at` never decreases along `seq`.
-    /// Read under the store's lock, like the `seq` it goes with. Being one
-    /// fixed-width format, two of these compare as strings.
-    fn next_at(&self) -> String {
-        let now = crate::now();
-        if now < self.audit_at {
-            self.audit_at.clone()
-        } else {
-            now
-        }
+/// The `at` the next leaf carries: now, or the newest leaf's `at` if the
+/// clock has gone back since — so `at` never decreases along `seq`. Read
+/// under the store's lock, like the `seq` it goes with. Being one
+/// fixed-width format, two of these compare as strings.
+fn next_at(audit_at: &str) -> String {
+    let now = crate::now();
+    if now.as_str() < audit_at {
+        audit_at.to_string()
+    } else {
+        now
     }
 }
 
@@ -209,14 +254,23 @@ impl Store {
         write: impl FnOnce(&rusqlite::Transaction, &str) -> Result<Outcome<T>>,
         build_leaves: impl FnOnce(u64, &str, &T) -> Vec<Vec<u8>>,
     ) -> Result<T> {
-        let mut state = self.lock();
+        let mut guard = self.lock();
+        let StoreState {
+            conn,
+            audit,
+            audit_at,
+        } = &mut *guard;
+        // `IMMEDIATE`: the database's write lock from the start, so another
+        // process (`reset-passkeys`) cannot append between the catch-up
+        // below and this transaction's own leaves.
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        catch_up(&tx, audit, audit_at)?;
         // The position the first leaf will hold if this commits: the
         // tree's current size, read under the same lock the transaction
-        // below holds for its whole duration, so no other request can
-        // observe or claim this seq first.
-        let seq = state.audit.size();
-        let at = state.next_at();
-        let tx = state.conn.transaction()?;
+        // holds for its whole duration, so no other request can observe or
+        // claim this seq first.
+        let seq = audit.size();
+        let at = next_at(audit_at);
         let value = match write(&tx, &at)? {
             Outcome::Commit(value) => value,
             Outcome::Refuse(value) => return Ok(value), // `tx` drops here: rolled back.
@@ -233,10 +287,10 @@ impl Store {
         }
         tx.commit()?;
         for leaf_hash in hashes {
-            state.audit.append(leaf_hash);
+            audit.append(leaf_hash);
         }
         if !leaves.is_empty() {
-            state.audit_at = at;
+            *audit_at = at;
         }
         Ok(value)
     }
@@ -623,6 +677,43 @@ mod tests {
         let st = Store::open(&path).unwrap();
         assert_eq!(st.audit_checkpoint(), before);
         assert_eq!(st.audit_append(|seq, _| push_leaf(seq)).unwrap(), 5);
+    }
+
+    /// A leaf another process appends to the same file, as
+    /// `recall-server reset-passkeys` does beside a running server, is read
+    /// into this one's tree before its next append, which then takes the
+    /// seq after it; the two agree on the tree after. A log that went back
+    /// under a running store stops its appends rather than growing a fork.
+    #[test]
+    fn a_leaf_another_process_appended_is_read_in_before_the_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.db");
+        let server = Store::open(&path).unwrap();
+        append(&server);
+        append(&server);
+        let host = Store::open(&path).unwrap();
+        assert_eq!(host.audit_append(|seq, _| push_leaf(seq)).unwrap(), 2);
+        assert_eq!(server.audit_checkpoint().0, 2, "not read until it appends");
+        assert_eq!(server.audit_append(|seq, _| push_leaf(seq)).unwrap(), 3);
+        assert_eq!(
+            server.audit_checkpoint(),
+            Store::open(&path).unwrap().audit_checkpoint()
+        );
+
+        // A store that has never looked at the log reads all of it in first.
+        let blank = Store::with_connection(Connection::open(&path).unwrap()).unwrap();
+        blank.lock().audit = Tree::new();
+        assert_eq!(blank.audit_append(|seq, _| push_leaf(seq)).unwrap(), 4);
+
+        // The file replaced by an older copy under the running store.
+        let older = dir.path().join("older.db");
+        {
+            let st = Store::open(&older).unwrap();
+            append(&st);
+        }
+        std::fs::copy(&older, &path).unwrap();
+        let err = server.audit_append(|seq, _| push_leaf(seq)).unwrap_err();
+        assert!(format!("{err:#}").contains("restart it"), "{err:#}");
     }
 
     /// Opening refuses a log changed behind the triggers' back: a leaf

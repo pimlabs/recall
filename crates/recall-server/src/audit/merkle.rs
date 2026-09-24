@@ -305,7 +305,7 @@ impl Tree {
         }
         self.levels[0].push(leaf_hash);
         let mut level = 0;
-        while self.levels[level].len() % 2 == 0 {
+        while self.levels[level].len().is_multiple_of(2) {
             let nodes = &self.levels[level];
             let parent = hash_children(&nodes[nodes.len() - 2], &nodes[nodes.len() - 1]);
             if self.levels.len() == level + 1 {

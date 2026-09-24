@@ -195,7 +195,7 @@ run "cargo build --release"            cargo build --release --locked
 # The two that talk to a real server rather than a stand-in. Both have caught
 # bugs every unit test in the repo missed.
 run "compat-check.sh (19 checks)"      ./scripts/compat-check.sh target/release/recall-server
-run "api-doc-check.sh (111 checks)"    ./scripts/api-doc-check.sh target/release/recall-server
+run "api-doc-check.sh (135 checks)"    ./scripts/api-doc-check.sh target/release/recall-server
 run "trusted-ip-check.sh (9 checks)"   ./scripts/trusted-ip-check.sh target/release/recall-server
 
 built=$(./target/release/recall version)
@@ -210,6 +210,11 @@ case "$built" in
   "recall-server $VERSION"*) ok "server binary reports $VERSION" ;;
   *) die "server binary reports '$built', expected recall-server $VERSION" ;;
 esac
+if printf '%s\n' "$built" | grep -Eq '^features:( [a-z-]+)* passkeys( |$)'; then
+  ok "server binary has passkey sign-in"
+else
+  die "server binary was built without the passkeys feature"
+fi
 built=$(./target/release/recall-worker version)
 printf '    built: %s\n' "$built"
 case "$built" in

@@ -55,6 +55,9 @@ services:
       RECALL_BACKUP_DIR: /backups
       RECALL_BACKUP_INTERVAL_HOURS: "24"
       RECALL_BACKUP_KEEP: "7"
+      # The address /admin is opened at, such as https://recall.example.com.
+      # Passkeys are bound to it; empty leaves passkey sign-in off.
+      RECALL_PUBLIC_URL: ${RECALL_PUBLIC_URL:-}
       # This file publishes its port to the internet, so it must never come
       # up as plain HTTP: with this set, recall-server refuses to start
       # unless one of the two TLS modes below is fully configured, rather

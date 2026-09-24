@@ -34,8 +34,8 @@ is far less likely than a bug in one. It checks:
      `project_key` is the query's, a revoke's or a job's id the path's;
    - where the leaf keeps the body (the device-management actions), the
      body hashes to `body_sha256` and says what `subject` says.
-   A leaf nobody signed (the operator's, an authkey's, the server's) must
-   carry no request.
+   A leaf nobody signed (the operator's, an authkey's, an admin session's,
+   the server's, the host's) must carry no request.
 4. The rest the server enforces, so a log it did not write fails: an id
    approved or enrolled twice, a device-management action signed by a
    device without the admin scope, a device revoked twice, an enrolment
@@ -43,7 +43,10 @@ is far less likely than a bug in one. It checks:
    a device that is not a worker, or a worker signing anything else; a job
    no push or result queued, claimed while a live worker holds it or once
    it is settled, settled by a worker that does not hold it, retried
-   before it failed, or counted at the wrong attempt.
+   before it failed, or counted at the wrong attempt; an admin session
+   acting with a passkey the log never added or already removed; a first
+   passkey added with no bootstrap code outstanding or beside another, the
+   last passkey removed, or a reset that miscounts the passkeys it removed.
 
 What a signature proves is that a device sent a request with that method,
 path, query and body digest — not what the server did with it. A push's or
@@ -349,7 +352,9 @@ ACTOR_KEYS = {
     "device": ["kind", "id", "name", "agent"],
     "operator": ["kind"],
     "authkey": ["kind", "id", "tag"],
+    "session": ["kind", "credential_id"],
     "server": ["kind"],
+    "host": ["kind"],
 }
 FILE = ["project_key", "file_path", "deleted", "stored_sha256", "base_sha256", "merged", "merge_job"]
 DEVICE = ["device_id", "name", "scope", "public_key", "fingerprint", "ephemeral", "authkey_id", "user_code"]
@@ -368,18 +373,25 @@ SUBJECT_KEYS = {
     "job_claim": ["job_id", "kind", "attempt", "lease_expires_at", "project_key", "file_path"],
     "job_result": ["job_id", "project_key", "file_path", "state", "stored_sha256", "follow_up"],
     "job_retry": ["job_id", "kind", "project_key", "file_path"],
+    "passkey_add": ["credential_id", "name", "first"],
+    "passkey_remove": ["credential_id", "name"],
+    "sessions_end": ["ended"],
+    "bootstrap_code": ["expires_at"],
+    "passkey_reset": ["passkeys_removed", "expires_at"],
 }
-# Who may do what: a device or the operator through the API, an authkey
-# enrolling the one device it approves, the server on its own.
+# Who may do what: a device or the operator through the API, the admin
+# page's passkey session on the routes that manage devices, an authkey
+# enrolling the one device it approves, the server on its own, the host
+# through `recall-server reset-passkeys`.
 ACTORS = {
     "push": {"device", "operator"},
     "delete": {"device", "operator"},
     "pull": {"device", "operator"},
-    "approve": {"device", "operator"},
-    "deny": {"device", "operator"},
-    "revoke": {"device", "operator"},
-    "authkey_create": {"device", "operator"},
-    "authkey_revoke": {"device", "operator"},
+    "approve": {"device", "operator", "session"},
+    "deny": {"device", "operator", "session"},
+    "revoke": {"device", "operator", "session"},
+    "authkey_create": {"device", "operator", "session"},
+    "authkey_revoke": {"device", "operator", "session"},
     "enroll": {"authkey"},
     "sweep": {"server"},
     "start": {"server"},
@@ -389,6 +401,13 @@ ACTORS = {
     "job_claim": {"device", "server"},
     "job_result": {"device", "server"},
     "job_retry": {"device", "operator"},
+    # The first passkey takes RECALL_TOKEN (and the bootstrap code); every
+    # other passkey action, a session.
+    "passkey_add": {"operator", "session"},
+    "passkey_remove": {"session"},
+    "sessions_end": {"session"},
+    "bootstrap_code": {"server"},
+    "passkey_reset": {"host"},
 }
 # The actions whose request body the leaf keeps, and their routes.
 KEEPS_BODY = {"approve", "deny", "revoke", "authkey_create", "authkey_revoke"}
@@ -535,6 +554,21 @@ def check_shape(leaf, position):
                 raise Invalid("a result wrote the file but the job is not done, or has a follow-up")
         if subject["follow_up"] is not None:
             expect_str(subject["follow_up"], "subject.follow_up")
+    elif action in ("passkey_add", "passkey_remove"):
+        expect_str(subject["credential_id"], "subject.credential_id")
+        expect_str(subject["name"], "subject.name")
+        if action == "passkey_add":
+            expect_bool(subject["first"], "subject.first")
+            if subject["first"] is not (kind == "operator"):
+                raise Invalid("the first passkey is the operator's to add, and only the first")
+    elif action == "sessions_end":
+        if not is_int(subject["ended"]) or subject["ended"] < 1:
+            raise Invalid("subject.ended is not a count of sessions")
+    elif action in ("bootstrap_code", "passkey_reset"):
+        if not isinstance(subject["expires_at"], str) or not TIMESTAMP.fullmatch(subject["expires_at"]):
+            raise Invalid("subject.expires_at is not a timestamp")
+        if action == "passkey_reset" and (not is_int(subject["passkeys_removed"]) or subject["passkeys_removed"] < 0):
+            raise Invalid("subject.passkeys_removed is not a count")
     else:
         for key, value in subject.items():
             expect_str(value, f"subject.{key}")
@@ -654,6 +688,8 @@ class State:
         self.devices = {}  # id -> {"public_key", "scope", "ephemeral", "authkey_id", "gone"}
         self.authkeys = {}  # id -> {"revoked": bool}
         self.jobs = {}  # id -> {"file", "state", "holder", "attempt"}
+        self.passkeys = set()  # the admin page's passkeys, by credential id
+        self.bootstrap = False  # a bootstrap code outstanding
         self.nonces = set()
         self.last_at = ""
 
@@ -761,6 +797,49 @@ def apply(leaf, state):
             queue(state, subject["merge_job"], file)
     elif action in ("job_claim", "job_result", "job_retry"):
         apply_job(leaf, state)
+    elif action in PASSKEY_ACTIONS:
+        apply_passkey(leaf, state)
+
+
+PASSKEY_ACTIONS = {"passkey_add", "passkey_remove", "sessions_end", "bootstrap_code", "passkey_reset"}
+
+
+def apply_passkey(leaf, state):
+    """The admin page's passkeys, as the log has added and removed them."""
+    action, subject = leaf["action"], leaf["subject"]
+    if action == "bootstrap_code":
+        if state.passkeys:
+            raise Invalid("a bootstrap code was issued with a passkey registered")
+        state.bootstrap = True
+    elif action == "passkey_reset":
+        if subject["passkeys_removed"] != len(state.passkeys):
+            raise Invalid(
+                f"a reset says it removed {subject['passkeys_removed']} passkeys, "
+                f"but {len(state.passkeys)} were registered"
+            )
+        state.passkeys.clear()
+        state.bootstrap = True
+    elif action == "passkey_add":
+        if subject["credential_id"] in state.passkeys:
+            raise Invalid(f"passkey {subject['credential_id']} was added twice")
+        if subject["first"]:
+            if state.passkeys or not state.bootstrap:
+                raise Invalid("a first passkey added beside another, or with no bootstrap code outstanding")
+            state.bootstrap = False
+        state.passkeys.add(subject["credential_id"])
+    elif action == "passkey_remove":
+        if subject["credential_id"] not in state.passkeys:
+            raise Invalid(f"a removal of passkey {subject['credential_id']}, which is not registered")
+        if len(state.passkeys) == 1:
+            raise Invalid("the last passkey was removed")
+        state.passkeys.discard(subject["credential_id"])
+
+
+def check_session(leaf, state):
+    """An admin session acts with a passkey the log added and still holds."""
+    credential = leaf["actor"]["credential_id"]
+    if credential not in state.passkeys:
+        raise Invalid(f"an admin session with passkey {credential}, which the log never added or removed since")
 
 
 def queue(state, job_id, file):
@@ -832,6 +911,8 @@ def verify_export(path, checkpoints, verify):
             if leaf["actor"]["kind"] == "device":
                 check_request(leaf, state, verify)
                 signed += 1
+            elif leaf["actor"]["kind"] == "session":
+                check_session(leaf, state)
             apply(leaf, state)
         except Invalid as e:
             problems.append(f"leaf {position}: {e}")

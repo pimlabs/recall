@@ -25,15 +25,17 @@ use crate::audit::leaf;
 use crate::store::ConsistencyError;
 
 /// The actor an audit leaf records for whoever called the route it is
-/// appended from: the device that signed the request, or the operator when
-/// it carried `RECALL_TOKEN` instead (or, defensively, carried no
-/// credential the auth layer recognised at all — which `guard` never lets
-/// reach a handler, but this stays total rather than assuming it).
+/// appended from: the device that signed the request, the admin page's
+/// passkey session by its passkey, or the operator when it carried
+/// `RECALL_TOKEN` instead (or, defensively, carried no credential the auth
+/// layer recognised at all — which `guard` never lets reach a handler, but
+/// this stays total rather than assuming it).
 pub(super) fn actor_for(caller: Option<&Caller>) -> leaf::Actor<'_> {
     match caller {
         Some(Caller::Device {
             id, name, agent, ..
         }) => leaf::Actor::Device { id, name, agent },
+        Some(Caller::Owner { credential_id }) => leaf::Actor::Session { credential_id },
         Some(Caller::Operator) | None => leaf::Actor::Operator,
     }
 }

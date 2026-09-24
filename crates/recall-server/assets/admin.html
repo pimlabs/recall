@@ -3,251 +3,918 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
 <title>Recall admin</title>
 <style>
   :root {
     color-scheme: light dark;
     --bg: #ffffff;
+    --panel: #f7f7f8;
     --fg: #1a1a1a;
     --muted: #6b7280;
     --border: #e5e7eb;
-    --row-alt: #fafafa;
     --error: #b91c1c;
+    --ok: #166534;
+    --warn-bg: #fef3c7;
+    --warn-fg: #78350f;
     --accent: #111827;
+    --accent-fg: #ffffff;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #14161a;
+      --panel: #1b1d22;
       --fg: #e8e8e8;
       --muted: #9aa0a6;
       --border: #2a2d33;
-      --row-alt: #1b1d22;
       --error: #f87171;
+      --ok: #86efac;
+      --warn-bg: #3b2f14;
+      --warn-fg: #fde68a;
       --accent: #e8e8e8;
+      --accent-fg: #14161a;
     }
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body {
     margin: 0;
-    padding: 2.5rem 1.5rem;
+    padding: 1.25rem 1rem 3rem;
     background: var(--bg);
     color: var(--fg);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.45;
   }
-  main {
-    max-width: 860px;
-    margin: 0 auto;
-  }
-  h1 {
-    font-size: 1.25rem;
-    font-weight: 600;
-    margin: 0 0 1.5rem;
-  }
-  .token-row {
+  main { max-width: 760px; margin: 0 auto; }
+  header {
     display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
     gap: 0.5rem;
-    margin-bottom: 1.75rem;
+    margin-bottom: 1.25rem;
   }
-  input[type="password"], input[type="text"] {
-    flex: 1;
+  h1 { font-size: 1.25rem; font-weight: 600; margin: 0; }
+  h2 { font-size: 1.05rem; font-weight: 600; margin: 0 0 0.75rem; }
+  p { margin: 0 0 0.75rem; }
+  .muted { color: var(--muted); font-size: 0.9rem; }
+  .who { color: var(--muted); font-size: 0.9rem; display: flex; gap: 0.5rem; align-items: center; }
+  section.card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+  }
+  label { display: block; font-size: 0.85rem; color: var(--muted); margin: 0.5rem 0 0.25rem; }
+  input[type="password"], input[type="text"], input[type="number"], select {
+    width: 100%;
+    min-height: 44px;
     padding: 0.5rem 0.75rem;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: 8px;
     background: var(--bg);
     color: var(--fg);
-    font-size: 0.9rem;
+    font-size: 16px;
   }
+  input.code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0.08em; text-transform: uppercase; }
+  .check { display: flex; align-items: center; gap: 0.5rem; margin: 0.75rem 0 0; color: var(--fg); font-size: 0.95rem; }
+  .check input { width: 20px; height: 20px; }
+  .row { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem; }
+  .row > * { flex: 1 1 auto; }
   button {
+    min-height: 44px;
     padding: 0.5rem 1rem;
-    border: 1px solid var(--border);
-    border-radius: 6px;
+    border: 1px solid var(--accent);
+    border-radius: 8px;
     background: var(--accent);
-    color: var(--bg);
-    font-size: 0.9rem;
+    color: var(--accent-fg);
+    font-size: 1rem;
     cursor: pointer;
   }
-  button:hover { opacity: 0.85; }
-  .summary {
+  button.secondary { background: transparent; color: var(--fg); border-color: var(--border); }
+  button.danger { background: transparent; color: var(--error); border-color: var(--error); }
+  button.small { min-height: 36px; padding: 0.25rem 0.75rem; font-size: 0.9rem; flex: 0 0 auto; }
+  button:disabled { opacity: 0.45; cursor: default; }
+  .error { color: var(--error); font-size: 0.95rem; margin: 0.5rem 0 0; }
+  .ok { color: var(--ok); font-size: 0.95rem; margin: 0.5rem 0 0; }
+  .warn {
+    background: var(--warn-bg);
+    color: var(--warn-fg);
+    border-radius: 8px;
+    padding: 0.75rem;
+    font-size: 0.95rem;
+    margin: 0.75rem 0 0;
+  }
+  details { margin-top: 1rem; }
+  summary { cursor: pointer; color: var(--muted); font-size: 0.95rem; min-height: 32px; }
+  nav.tabs { display: flex; gap: 0.25rem; margin-bottom: 1rem; border-bottom: 1px solid var(--border); overflow-x: auto; }
+  nav.tabs button {
+    background: transparent;
     color: var(--muted);
-    font-size: 0.9rem;
-    margin-bottom: 1.5rem;
-    line-height: 1.6;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    flex: 0 0 auto;
   }
-  .error {
-    color: var(--error);
-    font-size: 0.9rem;
-    margin-bottom: 1.5rem;
+  nav.tabs button[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--fg); }
+  ul.items { list-style: none; margin: 0; padding: 0; }
+  ul.items li {
+    border-top: 1px solid var(--border);
+    padding: 0.75rem 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.75rem;
+    align-items: center;
+    justify-content: space-between;
   }
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.9rem;
-  }
-  th, td {
-    text-align: left;
-    padding: 0.6rem 0.75rem;
-    border-bottom: 1px solid var(--border);
-  }
-  th {
+  ul.items li:first-child { border-top: 0; }
+  .item-main { flex: 1 1 14rem; min-width: 0; }
+  .item-name { font-weight: 600; overflow-wrap: anywhere; }
+  .item-meta { color: var(--muted); font-size: 0.85rem; overflow-wrap: anywhere; }
+  .badge {
+    display: inline-block;
+    font-size: 0.75rem;
+    padding: 0.05rem 0.45rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    margin-left: 0.35rem;
+    font-weight: 400;
     color: var(--muted);
-    font-weight: 500;
-    font-size: 0.8rem;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
+    vertical-align: middle;
   }
-  tbody tr:nth-child(even) { background: var(--row-alt); }
-  .empty {
-    color: var(--muted);
-    font-size: 0.9rem;
+  .badge.gone { color: var(--error); border-color: var(--error); }
+  dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: 0.35rem 0.75rem; margin: 0.75rem 0 0; }
+  dl.facts dt { color: var(--muted); font-size: 0.9rem; }
+  dl.facts dd { margin: 0; overflow-wrap: anywhere; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.9rem; }
+  .secret {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: var(--bg);
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+    padding: 0.75rem;
+    overflow-wrap: anywhere;
+    user-select: all;
+    margin: 0.5rem 0 0;
+  }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; }
+  @media (max-width: 480px) {
+    .row > button { width: 100%; }
   }
 </style>
 </head>
 <body>
 <main>
-  <h1>Recall admin</h1>
-  <div class="token-row">
-    <input type="password" id="token" placeholder="Bearer token">
-    <button id="load">Load</button>
+  <header>
+    <h1>Recall admin</h1>
+    <div class="who" id="who" hidden>
+      <span id="who-text"></span>
+      <button class="secondary small" id="sign-out" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <section class="card" id="signin" hidden>
+    <div id="origin-warning" class="warn" hidden></div>
+
+    <div id="passkey-off" hidden>
+      <h2>Passkey sign-in is off</h2>
+      <p class="muted" id="passkey-off-reason"></p>
+    </div>
+
+    <div id="passkey-signin" hidden>
+      <h2>Sign in</h2>
+      <p class="muted">Use the passkey saved on this phone or computer.</p>
+      <div class="row"><button id="signin-button" type="button">Sign in with a passkey</button></div>
+      <p class="muted">Never registered a passkey here? Then someone else did. Rotate RECALL_TOKEN first, then run recall-server reset-passkeys on the server.</p>
+    </div>
+
+    <div id="passkey-bootstrap" hidden>
+      <h2>Set up a passkey</h2>
+      <p class="muted">No passkey is registered yet. Enter the server's RECALL_TOKEN and the one-time bootstrap code the server printed where it runs (its log, or recall-server reset-passkeys) to register one on this device. After that neither is needed here, and the token cannot register another passkey.</p>
+      <label for="bootstrap-token">RECALL_TOKEN</label>
+      <input type="password" id="bootstrap-token" autocomplete="off">
+      <label for="bootstrap-code">Bootstrap code</label>
+      <input type="text" class="code" id="bootstrap-code" placeholder="BCDF-GHJK-LMNP-QRST" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="24">
+      <label for="bootstrap-name">Name for this passkey</label>
+      <input type="text" id="bootstrap-name" value="Phone" maxlength="64" autocomplete="off">
+      <div class="row"><button id="bootstrap-button" type="button">Register a passkey</button></div>
+    </div>
+
+    <p class="error" id="signin-error" hidden></p>
+
+    <details id="token-details">
+      <summary>Use the server token instead</summary>
+      <label for="token">RECALL_TOKEN</label>
+      <input type="password" id="token" autocomplete="off">
+      <div class="row"><button class="secondary" id="token-button" type="button">Use token</button></div>
+    </details>
+  </section>
+
+  <div id="app" hidden>
+    <nav class="tabs" role="tablist">
+      <button type="button" role="tab" data-tab="devices" aria-selected="true">Devices</button>
+      <button type="button" role="tab" data-tab="projects" aria-selected="false">Projects</button>
+      <button type="button" role="tab" data-tab="passkeys" aria-selected="false" id="passkeys-tab">Passkeys</button>
+    </nav>
+
+    <div id="tab-devices" data-panel="devices">
+      <section class="card">
+        <h2>Approve a device</h2>
+        <p class="muted">Enter the code the new machine shows. You will see its name and key fingerprint before anything is approved.</p>
+        <label for="code">Code</label>
+        <input type="text" class="code" id="code" placeholder="WDJB-MJHT" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="12">
+        <div class="row"><button id="lookup" type="button">Look up</button></div>
+        <div id="pending" hidden>
+          <dl class="facts">
+            <dt>Name</dt><dd id="pending-name"></dd>
+            <dt>Agent</dt><dd id="pending-agent"></dd>
+            <dt>Fingerprint</dt><dd class="mono" id="pending-fingerprint"></dd>
+            <dt>Expires</dt><dd id="pending-expires"></dd>
+          </dl>
+          <p class="warn">Approve only if this name and fingerprint match what the machine shows.</p>
+          <label for="pending-scope">Scope</label>
+          <select id="pending-scope">
+            <option value="sync">sync: syncs memory</option>
+            <option value="admin">admin: can also approve and revoke devices</option>
+            <option value="worker">worker: recall-worker, which only merges</option>
+          </select>
+          <div class="row">
+            <button id="approve" type="button">Approve</button>
+            <button class="danger" id="deny" type="button">Deny</button>
+          </div>
+        </div>
+        <p class="error" id="approve-error" hidden></p>
+        <p class="ok" id="approve-ok" hidden></p>
+      </section>
+
+      <section class="card">
+        <h2>Devices</h2>
+        <label class="check"><input type="checkbox" id="show-revoked"> Show revoked devices</label>
+        <ul class="items" id="devices"></ul>
+        <p class="error" id="devices-error" hidden></p>
+      </section>
+
+      <section class="card">
+        <h2>Authkeys</h2>
+        <p class="muted">An authkey lets cloud sessions enrol themselves with the sync scope. Put it in the cloud environment's variables as RECALL_AUTHKEY.</p>
+        <label for="key-tag">Tag</label>
+        <input type="text" id="key-tag" value="cloud" maxlength="32" autocomplete="off">
+        <label for="key-days">Expires in (days, 1 to 365)</label>
+        <input type="number" id="key-days" value="90" min="1" max="365" inputmode="numeric">
+        <label for="key-max">Most devices at once (empty for no limit)</label>
+        <input type="number" id="key-max" min="1" inputmode="numeric">
+        <label class="check"><input type="checkbox" id="key-ephemeral" checked> Ephemeral: remove its devices once idle</label>
+        <div class="row"><button id="key-create" type="button">Create authkey</button></div>
+        <div id="key-shown" hidden>
+          <p class="warn">This authkey is shown once. Copy it now: it cannot be shown again. Anyone holding it can enrol devices until it expires or is revoked.</p>
+          <p class="secret" id="key-secret"></p>
+          <div class="row"><button class="secondary" id="key-copy" type="button">Copy</button><button class="secondary" id="key-done" type="button">Done</button></div>
+        </div>
+        <p class="error" id="keys-error" hidden></p>
+        <ul class="items" id="keys"></ul>
+      </section>
+    </div>
+
+    <div id="tab-projects" data-panel="projects" hidden>
+      <section class="card">
+        <p class="muted" id="summary"></p>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr><th>Project</th><th>Active files</th><th>Deleted</th><th>Sources</th><th>Last updated</th></tr>
+            </thead>
+            <tbody id="tbody"></tbody>
+          </table>
+        </div>
+        <p class="error" id="projects-error" hidden></p>
+      </section>
+    </div>
+
+    <div id="tab-passkeys" data-panel="passkeys" hidden>
+      <section class="card">
+        <h2>Passkeys</h2>
+        <p class="muted">Any of these can sign in here. The last one cannot be removed.</p>
+        <ul class="items" id="passkeys"></ul>
+        <label for="passkey-name">Name for a new passkey</label>
+        <input type="text" id="passkey-name" value="" placeholder="Laptop" maxlength="64" autocomplete="off">
+        <div class="row"><button id="passkey-add" type="button">Add a passkey on this device</button></div>
+        <p class="muted">Adding or removing a passkey, and signing out other sessions, asks for your passkey again unless you signed in in the last five minutes.</p>
+        <p class="error" id="passkeys-error" hidden></p>
+        <p class="ok" id="passkeys-ok" hidden></p>
+      </section>
+      <section class="card">
+        <h2>Sessions</h2>
+        <p class="muted">Signed in on a device you no longer have, or not sure? This ends every session but this one.</p>
+        <div class="row"><button class="secondary" id="sign-out-others" type="button">Sign out other sessions</button></div>
+        <p class="error" id="sessions-error" hidden></p>
+        <p class="ok" id="sessions-ok" hidden></p>
+      </section>
+    </div>
   </div>
-  <div id="summary" class="summary"></div>
-  <div id="error" class="error" style="display:none"></div>
-  <table id="table" style="display:none">
-    <thead>
-      <tr>
-        <th>Project</th>
-        <th>Active files</th>
-        <th>Deleted</th>
-        <th>Sources</th>
-        <th>Last updated</th>
-      </tr>
-    </thead>
-    <tbody id="tbody"></tbody>
-  </table>
 </main>
 <script>
 (function () {
-  var STORAGE_KEY = "recall_admin_token";
-  var tokenInput = document.getElementById("token");
-  var loadBtn = document.getElementById("load");
-  var summaryEl = document.getElementById("summary");
-  var errorEl = document.getElementById("error");
-  var tableEl = document.getElementById("table");
-  var tbodyEl = document.getElementById("tbody");
+  "use strict";
 
-  function clearChildren(el) {
-    while (el.firstChild) el.removeChild(el.firstChild);
+  var TOKEN_KEY = "recall_admin_token";
+  // How the page authenticates: the passkey session's CSRF token (the
+  // cookie itself is HttpOnly and never seen here), or the bearer token.
+  var auth = { csrf: null, token: null };
+  var status = null;
+  var devicesCache = [];
+
+  function $(id) { return document.getElementById(id); }
+  function show(el, on) { el.hidden = !on; }
+  function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
+  function say(el, text) { el.textContent = text || ""; show(el, !!text); }
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined && text !== null) e.textContent = text;
+    return e;
+  }
+  function when(ts) {
+    if (!ts) return "never";
+    var d = new Date(ts);
+    return isNaN(d.getTime()) ? ts : d.toLocaleString();
   }
 
-  function showError(message) {
-    tableEl.style.display = "none";
-    clearChildren(summaryEl);
-    errorEl.textContent = message;
-    errorEl.style.display = "block";
-  }
-
-  function hideError() {
-    errorEl.style.display = "none";
-    errorEl.textContent = "";
-  }
-
-  function renderSummary(data) {
-    clearChildren(summaryEl);
-    var totals = data.totals || {};
-    var parts = [
-      "Projects: " + totals.project_count,
-      "Active files: " + totals.file_count,
-      "Deleted: " + totals.deleted_count,
-      "git_commit: " + data.git_commit,
-      "last_backup_at: " + (data.last_backup_at || "never"),
-    ];
-    parts.forEach(function (text, i) {
-      if (i > 0) summaryEl.appendChild(document.createTextNode(" · "));
-      summaryEl.appendChild(document.createTextNode(text));
-    });
-  }
-
-  function renderTable(projects) {
-    clearChildren(tbodyEl);
-    if (!projects.length) {
-      var tr = document.createElement("tr");
-      var td = document.createElement("td");
-      td.colSpan = 5;
-      td.className = "empty";
-      td.textContent = "No projects yet.";
-      tr.appendChild(td);
-      tbodyEl.appendChild(tr);
-      tableEl.style.display = "";
-      return;
-    }
-    projects.forEach(function (p) {
-      var tr = document.createElement("tr");
-
-      var tdKey = document.createElement("td");
-      tdKey.textContent = p.project_key;
-      tr.appendChild(tdKey);
-
-      var tdActive = document.createElement("td");
-      tdActive.textContent = String(p.file_count);
-      tr.appendChild(tdActive);
-
-      var tdDeleted = document.createElement("td");
-      tdDeleted.textContent = String(p.deleted_count);
-      tr.appendChild(tdDeleted);
-
-      var tdSources = document.createElement("td");
-      tdSources.textContent = (p.sources || []).join(", ");
-      tr.appendChild(tdSources);
-
-      var tdUpdated = document.createElement("td");
-      tdUpdated.textContent = p.last_updated_at || "";
-      tr.appendChild(tdUpdated);
-
-      tbodyEl.appendChild(tr);
-    });
-    tableEl.style.display = "";
-  }
-
-  function load() {
-    var token = tokenInput.value.trim();
-    if (!token) {
-      showError("enter a token");
-      return;
-    }
-    hideError();
-    fetch("/admin/stats", { headers: { Authorization: "Bearer " + token } })
-      .then(function (resp) {
-        if (resp.status === 401) {
-          showError("invalid token");
-          return null;
+  // ---- The API, with whichever credential the page holds.
+  function api(method, path, body) {
+    var headers = { "Content-Type": "application/json" };
+    if (auth.token) headers["Authorization"] = "Bearer " + auth.token;
+    else if (auth.csrf && method !== "GET") headers["X-Recall-CSRF"] = auth.csrf;
+    var init = { method: method, headers: headers, credentials: "same-origin", cache: "no-store" };
+    if (body !== undefined) init.body = JSON.stringify(body);
+    return fetch(path, init).then(function (resp) {
+      return resp.text().then(function (text) {
+        var data = null;
+        try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+        if (resp.status === 401 && (auth.csrf || auth.token) && path.indexOf("/admin/login") !== 0 && path.indexOf("/admin/bootstrap") !== 0) {
+          signedOut(auth.token ? "The token was not accepted." : "Your session has ended. Sign in again.");
         }
-        if (!resp.ok) {
-          showError("request failed (" + resp.status + ")");
-          return null;
-        }
-        // Only persist a token that's actually been proven valid.
-        sessionStorage.setItem(STORAGE_KEY, token);
-        return resp.json();
-      })
-      .then(function (data) {
-        if (!data) return;
-        renderSummary(data);
-        renderTable(data.projects || []);
-      })
-      .catch(function () {
-        showError("request failed");
+        return { ok: resp.ok, status: resp.status, data: data };
       });
+    });
+  }
+  function failure(r) {
+    return (r.data && r.data.error) ? r.data.error : "request failed (" + r.status + ")";
   }
 
-  loadBtn.addEventListener("click", load);
-  tokenInput.addEventListener("keydown", function (e) {
-    if (e.key === "Enter") load();
+  // ---- WebAuthn's JSON form: binary values travel as base64url.
+  function b64urlToBuf(s) {
+    s = s.replace(/-/g, "+").replace(/_/g, "/");
+    while (s.length % 4) s += "=";
+    var bin = atob(s);
+    var out = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out.buffer;
+  }
+  function bufToB64url(buf) {
+    var bytes = new Uint8Array(buf);
+    var bin = "";
+    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function dropNulls(v) {
+    if (Array.isArray(v)) return v.map(dropNulls);
+    if (v && typeof v === "object") {
+      var out = {};
+      Object.keys(v).forEach(function (k) { if (v[k] !== null) out[k] = dropNulls(v[k]); });
+      return out;
+    }
+    return v;
+  }
+  function creationOptions(options) {
+    var pk = dropNulls(options.publicKey);
+    pk.challenge = b64urlToBuf(pk.challenge);
+    pk.user.id = b64urlToBuf(pk.user.id);
+    (pk.excludeCredentials || []).forEach(function (c) { c.id = b64urlToBuf(c.id); });
+    return { publicKey: pk };
+  }
+  function requestOptions(options) {
+    var pk = dropNulls(options.publicKey);
+    pk.challenge = b64urlToBuf(pk.challenge);
+    (pk.allowCredentials || []).forEach(function (c) { c.id = b64urlToBuf(c.id); });
+    return { publicKey: pk };
+  }
+  // What the browser says about the credential beyond the signed answer:
+  // credProps says whether the authenticator kept it, which signing in
+  // here, with no user name, needs.
+  function extensionResults(cred) {
+    try { return cred.getClientExtensionResults ? (cred.getClientExtensionResults() || {}) : {}; }
+    catch (e) { return {}; }
+  }
+  function registrationJSON(cred) {
+    var ext = extensionResults(cred);
+    if (ext.credProps && ext.credProps.rk === false) {
+      throw new Error("This authenticator did not keep the passkey on itself, and signing in here needs one that does. Use a phone, or a password manager that saves passkeys.");
+    }
+    return {
+      id: cred.id,
+      rawId: bufToB64url(cred.rawId),
+      type: cred.type,
+      response: {
+        attestationObject: bufToB64url(cred.response.attestationObject),
+        clientDataJSON: bufToB64url(cred.response.clientDataJSON)
+      },
+      extensions: ext
+    };
+  }
+  function assertionJSON(cred) {
+    var r = cred.response;
+    return {
+      id: cred.id,
+      rawId: bufToB64url(cred.rawId),
+      type: cred.type,
+      response: {
+        authenticatorData: bufToB64url(r.authenticatorData),
+        clientDataJSON: bufToB64url(r.clientDataJSON),
+        signature: bufToB64url(r.signature),
+        userHandle: r.userHandle ? bufToB64url(r.userHandle) : null
+      },
+      extensions: extensionResults(cred)
+    };
+  }
+  function webauthnError(e) {
+    if (e && e.name === "NotAllowedError") return "The passkey prompt was cancelled or timed out.";
+    if (e && e.name === "InvalidStateError") return "This device already has a passkey for this server.";
+    if (e && e.name === "SecurityError") return "This browser refused: the page address does not match RECALL_PUBLIC_URL.";
+    return "The passkey did not work here: " + (e && e.message ? e.message : e);
+  }
+  function webauthnAvailable() {
+    return !!(window.PublicKeyCredential && navigator.credentials);
+  }
+
+  // ---- Signing in and out.
+  function signedOut(message) {
+    auth.csrf = null;
+    auth.token = null;
+    try { sessionStorage.removeItem(TOKEN_KEY); } catch (e) {}
+    show($("app"), false);
+    show($("who"), false);
+    renderSignIn();
+    if (message) say($("signin-error"), message);
+  }
+
+  function signedIn(how) {
+    show($("signin"), false);
+    say($("signin-error"), "");
+    $("who-text").textContent = how;
+    show($("who"), true);
+    show($("passkeys-tab"), !!auth.csrf);
+    show($("app"), true);
+    selectTab("devices");
+  }
+
+  function renderSignIn() {
+    show($("signin"), true);
+    var pk = (status && status.passkeys) || { enabled: false, reason: "The server could not be reached." };
+    var wrongOrigin = pk.enabled && pk.origin && pk.origin !== window.location.origin;
+    if (wrongOrigin) {
+      say($("origin-warning"), "This page is open at " + window.location.origin + ", but passkeys are set up for " + pk.origin + ". Open " + pk.origin + "/admin to use a passkey.");
+    } else {
+      say($("origin-warning"), "");
+    }
+    var usable = pk.enabled && !wrongOrigin && webauthnAvailable();
+    show($("passkey-off"), !pk.enabled);
+    $("passkey-off-reason").textContent = pk.reason || "";
+    show($("passkey-signin"), usable && status.bootstrapped);
+    show($("passkey-bootstrap"), usable && !status.bootstrapped);
+    if (pk.enabled && !webauthnAvailable()) {
+      say($("signin-error"), "This browser does not support passkeys.");
+    }
+    $("token-details").open = !usable;
+  }
+
+  function loadStatus() {
+    return api("GET", "/admin/session").then(function (r) {
+      status = r.ok ? r.data : null;
+      return status;
+    }).catch(function () { status = null; return null; });
+  }
+
+  // The passkey ceremony: a new session, replacing any this browser had.
+  function passkeySignIn() {
+    return api("POST", "/admin/login/start").then(function (r) {
+      if (!r.ok) throw new Error(failure(r));
+      return navigator.credentials.get(requestOptions(r.data.options)).then(function (cred) {
+        return api("POST", "/admin/login/finish", { ceremony_id: r.data.ceremony_id, credential: assertionJSON(cred) });
+      }, function (e) { throw new Error(webauthnError(e)); });
+    }).then(function (r) {
+      if (!r.ok) throw new Error(failure(r));
+      auth.csrf = r.data.csrf_token;
+    });
+  }
+
+  function signIn() {
+    say($("signin-error"), "");
+    $("signin-button").disabled = true;
+    passkeySignIn().then(function () {
+      signedIn("Signed in with a passkey");
+    }).catch(function (e) {
+      say($("signin-error"), e.message);
+    }).then(function () { $("signin-button").disabled = false; });
+  }
+
+  // Changing the passkeys, or signing out the other sessions, needs a
+  // sign-in in the last five minutes, so a copied cookie cannot. When the
+  // server says this session's is older, ask for the passkey, then try
+  // once more.
+  var RECENT = "forbidden: this needs a sign-in in the last five minutes";
+  function recently(call) {
+    return call().then(function (r) {
+      if (r.status !== 403 || !r.data || !r.data.error || r.data.error.indexOf(RECENT) !== 0) return r;
+      return passkeySignIn().then(call);
+    });
+  }
+
+  function bootstrap() {
+    var token = $("bootstrap-token").value.trim();
+    var code = $("bootstrap-code").value.trim();
+    if (!token) { say($("signin-error"), "Enter RECALL_TOKEN first."); return; }
+    if (!code) { say($("signin-error"), "Enter the bootstrap code the server printed."); return; }
+    say($("signin-error"), "");
+    $("bootstrap-button").disabled = true;
+    var bearer = { "Content-Type": "application/json", "Authorization": "Bearer " + token };
+    function post(path, body) {
+      return fetch(path, { method: "POST", headers: bearer, body: JSON.stringify(body || {}), cache: "no-store" })
+        .then(function (resp) {
+          return resp.json().catch(function () { return null; }).then(function (data) {
+            return { ok: resp.ok, status: resp.status, data: data };
+          });
+        });
+    }
+    post("/admin/bootstrap/register", { bootstrap_code: code }).then(function (r) {
+      if (r.status === 401) throw new Error("That is not the server's RECALL_TOKEN.");
+      if (!r.ok) throw new Error(failure(r));
+      return navigator.credentials.create(creationOptions(r.data.options)).then(function (cred) {
+        return post("/admin/bootstrap/register/finish", {
+          ceremony_id: r.data.ceremony_id,
+          name: $("bootstrap-name").value.trim(),
+          credential: registrationJSON(cred)
+        });
+      }, function (e) { throw new Error(webauthnError(e)); });
+    }).then(function (r) {
+      if (!r.ok) throw new Error(failure(r));
+      $("bootstrap-token").value = "";
+      $("bootstrap-code").value = "";
+      return loadStatus().then(function () {
+        renderSignIn();
+        // Signing in straight away also proves the new passkey works.
+        signIn();
+      });
+    }).catch(function (e) {
+      say($("signin-error"), e.message);
+    }).then(function () { $("bootstrap-button").disabled = false; });
+  }
+
+  function useToken(token, quiet) {
+    auth.token = token;
+    auth.csrf = null;
+    return api("GET", "/admin/stats").then(function (r) {
+      if (!r.ok) {
+        auth.token = null;
+        if (!quiet) say($("signin-error"), r.status === 401 ? "That token was not accepted." : failure(r));
+        return;
+      }
+      // Kept for this tab only, and only once proven valid.
+      try { sessionStorage.setItem(TOKEN_KEY, token); } catch (e) {}
+      $("token").value = "";
+      signedIn("Using RECALL_TOKEN");
+    });
+  }
+
+  function signOut() {
+    if (auth.token) { signedOut(""); return; }
+    api("POST", "/admin/logout").then(function () { signedOut(""); });
+  }
+
+  // ---- Tabs.
+  function selectTab(name) {
+    Array.prototype.forEach.call(document.querySelectorAll("nav.tabs button"), function (b) {
+      b.setAttribute("aria-selected", b.getAttribute("data-tab") === name ? "true" : "false");
+    });
+    Array.prototype.forEach.call(document.querySelectorAll("[data-panel]"), function (p) {
+      show(p, p.getAttribute("data-panel") === name);
+    });
+    if (name === "devices") { loadDevices(); loadKeys(); }
+    if (name === "projects") loadProjects();
+    if (name === "passkeys") loadPasskeys();
+  }
+
+  // ---- Devices.
+  function loadDevices() {
+    return api("GET", "/v1/devices").then(function (r) {
+      if (!r.ok) { say($("devices-error"), failure(r)); return; }
+      say($("devices-error"), "");
+      devicesCache = r.data.devices || [];
+      renderDevices();
+    });
+  }
+
+  function renderDevices() {
+    var list = $("devices");
+    clear(list);
+    var all = $("show-revoked").checked;
+    var shown = devicesCache.filter(function (d) { return all || !d.revoked_at; });
+    if (!shown.length) {
+      list.appendChild(el("li", "muted", "No devices yet."));
+      return;
+    }
+    shown.forEach(function (d) {
+      var li = el("li");
+      var main = el("div", "item-main");
+      var name = el("div", "item-name", d.name);
+      name.appendChild(el("span", "badge", d.scope));
+      if (d.ephemeral) name.appendChild(el("span", "badge", "ephemeral"));
+      if (d.revoked_at) name.appendChild(el("span", "badge gone", "revoked"));
+      main.appendChild(name);
+      main.appendChild(el("div", "item-meta", "Last seen " + when(d.last_seen) + (d.agent ? " · " + d.agent : "")));
+      main.appendChild(el("div", "item-meta mono", d.fingerprint));
+      li.appendChild(main);
+      if (!d.revoked_at) {
+        var b = el("button", "danger small", "Revoke");
+        b.type = "button";
+        b.addEventListener("click", function () {
+          if (!window.confirm("Revoke " + d.name + "? It will stop syncing at once.")) return;
+          b.disabled = true;
+          api("POST", "/v1/devices/" + encodeURIComponent(d.id) + "/revoke").then(function (r) {
+            if (!r.ok) say($("devices-error"), failure(r));
+            loadDevices();
+          });
+        });
+        li.appendChild(b);
+      }
+      list.appendChild(li);
+    });
+  }
+
+  var pendingCode = null;
+  var pendingFingerprint = null;
+
+  function lookup() {
+    say($("approve-error"), "");
+    say($("approve-ok"), "");
+    show($("pending"), false);
+    var code = $("code").value.trim();
+    if (!code) { say($("approve-error"), "Enter the code the machine shows."); return; }
+    api("GET", "/v1/devices/pending/" + encodeURIComponent(code)).then(function (r) {
+      if (!r.ok) { say($("approve-error"), failure(r)); return; }
+      pendingCode = r.data.user_code;
+      pendingFingerprint = r.data.fingerprint;
+      $("pending-name").textContent = r.data.name;
+      $("pending-agent").textContent = r.data.agent || "(none)";
+      $("pending-fingerprint").textContent = r.data.fingerprint;
+      $("pending-expires").textContent = "in " + Math.max(1, Math.round(r.data.expires_in / 60)) + " min";
+      $("pending-scope").value = "sync";
+      show($("pending"), true);
+    });
+  }
+
+  function decide(approve) {
+    if (!pendingCode) return;
+    var body = approve
+      ? { user_code: pendingCode, fingerprint: pendingFingerprint, scope: $("pending-scope").value }
+      : { user_code: pendingCode };
+    api("POST", approve ? "/v1/devices/approve" : "/v1/devices/deny", body).then(function (r) {
+      if (!r.ok) { say($("approve-error"), failure(r)); return; }
+      show($("pending"), false);
+      $("code").value = "";
+      say($("approve-ok"), approve ? "Approved " + r.data.name + "." : "Denied.");
+      pendingCode = null;
+      pendingFingerprint = null;
+      loadDevices();
+    });
+  }
+
+  // ---- Authkeys.
+  function loadKeys() {
+    return api("GET", "/v1/authkeys").then(function (r) {
+      if (!r.ok) { say($("keys-error"), failure(r)); return; }
+      say($("keys-error"), "");
+      var list = $("keys");
+      clear(list);
+      var keys = (r.data.authkeys || []).filter(function (k) { return !k.revoked_at; });
+      keys.forEach(function (k) {
+        var li = el("li");
+        var main = el("div", "item-main");
+        var name = el("div", "item-name", k.tag || "(no tag)");
+        if (k.ephemeral) name.appendChild(el("span", "badge", "ephemeral"));
+        if (k.expires_at && new Date(k.expires_at) < new Date()) name.appendChild(el("span", "badge gone", "expired"));
+        main.appendChild(name);
+        main.appendChild(el("div", "item-meta", "Expires " + when(k.expires_at) + (k.max_devices ? " · at most " + k.max_devices + " devices" : "")));
+        li.appendChild(main);
+        var b = el("button", "danger small", "Revoke");
+        b.type = "button";
+        b.addEventListener("click", function () { revokeKey(k, b); });
+        li.appendChild(b);
+        list.appendChild(li);
+      });
+    });
+  }
+
+  function revokeKey(k, button) {
+    if (!window.confirm("Revoke the " + (k.tag || "untagged") + " authkey? No new device will enrol with it.")) return;
+    var enrolled = devicesCache.filter(function (d) { return d.authkey_id === k.id && !d.revoked_at; }).length;
+    var also = enrolled > 0 && window.confirm("Also revoke the " + enrolled + " device(s) it enrolled?");
+    button.disabled = true;
+    api("POST", "/v1/authkeys/" + encodeURIComponent(k.id) + "/revoke", { revoke_devices: also }).then(function (r) {
+      if (!r.ok) say($("keys-error"), failure(r));
+      loadKeys();
+      loadDevices();
+    });
+  }
+
+  function createKey() {
+    say($("keys-error"), "");
+    var body = {
+      tag: $("key-tag").value.trim(),
+      expires_in_days: parseInt($("key-days").value, 10) || 0,
+      ephemeral: $("key-ephemeral").checked
+    };
+    var max = parseInt($("key-max").value, 10);
+    if (max) body.max_devices = max;
+    $("key-create").disabled = true;
+    api("POST", "/v1/authkeys", body).then(function (r) {
+      $("key-create").disabled = false;
+      if (!r.ok) { say($("keys-error"), failure(r)); return; }
+      $("key-secret").textContent = r.data.key;
+      show($("key-shown"), true);
+      loadKeys();
+    });
+  }
+
+  function copyKey() {
+    var text = $("key-secret").textContent;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () {
+        $("key-copy").textContent = "Copied";
+      }, function () { $("key-copy").textContent = "Select and copy it"; });
+    } else {
+      $("key-copy").textContent = "Select and copy it";
+    }
+  }
+
+  function forgetKey() {
+    $("key-secret").textContent = "";
+    $("key-copy").textContent = "Copy";
+    show($("key-shown"), false);
+  }
+
+  // ---- Projects.
+  function loadProjects() {
+    return api("GET", "/admin/stats").then(function (r) {
+      if (!r.ok) { say($("projects-error"), failure(r)); return; }
+      say($("projects-error"), "");
+      var t = r.data.totals || {};
+      $("summary").textContent = [
+        "Projects: " + t.project_count,
+        "Active files: " + t.file_count,
+        "Deleted: " + t.deleted_count,
+        "git_commit: " + r.data.git_commit,
+        "last_backup_at: " + (r.data.last_backup_at || "never")
+      ].join(" · ");
+      var tbody = $("tbody");
+      clear(tbody);
+      var projects = r.data.projects || [];
+      if (!projects.length) {
+        var tr = el("tr");
+        var td = el("td", "muted", "No projects yet.");
+        td.colSpan = 5;
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+        return;
+      }
+      projects.forEach(function (p) {
+        var tr = el("tr");
+        [p.project_key, String(p.file_count), String(p.deleted_count), (p.sources || []).join(", "), p.last_updated_at || ""]
+          .forEach(function (v) { tr.appendChild(el("td", null, v)); });
+        tbody.appendChild(tr);
+      });
+    });
+  }
+
+  // ---- Passkeys.
+  function loadPasskeys() {
+    return api("GET", "/admin/passkeys").then(function (r) {
+      if (!r.ok) { say($("passkeys-error"), failure(r)); return; }
+      var list = $("passkeys");
+      clear(list);
+      var keys = r.data.passkeys || [];
+      keys.forEach(function (p) {
+        var li = el("li");
+        var main = el("div", "item-main");
+        var name = el("div", "item-name", p.name);
+        if (p.current) name.appendChild(el("span", "badge", "this session"));
+        main.appendChild(name);
+        main.appendChild(el("div", "item-meta", "Added " + when(p.created_at) + " · last used " + when(p.last_used_at)));
+        li.appendChild(main);
+        var b = el("button", "danger small", "Remove");
+        b.type = "button";
+        b.disabled = keys.length < 2;
+        b.addEventListener("click", function () {
+          var warning = p.current ? " You signed in with it, so you will be signed out." : "";
+          if (!window.confirm("Remove the passkey " + p.name + "?" + warning)) return;
+          b.disabled = true;
+          say($("passkeys-error"), "");
+          recently(function () {
+            return api("POST", "/admin/passkeys/" + encodeURIComponent(p.id) + "/remove");
+          }).then(function (r) {
+            if (!r.ok) { say($("passkeys-error"), failure(r)); loadPasskeys(); return; }
+            // Signing in again for it may have been with this very passkey,
+            // so ask the server rather than trust what the list said.
+            loadStatus().then(function (s) {
+              if (!s || !s.session) { signedOut("That passkey was removed. Sign in with another."); return; }
+              loadPasskeys();
+            });
+          }).catch(function (e) { say($("passkeys-error"), e.message); loadPasskeys(); });
+        });
+        li.appendChild(b);
+        list.appendChild(li);
+      });
+    });
+  }
+
+  function addPasskey() {
+    say($("passkeys-error"), "");
+    say($("passkeys-ok"), "");
+    $("passkey-add").disabled = true;
+    recently(function () { return api("POST", "/admin/passkeys/register"); }).then(function (r) {
+      if (!r.ok) throw new Error(failure(r));
+      return navigator.credentials.create(creationOptions(r.data.options)).then(function (cred) {
+        return api("POST", "/admin/passkeys/register/finish", {
+          ceremony_id: r.data.ceremony_id,
+          name: $("passkey-name").value.trim(),
+          credential: registrationJSON(cred)
+        });
+      }, function (e) { throw new Error(webauthnError(e)); });
+    }).then(function (r) {
+      if (!r.ok) throw new Error(failure(r));
+      $("passkey-name").value = "";
+      say($("passkeys-ok"), "Added " + r.data.name + ".");
+      loadPasskeys();
+    }).catch(function (e) {
+      say($("passkeys-error"), e.message);
+    }).then(function () { $("passkey-add").disabled = false; });
+  }
+
+  function signOutOthers() {
+    say($("sessions-error"), "");
+    say($("sessions-ok"), "");
+    if (!window.confirm("Sign out every other session? This one stays signed in.")) return;
+    $("sign-out-others").disabled = true;
+    recently(function () { return api("POST", "/admin/logout/others"); }).then(function (r) {
+      if (!r.ok) throw new Error(failure(r));
+      var n = r.data.other_sessions_ended;
+      say($("sessions-ok"), n === 1 ? "Signed out 1 other session." : "Signed out " + n + " other sessions.");
+    }).catch(function (e) {
+      say($("sessions-error"), e.message);
+    }).then(function () { $("sign-out-others").disabled = false; });
+  }
+
+  // ---- Wiring. No inline handlers: the CSP would block them.
+  $("signin-button").addEventListener("click", signIn);
+  $("bootstrap-button").addEventListener("click", bootstrap);
+  $("token-button").addEventListener("click", function () {
+    var t = $("token").value.trim();
+    if (t) useToken(t, false); else say($("signin-error"), "Enter a token.");
+  });
+  $("token").addEventListener("keydown", function (e) { if (e.key === "Enter") $("token-button").click(); });
+  $("sign-out").addEventListener("click", signOut);
+  $("lookup").addEventListener("click", lookup);
+  $("code").addEventListener("keydown", function (e) { if (e.key === "Enter") lookup(); });
+  $("approve").addEventListener("click", function () { decide(true); });
+  $("deny").addEventListener("click", function () { decide(false); });
+  $("show-revoked").addEventListener("change", renderDevices);
+  $("key-create").addEventListener("click", createKey);
+  $("key-copy").addEventListener("click", copyKey);
+  $("key-done").addEventListener("click", forgetKey);
+  $("passkey-add").addEventListener("click", addPasskey);
+  $("sign-out-others").addEventListener("click", signOutOthers);
+  Array.prototype.forEach.call(document.querySelectorAll("nav.tabs button"), function (b) {
+    b.addEventListener("click", function () { selectTab(b.getAttribute("data-tab")); });
   });
 
-  var stored = sessionStorage.getItem(STORAGE_KEY);
-  if (stored) {
-    tokenInput.value = stored;
-    load();
-  }
+  // ---- Start: a live session first, then a token this tab already proved.
+  loadStatus().then(function (s) {
+    if (s && s.session) {
+      auth.csrf = s.session.csrf_token;
+      signedIn("Signed in with a passkey");
+      return;
+    }
+    var stored = null;
+    try { stored = sessionStorage.getItem(TOKEN_KEY); } catch (e) {}
+    if (stored) {
+      return useToken(stored, true).then(function () { if (!auth.token) renderSignIn(); });
+    }
+    renderSignIn();
+  });
 })();
 </script>
 </body>

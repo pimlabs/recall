@@ -10,6 +10,7 @@
 
 pub mod admin;
 pub mod audit;
+pub mod bootstrap;
 pub mod config;
 pub mod merge;
 pub mod server;

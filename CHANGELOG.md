@@ -84,14 +84,72 @@ break will be described here in full rather than smoothed over.
   all the same (see "Revoking it" in `deploy/README.md`).
 - **Releases publish `recall-worker`** for Linux amd64 and arm64, static,
   beside `recall-server`, in the same `checksums.txt`, and on crates.io.
+- **The `/admin` page manages devices, and signs in with a passkey.** A new
+  Devices tab approves a machine by its code (showing its name, agent and
+  key fingerprint first, and with the `sync`, `admin` or `worker` scope),
+  lists and revokes devices, and makes and revokes authkeys, so an owner
+  with only a phone can do everything `RECALL_TOKEN` could. The page signs
+  in with a passkey; the token still works on it as before.
+- **New setting: `RECALL_PUBLIC_URL`**, such as
+  `https://recall.example.com`. Passkeys are bound to that address, so it
+  must be a full domain name with no trailing dot (`http://` only for
+  `localhost`, with a warning that such passkeys work on that machine
+  only). Unset or unusable, passkey sign-in is off and the page says why;
+  nothing else changes. All three compose files pass it through from
+  `deploy/.env`.
+- **The first passkey takes `RECALL_TOKEN` and a one-time bootstrap
+  code.** The server prints the code to its log when it starts with
+  passkey sign-in on and no passkey registered; it works for an hour, and
+  once. So a copy of the token that leaked cannot plant a passkey of its
+  own. Once a passkey exists the token cannot register another, whatever
+  it is shown; further passkeys are added from a signed-in session. Lost
+  every passkey? `recall-server reset-passkeys`, run on the server as the
+  database's owner, clears them and prints a new code. See step 6 of
+  `deploy/README.md`.
+- **Adding or removing a passkey, and signing out the other sessions, need
+  a sign-in in the last five minutes**, so a copied session cookie cannot
+  lock the owner out; the page asks for the passkey again first. A new
+  **Sign out other sessions** button ends every session but the current
+  one, and signing in again from a browser replaces the session it had.
+- **New routes** under `/admin`: `GET /admin/session`,
+  `POST /admin/bootstrap/register` and `…/finish`, `POST /admin/login/start`
+  and `…/finish`, `POST /admin/logout`, `POST /admin/logout/others`,
+  `GET /admin/passkeys`, `POST /admin/passkeys/register` and `…/finish`,
+  and `POST /admin/passkeys/{id}/remove`. The device and authkey routes
+  that took `RECALL_TOKEN` or an admin device also take the page's session
+  (with its `X-Recall-CSRF` header on a `POST`); `/sync` and `/v1/jobs`
+  never do. A request with an `Authorization` header or a signature is
+  judged by that alone, whatever cookie it also carries.
+- **Starting a passkey sign-in makes the server hold nothing.** A
+  ceremony's state is sealed into the `ceremony_id` the page sends back,
+  so strangers starting sign-ins cannot fill anything and keep the owner
+  out. Every ceremony's start and finish must be
+  `Content-Type: application/json`, or it is `415`, which a page on
+  another site cannot send blind.
+- **`GET /admin` is served with a stricter CSP**: the page's inline script
+  and stylesheet are allowed by hash rather than `'unsafe-inline'`, plus
+  `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`.
+- **Three more tables**, `admin_credentials`, `admin_sessions` and
+  `admin_bootstrap`, created on start. An older server ignores them.
+- **`recall-server version` prints a second line, `features: passkeys`**,
+  and a release refuses to publish a server binary that does not say it.
+- **The server binary is about 5 MiB larger** (3.0 MB to 8.3 MB, static
+  x86_64 musl): it now carries OpenSSL, built in, and webauthn-rs, which
+  the passkey verification needs. The client does not.
+  Building the server from source needs perl and make as well as a C
+  compiler, and Rust 1.88.
 - **The server keeps an audit log**: a Merkle tree (RFC 9162) over every
   authenticated push, pull, delete, and change to a device or authkey,
   including a device an authkey enrols, and over the merge queue's claims,
-  results and retries, the server's own when it merges without a worker.
-  A push queued for the worker names its job. Each leaf records who acted,
-  what changed, and a content hash — never the content itself. A change
-  and its leaf commit in one transaction, and the table refuses any
-  `UPDATE`, `DELETE`, or insert that is not the next leaf.
+  results and retries, the server's own when it merges without a worker,
+  and over the admin page's passkeys: each one added or removed, other
+  sessions signed out, a bootstrap code issued, and `recall-server
+  reset-passkeys`. What a passkey session does is credited to its passkey,
+  never to the token. A push queued for the worker names its job. Each
+  leaf records who acted, what changed, and a content hash — never the
+  content itself. A change and its leaf commit in one transaction, and
+  the table refuses any `UPDATE`, `DELETE`, or insert that is not the
+  next leaf.
 - **What it protects against today, and what it does not.** A checkpoint
   (the tree's size and root) that the owner saves somewhere the server
   cannot reach lets `scripts/audit-verify.py` show later that the log

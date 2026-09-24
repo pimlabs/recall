@@ -160,8 +160,9 @@ every pull leaves the client a checkpoint without another request.
 
 **The leaf, version 1.** One per authenticated push, pull and change to a
 device or authkey (an authkey enrolling a device included), one per merge
-job leased, settled or retried, and one per action the server takes
-itself. Unauthenticated routes and refused requests
+job leased, settled or retried, one per change to the admin page's
+passkeys (`reset-passkeys` on the host included), and one per action the
+server takes itself. Unauthenticated routes and refused requests
 append nothing, so the internet cannot grow the log. Shown indented; stored
 on one line, compact, in this field order:
 
@@ -180,8 +181,8 @@ on one line, compact, in this field order:
 | `v` | Leaf format, `1`. |
 | `seq` | Its index in the tree, from 0. |
 | `at` | Taken under the store's lock with `seq`, and never below the leaf before it. |
-| `action` | `push`, `delete`, `pull`, `approve`, `enroll`, `deny`, `revoke`, `sweep`, `authkey_create`, `authkey_revoke`, `start`, and, with PR 2's queue, `job_claim`, `job_result` and `job_retry`. Later pull requests add `key_create`, `key_grant`, `seal`, `evaluate` and `strict`. |
-| `actor.kind` | `device` (a signed request), `operator` (`RECALL_TOKEN`), `authkey` (by id and tag, for the device it enrols) or `server` (its own sweeps; `start`, which records the version it started as; and the jobs it settles itself: a merge with no worker left, a lease run out, a job failed for want of anything to merge it). |
+| `action` | `push`, `delete`, `pull`, `approve`, `enroll`, `deny`, `revoke`, `sweep`, `authkey_create`, `authkey_revoke`, `start`, and, with PR 2's queue, `job_claim`, `job_result` and `job_retry`, and, with the admin page's passkeys, `passkey_add`, `passkey_remove`, `sessions_end`, `bootstrap_code` and `passkey_reset`. Later pull requests add `key_create`, `key_grant`, `seal`, `evaluate` and `strict`. |
+| `actor.kind` | `device` (a signed request), `operator` (`RECALL_TOKEN`), `authkey` (by id and tag, for the device it enrols), `session` (the admin page, by the passkey it signed in with), `server` (its own sweeps; `start`, which records the version it started as; a bootstrap code; and the jobs it settles itself: a merge with no worker left, a lease run out, a job failed for want of anything to merge it) or `host` (`recall-server reset-passkeys`, from another process, whose leaf a running server reads in before its own next append). |
 | `subject` | Per action. `approve` and `enroll` leaves carry the device's `public_key`, and from PR 3 its `encryption_key`, so the log verifies without the `devices` table. A push says whether the server `merged` it inline, or names the `merge_job` it queued; that job's `job_result` says what the file became, by hash. |
 | `request` | For a signed request: the SHA-256 of its body in base64, as its `Content-Digest` carries it; the RFC 9421 signature base the server verified; the signature; and the body itself for the device-management actions, whose bodies are small and hold no secret, so what they asked for is bound to the subject. `null` otherwise. A push's body, the file, is not kept: its signature proves the device pushed at that moment, not which file the server says it was. |
 
