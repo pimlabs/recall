@@ -94,7 +94,7 @@ fn main() -> ExitCode {
     }
 }
 
-/// SIGTERM, which `docker compose stop` sends, or ctrl-c. A merge cut off
+/// SIGTERM, which `docker stop`/`docker compose stop` sends, or ctrl-c. A merge cut off
 /// here is not lost: its lease runs out and the job is claimed again.
 async fn shutdown_signal() {
     let ctrl_c = async {

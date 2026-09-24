@@ -172,9 +172,10 @@ services:
     #
     # Two costs of a single-file mount, both acceptable for a read-only
     # browser: it pins the file's inode, so a database replaced by a new
-    # file (rather than written in place) needs `docker compose restart
-    # sqlite-web` to be seen; and recall.db-wal and recall.db-shm beside it
-    # are invisible here. The server keeps the database in WAL mode, so
+    # file (rather than written in place) needs `docker restart
+    # recall-sqlite-web` (needs no -f; see deploy/README.md) to be seen; and
+    # recall.db-wal and recall.db-shm beside it are invisible here. The
+    # server keeps the database in WAL mode, so
     # SQLite in this container can keep a -wal and -shm of its own inside the
     # container, unrelated to the server's, and shows recall.db as last
     # checkpointed (the server does that every ten minutes), read with no

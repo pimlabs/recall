@@ -219,6 +219,8 @@ deliberately, so nothing can reach the origin around the ingress. The job
 therefore asks from *inside* the container:
 
 ```sh
+# doclint:allow-no-f: $COMPOSE_FILES is DEPLOY_COMPOSE_FILES, which the step
+# above this one refuses to run without, and it already reads "-f ...".
 docker compose $COMPOSE_FILES exec -T recall-server \
   wget -qO- http://127.0.0.1:8787/health
 ```

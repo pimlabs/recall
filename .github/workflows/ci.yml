@@ -158,7 +158,11 @@ jobs:
       # those, so each is asserted, and each assertion is shown to fail on a
       # copy of the file with that line added. The same for what the
       # database procedures rely on in all three files: the container names
-      # the restore stops by, and the server's stop grace period.
+      # the restore stops by, and the server's stop grace period. It also
+      # lints deploy/README.md and docs/**/*.md themselves: a fenced sh/bash
+      # block that runs `docker compose exec/logs/restart/stop/start/ps/run`
+      # with no `-f` acts on whichever compose file is on disk by default,
+      # not the one the surrounding prose means.
       - name: The compose files keep the worker unreachable and the procedures' names
         run: python3 scripts/compose-check.py
 

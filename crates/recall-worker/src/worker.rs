@@ -559,7 +559,7 @@ impl Worker {
             } else {
                 format!(
                     "the claude CLI cannot merge ({}); taking no jobs until it can. \
-                     Log it in with: docker compose exec -it -u node recall-worker claude setup-token",
+                     Log it in with: docker exec -it -u node recall-worker claude setup-token",
                     if self.status.error.is_empty() {
                         "not logged in"
                     } else {

@@ -393,11 +393,17 @@ that works from a phone with nothing typed but a code. Setting it up takes
    registered, the server prints one each time it starts:
 
    ```sh
-   docker compose logs recall-server | grep -A3 'bootstrap code'
+   docker logs recall-server 2>&1 | grep -A3 'bootstrap code'
    ```
 
+   All three compose files name this container `recall-server`, so this
+   needs no `-f`. `2>&1` is not decoration: the server prints it with
+   `eprintln!`, to stderr, and `docker logs` sends stdout and stderr lines
+   to its own stdout and stderr respectively rather than one merged stream,
+   so a plain pipe into `grep` would see nothing.
+
    It looks like `BCDF-GHJK-LMNP-QRST`, works for an hour, and works once.
-   Expired? `docker compose restart recall-server` prints a new one.
+   Expired? `docker restart recall-server` prints a new one.
 3. On your phone, open `https://recall.yourdomain.com/admin`. It says
    **Set up a passkey**.
 4. Paste `RECALL_TOKEN` (from `.env`; a password manager is the easy way to
@@ -433,15 +439,16 @@ reset as below.
 **Lost every passkey?** On the server, run:
 
 ```sh
-docker compose exec -u node recall-server recall-server reset-passkeys
+docker exec -u node recall-server recall-server reset-passkeys
 ```
 
-(with `-f docker-compose.traefik.yml` for Traefik). It removes every
-passkey and admin session, prints a new bootstrap code, and the page
-offers **Set up a passkey** again. It needs a shell on the server on
-purpose: nothing reachable over the network can do it. Run it as `node`,
-the database's owner, as shown; as anyone else it refuses, since files it
-left behind could stop the server opening the database. It is in the audit
+All three compose files name this container `recall-server`, so this needs
+no `-f`, whichever one runs. It removes every passkey and admin session,
+prints a new bootstrap code, and the page offers **Set up a passkey**
+again. It needs a shell on the server on purpose: nothing reachable over
+the network can do it. Run it as `node`, the database's owner, as shown;
+as anyone else it refuses, since files it left behind could stop the
+server opening the database. It is in the audit
 log: a `passkey_reset` leaf, credited to the host, saying how many passkeys
 went and until when the new code works (never the code).
 
@@ -549,9 +556,9 @@ nothing says so until you go looking for one.
 ### 4. Verify, in this order
 
 ```sh
-# the row counts should match what you saw before the switch
-docker compose -f docker-compose.traefik.yml exec recall-server \
-  sh -c "ls -la /data"
+# the row counts should match what you saw before the switch: needs no -f,
+# both compose files name this container recall-server
+docker exec recall-server sh -c "ls -la /data"
 
 # from anywhere: the new URL answers, with the version you meant to run
 curl -sf https://recall.yourdomain.com/.well-known/recall
@@ -591,7 +598,7 @@ and rebuild:
 git fetch --tags origin
 git checkout v0.4.1
 cd deploy
-docker compose up -d --build
+docker compose up -d --build   # with your -f files
 curl -sf https://recall.yourdomain.com/.well-known/recall   # server.version
 ```
 
@@ -606,7 +613,8 @@ for wiring `.github/workflows/deploy.yml` to this machine.
 
 To try an unreleased branch on a server, build it from the checkout:
 `RECALL_SOURCE=source GIT_COMMIT=$(git rev-parse --short HEAD) docker compose
-up -d --build`. The discovery document then says `dev`, which is the point.
+up -d --build` (with your `-f` files). The discovery document then says
+`dev`, which is the point.
 
 The SQLite file lives in the named `recall-data` volume, so it survives
 rebuilds/restarts. `docker compose down -v` would delete it — don't run
@@ -969,14 +977,15 @@ That's a one-time interactive step only the owner can do (it's your
 Claude subscription):
 
 ```sh
-docker compose exec -it -u node recall-server claude setup-token
+docker exec -it -u node recall-server claude setup-token
 ```
 
-Follow the prompt (open a URL, paste back what it gives you). The token
-lands under `/data/claude-config` — the same persistent volume as the
-database, so this survives rebuilds and restarts; you don't need to redo
-it after `docker compose up -d --build`, only if you tear down the
-`recall-data` volume itself.
+Needs no `-f`, whichever compose file runs: all three name this container
+`recall-server`. Follow the prompt (open a URL, paste back what it gives
+you). The token lands under `/data/claude-config` — the same persistent
+volume as the database, so this survives rebuilds and restarts; you don't
+need to redo it after `docker compose up -d --build` (with your `-f`
+files), only if you tear down the `recall-data` volume itself.
 
 Verify it worked:
 
@@ -1048,9 +1057,12 @@ so and stops there. Then, on first start, it makes its key, asks to enrol,
 and prints a code and the key's fingerprint, once per code:
 
 ```sh
-docker compose logs recall-worker
+docker logs recall-worker
 # recall-worker: waiting for approval of code WDJB-MJHT as a worker, key fingerprint SHA256:…
 ```
+
+Needs no `-f`: both compose files that have this service name its container
+`recall-worker`.
 
 Approve that code with the `worker` scope, naming the fingerprint so only
 that key can be approved. From a machine enrolled as an admin device:
@@ -1084,14 +1096,16 @@ The worker merges with its own `claude` CLI, which needs the same one-time
 login the server's did, run inside the worker's container this time:
 
 ```sh
-docker compose exec -it -u node recall-worker claude setup-token
+docker exec -it -u node recall-worker claude setup-token
 ```
 
-`-u node` because the worker runs as `node`, and the login must be that
-user's. It lands in `/data/claude-config` on the worker's volume and
-survives rebuilds. Until it is logged in, the worker takes no jobs (they
-wait in the queue, and nothing is lost) and says so in its log and in
-`/health`. It checks again every minute, so there is nothing to restart.
+Needs no `-f`: both compose files that have this service name its
+container `recall-worker`. `-u node` because the worker runs as `node`,
+and the login must be that user's. It lands in `/data/claude-config` on
+the worker's volume and survives rebuilds. Until it is logged in, the
+worker takes no jobs (they wait in the queue, and nothing is lost) and
+says so in its log and in `/health`. It checks again every minute, so
+there is nothing to restart.
 
 ### 3. Check it
 
@@ -1102,8 +1116,8 @@ curl -sS "https://recall.yourdomain.com/health" | jq .merge
 With a worker approved, `merge` gains `worker` (`last_claim_at`, which
 moves about every 25 seconds while it runs, and its `agent`) and `queue`
 (`queued`, `leased`, `failed`, `oldest_queued_at`), and `claude_cli` is the
-worker's CLI rather than the server's. `docker compose logs recall-worker`
-shows each merge. `recall status` and `recall doctor` read the same fields,
+worker's CLI rather than the server's. `docker logs recall-worker` shows
+each merge. `recall status` and `recall doctor` read the same fields,
 and warn when the worker has not asked for work in two minutes, or any
 merge has failed.
 
@@ -1133,8 +1147,10 @@ did before the worker, until the worker is back.
 Something only you can fix (the server has no merge queue, the enrolment
 was denied, the worker was revoked, a setting is wrong) is said once in its
 log, and then the worker idles rather than exiting, so the restart policy
-does not start it again and again. `docker compose logs recall-worker`
-says what to do; once it is done, `docker compose restart recall-worker`.
+does not start it again and again. `docker logs recall-worker` says what
+to do; once it is done, `docker restart recall-worker`. Neither needs
+`-f`: both compose files that have this service name its container
+`recall-worker`.
 
 ### Settings
 
@@ -1167,19 +1183,23 @@ Until then, the newest push of each file stands.
 To enrol it again, delete its identity and restart it:
 
 ```sh
-docker compose exec -u node recall-worker rm /data/worker-identity.json
-docker compose restart recall-worker
+docker exec -u node recall-worker rm /data/worker-identity.json
+docker restart recall-worker
 ```
 
+Neither needs `-f`: both compose files that have this service name its
+container `recall-worker`.
+
 To stop running a worker at all, revoke it, remove `worker` from
-`COMPOSE_PROFILES`, and `docker compose up -d --remove-orphans`.
+`COMPOSE_PROFILES`, and `docker compose up -d --remove-orphans` (with your
+`-f` files).
 
 Once the worker merges, the server's own CLI login (step "Enabling real
 merge" above) is used only if the worker is revoked. Leaving it in place
 keeps that fallback; removing it
-(`docker compose exec recall-server rm -rf /data/claude-config`) is what
-takes the login off the container the internet reaches, at the cost of the
-fallback degrading to last-write-wins.
+(`docker exec recall-server rm -rf /data/claude-config`, needing no `-f`)
+is what takes the login off the container the internet reaches, at the
+cost of the fallback degrading to last-write-wins.
 
 Rolling back to a release from before the worker: **revoke the worker
 first**, on the newer server, before starting the older one. 0.4.1 has no
@@ -1187,10 +1207,10 @@ first**, on the newer server, before starting the older one. 0.4.1 has no
 unrevoked worker can do nothing there either; but a server without that
 guard would read it as an ordinary `sync` device, which may pull and push
 every project's memory, and revoked, it is refused everywhere. Then roll
-back, and `docker compose up -d --remove-orphans` stops the worker's
-container, which the older compose file has no service for. The older
-server ignores the queue's table, and a merge still waiting in it is not
-made.
+back, and `docker compose up -d --remove-orphans` (with your `-f` files)
+stops the worker's container, which the older compose file has no
+service for. The older server ignores the queue's table, and a merge
+still waiting in it is not made.
 
 ## Renaming, removing or restoring a project
 
