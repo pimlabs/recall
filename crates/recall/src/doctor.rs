@@ -162,21 +162,21 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
                  can merge them",
                 quiet.whole_minutes()
             ),
-            "on the server: docker compose logs recall-worker, and check it is running",
+            "on the server: docker logs recall-worker, and check it is running",
         ));
     } else if rep.server_ok && !rep.merge_ready && rep.merge_worker {
         out.push(warn(
             "merge",
             "the merge worker's Claude CLI is not logged in, so conflicting edits wait \
              in its queue unmerged",
-            "on the server: docker compose exec -it -u node recall-worker claude setup-token",
+            "on the server: docker exec -it -u node recall-worker claude setup-token",
         ));
     } else if rep.server_ok && !rep.merge_ready {
         out.push(warn(
             "merge",
             "the server's Claude CLI is not logged in, so conflicting edits use \
              last-write-wins",
-            "on the server: docker compose exec -it -u node recall-server claude setup-token",
+            "on the server: docker exec -it -u node recall-server claude setup-token",
         ));
     }
     if rep.server_ok {
@@ -738,7 +738,7 @@ fn queue_finding(rep: &Report, out: &mut Vec<Finding>) {
                 if q.queued == 1 { "" } else { "s" },
                 age.whole_minutes()
             ),
-            "on the server: docker compose logs recall-worker, and check it is running",
+            "on the server: docker logs recall-worker, and check it is running",
         )),
         _ => out.push(ok(
             "merge queue",

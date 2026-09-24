@@ -1587,9 +1587,11 @@ straight after, which also proves the passkey works.
 
 An owner who has lost every passkey runs `recall-server reset-passkeys`
 where the server runs, as the database's owner (for example
-`docker compose exec -u node recall-server recall-server reset-passkeys`).
-It removes every passkey and session, and prints a new bootstrap code. That
-takes a shell on the server, which is more than the token gives. If the
+`docker exec -u node recall-server recall-server reset-passkeys`, which
+needs no `-f`: all three compose files name this container
+`recall-server`). It removes every passkey and session, and prints a new
+bootstrap code. That takes a shell on the server, which is more than the
+token gives. If the
 page ever offers to sign in though the owner never registered a passkey,
 someone else did: rotate `RECALL_TOKEN` before resetting.
 

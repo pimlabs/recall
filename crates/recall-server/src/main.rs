@@ -33,7 +33,7 @@ session they signed in, from the database at RECALL_DB_PATH, and prints a
 one-time bootstrap code. It is for an owner who has lost all of them:
 RECALL_TOKEN and that code can then register a first passkey again. Run it
 where the server runs, as the database's owner, such as with
-docker compose exec -u node.";
+docker exec -u node.";
 
 /// What `recall-server version` prints: the same first line as `recall
 /// version`, so one reading of either tells the same story, then the

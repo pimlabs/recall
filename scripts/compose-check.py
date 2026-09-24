@@ -20,13 +20,27 @@ because procedures in deploy/README.md depend on them: `recall-server` and
 `-f`; and `recall-server` has a `stop_grace_period` of at least 60 seconds,
 so a stop lets a merge in flight finish and reaches the checkpoint that
 empties the WAL into recall.db, rather than being killed at Docker's
-default of 10.
+default of 10. `recall-worker` keeps the container name `recall-worker` too,
+in whichever of the two files defines it, since deploy/README.md's worker
+procedures stop, restart and read its logs by that name the same way.
 
 The checks are also run against copies of each file with one of those lines
 added, and each copy must fail: a check that can never fail is not one.
 
 Reads the files with PyYAML when it is installed, and otherwise through
 `docker compose config`, which CI's runner has either way.
+
+The same run also lints deploy/README.md and every docs/**/*.md file: a
+fenced sh/bash block that runs `docker compose` with one of `exec`, `logs`,
+`restart`, `stop`, `start`, `ps` or `run` and no `-f` acts on whichever
+compose file is on the host's disk by default (see "Which ingress" in
+deploy/README.md), which is wrong on a Traefik or direct-TLS host even when
+it happens not to fail outright. `up`, `down`, `pull` and `config` are not
+in that list: those commands are meant to touch the stack the `-f` files
+name, and the surrounding prose is reviewed by hand instead, the same as a
+compose file's own YAML would be. A block that names the marker
+`doclint:allow-no-f` anywhere in it is exempted, for the one case where a
+variable already carries `-f` (see docs/reference/github-actions-deploy.md).
 """
 import copy
 import json
@@ -47,6 +61,9 @@ SERVER, WORKER, BACKEND = 'recall-server', 'recall-worker', 'backend'
 SQLITE_WEB = 'sqlite-web'
 # The names deploy/README.md's restore stops and starts the containers by.
 CONTAINER_NAMES = {SERVER: 'recall-server', SQLITE_WEB: 'recall-sqlite-web'}
+# Asserted only in whichever files define the worker at all: direct TLS has
+# no worker service, so it has nothing to name here.
+WORKER_CONTAINER_NAME = 'recall-worker'
 GRACE_SECONDS = 60
 PROFILE = 'worker'
 # Each of these reaches past the worker's own container.
@@ -185,6 +202,11 @@ def server_problems(doc):
     if grace is None or grace < GRACE_SECONDS:
         found.append(f'{SERVER} has stop_grace_period of at least {GRACE_SECONDS}s, so a '
                      'stop reaches the checkpoint that empties the WAL')
+    if WORKER in services:
+        got = services[WORKER].get('container_name')
+        if got != WORKER_CONTAINER_NAME:
+            found.append(f'{WORKER} is container_name: {WORKER_CONTAINER_NAME}, which '
+                         f'deploy/README.md logs, restarts and stops it by, not {got!r}')
     return found
 
 
@@ -195,7 +217,7 @@ def server_mutations(doc):
         change(d['services'][service])
         return label, d
 
-    return [
+    muts = [
         changed('no stop_grace_period', SERVER, lambda s: s.pop('stop_grace_period', None)),
         changed('Docker\'s default grace', SERVER,
                 lambda s: s.__setitem__('stop_grace_period', '10s')),
@@ -203,6 +225,10 @@ def server_mutations(doc):
                 lambda s: s.__setitem__('container_name', 'recall-recall-server-1')),
         changed('no sqlite-web container name', SQLITE_WEB, lambda s: s.pop('container_name')),
     ]
+    if WORKER in (doc.get('services') or {}):
+        muts.append(changed('a renamed worker container', WORKER,
+                             lambda s: s.__setitem__('container_name', 'recall-recall-worker-1')))
+    return muts
 
 
 def mutations(doc, ingress):
@@ -267,6 +293,68 @@ def mutations(doc, ingress):
     ]
 
 
+# ---------------------------------------------------------------------------
+# The doc lint: every fenced sh/bash block in deploy/README.md and
+# docs/**/*.md, checked for a `docker compose` command that needs `-f` and
+# does not carry it. See the module docstring for why this matters and what
+# it deliberately leaves alone.
+
+DOC_LINT_FILES = ['deploy/README.md']
+DOC_LINT_SUBCOMMANDS = {'exec', 'logs', 'restart', 'stop', 'start', 'ps', 'run'}
+DOC_LINT_MARKER = 'doclint:allow-no-f'
+FENCE = re.compile(r'```(?:sh|bash)\n(.*?)```', re.S)
+
+
+def doc_lint_files():
+    """deploy/README.md, then every docs/**/*.md, relative to ROOT."""
+    files = list(DOC_LINT_FILES)
+    for dirpath, dirnames, filenames in sorted(os.walk(os.path.join(ROOT, 'docs'))):
+        dirnames.sort()
+        for name in sorted(filenames):
+            if name.endswith('.md'):
+                files.append(os.path.relpath(os.path.join(dirpath, name), ROOT))
+    return files
+
+
+def doc_lint_logical_lines(block):
+    """One shell logical line per yield, backslash continuations joined."""
+    buf = []
+    for line in block.split('\n'):
+        if line.endswith('\\'):
+            buf.append(line[:-1])
+            continue
+        buf.append(line)
+        yield ' '.join(buf)
+        buf = []
+    if buf:
+        yield ' '.join(buf)
+
+
+def doc_lint_problems(text):
+    """Every `docker compose <op>` in `text` with no `-f`, `op` one of
+    DOC_LINT_SUBCOMMANDS. `up`, `down`, `pull` and `config` are not checked:
+    those are meant to act on the stack the `-f` files name, and reviewed by
+    hand instead, as the module docstring says."""
+    found = []
+    for block in FENCE.findall(text):
+        if DOC_LINT_MARKER in block:
+            continue
+        for line in doc_lint_logical_lines(block):
+            for part in re.split(r'&&|;|\|', line):
+                part = re.sub(r'(?:^|\s)#.*$', '', part)
+                m = re.search(r'\bdocker\s+compose\b(.*)$', part)
+                if not m:
+                    continue
+                tokens = m.group(1).split()
+                hit = [t for t in tokens if t in DOC_LINT_SUBCOMMANDS]
+                if not hit or '-f' in tokens or '--file' in tokens:
+                    continue
+                found.append(f"'docker compose {' '.join(tokens)}' has no -f: "
+                             f"{hit[0]} needs the fixed container name (docker "
+                             f"{hit[0]}) instead, or -f if it truly must be compose")
+    return found
+
+
 def main():
     fails = 0
     for path in ALL_FILES:
@@ -297,6 +385,40 @@ def main():
             else:
                 print(f'  FAIL {path} with {label} passes the checks')
                 fails += 1
+    doc_fails = 0
+    doc_files = doc_lint_files()
+    for path in doc_files:
+        with open(os.path.join(ROOT, path), encoding='utf-8') as f:
+            found = doc_lint_problems(f.read())
+        for p in found:
+            print(f'  FAIL {path}: {p}')
+        doc_fails += len(found)
+    if doc_fails == 0:
+        print(f'  ok   {len(doc_files)} doc files: every fenced sh/bash block '
+              f'passes -f on exec/logs/restart/stop/start/ps/run')
+    fails += doc_fails
+
+    # The lint itself, proven against two small blocks it never reads from a
+    # real file: one that must pass and one, missing only `-f`, that must not.
+    compliant = '```sh\ndocker compose -f docker-compose.traefik.yml logs recall-server\n```\n'
+    missing_f = '```sh\ndocker compose logs recall-server\n```\n'
+    if doc_lint_problems(compliant):
+        print('  FAIL the lint refuses a block that already passes -f')
+        fails += 1
+    else:
+        print('  ok   the lint passes a block that already passes -f')
+    if not doc_lint_problems(missing_f):
+        print('  FAIL the lint passes a block missing -f')
+        fails += 1
+    else:
+        print('  ok   the lint refuses a block missing -f')
+    marked = missing_f.replace('```sh\n', f'```sh\n# {DOC_LINT_MARKER}\n', 1)
+    if doc_lint_problems(marked):
+        print(f'  FAIL the {DOC_LINT_MARKER} marker does not suppress the lint')
+        fails += 1
+    else:
+        print(f'  ok   the {DOC_LINT_MARKER} marker suppresses the lint')
+
     print('all checks passed' if fails == 0 else f'{fails} FAILED')
     return 1 if fails else 0
 
