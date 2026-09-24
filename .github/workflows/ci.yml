@@ -122,11 +122,14 @@ jobs:
             echo "::notice::Nothing under crates/, deploy/, Cargo.toml, Cargo.lock or this workflow changed, so the server image build was skipped. It runs unconditionally on every push to main."
           fi
 
-          if printf '%s\n' "$changed" | grep -Eq '^(crates/|Cargo\.(toml|lock)$|install\.ps1$|\.github/workflows/ci\.yml$)'; then
+          # .github/actions/ too: the windows jobs set up Rust through the
+          # local rust-setup action, so a change there is only proven on
+          # Windows by running them.
+          if printf '%s\n' "$changed" | grep -Eq '^(crates/|Cargo\.(toml|lock)$|install\.ps1$|\.github/workflows/ci\.yml$|\.github/actions/)'; then
             echo "windows=true" >> "$GITHUB_OUTPUT"
           else
             echo "windows=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Nothing under crates/, Cargo.toml, Cargo.lock, install.ps1 or this workflow changed, so the Windows jobs were skipped. They run unconditionally on every push to main."
+            echo "::notice::Nothing under crates/, .github/actions/, Cargo.toml, Cargo.lock, install.ps1 or this workflow changed, so the Windows jobs were skipped. They run unconditionally on every push to main."
           fi
 
   # Seven checks that are plain scripts against files already in the
