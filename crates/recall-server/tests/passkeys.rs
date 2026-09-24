@@ -2052,14 +2052,16 @@ async fn passkey_actions_and_a_sessions_changes_are_in_the_audit_log() {
             .arg("--ed25519=builtin")
             .output()
             .expect("python3 must be on PATH");
-        (
-            out.status.code().unwrap_or(-1),
-            format!(
-                "{}{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            ),
-        )
+        let code = out.status.code().unwrap_or(-1);
+        let out = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // And `recall audit verify`'s verifier gives the same verdict.
+        let rust = recall_wire::audit::verify::verify_export(export.as_bytes(), &[]);
+        assert_eq!(rust.ok(), code == 0, "{out}\n{:#?}", rust.problems);
+        (code, out)
     };
     let (code, out) = verify(&export(&leaves));
     assert_eq!(code, 0, "{out}");

@@ -97,6 +97,123 @@ pub struct DeviceReport {
     pub check_error: Option<String>,
 }
 
+/// This machine's witness of the server's audit log, as `status --json`
+/// reports it: the checkpoints saved in `~/.recall/audit.json`, and what
+/// checking them found. See `recall_hooks::audit`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct AuditReport {
+    /// `~/.recall/audit.json`.
+    pub file: String,
+    /// Checkpoints a proof has shown the log extends.
+    pub checkpoints: usize,
+    /// Checkpoints saved by pulls and not yet proven.
+    pub unchecked: usize,
+    /// The newest proven one, as `<tree_size> <root_hash>`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub newest: Option<String>,
+    /// Whether the server keeps an audit log, per its discovery document:
+    /// absent when it was not asked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_log: Option<bool>,
+    /// Whether the server just proved its log extends every checkpoint
+    /// saved here: absent when it was not asked, `false` once an
+    /// inconsistency is found.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extends: Option<bool>,
+    /// The server answered, and not with a proof: what it said. Not a
+    /// finding about its log, and not written down, but no proof either.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unproven: Option<String>,
+    /// Why the check did not finish: the server did not answer (rate
+    /// limited, unreachable, too slow), or what it proved could not be
+    /// written down. Nothing about its log follows from this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Why `audit.json` itself could not be read. It may hold the only
+    /// record of a rewrite, so this is a failure, not a detail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_error: Option<String>,
+    /// When the oldest checkpoint still unchecked was saved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unchecked_since: Option<String>,
+    /// When a check last finished, proving every checkpoint saved then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_proven_at: Option<String>,
+    /// Whether the server refused this machine's credential for the audit
+    /// routes (401, 403): [`AuditReport::error`] says what it answered.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub refused: bool,
+    /// How many unchecked checkpoints were dropped past the bound since the
+    /// last reset: a gap in the witnessing.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub dropped: u64,
+    /// How many checks in a row the server left unanswered.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub unanswered: u64,
+    /// What checking found once the log did not extend a checkpoint saved
+    /// here. Kept until `recall audit reset`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inconsistent: Option<recall_hooks::audit::Inconsistency>,
+    /// Why that finding could not be written into `audit.json` this time,
+    /// when it could not: it stands all the same.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unsaved: Option<String>,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+impl AuditReport {
+    /// How many checkpoints are saved, checked or not.
+    pub fn saved(&self) -> usize {
+        self.checkpoints + self.unchecked
+    }
+
+    /// Reads what `witness` holds into the report, keeping what was found
+    /// by asking; a file that cannot be read is said so, and never taken
+    /// for an empty one.
+    fn read(&mut self, witness: &recall_hooks::audit::Witness) {
+        match witness.load() {
+            Ok(saved) => {
+                self.checkpoints = saved.checkpoints.len();
+                self.unchecked = saved.unchecked.len();
+                self.newest = saved.newest().map(|c| c.header());
+                self.unchecked_since = saved.unchecked_since;
+                self.last_proven_at = saved.last_proven_at;
+                self.dropped = saved.dropped;
+                self.unanswered = saved.unanswered;
+                if saved.inconsistent.is_some() {
+                    self.inconsistent = saved.inconsistent;
+                }
+            }
+            Err(e) => self.file_error = Some(e.to_string()),
+        }
+    }
+}
+
+/// How long `recall status` and `recall doctor` wait on the server.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Deadlines {
+    /// For everything but the audit check, in all: every request has a
+    /// timeout of its own, and a slow server answering each just inside it
+    /// would otherwise hold the command for minutes.
+    pub server: std::time::Duration,
+    /// For the audit check, its rate-limited retries included, on top of
+    /// that. A budget of its own, so that a server slow at everything else
+    /// cannot keep the check from ever being asked, and pending for ever:
+    /// what the check proves before its deadline is kept, what it does not
+    /// is counted as unanswered, and `recall doctor` fails on either kind
+    /// of stall in the end.
+    pub audit: std::time::Duration,
+}
+
+/// The deadlines both commands run with.
+const DEADLINES: Deadlines = Deadlines {
+    server: std::time::Duration::from_secs(90),
+    audit: std::time::Duration::from_secs(20),
+};
+
 /// The `--json` shape. Stable enough to script against; that is the point of
 /// having it at all.
 #[derive(serde::Serialize)]
@@ -290,6 +407,12 @@ pub struct Report {
     /// also what "no off-box backup is configured" looks like.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_offbox_at: Option<String>,
+    /// This machine's witness of the server's audit log, when there is a
+    /// server and a `~/.recall` to keep checkpoints in. Read from the file
+    /// whether or not the server answers, so a rewrite found earlier is
+    /// reported even while it is down.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit: Option<AuditReport>,
 }
 
 /// Collects the report, then prints it as text or JSON.
@@ -314,6 +437,15 @@ pub async fn run(as_json: bool) -> anyhow::Result<i32> {
 /// cannot be silently missing from doctor, which is the shape of bug this
 /// crate has now shipped twice.
 pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report {
+    collect_within(here, cfg, DEADLINES).await
+}
+
+/// [`collect`], waiting on the server as long as `deadlines` says.
+pub(crate) async fn collect_within(
+    here: &proj::Resolved,
+    cfg: &ClientConfig,
+    deadlines: Deadlines,
+) -> Report {
     let root = &here.root;
     let root_str = root.to_string_lossy().to_string();
     let remote = proj::remote();
@@ -438,10 +570,23 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
         synced_files: 0,
         last_synced_at: None,
         last_offbox_at: None,
+        audit: None,
     };
 
     if !rep.url_set {
         return rep;
+    }
+    let witness = cfg
+        .audit_file
+        .as_ref()
+        .map(|file| recall_hooks::audit::Witness::new(file, &cfg.url));
+    if let Some(witness) = &witness {
+        let mut audit = AuditReport {
+            file: witness.file().display().to_string(),
+            ..Default::default()
+        };
+        audit.read(witness);
+        rep.audit = Some(audit);
     }
 
     // A device key that cannot be used is the device's problem, reported as
@@ -461,69 +606,144 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
     };
     match client {
         Ok(client) => {
-            match client.health().await {
-                Ok(health) => {
-                    rep.server_ok = true;
-                    rep.git_commit = Some(health.git_commit);
-                    rep.merge_ready = health.merge.claude_cli.logged_in.unwrap_or(false);
-                    rep.merge_worker = health.merge.worker.is_some();
-                    rep.merge_queue = health.merge.queue;
-                    rep.merge_worker_seen_at = health
-                        .merge
-                        .worker
-                        .map(|w| w.last_claim_at.unwrap_or_else(|| health.started_at.clone()));
-                    if !health.last_sync_at.is_empty() {
-                        rep.last_synced_at = Some(health.last_sync_at);
-                    }
-                    if !health.last_offbox_at.is_empty() {
-                        rep.last_offbox_at = Some(health.last_offbox_at);
-                    }
-                }
-                Err(err) => rep.server_error = Some(err.to_string()),
+            let asked = ask_server(&mut rep, &client, usable);
+            let finished = tokio::time::timeout(deadlines.server, asked).await.is_ok();
+            if !finished && !rep.server_ok {
+                rep.server_error.get_or_insert(format!(
+                    "no answer within {} seconds in all",
+                    deadlines.server.as_secs()
+                ));
             }
-            // Asked only of a server that answered: an unreachable one has
-            // already been reported, and a second error would say nothing new.
-            if rep.server_ok {
-                if let Ok(Some(doc)) = client.discover().await {
-                    rep.server_devices = Some(
-                        doc.accepts(recall_wire::discovery::AUTH_DEVICE_SIG)
-                            && doc.devices().is_some(),
-                    );
-                    rep.server_version = Some(doc.server.version);
-                    rep.server_channel = Some(doc.server.build.channel);
-                    rep.server_protocols = doc.protocol.supported;
-                    rep.min_client = Some(doc.min_client);
-                }
-            }
-            // The one request that says whether this machine is still
-            // enrolled: a device key the server has revoked or swept looks
-            // exactly like a working one from here.
-            if rep.server_ok && usable {
-                if let Some(device) = rep.device.as_mut() {
-                    match client.me().await {
-                        Ok(me) => {
-                            device.confirmed = Some(true);
-                            device.name = me.name;
-                            device.scope = me.scope;
-                            device.ephemeral = me.ephemeral;
-                        }
-                        Err(e) => {
-                            device.confirmed = Some(false);
-                            device.gone = e.device_gone();
-                            device.check_error = Some(e.reason());
-                        }
-                    }
-                }
-            }
-            if usable && (rep.token_set || rep.device.is_some()) {
-                if let Ok(resp) = client.pull(&rep.project_key).await {
-                    rep.synced_files = resp.files.iter().filter(|f| !f.deleted).count();
+            // After the pull, which saved the checkpoint it carried: the
+            // check proves that one too. What `recall doctor` is for, per
+            // docs/design/part5-plan.md's "Who witnesses". Outside the
+            // deadline above, on one of its own, and asked however the
+            // rest went: a server slow at everything else would otherwise
+            // never be asked at all. Asked of any server not known to keep
+            // no log: discovery failing is no reason to leave saved
+            // checkpoints unproven, and the audit routes answer for
+            // themselves (404 is no log).
+            let credential = usable && (rep.token_set || rep.device.is_some());
+            if let (Some(witness), Some(audit)) = (&witness, rep.audit.as_mut()) {
+                audit.read(witness);
+                if credential && audit.server_log != Some(false) && audit.file_error.is_none() {
+                    witness_check(witness, &client, audit, deadlines.audit).await;
                 }
             }
         }
         Err(err) => rep.server_error = Some(err),
     }
     rep
+}
+
+/// Everything `collect` asks the server but the audit check, in order,
+/// filling in `rep`: what is filled in before the server's deadline passes
+/// stays, whatever is not reached.
+async fn ask_server(rep: &mut Report, client: &recall_hooks::client::Client, usable: bool) {
+    match client.health().await {
+        Ok(health) => {
+            rep.server_ok = true;
+            rep.git_commit = Some(health.git_commit);
+            rep.merge_ready = health.merge.claude_cli.logged_in.unwrap_or(false);
+            rep.merge_worker = health.merge.worker.is_some();
+            rep.merge_queue = health.merge.queue;
+            rep.merge_worker_seen_at = health
+                .merge
+                .worker
+                .map(|w| w.last_claim_at.unwrap_or_else(|| health.started_at.clone()));
+            if !health.last_sync_at.is_empty() {
+                rep.last_synced_at = Some(health.last_sync_at);
+            }
+            if !health.last_offbox_at.is_empty() {
+                rep.last_offbox_at = Some(health.last_offbox_at);
+            }
+        }
+        Err(err) => rep.server_error = Some(err.to_string()),
+    }
+    // Asked only of a server that answered: an unreachable one has
+    // already been reported, and a second error would say nothing new.
+    if rep.server_ok {
+        let doc = client.discover().await;
+        if let Some(audit) = rep.audit.as_mut() {
+            // A server older than the discovery document is older
+            // than the audit log too.
+            audit.server_log = match &doc {
+                Ok(Some(doc)) => Some(doc.audit().is_some()),
+                Ok(None) => Some(false),
+                Err(_) => None,
+            };
+        }
+        if let Ok(Some(doc)) = doc {
+            rep.server_devices = Some(
+                doc.accepts(recall_wire::discovery::AUTH_DEVICE_SIG) && doc.devices().is_some(),
+            );
+            rep.server_version = Some(doc.server.version);
+            rep.server_channel = Some(doc.server.build.channel);
+            rep.server_protocols = doc.protocol.supported;
+            rep.min_client = Some(doc.min_client);
+        }
+    }
+    // The one request that says whether this machine is still
+    // enrolled: a device key the server has revoked or swept looks
+    // exactly like a working one from here.
+    if rep.server_ok && usable {
+        if let Some(device) = rep.device.as_mut() {
+            match client.me().await {
+                Ok(me) => {
+                    device.confirmed = Some(true);
+                    device.name = me.name;
+                    device.scope = me.scope;
+                    device.ephemeral = me.ephemeral;
+                }
+                Err(e) => {
+                    device.confirmed = Some(false);
+                    device.gone = e.device_gone();
+                    device.check_error = Some(e.reason());
+                }
+            }
+        }
+    }
+    if usable && (rep.token_set || rep.device.is_some()) {
+        if let Ok(resp) = client.pull(&rep.project_key).await {
+            rep.synced_files = resp.files.iter().filter(|f| !f.deleted).count();
+        }
+    }
+}
+
+/// Asks the server to prove its log extends every checkpoint saved here,
+/// within `deadline`, and reads what that found into `audit`.
+async fn witness_check(
+    witness: &recall_hooks::audit::Witness,
+    client: &recall_hooks::client::Client,
+    audit: &mut AuditReport,
+    deadline: std::time::Duration,
+) {
+    use recall_hooks::audit::{CheckError, Witnessed};
+    let mut found = None;
+    match witness.check(client, deadline).await {
+        Ok(Witnessed::Extends { .. }) => audit.extends = Some(true),
+        Ok(Witnessed::Inconsistent { finding, unsaved }) => {
+            audit.extends = Some(false);
+            audit.unsaved = unsaved;
+            found = Some(finding);
+        }
+        Err(e) if e.unreadable() => audit.file_error = Some(e.to_string()),
+        Err(e) if e.no_log() => audit.server_log = Some(false),
+        Err(e) if e.refused() => {
+            audit.refused = true;
+            audit.error = Some(e.to_string());
+        }
+        Err(e @ (CheckError::File(_) | CheckError::Deadline(_) | CheckError::Moved)) => {
+            audit.error = Some(e.to_string())
+        }
+        Err(e) if e.unanswered() => audit.error = Some(e.to_string()),
+        Err(e) => audit.unproven = Some(e.to_string()),
+    }
+    audit.read(witness);
+    // A finding the file could not take is still the finding.
+    if audit.inconsistent.is_none() {
+        audit.inconsistent = found;
+    }
 }
 
 /// Variables in the environment that override a different value in
@@ -655,6 +875,53 @@ fn print_declared_env(rep: &Report) {
         field!(
             "               Claude Code cannot read it either, so nothing it \
 declares is in effect for the hooks."
+        );
+    }
+}
+
+fn print_audit(audit: &AuditReport) {
+    if let Some(found) = &audit.inconsistent {
+        field!(
+            "audit log    : REWRITTEN, found {}: {}{}; see recall doctor",
+            found.found_at,
+            found.detail,
+            if audit.unsaved.is_some() {
+                " (NOT SAVED to audit.json this time)"
+            } else {
+                ""
+            }
+        );
+    } else if let Some(err) = &audit.file_error {
+        field!("audit log    : UNREADABLE ({err}); it may hold the only record of a rewrite");
+    } else if audit.dropped > 0 {
+        field!(
+            "audit log    : {} checkpoint(s) DROPPED unchecked, a gap a rewrite could hide in; \
+             see recall doctor",
+            audit.dropped
+        );
+    } else if let Some(why) = &audit.unproven {
+        field!("audit log    : NOT PROVEN, the server answered without a proof: {why}");
+    } else if audit.extends == Some(true) {
+        field!(
+            "audit log    : extends every checkpoint saved here ({} kept, newest {})",
+            audit.checkpoints,
+            audit.newest.as_deref().unwrap_or("none")
+        );
+    } else if let Some(err) = &audit.error {
+        field!(
+            "audit log    : not checked ({err}), {} checkpoint(s) saved{}",
+            audit.saved(),
+            match audit.refused {
+                true => "; the server refused this machine's credential, see recall doctor",
+                false => "",
+            }
+        );
+    } else if audit.server_log == Some(false) && audit.saved() == 0 {
+        field!("audit log    : not kept by this server (older than 0.4.2)");
+    } else if audit.saved() > 0 {
+        field!(
+            "audit log    : {} checkpoint(s) saved, not checked",
+            audit.saved()
         );
     }
 }
@@ -840,6 +1107,11 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
     if !rep.url_set {
         return;
     }
+    // Before the server's lines, and whether or not it answered: a rewrite
+    // found earlier stays found while the server is down.
+    if let Some(audit) = &rep.audit {
+        print_audit(audit);
+    }
     if !rep.server_ok {
         field!(
             "server       : UNREACHABLE ({})",
@@ -916,4 +1188,88 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
         }
     }
     field!("synced files : {} on server", rep.synced_files);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// N2: a server slow at everything else is still asked for the audit
+    /// check, on a budget of its own. Inside the server's budget, a slow
+    /// `/health` kept the check from ever being asked, or counted as
+    /// unanswered, so a stall like that never reached `recall doctor`'s
+    /// rules. Mutation: ask it only when the rest finished in time.
+    #[tokio::test]
+    async fn the_audit_check_has_a_budget_of_its_own() {
+        let root = recall_wire::audit::merkle::hash_leaf(b"x");
+        let header = recall_hooks::audit::Checkpoint { size: 1, root }.header();
+        let answer = recall_wire::AuditCheckpoint::parse_header_value(&header).unwrap();
+        let app = axum::Router::new()
+            .route(
+                "/health",
+                axum::routing::get(|| async {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    "late"
+                }),
+            )
+            .route(
+                recall_wire::audit::CHECKPOINT_PATH,
+                axum::routing::get(move || {
+                    let answer = answer.clone();
+                    async move { axum::Json(answer) }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let rep = collect_from(url).await;
+        assert!(!rep.server_ok, "the rest ran out of time");
+        let audit = rep.audit.unwrap();
+        assert_eq!(audit.extends, Some(true), "{audit:?}");
+        assert_eq!(audit.checkpoints, 1);
+    }
+
+    /// The report for a server at `url`, with a home of its own, a token,
+    /// and short deadlines.
+    async fn collect_from(url: String) -> Report {
+        let dir = tempfile::tempdir().unwrap();
+        let here = proj::resolve_at(dir.path().to_path_buf());
+        let cfg = ClientConfig {
+            url,
+            token: "t".into(),
+            audit_file: Some(dir.path().join("audit.json")),
+            ..Default::default()
+        };
+        let deadlines = Deadlines {
+            server: Duration::from_millis(300),
+            audit: Duration::from_secs(10),
+        };
+        collect_within(&here, &cfg, deadlines).await
+    }
+
+    /// A credential the audit routes refuse is reported as that, for
+    /// `recall doctor` to say what to do about it. Mutation: report it as
+    /// any other error.
+    #[tokio::test]
+    async fn a_refused_credential_is_flagged() {
+        let app = axum::Router::new().route(
+            recall_wire::audit::CHECKPOINT_PATH,
+            axum::routing::get(|| async {
+                (
+                    axum::http::StatusCode::FORBIDDEN,
+                    r#"{"error":"forbidden"}"#,
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let audit = collect_from(url).await.audit.unwrap();
+        assert!(audit.refused, "{audit:?}");
+        assert!(
+            audit.error.is_some() && audit.unproven.is_none(),
+            "{audit:?}"
+        );
+    }
 }

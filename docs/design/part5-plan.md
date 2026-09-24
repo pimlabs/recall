@@ -1,6 +1,10 @@
 # Plan: Part 5, encrypted storage and a worker
 
-Status: **plan**, not built. Part 5 of [`handshake.md`](handshake.md) is the
+Status: **plan**, partly built. PR 1 (the audit log) and PR 2 (the merge
+queue and `recall-worker`) shipped in 0.4.2, and PR 1's client half, the
+checkpoints every pull keeps and `recall audit export` and `verify`, after
+it; the worker's own check on each claim, and PR 3 onwards, are not built.
+Part 5 of [`handshake.md`](handshake.md) is the
 design the owner approved on 2026-09-23. This file turns it into pull
 requests that can be built and merged one at a time. Where the design leaves
 something open, the plan decides it and says why; what only the owner can
@@ -960,7 +964,7 @@ durable; that is its job.
 
 | PR | Protects against | Does not protect against |
 |---|---|---|
-| 1 Audit | A server quietly removing or rewriting history someone holds a checkpoint for (until the client keeps them, the owner saving one by hand); a device's requests being forged, since they are signed | Rewrites before anyone saved a checkpoint; entries by the operator or the server, which are unsigned; what the server did with a signed push, which the log states but the signature does not bind; `recall-server admin` changes on the host, whose leaves are the host's own unsigned account; reading anything |
+| 1 Audit | A server quietly removing or rewriting history someone holds a checkpoint for (every client saves one at every pull, and `recall doctor` checks them); a device's requests being forged, since they are signed | Rewrites before anyone saved a checkpoint; entries by the operator or the server, which are unsigned; what the server did with a signed push, which the log states but the signature does not bind; `recall-server admin` changes on the host, whose leaves are the host's own unsigned account; reading anything |
 | 2 Worker | A compromise of the API process reaching the `claude` login, which moves to the worker's volume; slow merges holding a hook | Root on the host, which reaches both volumes. Merges still see plaintext |
 | 3 Keys | Nothing new for notes, since none is encrypted yet. It sets up grants a compromised server cannot forge unnoticed | Key substitution for a device enrolling while an attacker holds the API, beyond what trust on first use and `ck_id` catch |
 | 4 Sealed sync | A leaked database, backup or `sqlite-web` view exposing sealed files; the server moving a body between files or versions | Files still in plaintext; forged deletes, while old clients' unsealed tombstones are still honoured; a server serving an older version of a file (visible in the audit log, not prevented); a server withholding files |

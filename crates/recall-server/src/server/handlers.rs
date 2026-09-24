@@ -594,7 +594,7 @@ pub(super) async fn handle_discovery(State(state): State<Arc<AppState>>) -> Resp
         serde_json::json!({}),
     );
     capabilities.insert(
-        "audit".to_string(),
+        discovery::CAPABILITY_AUDIT.to_string(),
         serde_json::to_value(recall_wire::AuditCapability {
             leaf_version: recall_wire::audit::LEAF_VERSION,
             max_page: recall_wire::audit::MAX_PAGE,

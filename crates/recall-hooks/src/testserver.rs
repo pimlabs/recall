@@ -53,6 +53,21 @@ struct Inner {
     /// When set, every request is answered with this redirect: a status
     /// and a `Location`.
     redirect: Option<(u16, String)>,
+    /// The fake's audit log, once a test turns it on: each leaf's bytes. A
+    /// pull appends one and answers with the checkpoint over them, as the
+    /// real server does, and the checkpoint and consistency routes answer
+    /// from them. Rewriting one is what a server that rewrote history
+    /// looks like from outside.
+    audit: Option<Vec<Vec<u8>>>,
+    /// Consistency proofs answered before the fake's rate limit refuses
+    /// every one after: [`None`] for no limit.
+    proofs_before_limit: Option<usize>,
+    /// Whether a consistency proof is never answered at all, as by a
+    /// server too slow to wait for.
+    hang_proofs: bool,
+    /// A size whose consistency proofs the fake's rate limit refuses,
+    /// every one, while others are answered.
+    refuse_proofs_from: Option<u64>,
 }
 
 pub struct FakeServer {
@@ -68,6 +83,8 @@ impl FakeServer {
             .route("/sync", get(pull).post(push))
             .route("/health", get(health))
             .route("/admin/stats", get(admin_stats))
+            .route(recall_wire::audit::CHECKPOINT_PATH, get(audit_checkpoint))
+            .route(recall_wire::audit::CONSISTENCY_PATH, get(audit_consistency))
             .fallback(elsewhere)
             .with_state(inner.clone());
 
@@ -124,6 +141,11 @@ impl FakeServer {
         self.inner.lock().expect("test lock").fail_with = Some((code, body.to_string()));
     }
 
+    /// Answers every request as before [`FakeServer::fail_with`] again.
+    pub fn stop_failing(&self) {
+        self.inner.lock().expect("test lock").fail_with = None;
+    }
+
     /// How many pushes were attempted, whether or not they were accepted.
     pub fn push_attempts(&self) -> usize {
         self.inner.lock().expect("test lock").push_attempts
@@ -156,6 +178,90 @@ impl FakeServer {
             .expect("test lock")
             .last_authorization
             .clone()
+    }
+}
+
+impl FakeServer {
+    /// Starts keeping an audit log of `leaves` leaves, each pull adding
+    /// one.
+    pub fn keep_audit_log(&self, leaves: usize) {
+        let log = (0..leaves)
+            .map(|i| format!("leaf {i}").into_bytes())
+            .collect();
+        self.inner.lock().expect("test lock").audit = Some(log);
+    }
+
+    /// Appends `n` more leaves, as other machines' requests would.
+    pub fn grow_audit_log(&self, n: usize) {
+        let mut inner = self.inner.lock().expect("test lock");
+        let log = inner.audit.as_mut().expect("an audit log");
+        for _ in 0..n {
+            let i = log.len();
+            log.push(format!("leaf {i}").into_bytes());
+        }
+    }
+
+    /// Rewrites leaf `i`: every checkpoint from before, at a size past it,
+    /// no longer holds.
+    pub fn rewrite_audit_leaf(&self, i: usize) {
+        let mut inner = self.inner.lock().expect("test lock");
+        inner.audit.as_mut().expect("an audit log")[i] = format!("rewritten {i}").into_bytes();
+    }
+
+    /// Cuts the log back to `n` leaves, as restoring a backup does.
+    pub fn truncate_audit_log(&self, n: usize) {
+        let mut inner = self.inner.lock().expect("test lock");
+        inner.audit.as_mut().expect("an audit log").truncate(n);
+    }
+
+    /// Answers `n` more consistency proofs, then refuses each after as its
+    /// rate limit would; [`None`] lifts the limit.
+    pub fn limit_proofs_after(&self, n: Option<usize>) {
+        self.inner.lock().expect("test lock").proofs_before_limit = n;
+    }
+
+    /// Serves `log` as the audit log from now on: another fork of it, to
+    /// show one machine two histories.
+    pub fn set_audit_log(&self, log: Vec<Vec<u8>>) {
+        self.inner.lock().expect("test lock").audit = Some(log);
+    }
+
+    /// Refuses every consistency proof from a checkpoint of `size`, as the
+    /// rate limit would, until called with [`None`].
+    pub fn refuse_proofs_from(&self, size: Option<u64>) {
+        self.inner.lock().expect("test lock").refuse_proofs_from = size;
+    }
+
+    /// Never answers a consistency proof from now on.
+    pub fn hang_proofs(&self) {
+        self.inner.lock().expect("test lock").hang_proofs = true;
+    }
+
+    /// The log's checkpoint now.
+    pub fn audit_checkpoint(&self) -> recall_wire::AuditCheckpoint {
+        checkpoint_of(
+            self.inner
+                .lock()
+                .expect("test lock")
+                .audit
+                .as_deref()
+                .unwrap_or_default(),
+        )
+    }
+}
+
+fn leaf_hashes(log: &[Vec<u8>]) -> Vec<recall_wire::audit::merkle::Hash> {
+    log.iter()
+        .map(|l| recall_wire::audit::merkle::hash_leaf(l))
+        .collect()
+}
+
+fn checkpoint_of(log: &[Vec<u8>]) -> recall_wire::AuditCheckpoint {
+    use base64::Engine;
+    recall_wire::AuditCheckpoint {
+        tree_size: log.len() as u64,
+        root_hash: base64::engine::general_purpose::STANDARD
+            .encode(recall_wire::audit::merkle::root(&leaf_hashes(log))),
     }
 }
 
@@ -223,19 +329,96 @@ async fn pull(
     if let Some(failure) = intercept(&state, &headers) {
         return failure;
     }
-    let files = {
+    let (files, checkpoint) = {
         let mut inner = state.lock().expect("test lock");
         inner.pulled_keys.push(q.project_key.clone());
-        inner
+        let checkpoint = inner.audit.as_mut().map(|log| {
+            let i = log.len();
+            log.push(format!("pull {i}").into_bytes());
+            checkpoint_of(log)
+        });
+        let files = inner
             .files
             .get(&q.project_key)
             .or_else(|| inner.files.get(""))
             .cloned()
-            .unwrap_or_default()
+            .unwrap_or_default();
+        (files, checkpoint)
     };
-    Json(SyncResponse {
+    let mut response = Json(SyncResponse {
         project_key: q.project_key,
         files,
+    })
+    .into_response();
+    if let Some(cp) = checkpoint {
+        response.headers_mut().insert(
+            recall_wire::audit::CHECKPOINT_HEADER,
+            cp.to_header_value().parse().expect("a header value"),
+        );
+    }
+    response
+}
+
+async fn audit_checkpoint(State(state): State<Shared>, headers: HeaderMap) -> Response {
+    if let Some(failure) = intercept(&state, &headers) {
+        return failure;
+    }
+    match &state.lock().expect("test lock").audit {
+        Some(log) => Json(checkpoint_of(log)).into_response(),
+        None => (StatusCode::NOT_FOUND, r#"{"error":"not found"}"#).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ConsistencyQuery {
+    first: u64,
+    second: u64,
+}
+
+async fn audit_consistency(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<ConsistencyQuery>,
+) -> Response {
+    use base64::Engine;
+    if let Some(failure) = intercept(&state, &headers) {
+        return failure;
+    }
+    if state.lock().expect("test lock").hang_proofs {
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    }
+    let mut inner = state.lock().expect("test lock");
+    if inner.refuse_proofs_from == Some(q.first) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            r#"{"error":"too many requests"}"#,
+        )
+            .into_response();
+    }
+    if let Some(left) = inner.proofs_before_limit.as_mut() {
+        if *left == 0 {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                r#"{"error":"too many requests"}"#,
+            )
+                .into_response();
+        }
+        *left -= 1;
+    }
+    let Some(log) = &inner.audit else {
+        return (StatusCode::NOT_FOUND, r#"{"error":"not found"}"#).into_response();
+    };
+    if q.first < 1 || q.first > q.second || q.second > log.len() as u64 {
+        return (StatusCode::BAD_REQUEST, r#"{"error":"bad range"}"#).into_response();
+    }
+    let proof = recall_wire::audit::merkle::consistency(q.first, q.second, &leaf_hashes(log));
+    Json(recall_wire::AuditConsistencyResponse {
+        first: q.first,
+        second: q.second,
+        proof: proof
+            .iter()
+            .map(|h| base64::engine::general_purpose::STANDARD.encode(h))
+            .collect(),
     })
     .into_response()
 }

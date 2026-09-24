@@ -64,6 +64,46 @@ break will be described here in full rather than smoothed over.
   minutes and when it stops, and a page loaded during a checkpoint can be
   inconsistent or fail until reloaded. It still cannot change the
   database.
+- **The client keeps the server's audit checkpoints.** Every pull saves
+  the `Recall-Audit-Checkpoint` it receives in a new file,
+  `~/.recall/audit.json`, per server, each as the three lines of a C2SP
+  tlog-checkpoint note. The hooks only save; they make no extra request
+  and never fail for it.
+- **`recall doctor` and `recall status` check them.** They ask the server
+  for an RFC 9162 consistency proof from each saved checkpoint to its log
+  now, and `recall doctor` fails a new `audit log` check when the log no
+  longer extends one: history rewritten, or rolled back by a restore. The
+  finding is kept in `audit.json`: `doctor` keeps failing, `status` keeps
+  showing it, and every session's pull warns about it (still exiting 0),
+  until `recall audit reset`. `recall status --json` gains an `audit`
+  object.
+- **Checkpoints waiting to be checked are kept, all of them**, up to
+  4096; past that the ones dropped are counted and `doctor` fails until a
+  reset. A check proves the newest checkpoint already proven first and
+  keeps nothing until that proof holds, so a server showing one history
+  to one check and another to the next cannot get both marked proven;
+  after it, each is written down as proven the moment its proof verifies,
+  so a check the server's rate limit or a deadline cuts short carries on
+  next time. The pull says so once more than 16 wait. `doctor` also fails
+  when `audit.json` cannot be read, when the server answers with anything
+  but a proof, and, while anything is saved, once no check has finished
+  in a week, the oldest waiting is a week old, or ten checks in a row
+  went unanswered; a check the server did not answer this once only
+  warns, and so does one it refused this machine's credential for (401,
+  403), with what to do about the credential. A time stamped more than a
+  day in the future, by a clock set wrong, counts as a week old. `status` and `doctor` stop
+  waiting on a slow server after 90 seconds, and give the audit check 20
+  more of its own, so a slow server cannot keep it from being asked.
+- **`recall audit`**, with three commands. `export` writes the server's
+  whole log (admin device or `RECALL_TOKEN`) in the format
+  `scripts/audit-verify.py` reads, and checks the saved checkpoints
+  against it. `verify FILE` checks an export offline with the script's
+  checks, in Rust, against every checkpoint saved here; with no file it
+  asks the server for the proofs, as `doctor` does. `reset` forgets what
+  was saved for the server. Exit codes are the script's: 0, 1 when
+  something does not check out (a server that no longer keeps a log this
+  machine saw it keep included, for `export` too), 2 when it could not be
+  checked (`reset` included, when `audit.json` cannot be read).
 
 ## 0.4.2 — 2026-09-24
 

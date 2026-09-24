@@ -10,8 +10,15 @@
 //! crate's fixtures, the entries route, an export — treats it as an opaque
 //! string. [`AuditEntriesResponse::entries`] is `Vec<String>` for exactly
 //! that reason.
+//!
+//! Two submodules hold what both halves compute over those strings:
+//! [`merkle`], the tree hash and its proofs, and [`verify`], the offline
+//! check of an exported log that `recall audit verify` runs.
 
 use serde::{Deserialize, Serialize};
+
+pub mod merkle;
+pub mod verify;
 
 /// `GET`: the tree's current size and root.
 pub const CHECKPOINT_PATH: &str = "/v1/audit/checkpoint";
@@ -70,6 +77,13 @@ impl AuditCheckpoint {
             tree_size: size.parse().ok()?,
             root_hash: root.to_string(),
         })
+    }
+
+    /// [`AuditCheckpoint::root_hash`] as the 32 bytes it encodes. [`None`]
+    /// unless it is exactly their canonical standard base64: a root with a
+    /// second spelling could be saved in one and compared in the other.
+    pub fn root(&self) -> Option<merkle::Hash> {
+        verify::root_hash(&self.root_hash)
     }
 }
 

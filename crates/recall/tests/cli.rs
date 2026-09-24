@@ -975,7 +975,7 @@ fn promote_is_loud_about_missing_configuration() {
 /// Every command the CLI offers. A new one added without a line here is a
 /// command the help tests below will not notice is missing from the help.
 const COMMANDS: &[&str] = &[
-    "init", "backfill", "promote", "status", "doctor", "push", "pull", "version", "help",
+    "init", "backfill", "promote", "status", "doctor", "audit", "push", "pull", "version", "help",
 ];
 
 #[test]
@@ -1717,6 +1717,35 @@ impl LiveServer {
     }
 }
 
+impl LiveServer {
+    /// Stops the server, lets `edit` change its database file as someone
+    /// holding that file can, and starts it again on the same port: to its
+    /// clients, the same server, with whatever history the file now holds.
+    fn restart_after(mut self, edit: impl FnOnce(&Path)) -> LiveServer {
+        let port: u16 = self.url.rsplit(':').next().unwrap().parse().unwrap();
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
+        }
+        let db = std::mem::replace(&mut self._db, tempfile::tempdir().unwrap());
+        let token = self.cfg.token.clone();
+        drop(self);
+        edit(&db.path().join("recall.db"));
+        // Free once the old listener closed; asked again for a moment in
+        // case the system is slow to let it go.
+        let listener = (0..50)
+            .find_map(|_| {
+                std::net::TcpListener::bind(("127.0.0.1", port))
+                    .map_err(|_| std::thread::sleep(std::time::Duration::from_millis(100)))
+                    .ok()
+            })
+            .expect("the same port again");
+        serve(db, &token, true, listener)
+    }
+}
+
 impl Drop for LiveServer {
     fn drop(&mut self) {
         if let Some(stop) = self.stop.take() {
@@ -1741,7 +1770,17 @@ fn live_server_just_started(token: &str) -> LiveServer {
 /// Every other test's server acts as if it started a minute ago, so that
 /// requests are signed and accepted at once.
 fn live_server_started(token: &str, a_minute_ago: bool) -> LiveServer {
-    let db = tempfile::tempdir().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    serve(tempfile::tempdir().unwrap(), token, a_minute_ago, listener)
+}
+
+/// A server on `listener`, over the database in `db`.
+fn serve(
+    db: tempfile::TempDir,
+    token: &str,
+    a_minute_ago: bool,
+    listener: std::net::TcpListener,
+) -> LiveServer {
     let cfg = recall_server::Config {
         token: token.to_string(),
         db_path: db.path().join("recall.db").to_string_lossy().to_string(),
@@ -1750,7 +1789,6 @@ fn live_server_started(token: &str, a_minute_ago: bool) -> LiveServer {
     };
     let store = std::sync::Arc::new(recall_server::Store::open(&cfg.db_path).expect("store opens"));
     let (kept_cfg, kept_store) = (cfg.clone(), store.clone());
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let port = listener.local_addr().unwrap().port();
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
@@ -3582,4 +3620,635 @@ fn a_signed_request_refused_just_after_a_server_start_is_signed_again() {
         started.elapsed() >= std::time::Duration::from_secs(2),
         "a signature this soon after the start is refused, so it waited and signed again"
     );
+}
+
+// ---------------------------------------------------------------------------
+// the audit log: this machine as its witness, export and offline verify
+// ---------------------------------------------------------------------------
+
+/// The record `audit.json` in `home` holds for `server`.
+fn witnessed(home: &Path, server: &LiveServer) -> recall_hooks::audit::Saved {
+    recall_hooks::audit::Witness::new(home.join("audit.json"), &server.url)
+        .load()
+        .unwrap()
+}
+
+/// `scripts/audit-verify.py` over `file`, with the built-in Ed25519 so what
+/// is tested does not depend on what this machine has installed: its exit
+/// code and all it printed.
+fn audit_verify_py(file: &Path, args: &[String]) -> (i32, String) {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/audit-verify.py");
+    let out = Command::new("python3")
+        .arg(script)
+        .arg(file)
+        .arg("--ed25519=builtin")
+        .args(args)
+        .output()
+        .expect("python3 must be on PATH");
+    (
+        out.status.code().unwrap_or(-1),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    )
+}
+
+/// Rewrites the first leaf of the audit log in the database at `db` that
+/// holds `from`, and its stored hash to match, so the server starts on it:
+/// what someone holding the database file can do, and what only a
+/// checkpoint saved elsewhere can show.
+fn rewrite_leaf(db: &Path, from: &str, to: &str) {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.execute_batch("DROP TRIGGER audit_log_no_update")
+        .unwrap();
+    let leaves: Vec<(i64, Vec<u8>)> = conn
+        .prepare("SELECT seq, leaf FROM audit_log ORDER BY seq")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let (seq, leaf) = leaves
+        .into_iter()
+        .find(|(_, l)| String::from_utf8_lossy(l).contains(from))
+        .unwrap_or_else(|| panic!("no leaf holds {from}"));
+    let forged = String::from_utf8(leaf).unwrap().replacen(from, to, 1);
+    let hash = recall_wire::audit::merkle::hash_leaf(forged.as_bytes());
+    conn.execute(
+        "UPDATE audit_log SET leaf = ?1, leaf_hash = ?2 WHERE seq = ?3",
+        (forged.as_bytes(), &hash[..], seq),
+    )
+    .unwrap();
+}
+
+/// The whole round: pulls save checkpoints, an admin device exports the
+/// log, `recall audit verify` and the script both accept the export and the
+/// checkpoints this machine saved, and both refuse it with a byte changed,
+/// a leaf missing or two swapped.
+#[test]
+fn an_export_verifies_here_and_with_the_script_and_tampering_does_not() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let home = enrolled(&server, &repo, "laptop");
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [("RECALL_HOME", home_str.as_str())];
+
+    let r = push_memory(&repo, &env, "fact.md", "A fact.\n");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let r = run(&["pull"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let saved = witnessed(home.path(), &server);
+    assert!(
+        !saved.unchecked.is_empty(),
+        "every pull saves the checkpoint it carries: {saved:?}"
+    );
+
+    let file = home.path().join("audit.jsonl");
+    let file_str = file.to_string_lossy().to_string();
+    let r = run(
+        &["audit", "export", "-o", &file_str],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(r.stderr.contains("wrote"), "stderr: {}", r.stderr);
+    assert!(
+        r.stderr.contains("it extends the"),
+        "the export held the saved checkpoints to its leaves: {}",
+        r.stderr
+    );
+    let saved = witnessed(home.path(), &server);
+    assert!(saved.unchecked.is_empty(), "now proven: {saved:?}");
+
+    let r = run(&["audit", "verify", &file_str], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(r.stdout.starts_with("OK: checkpoint "), "{}", r.stdout);
+    assert!(r.stdout.contains("every signature checked"), "{}", r.stdout);
+    assert!(
+        r.stdout.contains("saved here for 127.0.0.1:"),
+        "{}",
+        r.stdout
+    );
+
+    // The script reads the same file, held to the same checkpoints.
+    let checkpoints: Vec<String> = saved
+        .all()
+        .iter()
+        .map(|c| format!("--checkpoint={}", c.header().replacen(' ', ":", 1)))
+        .collect();
+    let (code, out) = audit_verify_py(&file, &checkpoints);
+    assert_eq!(code, 0, "{out}");
+
+    let export = std::fs::read_to_string(&file).unwrap();
+    let lines: Vec<&str> = export.lines().collect();
+    let mut dropped = lines.clone();
+    dropped.remove(3);
+    let mut swapped = lines.clone();
+    swapped.swap(2, 3);
+    for (what, forged) in [
+        ("a changed byte", export.replacen("fact.md", "fakt.md", 1)),
+        ("a missing leaf", dropped.join("\n") + "\n"),
+        ("two swapped leaves", swapped.join("\n") + "\n"),
+    ] {
+        let path = home.path().join("forged.jsonl");
+        std::fs::write(&path, forged).unwrap();
+        let path_str = path.to_string_lossy().to_string();
+        let r = run(&["audit", "verify", &path_str], repo.path(), &env, None);
+        assert_eq!(r.code, 1, "{what} was accepted: {}", r.stdout);
+        assert!(r.stderr.contains("FAIL: "), "{what}: {}", r.stderr);
+        let (code, out) = audit_verify_py(&path, &checkpoints);
+        assert_eq!(code, 1, "{what}, the script: {out}");
+    }
+
+    // And with no file, the server proves it to any credential.
+    let r = run(&["audit", "verify"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(
+        r.stdout.contains("extends every checkpoint saved here"),
+        "{}",
+        r.stdout
+    );
+}
+
+/// The other way round: an export the script accepts, the 0.4.2 capture of
+/// a real server's log, is accepted here, and one it refuses is refused.
+#[test]
+fn a_file_the_script_accepts_is_accepted_here() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../recall-wire/fixtures/wire/0.4.2/audit_entries_response.json");
+    let page: recall_wire::AuditEntriesResponse =
+        serde_json::from_slice(&std::fs::read(fixture).unwrap()).unwrap();
+    let checkpoint: recall_wire::AuditCheckpoint = serde_json::from_slice(
+        &std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../recall-wire/fixtures/wire/0.4.2/audit_checkpoint_response.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut export = format!("{}\n", checkpoint.to_header_value());
+    for leaf in &page.entries {
+        export.push_str(leaf);
+        export.push('\n');
+    }
+    let file = dir.path().join("captured.jsonl");
+    std::fs::write(&file, &export).unwrap();
+    let file_str = file.to_string_lossy().to_string();
+
+    let (code, out) = audit_verify_py(&file, &[]);
+    assert_eq!(code, 0, "{out}");
+    let r = run(&["audit", "verify", &file_str], dir.path(), &[], None);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(r.stdout.contains("10 leaves, 1 signed"), "{}", r.stdout);
+    assert!(r.stdout.contains("no saved checkpoint"), "{}", r.stdout);
+
+    // A saved checkpoint given by hand, as to the script.
+    let early = format!(
+        "--checkpoint={}",
+        checkpoint.to_header_value().replacen(' ', ":", 1)
+    );
+    let r = run(
+        &["audit", "verify", &file_str, &early],
+        dir.path(),
+        &[],
+        None,
+    );
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+
+    // The push's signature, one bit off: both refuse it.
+    let push = page
+        .entries
+        .iter()
+        .find(|l| l.contains("\"signature\":\"x4bs"))
+        .unwrap();
+    let forged = export.replacen(
+        push,
+        &push.replacen("\"signature\":\"x4bs", "\"signature\":\"y4bs", 1),
+        1,
+    );
+    std::fs::write(&file, forged).unwrap();
+    let (code, out) = audit_verify_py(&file, &[]);
+    assert_eq!(code, 1, "{out}");
+    let r = run(&["audit", "verify", &file_str], dir.path(), &[], None);
+    assert_eq!(r.code, 1, "stdout: {}", r.stdout);
+    assert!(r.stderr.contains("does not verify"), "stderr: {}", r.stderr);
+
+    // A file that is not there, or a checkpoint that is not one, cannot be
+    // checked at all: 2, as the script says it.
+    let r = run(&["audit", "verify", "no-such.jsonl"], dir.path(), &[], None);
+    assert_eq!(r.code, 2, "stderr: {}", r.stderr);
+    let r = run(
+        &["audit", "verify", &file_str, "--checkpoint", "12:nope"],
+        dir.path(),
+        &[],
+        None,
+    );
+    assert_eq!(r.code, 2, "stderr: {}", r.stderr);
+}
+
+/// Someone with the server's database rewrites a push already witnessed,
+/// and restarts it. The hooks carry on, exit 0, and save what they are
+/// shown; `recall doctor` catches it and fails, `recall status` shows it,
+/// every session start says so, and it stays caught until reset.
+#[test]
+fn a_server_that_rewrote_its_history_is_caught_and_stays_caught() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let home = enrolled(&server, &repo, "laptop");
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [("RECALL_HOME", home_str.as_str())];
+
+    let r = push_memory(&repo, &env, "fact.md", "A fact.\n");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let r = run(&["pull"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let before = doctor_finding(repo.path(), &env, "audit log");
+    assert_eq!(before["level"], "ok", "{before}");
+    assert!(
+        before["detail"]
+            .as_str()
+            .unwrap()
+            .contains("extends every checkpoint saved here"),
+        "{before}"
+    );
+
+    let server = server.restart_after(|db| {
+        rewrite_leaf(db, "\"file_path\":\"fact.md\"", "\"file_path\":\"fake.md\"")
+    });
+
+    let r = run(&["pull"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "a hook never fails for this: {}", r.stderr);
+
+    let r = run(&["doctor", "--json"], repo.path(), &env, None);
+    assert_ne!(r.code, 0, "doctor fails on it: {}", r.stdout);
+    let found = doctor_finding(repo.path(), &env, "audit log");
+    assert_eq!(found["level"], "fail", "{found}");
+    assert!(
+        found["detail"]
+            .as_str()
+            .unwrap()
+            .contains("no longer extends"),
+        "{found}"
+    );
+    assert!(
+        found["fix"]
+            .as_str()
+            .unwrap()
+            .contains("recall audit reset"),
+        "{found}"
+    );
+
+    let status = status_json(repo.path(), &env);
+    assert!(
+        status["audit"]["inconsistent"]["detail"].is_string(),
+        "status shows it: {}",
+        status["audit"]
+    );
+    assert_eq!(status["audit"]["extends"], false);
+    let r = run(&["status"], repo.path(), &env, None);
+    assert!(
+        r.stdout.contains("audit log    : REWRITTEN"),
+        "{}",
+        r.stdout
+    );
+
+    let r = run(&["pull"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(
+        r.stderr
+            .contains("WARNING: the server's audit log no longer extends a checkpoint"),
+        "every session start says so: {}",
+        r.stderr
+    );
+
+    let r = run(&["audit", "verify"], repo.path(), &env, None);
+    assert_eq!(r.code, 1, "stdout: {}", r.stdout);
+    assert!(r.stderr.contains("FAIL: "), "{}", r.stderr);
+
+    // Kept through a server that looks fine again, until reset.
+    assert!(witnessed(home.path(), &server).inconsistent.is_some());
+    let r = run(&["audit", "reset"], repo.path(), &env, None);
+    assert_ne!(r.code, 0, "not without --yes or a terminal: {}", r.stderr);
+    assert!(witnessed(home.path(), &server).inconsistent.is_some());
+    let r = run(&["audit", "reset", "--yes"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(
+        r.stdout.contains("and the rewrite found on"),
+        "{}",
+        r.stdout
+    );
+    let after = doctor_finding(repo.path(), &env, "audit log");
+    assert_eq!(after["level"], "ok", "{after}");
+}
+
+/// The leaves are admin-only. A sync device has no business reading
+/// them, and is told what would; the proof anyone may ask for still works.
+#[test]
+fn an_export_needs_an_admin_and_says_so() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let key = ephemeral_authkey(&server);
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [
+        ("RECALL_HOME", home_str.as_str()),
+        ("RECALL_URL", server.url.as_str()),
+        ("RECALL_AUTHKEY", key.as_str()),
+    ];
+    let r = run(&["pull"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+
+    let r = run(&["audit", "export"], repo.path(), &env, None);
+    assert_eq!(r.code, 2, "stderr: {}", r.stderr);
+    assert!(r.stdout.is_empty(), "nothing half-written: {}", r.stdout);
+    assert!(
+        r.stderr
+            .contains("needs an admin device or the server's RECALL_TOKEN")
+            && r.stderr.contains("a sync device"),
+        "stderr: {}",
+        r.stderr
+    );
+
+    let r = run(&["audit", "verify"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+}
+
+/// A root, standard base64, for checkpoints a test makes up.
+const A_ROOT: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+
+/// Saves `sizes` as checkpoints this machine saw from the server at `url`,
+/// in `home`, as pulls would have.
+fn saw_checkpoints(home: &Path, url: &str, sizes: std::ops::RangeInclusive<u64>) {
+    let witness = recall_hooks::audit::Witness::new(home.join("audit.json"), url);
+    for size in sizes {
+        witness.record(&format!("{size} {A_ROOT}")).unwrap();
+    }
+}
+
+/// A server whose `/health` answers and whose discovery document fails,
+/// with an audit log of five leaves whose root is [`A_ROOT`].
+fn discovery_down(seen: &Seen) -> (u16, serde_json::Value) {
+    match seen.path.as_str() {
+        "/health" => (
+            200,
+            serde_json::to_value(recall_wire::Health {
+                status: "ok".into(),
+                ..Default::default()
+            })
+            .unwrap(),
+        ),
+        "/.well-known/recall" => (500, serde_json::json!({ "error": "boom" })),
+        "/sync" => (
+            200,
+            serde_json::json!({ "project_key": "acme/app", "files": [] }),
+        ),
+        "/v1/audit/checkpoint" => (
+            200,
+            serde_json::json!({ "tree_size": 5, "root_hash": A_ROOT }),
+        ),
+        _ => (404, serde_json::json!({ "error": "not found" })),
+    }
+}
+
+/// Discovery failing is no reason to leave saved checkpoints unproven: the
+/// audit routes answer for themselves. Mutation: check only a server whose
+/// discovery document lists the log, as before.
+#[test]
+fn saved_checkpoints_are_checked_when_discovery_fails() {
+    let server = fake_server(discovery_down);
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+    saw_checkpoints(home.path(), &server.url, 5..=5);
+    let env = [
+        ("RECALL_HOME", home_str.as_str()),
+        ("RECALL_URL", server.url.as_str()),
+        ("RECALL_TOKEN", "right"),
+    ];
+    let status = status_json(repo.path(), &env);
+    assert_eq!(status["audit"]["extends"], true, "{}", status["audit"]);
+    assert!(
+        server
+            .seen()
+            .iter()
+            .any(|s| s.path == "/v1/audit/checkpoint"),
+        "the server was asked"
+    );
+}
+
+/// `recall audit verify` with no file, against a server that answers the
+/// audit routes 404: a log this machine saw it keep is a history lost, 1,
+/// as doctor fails it; a log never seen is not there to check, 2.
+/// Mutation: answer 2 for both.
+#[test]
+fn a_log_that_went_away_fails_verify_and_one_never_kept_cannot_be_checked() {
+    let server = fake_server(|_| (404, serde_json::json!({ "error": "not found" })));
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [
+        ("RECALL_HOME", home_str.as_str()),
+        ("RECALL_URL", server.url.as_str()),
+        ("RECALL_TOKEN", "right"),
+    ];
+    let r = run(&["audit", "verify"], repo.path(), &env, None);
+    assert_eq!(r.code, 2, "never kept: {}", r.stderr);
+    saw_checkpoints(home.path(), &server.url, 5..=5);
+    let r = run(&["audit", "verify"], repo.path(), &env, None);
+    assert_eq!(r.code, 1, "went away: {}", r.stderr);
+    assert!(r.stderr.contains("keeps no audit log"), "{}", r.stderr);
+}
+
+/// An export says the same: a log never kept cannot be exported (2), and
+/// one this machine saw kept and the server no longer keeps is a history
+/// lost (1). Mutation: 2 whatever was saved, as before.
+#[test]
+fn an_export_of_a_log_that_went_away_fails() {
+    let server = fake_server(|_| (404, serde_json::json!({ "error": "not found" })));
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [
+        ("RECALL_HOME", home_str.as_str()),
+        ("RECALL_URL", server.url.as_str()),
+        ("RECALL_TOKEN", "right"),
+    ];
+    let r = run(&["audit", "export"], repo.path(), &env, None);
+    assert_eq!(r.code, 2, "never kept: {}", r.stderr);
+    saw_checkpoints(home.path(), &server.url, 5..=5);
+    let r = run(&["audit", "export"], repo.path(), &env, None);
+    assert_eq!(r.code, 1, "went away: {}", r.stderr);
+    assert!(r.stderr.contains("keeps no audit log"), "{}", r.stderr);
+}
+
+/// A credential the server refuses for the audit routes is "could not be
+/// checked" (2), said with what to do about the credential, not as a
+/// server that would not prove. Mutation: report it as any unanswered
+/// check.
+#[test]
+fn a_refused_credential_says_what_to_do_about_it() {
+    let server = fake_server(|seen| match seen.path.as_str() {
+        "/v1/audit/checkpoint" => (403, serde_json::json!({ "error": "forbidden" })),
+        _ => (404, serde_json::json!({ "error": "not found" })),
+    });
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [
+        ("RECALL_HOME", home_str.as_str()),
+        ("RECALL_URL", server.url.as_str()),
+        ("RECALL_TOKEN", "right"),
+    ];
+    saw_checkpoints(home.path(), &server.url, 5..=5);
+    let r = run(&["audit", "verify"], repo.path(), &env, None);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert!(
+        r.stderr.contains("refused this machine's credential"),
+        "{}",
+        r.stderr
+    );
+    assert!(r.stderr.contains("recall connect"), "{}", r.stderr);
+}
+
+/// `reset` never forgets what it cannot read: an `audit.json` that cannot
+/// be read is "could not" (2), as install.md says, and is left as it was.
+/// Mutation: answer 1, as for a reset declined.
+#[test]
+fn reset_cannot_forget_what_it_cannot_read() {
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+    let file = home.path().join("audit.json");
+    std::fs::write(&file, "{ not json").unwrap();
+    let env = [
+        ("RECALL_HOME", home_str.as_str()),
+        ("RECALL_URL", DEAD_SERVER),
+    ];
+    let r = run(&["audit", "reset", "--yes"], repo.path(), &env, None);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert_eq!(std::fs::read(&file).unwrap(), b"{ not json");
+}
+
+/// Not set up to ask is "could not be checked", 2, as install.md says: no
+/// server, and no credential. Mutation: 1, as before.
+#[test]
+fn not_set_up_to_ask_cannot_be_checked() {
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+    let r = run(
+        &["audit", "verify"],
+        repo.path(),
+        &[("RECALL_HOME", &home_str)],
+        None,
+    );
+    assert_eq!(r.code, 2, "no server: {}", r.stderr);
+    let r = run(
+        &["audit", "export"],
+        repo.path(),
+        &[("RECALL_HOME", &home_str), ("RECALL_URL", DEAD_SERVER)],
+        None,
+    );
+    assert_eq!(r.code, 2, "no credential: {}", r.stderr);
+}
+
+/// The pull hook says what the session should know about the witness, and
+/// still exits 0: more than a handful waiting to be checked, and a record
+/// it cannot read, which doctor then fails on. Mutation: say nothing of
+/// either.
+#[test]
+fn the_pull_hook_nudges_and_warns_about_the_audit_record() {
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [
+        ("RECALL_HOME", home_str.as_str()),
+        ("RECALL_URL", DEAD_SERVER),
+        ("RECALL_TOKEN", "right"),
+    ];
+    saw_checkpoints(home.path(), DEAD_SERVER, 1..=16);
+    let r = run(&["pull"], repo.path(), &env, None);
+    assert_eq!(r.code, 0);
+    assert!(!r.stderr.contains("wait to be checked"), "{}", r.stderr);
+    saw_checkpoints(home.path(), DEAD_SERVER, 17..=17);
+    let r = run(&["pull"], repo.path(), &env, None);
+    assert_eq!(r.code, 0);
+    assert!(
+        r.stderr
+            .contains("17 audit checkpoints wait to be checked; recall doctor checks them"),
+        "{}",
+        r.stderr
+    );
+
+    std::fs::write(home.path().join("audit.json"), "{ not json").unwrap();
+    let r = run(&["pull"], repo.path(), &env, None);
+    assert_eq!(r.code, 0);
+    assert!(
+        r.stderr.contains("may hold the only record of a rewrite"),
+        "{}",
+        r.stderr
+    );
+    let found = doctor_finding(repo.path(), &env, "audit log");
+    assert_eq!(found["level"], "fail", "{found}");
+}
+
+/// An export that cannot hold itself to the checkpoints saved here, because
+/// `audit.json` cannot be read, does not pass: it says so and exits 2, and
+/// leaves the file as it was. Mutation: say so and exit 0, as before.
+#[test]
+fn an_export_that_cannot_check_the_saved_checkpoints_does_not_pass() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let home = recall_home_with(&[(&server.url, "right")], &server.url);
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [("RECALL_HOME", home_str.as_str())];
+    std::fs::write(home.path().join("audit.json"), "{ not json").unwrap();
+    let out = home.path().join("audit.jsonl");
+    let out_str = out.to_string_lossy().to_string();
+    let r = run(
+        &["audit", "export", "-o", &out_str],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(r.code, 2, "stderr: {}", r.stderr);
+    assert!(r.stderr.contains("could not be checked"), "{}", r.stderr);
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("audit.json")).unwrap(),
+        "{ not json"
+    );
+}
+
+/// An export writes through no link left in its way: a `.partial` that is
+/// a symlink is removed, not followed to whatever it points at. Mutation:
+/// create the file by opening that name.
+#[cfg(unix)]
+#[test]
+fn an_export_never_writes_through_a_link_in_its_way() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let home = recall_home_with(&[(&server.url, "right")], &server.url);
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [("RECALL_HOME", home_str.as_str())];
+    let victim = home.path().join("precious.txt");
+    std::fs::write(&victim, "precious").unwrap();
+    let out = home.path().join("audit.jsonl");
+    std::os::unix::fs::symlink(&victim, home.path().join("audit.jsonl.partial")).unwrap();
+
+    let out_str = out.to_string_lossy().to_string();
+    let r = run(
+        &["audit", "export", "-o", &out_str],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious");
+    let written = std::fs::read_to_string(&out).unwrap();
+    assert!(written.split_once(' ').is_some(), "{written}");
+    assert!(!home.path().join("audit.jsonl.partial").exists());
 }

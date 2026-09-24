@@ -46,3 +46,7 @@ tempfile.workspace = true
 # release from before devices, or record exactly what approving sent.
 # Already in the tree through recall-server.
 axum.workspace = true
+# To rewrite the audit log in a stopped server's database, as someone
+# holding the file could, for the client to catch. Already in the tree
+# through recall-server.
+rusqlite.workspace = true

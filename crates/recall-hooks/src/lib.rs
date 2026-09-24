@@ -51,6 +51,7 @@
 //! | Module | What it holds |
 //! |---|---|
 //! | [`client`] | the HTTP client for the Recall API |
+//! | [`audit`] | this machine as a witness of the server's audit log: the checkpoints it saved, and checking them |
 //! | [`device`] | this machine as an enrolled device: its key, and signing with it |
 //! | [`payload`] | what Claude Code sends a hook on stdin |
 //! | [`exit`] | how a hook is allowed to fail |
@@ -95,6 +96,7 @@ mod promote;
 mod pull;
 mod push;
 
+pub mod audit;
 pub mod claude;
 pub mod client;
 pub mod config;

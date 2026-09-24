@@ -23,6 +23,7 @@
 //! | [`discovery`] | `GET /.well-known/recall` — what the server is and speaks |
 //! | [`devices`] | `/v1/devices`, `/v1/authkeys` — enrolling and managing devices |
 //! | [`jobs`] | `/v1/jobs` — the merge queue a worker drains |
+//! | [`audit`] | `/v1/audit/*`: the log's checkpoint, leaves and proofs, the tree they hash to, and checking an export offline |
 //! | [`signature`] | not an endpoint: how a device signs every request |
 //! | [`validate`] | the rules both halves enforce |
 //!

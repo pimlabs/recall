@@ -2,18 +2,21 @@
 
 use std::time::Duration;
 
+use recall_wire::audit as wire_audit;
 use recall_wire::devices::{self as wire_devices, EnrollPollRequest, EnrollRequest};
 use recall_wire::signature::{self, SignatureError, Target};
 use recall_wire::{
-    discovery, ApproveRequest, Authkey, AuthkeyCreated, AuthkeyList, AuthkeyRequest,
-    AuthkeyRevokeRequest, Device, DeviceIdentity, DeviceList, Discovery, EnrollApproved,
-    EnrollPending, EnrollPollResponse, ErrorResponse, Health, PendingEnrollment, PushRequest,
-    PushResponse, SyncResponse, ValidationError, DISCOVERY_PATH, PROTOCOL, PROTOCOL_HEADER,
+    discovery, ApproveRequest, AuditCheckpoint, AuditConsistencyResponse, AuditEntriesResponse,
+    Authkey, AuthkeyCreated, AuthkeyList, AuthkeyRequest, AuthkeyRevokeRequest, Device,
+    DeviceIdentity, DeviceList, Discovery, EnrollApproved, EnrollPending, EnrollPollResponse,
+    ErrorResponse, Health, PendingEnrollment, PushRequest, PushResponse, SyncResponse,
+    ValidationError, DISCOVERY_PATH, PROTOCOL, PROTOCOL_HEADER,
 };
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
+use crate::audit::Witness;
 use crate::device::Signer;
 
 /// A generous but bounded timeout. The server may be running a semantic
@@ -156,6 +159,9 @@ pub struct Client {
     /// Set once this machine is an enrolled device: every request is then
     /// signed with its key, and the token is not sent.
     signer: Option<Signer>,
+    /// Where a checkpoint of the server's audit log that a response
+    /// carries is saved: see [`Client::with_witness`].
+    witness: Option<Witness>,
     http: reqwest::Client,
 }
 
@@ -168,6 +174,7 @@ impl std::fmt::Debug for Client {
             .field("base_url", &self.base_url)
             .field("token", &crate::config::redacted(&self.token))
             .field("signer", &self.signer)
+            .field("witness", &self.witness.as_ref().map(|w| w.file()))
             .finish_non_exhaustive()
     }
 }
@@ -199,6 +206,7 @@ impl Client {
             base_url: base_url.trim_end_matches('/').to_string(),
             token: token.to_string(),
             signer: None,
+            witness: None,
             http: reqwest::Client::builder()
                 .timeout(TIMEOUT)
                 .user_agent(discovery::user_agent())
@@ -218,6 +226,20 @@ impl Client {
     /// meaningless.
     pub fn with_signer(mut self, signer: Signer) -> Self {
         self.signer = Some(signer);
+        self
+    }
+
+    /// The same client, saving every audit checkpoint a response carries
+    /// (the `Recall-Audit-Checkpoint` header, on every pull) with
+    /// `witness`, so this machine can later show the server's log still
+    /// extends it: see [`crate::audit`].
+    ///
+    /// Saving never fails a request. A checkpoint that cannot be saved (the
+    /// file's lock held too long, `~/.recall` not writable) is one fewer
+    /// witnessed; `recall doctor` is where a file that cannot be written
+    /// is reported, since it writes the same file.
+    pub fn with_witness(mut self, witness: Witness) -> Self {
+        self.witness = Some(witness);
         self
     }
 
@@ -286,6 +308,39 @@ impl Client {
     pub async fn check_token(&self) -> Result<(), Error> {
         let request = self.http.get(format!("{}/admin/stats", self.base_url));
         self.send::<serde_json::Value>(request).await.map(|_| ())
+    }
+
+    /// The audit log's checkpoint now: `GET /v1/audit/checkpoint`. Any
+    /// credential. A server older than 0.4.2 keeps no log and answers 404.
+    pub async fn audit_checkpoint(&self) -> Result<AuditCheckpoint, Error> {
+        let request = self
+            .http
+            .get(format!("{}{}", self.base_url, wire_audit::CHECKPOINT_PATH));
+        self.send(request).await
+    }
+
+    /// The RFC 9162 proof that the log at `second` extends the log at
+    /// `first`: `GET /v1/audit/consistency`. Any credential.
+    pub async fn audit_consistency(
+        &self,
+        first: u64,
+        second: u64,
+    ) -> Result<AuditConsistencyResponse, Error> {
+        let request = self
+            .http
+            .get(format!("{}{}", self.base_url, wire_audit::CONSISTENCY_PATH))
+            .query(&[("first", first), ("second", second)]);
+        self.send(request).await
+    }
+
+    /// Leaves `start` to `end - 1`, or fewer when they come to more than a
+    /// page's bytes: `GET /v1/audit/entries`. Admin.
+    pub async fn audit_entries(&self, start: u64, end: u64) -> Result<AuditEntriesResponse, Error> {
+        let request = self
+            .http
+            .get(format!("{}{}", self.base_url, wire_audit::ENTRIES_PATH))
+            .query(&[("start", start), ("end", end)]);
+        self.send(request).await
     }
 
     /// Starts enrolling this machine: `POST /v1/devices/enroll`.
@@ -411,7 +466,9 @@ impl Client {
                 "" => request,
                 token => request.bearer_auth(token),
             };
-            return read(self.http.execute(request.build()?).await?).await;
+            let response = self.http.execute(request.build()?).await?;
+            self.witness(&response);
+            return read(response).await;
         };
         let mut next = request.build()?;
         let mut retries = 0;
@@ -421,7 +478,9 @@ impl Client {
             let spare = next.try_clone();
             let mut request = next;
             sign(signer, &mut request)?;
-            match read(self.http.execute(request).await?).await {
+            let response = self.http.execute(request).await?;
+            self.witness(&response);
+            match read(response).await {
                 Err(e) if e.signed_too_soon() && retries < RESTART_RETRIES => match spare {
                     Some(spare) => {
                         next = spare;
@@ -432,6 +491,27 @@ impl Client {
                 },
                 other => return other,
             }
+        }
+    }
+}
+
+impl Client {
+    /// Saves the audit checkpoint a successful response carries, if it
+    /// carries one and this client has somewhere to save it. Errors are
+    /// dropped: see [`Client::with_witness`].
+    fn witness(&self, response: &reqwest::Response) {
+        let Some(witness) = &self.witness else {
+            return;
+        };
+        if !response.status().is_success() {
+            return;
+        }
+        if let Some(value) = response
+            .headers()
+            .get(wire_audit::CHECKPOINT_HEADER)
+            .and_then(|v| v.to_str().ok())
+        {
+            let _ = witness.record(value);
         }
     }
 }
