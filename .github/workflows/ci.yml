@@ -289,6 +289,16 @@ jobs:
         with:
           use: false
 
+      # BuildKit's `type=gha` cache talks to the Actions cache service with
+      # ACTIONS_RUNTIME_TOKEN and the cache URLs, which the runner hands
+      # only to JavaScript actions, never to a `run:` step. Without this,
+      # `docker buildx build --cache-to type=gha` below fails for want of a
+      # token. It exports those values into the environment of the steps
+      # after it, and nothing else.
+      - name: Expose the Actions cache service to the build step
+        if: steps.image.outputs.build == 'true'
+        uses: crazy-max/ghaction-github-runtime@v3
+
       # The image, both ways it can be built. This is where a crate rename
       # slipped through once: the Dockerfile has no file extension and was
       # missed by the search that updated everything else.
@@ -321,15 +331,22 @@ jobs:
           BUILDER: ${{ steps.buildx.outputs.name }}
         run: |
           set -eu
+          # Main writes the layer cache and a PR only reads it, for the same
+          # reason rust-cache saves only from main: an entry per PR branch
+          # would crowd main's out of the repository's cache quota.
+          cache_to=""
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            cache_to="--cache-to type=gha,scope=recall-docker-source,mode=max"
+          fi
+          # shellcheck disable=SC2086 # cache_to is empty or several words on purpose
           docker buildx build --builder "$BUILDER" --load \
-            --cache-from type=gha,scope=recall-docker-source \
-            --cache-to type=gha,scope=recall-docker-source,mode=max \
+            --cache-from type=gha,scope=recall-docker-source $cache_to \
             -f deploy/Dockerfile --build-arg RECALL_SOURCE=source -t recall-server-ci .
           # The worker's image from source too: its own target, whose
           # binary stage is picked by the same argument.
+          # shellcheck disable=SC2086
           docker buildx build --builder "$BUILDER" --load \
-            --cache-from type=gha,scope=recall-docker-source \
-            --cache-to type=gha,scope=recall-docker-source,mode=max \
+            --cache-from type=gha,scope=recall-docker-source $cache_to \
             -f deploy/Dockerfile --target worker --build-arg RECALL_SOURCE=source -t recall-worker-ci .
 
           rel="$RUNNER_TEMP/releases/v0.0.0-ci"
