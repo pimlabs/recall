@@ -42,7 +42,8 @@ break will be described here in full rather than smoothed over.
   in a week, the oldest waiting is a week old, or ten checks in a row
   went unanswered; a check the server did not answer this once only
   warns, and so does one it refused this machine's credential for (401,
-  403), with what to do about the credential. `status` and `doctor` stop
+  403), with what to do about the credential. A time stamped more than a
+  day in the future, by a clock set wrong, counts as a week old. `status` and `doctor` stop
   waiting on a slow server after 90 seconds, and give the audit check 20
   more of its own, so a slow server cannot keep it from being asked.
 - **`recall audit`**, with three commands. `export` writes the server's

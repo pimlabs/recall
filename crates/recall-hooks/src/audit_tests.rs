@@ -368,12 +368,35 @@ async fn a_split_view_is_not_laundered_by_a_check_cut_short() {
     assert_eq!(saved.checkpoints, vec![b50], "fork A never checked");
 }
 
+/// A rollback that needs no proof is not hidden behind a proof the server
+/// stalls: checked 8, waiting 55 and 70, the log now at 60, and the first
+/// proof asked for refused until the deadline. 70 is longer than the log,
+/// which says so with no request. Mutation: look only as each is reached.
+#[tokio::test]
+async fn a_rollback_needing_no_proof_is_found_behind_a_stalled_proof() {
+    let s = setup(8).await;
+    s.witness.check(&s.client, LONG).await.unwrap();
+    s.witness.record(&cp(55, 5).header()).unwrap();
+    s.witness.record(&cp(70, 7).header()).unwrap();
+    s.server.grow_audit_log(52);
+    s.server.refuse_proofs_from(Some(8));
+    let found = s
+        .witness
+        .check(&s.client, Duration::from_millis(500))
+        .await
+        .unwrap();
+    let finding = finding_of(&found);
+    assert_eq!(finding.saved, cp(70, 7).note(s.witness.origin()));
+    assert!(finding.detail.contains("fewer than the 70"), "{finding:?}");
+}
+
 /// N1 under the lock: a check writes only while the newest checked
 /// checkpoint is one it proved. Another check that moved it on meanwhile
 /// proved that one against the log it was shown, maybe another fork, and
 /// what this one proved does not follow from it: it stays unchecked, for
 /// the next check. The same closes two checks racing. Mutation: promote
-/// whatever the file holds by then.
+/// whatever the file holds by then; or count, or reset, the unanswered
+/// checks on a lost race.
 #[tokio::test]
 async fn nothing_is_promoted_past_a_checkpoint_this_check_did_not_prove() {
     let dir = tempfile::tempdir().unwrap();
@@ -406,6 +429,17 @@ async fn nothing_is_promoted_past_a_checkpoint_this_check_did_not_prove() {
     s.witness.check(&s.client, LONG).await.unwrap();
     s.client.pull("acme/app").await.unwrap();
     s.server.grow_audit_log(2);
+    // Two checks unanswered before it: a lost race leaves the count as it
+    // was, neither one more nor reset.
+    s.server.fail_with(429, r#"{"error":"too many requests"}"#);
+    for _ in 0..2 {
+        s.witness
+            .check(&s.client, Duration::from_millis(50))
+            .await
+            .unwrap_err();
+    }
+    s.server.stop_failing();
+    assert_eq!(s.witness.load().unwrap().unanswered, 2);
     s.server.limit_proofs_after(Some(0));
     let check = s.witness.check(&s.client, LONG);
     let meanwhile = async {
@@ -419,7 +453,7 @@ async fn nothing_is_promoted_past_a_checkpoint_this_check_did_not_prove() {
     assert!(matches!(found, Err(CheckError::Moved)), "{found:?}");
     let saved = s.witness.load().unwrap();
     assert_eq!(saved.unchecked.len(), 1, "left for the next check");
-    assert_eq!(saved.unanswered, 0, "and not counted as unanswered");
+    assert_eq!(saved.unanswered, 2, "and the count left as it was");
 }
 
 /// A check that finishes says when; one cut short does not, and `recall
@@ -700,7 +734,8 @@ fn a_waiting_checkpoint_without_a_time_is_as_old_as_the_oldest() {
 /// Unanswered checks are counted only while something is saved to be
 /// checked: a server never witnessed, down, is not a pending check. And a
 /// count is something a reset forgets. Mutation: count with nothing saved,
-/// or leave the count out of what is held.
+/// count only while some wait unchecked, or leave the count out of what is
+/// held.
 #[tokio::test]
 async fn unanswered_checks_count_only_while_something_is_saved() {
     let s = setup(3).await;
@@ -712,6 +747,18 @@ async fn unanswered_checks_count_only_while_something_is_saved() {
     let saved = s.witness.load().unwrap();
     assert_eq!(saved.unanswered, 0);
     assert!(saved.is_empty());
+
+    // Checked checkpoints alone are something saved: a server that stops
+    // answering after every one was proven still counts.
+    s.server.stop_failing();
+    s.witness.check(&s.client, LONG).await.unwrap();
+    assert!(s.witness.load().unwrap().unchecked.is_empty());
+    s.server.fail_with(429, r#"{"error":"too many requests"}"#);
+    s.witness
+        .check(&s.client, Duration::from_millis(50))
+        .await
+        .unwrap_err();
+    assert_eq!(s.witness.load().unwrap().unanswered, 1);
 
     // A count left in the file with nothing else is still held, and reset
     // forgets it.

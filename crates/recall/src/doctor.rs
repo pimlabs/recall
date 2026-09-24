@@ -790,18 +790,25 @@ fn audit_finding(rep: &Report, out: &mut Vec<Finding>) {
         }
         _ => {}
     }
+    // How long, when that is a week or more. A stamp more than a day ahead
+    // of this clock was written under one set wrong: it would never grow a
+    // week old, so it counts as stale rather than as recent.
     let stale = |at: Option<&str>| {
-        at.and_then(age_of)
-            .filter(|age| *age >= time::Duration::days(STALE_DAYS))
+        let age = at.and_then(age_of)?;
+        if age < -time::Duration::days(1) {
+            return Some(
+                "an unknown time (it is stamped in the future: a clock was wrong)".to_string(),
+            );
+        }
+        (age >= time::Duration::days(STALE_DAYS)).then(|| format!("{} days", age.whole_days()))
     };
     if let Some(waited) = stale(audit.unchecked_since.as_deref()) {
         out.push(fail(
             CHECK,
             format!(
-                "{} checkpoint(s) saved here have waited {} days to be checked, the oldest \
+                "{} checkpoint(s) saved here have waited {waited} to be checked, the oldest \
                  since {}",
                 audit.unchecked,
-                waited.whole_days(),
                 audit.unchecked_since.as_deref().unwrap_or_default()
             ),
             "recall audit verify; a server that never answers the proofs is not proving its \
@@ -817,9 +824,8 @@ fn audit_finding(rep: &Report, out: &mut Vec<Finding>) {
         out.push(fail(
             CHECK,
             format!(
-                "no check of the server's log has finished in {} days, the last on {}; {} \
+                "no check of the server's log has finished in {age}, the last on {}; {} \
                  checkpoint(s) are saved here",
-                age.whole_days(),
                 audit.last_proven_at.as_deref().unwrap_or_default(),
                 audit.saved()
             ),
@@ -2061,6 +2067,33 @@ mod tests {
         let found = findings(&since(8, 0));
         let level = find(&found, "audit log").map(|f| f.level);
         assert_ne!(level, Some(Level::Fail), "nothing saved");
+    }
+
+    /// A time stamped in the future, by a clock set wrong when it was
+    /// written, never grows a week old: it counts as stale, not as recent,
+    /// for both of the week's rules. A few hours ahead is drift. Mutation:
+    /// read a future stamp as recent, as before.
+    #[test]
+    fn a_time_stamped_in_the_future_is_stale() {
+        let proven = |at: &str| {
+            audit(|a| {
+                a.extends = None;
+                a.last_proven_at = Some(at.into());
+            })
+        };
+        let rep = proven("2099-01-01T00:00:00.000Z");
+        let found = findings(&rep);
+        let f = find(&found, "audit log").unwrap();
+        assert_eq!(f.level, Level::Fail);
+        assert!(f.detail.contains("in the future"), "{}", f.detail);
+        assert_eq!(audit_level(&proven(&days_ago(0))), Level::Warn);
+
+        let waiting = audit(|a| {
+            a.extends = None;
+            a.unchecked = 2;
+            a.unchecked_since = Some("2099-01-01T00:00:00.000Z".into());
+        });
+        assert_eq!(audit_level(&waiting), Level::Fail);
     }
 
     /// Unanswered checks with nothing saved are no pending check. Mutation:

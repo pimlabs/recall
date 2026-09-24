@@ -406,9 +406,15 @@ impl Home {
     /// killed while holding it is taken over once it is older than anything
     /// holds one on purpose.
     pub fn lock_devices(&self) -> Result<DevicesLock<'_>, Error> {
+        self.lock_devices_within(LOCK_WAIT)
+    }
+
+    /// [`Home::lock_devices`], waiting at most `wait`: what a hook takes,
+    /// with [`HOOK_LOCK_WAIT`].
+    pub fn lock_devices_within(&self, wait: std::time::Duration) -> Result<DevicesLock<'_>, Error> {
         Ok(DevicesLock {
             home: self,
-            _lock: FileLock::take(&self.dir, DEVICE_LOCK_FILE, LOCK_WAIT)?,
+            _lock: FileLock::take(&self.dir, DEVICE_LOCK_FILE, wait)?,
         })
     }
 
@@ -556,9 +562,17 @@ const DEVICE_LOCK_FILE: &str = "device.key.lock";
 /// timeout, and some file writes.
 const LOCK_STALE: std::time::Duration = std::time::Duration::from_secs(90);
 
-/// How long to wait for the lock before giving up: long enough to outlast
-/// a lock left behind, which is taken over once stale.
+/// How long a command waits for the lock before giving up: long enough to
+/// outlast a lock left behind, which is taken over once stale.
 const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(100);
+
+/// How long a hook waits for it: well inside Claude Code's sixty-second
+/// hook timeout, which the hundred seconds a command waits are not. What
+/// that gives up is the takeover of a lock left behind, which a hook no
+/// longer waits long enough to see go stale: for the minute and a half
+/// until one does, a hook gives up on enrolling and says so, and the next
+/// hook after that takes it over.
+pub const HOOK_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// How often a process waiting for the lock looks again.
 const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(50);
@@ -752,12 +766,22 @@ impl Drop for FileLock {
     }
 }
 
-/// How old the lock at `path` is, by its modification time.
+/// How far ahead of this clock a lock's time may be and still be taken for
+/// one just made: clocks drift, and a network filesystem stamps files with
+/// its own.
+const LOCK_FUTURE_SKEW: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// How old the lock at `path` is, by its modification time. One stamped
+/// more than [`LOCK_FUTURE_SKEW`] ahead was made under a clock set wrong,
+/// and would otherwise never grow old enough to take over: it counts as
+/// older than any lock held on purpose.
 fn lock_age(path: &Path) -> Option<std::time::Duration> {
-    fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|at| at.elapsed().ok())
+    let at = fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    match at.elapsed() {
+        Ok(age) => Some(age),
+        Err(ahead) if ahead.duration() > LOCK_FUTURE_SKEW => Some(std::time::Duration::MAX),
+        Err(_) => Some(std::time::Duration::ZERO),
+    }
 }
 
 /// Takes a stale lock at `path` out of the way, `seen` being what it held
@@ -1459,6 +1483,31 @@ mod tests {
             ..LockFs::REAL
         };
         assert!(!take_briefly(dir.path(), back_at_once));
+    }
+
+    /// A lock stamped days ahead of this clock was made under one set wrong
+    /// and would never grow stale: it is taken over like one left behind.
+    /// One only a little ahead is drift, and still held. Mutation: never
+    /// take over a lock from the future, as before.
+    #[test]
+    fn a_lock_from_the_future_is_taken_over() {
+        let ahead = |by: std::time::Duration| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(DEVICE_LOCK_FILE);
+            fs::write(&path, "theirs").unwrap();
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(std::time::SystemTime::now() + by)
+                .unwrap();
+            take_briefly(dir.path(), LockFs::REAL)
+        };
+        assert!(ahead(LOCK_FUTURE_SKEW * 2), "days ahead");
+        assert!(
+            !ahead(std::time::Duration::from_secs(3600)),
+            "an hour ahead"
+        );
     }
 
     /// A lock whose nonce could not be written is let go of at once, not

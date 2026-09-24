@@ -15,6 +15,16 @@ use recall_hooks::{
     claude, client, declared_env, device, home, project, scope, ClientConfig, Context,
 };
 
+/// How long the hooks wait for `device.key`'s lock:
+/// [`home::HOOK_LOCK_WAIT`], inside Claude Code's hook timeout, and a
+/// second in this crate's tests, so that one can tell it from the hundred
+/// seconds a command waits.
+const HOOK_LOCK_WAIT: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_secs(1)
+} else {
+    home::HOOK_LOCK_WAIT
+};
+
 /// The project root, resolved the way Claude Code resolves it: the git root,
 /// falling back to the working directory.
 pub fn root() -> PathBuf {
@@ -249,7 +259,7 @@ impl Resolved {
             eprintln!("{hook}: RECALL_AUTHKEY is set, but there is no home directory to keep a device key in");
             return cfg;
         };
-        let held = match h.lock_devices() {
+        let held = match h.lock_devices_within(HOOK_LOCK_WAIT) {
             Ok(held) => held,
             Err(e) => {
                 eprintln!(
@@ -335,7 +345,7 @@ impl Resolved {
         let why = refusal.reason();
         let why = why.trim_start_matches("unauthorized: ");
         let h = home::locate(self.env.lookup())?;
-        let held = match h.lock_devices() {
+        let held = match h.lock_devices_within(HOOK_LOCK_WAIT) {
             Ok(held) => held,
             Err(e) => {
                 eprintln!("{hook}: the server refused this machine's device ({why}), and {e}");
@@ -431,4 +441,61 @@ fn git(args: &[&str]) -> Option<String> {
     }
     let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!value.is_empty()).then_some(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// A hook waits for `device.key`'s lock no longer than
+    /// [`home::HOOK_LOCK_WAIT`], well inside Claude Code's sixty-second hook
+    /// timeout; the hundred seconds a command waits are not. Mutation: take
+    /// the command's wait in the hooks, as before.
+    #[test]
+    fn a_hook_waits_briefly_for_the_device_lock() {
+        const { assert!(home::HOOK_LOCK_WAIT.as_secs() < 60) };
+        let dir = tempfile::tempdir().unwrap();
+        let recall = dir.path().join(".recall");
+        std::fs::create_dir(&recall).unwrap();
+        std::fs::write(recall.join("device.key.lock"), "another hook").unwrap();
+        let root = dir.path().to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let home_dir = recall.display().to_string();
+            let shell = move |name: &str| (name == "RECALL_HOME").then(|| home_dir.clone());
+            let env = declared_env::Environment::from_files(&[], Box::new(shell));
+            let here = Resolved { root, env };
+            let cfg = ClientConfig {
+                url: "http://127.0.0.1:9".into(),
+                authkey: Some("rk_test".into()),
+                ..Default::default()
+            };
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let enrolled = runtime.block_on(here.enroll_if_needed(cfg.clone(), "recall-pull"));
+            let _ = tx.send(enrolled.device.is_none());
+
+            // And after a refusal, the other hook path that takes it.
+            let key = device::DeviceKey::generate().unwrap();
+            let refused = ClientConfig {
+                device: Some(key.entry("dev_x", "jarvis", "sync", true)),
+                ..cfg
+            };
+            let refusal = client::Error::Status {
+                code: 401,
+                body: r#"{"error":"unauthorized: unknown device"}"#.into(),
+            };
+            let retry = runtime.block_on(here.after_refusal(&refused, "recall-pull", &refusal));
+            let _ = tx.send(retry.is_none());
+        });
+        for path in ["enrolling", "after a refusal"] {
+            let gave_up = rx
+                .recv_timeout(Duration::from_secs(30))
+                .unwrap_or_else(|_| panic!("the hook stopped waiting, {path}"));
+            assert!(gave_up, "and did nothing, {path}");
+        }
+    }
 }

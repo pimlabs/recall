@@ -783,7 +783,18 @@ impl Witness {
         // Every checkpoint shown to be a prefix of `current`, which is one
         // of itself: any two of them are prefixes of one log.
         let mut proven = vec![current];
-        for held in saved.to_prove() {
+        let to_prove = saved.to_prove();
+        // What needs no proof is looked at before any proof is asked for:
+        // a checkpoint longer than the log now, or of its size with another
+        // root, is a finding whatever the proofs would say, and must not
+        // wait behind one the server stalls. It writes nothing but the
+        // finding, so the anchor still goes first for everything written.
+        for &held in &to_prove {
+            if let Compared::Fails(detail) = compare(held, current) {
+                return Ok(self.found(held, current, detail));
+            }
+        }
+        for held in to_prove {
             let holds = match compare(held, current) {
                 Compared::Holds => Ok(()),
                 Compared::Fails(detail) => Err(detail),

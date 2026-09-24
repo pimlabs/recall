@@ -1293,7 +1293,10 @@ as the nearest double.
 then ask for `GET /v1/audit/checkpoint` and, for the newest checkpoint
 proven so far and then each one saved since, smallest first,
 `GET /v1/audit/consistency` from it to the log now, and verify each proof
-by rebuilding both roots (RFC 9162 §2.1.4). Nothing is written down until
+by rebuilding both roots (RFC 9162 §2.1.4). Before any proof is asked
+for, every saved checkpoint is compared with the log now: one longer than
+it, or of its size with another root, is a finding at once, whatever a
+stalled proof would have said. Nothing is written down until
 the newest proven one's proof verifies: it stands for the older ones only
 against the log it was proven on, and a server showing this machine two
 forks shows each check one of them, so a checkpoint proven against one
