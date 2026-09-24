@@ -698,7 +698,13 @@ With a worker approved, `merge` gains `worker` (`last_claim_at`, which
 moves about every 25 seconds while it runs, and its `agent`) and `queue`
 (`queued`, `leased`, `failed`, `oldest_queued_at`), and `claude_cli` is the
 worker's CLI rather than the server's. `docker compose logs recall-worker`
-shows each merge.
+shows each merge. `recall status` and `recall doctor` read the same fields,
+and warn when the worker has not asked for work in two minutes, or any
+merge has failed.
+
+`/health` answers anyone, so what it says about a failed merge names the
+job and nothing else, never a project or a file:
+`GET /v1/jobs?state=failed`, with the operator token, has the rest.
 
 ### While it is down
 
@@ -711,6 +717,11 @@ the newer version if it has. A job that fails four times (after 1, 5 and 30
 minutes) is marked failed and kept; `GET /v1/jobs?state=failed` lists them
 and `POST /v1/jobs/{id}/retry` queues one again, both with the operator
 token.
+
+If the server's own CLI is still logged in (see below), a worker that has
+not asked for work in two minutes, or a queue that is full (1000 jobs), no
+longer means last-write-wins: the server merges new conflicts itself, as it
+did before the worker, until the worker is back.
 
 ### When it stops by itself
 
@@ -738,8 +749,17 @@ names the server uses.
 ### Revoking it, or enrolling it again
 
 Revoking the worker (`POST /v1/devices/{id}/revoke`) puts merging back in
-the server at once; the worker then says why in its log, and idles. To
-enrol it again, delete its identity and restart it:
+the server at once; the worker then says why in its log, and idles.
+
+Merges it left in the queue are not stranded: the server takes them over
+at once, releasing any it held. If the server's own CLI is logged in, it
+merges each, through the same check that the file has not changed since.
+If it is not, each is marked failed, which `/health` shows in
+`merge.queue.failed` (worker or not) and `recall doctor` warns about; once
+something can merge again, `POST /v1/jobs/{id}/retry` queues one again.
+Until then, the newest push of each file stands.
+
+To enrol it again, delete its identity and restart it:
 
 ```sh
 docker compose exec -u node recall-worker rm /data/worker-identity.json

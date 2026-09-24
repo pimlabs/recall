@@ -22,7 +22,10 @@ mod jobs;
 pub use devices::{
     plain_name, Created, Decision, Inserted, NewAuthkey, NewDevice, NewEnrollment, Poll, Waiting,
 };
-pub use jobs::{Queued, Retried, Settled, Settlement, MAX_ATTEMPTS, MAX_LINKS, MAX_OPEN_JOBS};
+pub use jobs::{
+    clip, Failure, Queued, Retried, Settled, Settlement, MAX_ATTEMPTS, MAX_ERROR_BYTES, MAX_LINKS,
+    MAX_OPEN_JOBS,
+};
 
 /// Frozen: an already-deployed database was created with exactly this.
 const SCHEMA: &str = "
@@ -159,6 +162,9 @@ impl Store {
     /// place: a mistaken delete stays recoverable at the database level,
     /// even though nothing in the app surfaces an undo yet. [`Store::list`]
     /// withholds the content so a pull can't resurrect it.
+    ///
+    /// In the same transaction it closes the file's open merge jobs, so
+    /// nothing merges the deleted notes back into a file pushed after it.
     pub fn tombstone(
         &self,
         project_key: &str,
@@ -166,8 +172,9 @@ impl Store {
         source_env: &str,
         updated_at: &str,
     ) -> Result<()> {
-        let conn = self.lock();
-        conn.execute(
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO memory_files (project_key, file_path, content, source_env, updated_at, deleted)
              VALUES (?1, ?2, '', ?3, ?4, 1)
              ON CONFLICT(project_key, file_path) DO UPDATE SET
@@ -176,6 +183,8 @@ impl Store {
                  deleted = 1",
             (project_key, file_path, nullable(source_env), updated_at),
         )?;
+        jobs::close_for_delete(&tx, project_key, file_path, updated_at)?;
+        tx.commit()?;
         Ok(())
     }
 

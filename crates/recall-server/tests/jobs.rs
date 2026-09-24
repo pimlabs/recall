@@ -591,13 +591,23 @@ async fn an_error_is_retried_later_and_a_failed_job_can_be_retried_by_the_owner(
         .await);
     assert_eq!(failed.state, "failed");
     let health: Health = ok(h.call("GET", "/health", None, None).await);
-    assert!(health
-        .merge
-        .last_merge_error
-        .unwrap()
-        .message
-        .contains("timed out"));
+    assert_eq!(
+        health.merge.last_merge_error.unwrap().message,
+        format!(
+            "merge job {} failed after 4 attempts; see GET /v1/jobs?state=failed",
+            job.id
+        )
+    );
     assert_eq!(health.merge.queue.unwrap().failed, 1);
+    // The listing, for the owner, says why.
+    let listed: JobList = ok(h
+        .call("GET", "/v1/jobs?state=failed", Some(TOKEN), None)
+        .await);
+    assert!(listed.jobs[0]
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("timed out"));
 
     let listed: JobList = ok(h
         .call("GET", "/v1/jobs?state=failed", Some(TOKEN), None)
@@ -960,6 +970,315 @@ async fn discovery_lists_the_merge_queue() {
     let h = harness(|_| {});
     let doc: recall_wire::Discovery = ok(h.call("GET", "/.well-known/recall", None, None).await);
     assert!(doc.can("merge_queue"));
+}
+
+// ---------------------------------------------------------------------------
+// a delete, a revoked worker, a stopped one, and what /health shows anyone
+// ---------------------------------------------------------------------------
+
+/// A server whose own CLI was checked and cannot merge.
+fn harness_without_cli() -> Harness {
+    let h = harness(|cfg| cfg.claude_bin = "definitely-not-a-real-claude".into());
+    h.server.set_claude_status(Status {
+        checked_at: "2026-10-02T09:13:40.002Z".into(),
+        available: false,
+        logged_in: false,
+        error: "claude CLI not found on PATH".into(),
+    });
+    h
+}
+
+impl Harness {
+    async fn revoke(&self, m: &Machine) {
+        let (status, _) = self
+            .call(
+                "POST",
+                &devices::revoke_device_path(&m.id),
+                Some(TOKEN),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// Drains until nothing is open, whichever drain (the one revoking
+    /// started, or this) does the work.
+    async fn drained(&self) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            self.server.drain_jobs().await.unwrap();
+            let open = self
+                .jobs()
+                .await
+                .iter()
+                .filter(|j| j.state == "queued" || j.state == "leased")
+                .count();
+            if open == 0 {
+                return;
+            }
+            assert!(Instant::now() < deadline, "{open} jobs never drained");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    async fn health_text(&self) -> String {
+        let (status, body) = self.call("GET", "/health", None, None).await;
+        assert_eq!(status, StatusCode::OK);
+        String::from_utf8(body.to_vec()).unwrap()
+    }
+}
+
+/// Deleted, then made again, while its merge was held by the worker: the
+/// worker's late result must not bring the deleted notes into the new
+/// file.
+#[tokio::test]
+async fn a_file_deleted_and_made_again_keeps_the_deleted_notes_out() {
+    let h = harness(|_| {});
+    let w = h.worker().await;
+    h.conflict().await;
+    let job = h.claim(&w, 0).await.job.unwrap();
+    let deleted =
+        json!({"project_key": P, "file_path": F, "deleted": true, "source_env": "laptop"});
+    ok::<PushResponse>(h.call("POST", "/sync", Some(TOKEN), Some(deleted)).await);
+    let fresh: PushResponse = ok(h.push("fresh start", None).await);
+    assert_eq!(
+        fresh.merge_job, None,
+        "a push after a delete is not a conflict"
+    );
+
+    let settled: ResultResponse = ok(h
+        .result(
+            &w,
+            &job.id,
+            json!({"lease_id": job.lease_id, "merge": {"content": "A and B"}}),
+        )
+        .await);
+    assert_eq!(
+        (settled.state.as_str(), settled.applied, settled.follow_up),
+        ("done", false, None)
+    );
+    assert_eq!(h.stored().await.0, "fresh start");
+    assert!(h.claim(&w, 0).await.job.is_none(), "no follow-up");
+}
+
+/// Revoking the worker with merges waiting: with this server's CLI able to
+/// merge, they are merged here, through the same compare-and-swap.
+#[tokio::test]
+async fn a_revoked_workers_queue_is_merged_here() {
+    let h = harness_with_claude(0, "A and B, merged here");
+    let w = h.worker().await;
+    let job = h.conflict().await.merge_job.unwrap();
+    // One it held, too: its lease ends with it.
+    h.claim(&w, 0).await.job.unwrap();
+    h.revoke(&w).await;
+    h.drained().await;
+
+    let (content, by) = h.stored().await;
+    assert_eq!(content, "A and B, merged here");
+    assert_eq!(by, "laptop", "attributed to the push that queued it");
+    let listed = h.jobs().await;
+    assert_eq!(
+        (listed[0].id.as_str(), listed[0].state.as_str()),
+        (job.as_str(), "done")
+    );
+    let health: Health = ok(h.call("GET", "/health", None, None).await);
+    assert!(health.merge.worker.is_none());
+    assert!(health.merge.queue.is_none(), "nothing left to show");
+    assert!(health.merge.last_merge_error.is_none());
+}
+
+/// Revoking the worker with merges waiting, and nothing here to merge
+/// them: they are failed, visibly, in /health's queue even with no worker,
+/// and a retry takes them up once something can.
+#[tokio::test]
+async fn a_revoked_workers_queue_fails_visibly_when_nothing_can_merge() {
+    let h = harness_without_cli();
+    let w = h.worker().await;
+    let job = h.conflict().await.merge_job.unwrap();
+    h.revoke(&w).await;
+    h.drained().await;
+
+    assert_eq!(h.stored().await.0, "B", "last-write-wins stands");
+    let health: Health = ok(h.call("GET", "/health", None, None).await);
+    assert!(health.merge.worker.is_none());
+    let queue = health
+        .merge
+        .queue
+        .expect("the queue, though no worker is enrolled");
+    assert_eq!((queue.queued, queue.leased, queue.failed), (0, 0, 1));
+    let message = health.merge.last_merge_error.unwrap().message;
+    assert!(
+        message.contains("see GET /v1/jobs?state=failed"),
+        "{message}"
+    );
+    let failed: JobList = ok(h
+        .call("GET", "/v1/jobs?state=failed", Some(TOKEN), None)
+        .await);
+    assert_eq!(failed.jobs[0].id, job);
+    assert!(failed.jobs[0]
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("no worker"));
+
+    // A new worker, and a retry: merged after all.
+    let mut again = Machine::new(41, "worker-2");
+    h.enrol(&mut again, SCOPE_WORKER).await;
+    ok::<JobSummary>(
+        h.call("POST", &wire_jobs::retry_path(&job), Some(TOKEN), None)
+            .await,
+    );
+    let claimed = h.claim(&again, 0).await.job.unwrap();
+    let m = claimed.merge.unwrap();
+    assert_eq!(
+        (m.stored.content.as_str(), m.incoming.content.as_str()),
+        ("A", "B")
+    );
+}
+
+/// A drain stops for a worker enrolled meanwhile, and leaves it the rest.
+#[tokio::test]
+async fn nothing_is_drained_while_a_worker_is_enrolled() {
+    let h = harness_without_cli();
+    h.worker().await;
+    h.conflict().await;
+    h.server.drain_jobs().await.unwrap();
+    assert_eq!(h.jobs().await[0].state, "queued");
+}
+
+/// A worker enrolled but no longer claiming, with this server's CLI able to
+/// merge: a conflict is merged here rather than left to wait.
+#[tokio::test]
+async fn a_worker_that_stopped_claiming_is_merged_around() {
+    let h = harness_with_claude(0, "merged here");
+    let w = h.worker().await;
+    // Claiming, so still queued.
+    h.claim(&w, 0).await;
+    assert!(h.conflict().await.merge_job.is_some());
+    // Held: a worker busy with a long merge has not stopped.
+    h.claim(&w, 0).await.job.unwrap();
+    h.server.backdate_last_claim(600);
+    assert!(h.conflict().await.merge_job.is_some());
+    // Nothing held, and no claim for ten minutes.
+    h.sql("UPDATE jobs SET state = 'done', lease_id = NULL, lease_expires_at = NULL");
+    let pushed = h.conflict().await;
+    assert!(pushed.merged && pushed.merge_job.is_none(), "{pushed:?}");
+    assert_eq!(h.stored().await.0, "merged here");
+}
+
+/// Without a CLI here, a stopped worker's conflicts still wait for it.
+#[tokio::test]
+async fn a_stopped_worker_is_waited_for_when_nothing_else_can_merge() {
+    let h = harness_without_cli();
+    h.worker().await;
+    h.server.backdate_last_claim(600);
+    let pushed = h.conflict().await;
+    assert!(!pushed.merged && pushed.merge_job.is_some());
+}
+
+/// A full queue, with this server's CLI able to merge: merged here, not
+/// stored last-write-wins.
+#[tokio::test]
+async fn a_full_queue_is_merged_around() {
+    let h = harness_with_claude(0, "merged here");
+    let w = h.worker().await;
+    h.claim(&w, 0).await;
+    fill_the_queue(&h);
+    let pushed = h.conflict().await;
+    assert!(pushed.merged && pushed.merge_job.is_none(), "{pushed:?}");
+    assert_eq!(h.stored().await.0, "merged here");
+}
+
+fn fill_the_queue(h: &Harness) {
+    let conn = rusqlite::Connection::open(h.dir.path().join("recall.db")).unwrap();
+    for i in 0..recall_server::store::MAX_OPEN_JOBS {
+        conn.execute(
+            "INSERT INTO jobs (id, kind, state, project_key, file_path, payload,
+                               not_before, created_at, updated_at)
+             VALUES (?1, 'merge', 'queued', 'other/project', 'f.md', '{}',
+                     '9999-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z',
+                     '2026-01-01T00:00:00.000Z')",
+            (format!("job_fill_{i}"),),
+        )
+        .unwrap();
+    }
+}
+
+/// `/health` answers anyone, so whatever went wrong with a merge it names
+/// no project and no file: not a job out of attempts, not one whose result
+/// could not be applied, not a full queue. And what a worker reports is
+/// kept short.
+#[tokio::test]
+async fn health_names_no_project_and_no_file() {
+    let absent = |text: &str| {
+        for secret in [P, F, "topics", "acme"] {
+            assert!(!text.contains(secret), "{secret} in {text}");
+        }
+    };
+
+    // Out of attempts.
+    let h = harness(|_| {});
+    let w = h.worker().await;
+    h.conflict().await;
+    h.sql("UPDATE jobs SET attempt = 3");
+    let job = h.claim(&w, 0).await.job.unwrap();
+    let error = format!("claude failed on {P}/{F}: {}", "x".repeat(100_000));
+    ok::<ResultResponse>(
+        h.result(
+            &w,
+            &job.id,
+            json!({"lease_id": job.lease_id, "error": error}),
+        )
+        .await,
+    );
+    let text = h.health_text().await;
+    assert!(text.contains(&job.id));
+    absent(&text);
+    let listed: JobList = ok(h.call("GET", "/v1/jobs", Some(TOKEN), None).await);
+    assert!(listed.jobs[0].error.as_deref().unwrap().len() < 600);
+
+    // Not applied: the file kept changing.
+    let h = harness(|_| {});
+    let w = h.worker().await;
+    h.conflict().await;
+    h.sql("UPDATE jobs SET link = 3");
+    let job = h.claim(&w, 0).await.job.unwrap();
+    ok::<PushResponse>(h.push("C", Some(&recall_wire::content_sha256("B"))).await);
+    let failed: ResultResponse = ok(h
+        .result(
+            &w,
+            &job.id,
+            json!({"lease_id": job.lease_id, "merge": {"content": "AB"}}),
+        )
+        .await);
+    assert_eq!(failed.state, "failed");
+    let text = h.health_text().await;
+    assert!(text.contains("was not applied"));
+    absent(&text);
+
+    // The queue full, with nothing here to merge around it.
+    let h = harness(|_| {});
+    let w = h.worker().await;
+    fill_the_queue(&h);
+    let pushed = h.conflict().await;
+    assert!(pushed.merge_job.is_none());
+    let text = h.health_text().await;
+    assert!(text.contains("the merge queue is full"));
+    absent(&text);
+
+    // A worker's CLI report and agent, however long, are kept short.
+    ok::<ClaimResponse>(
+        h.signed(
+            &w,
+            "POST",
+            CLAIM_PATH,
+            Some(json!({"kinds": [], "claude_cli": {"checked_at": "9".repeat(10_000), "available": true, "logged_in": false, "error": "e".repeat(100_000)}})),
+        )
+        .await,
+    );
+    let health: Health = ok(h.call("GET", "/health", None, None).await);
+    assert!(health.merge.claude_cli.error.len() <= 500);
+    assert!(health.merge.claude_cli.checked_at.len() <= 64);
 }
 
 // ---------------------------------------------------------------------------

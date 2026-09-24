@@ -219,9 +219,15 @@ pub struct Report {
     /// Whether a merge worker is enrolled, so merges run there, from a
     /// queue, rather than inside the server.
     pub merge_worker: bool,
-    /// The worker's queue, when there is a worker.
+    /// The worker's queue, when there is a worker, or when it holds
+    /// anything (a queue a revoked worker left, or failed merges).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub merge_queue: Option<recall_wire::QueueStatus>,
+    /// When the merge worker was last heard from: its last request for
+    /// work, or the server's start when it has made none since. [`None`]
+    /// without a worker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_worker_seen_at: Option<String>,
     /// How many live files the server holds for this project.
     pub synced_files: usize,
     /// When any project last synced.
@@ -342,6 +348,7 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
         merge_ready: false,
         merge_worker: false,
         merge_queue: None,
+        merge_worker_seen_at: None,
         synced_files: 0,
         last_synced_at: None,
         last_offbox_at: None,
@@ -360,6 +367,10 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
                     rep.merge_ready = health.merge.claude_cli.logged_in.unwrap_or(false);
                     rep.merge_worker = health.merge.worker.is_some();
                     rep.merge_queue = health.merge.queue;
+                    rep.merge_worker_seen_at = health
+                        .merge
+                        .worker
+                        .map(|w| w.last_claim_at.unwrap_or_else(|| health.started_at.clone()));
                     if !health.last_sync_at.is_empty() {
                         rep.last_synced_at = Some(health.last_sync_at);
                     }
@@ -703,15 +714,25 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
         ),
     }
     field!("client       : {}", rep.client_version);
-    field!(
-        "merge        : {}",
-        match (rep.merge_ready, rep.merge_worker) {
-            (true, false) => "ready (claude CLI logged in)",
-            (true, true) => "ready (merge worker, claude CLI logged in)",
-            (false, false) => "not configured, so the server uses last-write-wins",
-            (false, true) => "waiting: the merge worker's claude CLI is not logged in",
-        }
-    );
+    match crate::doctor::worker_quiet(rep) {
+        // What the worker last said about its CLI is only as current as
+        // the worker: one that stopped asking for work is not ready,
+        // whatever its last report was.
+        Some(quiet) => field!(
+            "merge        : stalled: the merge worker has not asked for work in {} minutes; \
+             is recall-worker running?",
+            quiet.whole_minutes()
+        ),
+        None => field!(
+            "merge        : {}",
+            match (rep.merge_ready, rep.merge_worker) {
+                (true, false) => "ready (claude CLI logged in)",
+                (true, true) => "ready (merge worker, claude CLI logged in)",
+                (false, false) => "not configured, so the server uses last-write-wins",
+                (false, true) => "waiting: the merge worker's claude CLI is not logged in",
+            }
+        ),
+    }
     if let Some(q) = &rep.merge_queue {
         match &q.oldest_queued_at {
             // An hour is long past what a running worker takes: say so
@@ -730,6 +751,9 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
                 q.queued
             ),
             None => field!("merge queue  : nothing waiting"),
+        }
+        if q.failed > 0 {
+            field!("failed merges: {}; see GET /v1/jobs?state=failed", q.failed);
         }
     }
     field!("synced files : {} on server", rep.synced_files);

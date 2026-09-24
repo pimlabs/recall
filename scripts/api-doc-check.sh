@@ -386,6 +386,19 @@ import json,sys; q=json.load(sys.stdin)["merge"]["queue"]; print(json.dumps({k: 
 check "only a failed job is retried" '{"error":"only a failed job can be retried; this one is queued"}' \
   "$(curl -s -X POST "${auth[@]}" "$JQ/v1/jobs/$(field "$WORK/queued.json" merge_job)/retry")"
 curl -s -X POST "${auth[@]}" "$JQ/v1/devices/$(field "$WORK/worker.json" id)/revoke" >/dev/null
+# The revocation starts a drain in the background; this server's claude
+# does not exist, so the waiting job is failed rather than merged.
+jq_queue() {
+  curl -s "$JQ/health" | python3 -c '
+import json,sys; q=json.load(sys.stdin)["merge"].get("queue"); print(json.dumps(q and {k: q[k] for k in ("queued","leased","failed")}))'
+}
+for _ in $(seq 1 40); do [ "$(jq_queue)" = '{"queued": 0, "leased": 0, "failed": 1}' ] && break; sleep 0.25; done
+check "the worker revoked: its waiting job is failed, and health still shows the queue" \
+  '{"queued": 0, "leased": 0, "failed": 1}' "$(jq_queue)"
+check "health names the failed job, and no project or file" 'True False' \
+  "$(curl -s "$JQ/health" | python3 -c '
+import json,sys; m=json.load(sys.stdin)["merge"]["last_merge_error"]["message"]
+print("see GET /v1/jobs?state=failed" in m, "acme" in m or "topics" in m)')"
 check "the worker revoked: a stale push answers as before" \
   'ok project_key file_path deleted merged updated_at' \
   "$(jq_push "# Auth, once more\\n" "$OLDER" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin).keys()))')"

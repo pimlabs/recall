@@ -433,10 +433,13 @@ impl Worker {
                 }
                 // A 404 among them: a server without the enrolment route
                 // answers every retry the same way.
-                Err(e) if is_final(&e) => return Err(Fatal::Other(format!(
-                    "{} refused the enrolment ({e}); asking again would be refused the same way",
-                    self.cfg.server
-                ))),
+                Err(e) if is_final(&e) => {
+                    return Err(Fatal::Other(format!(
+                        "{} refused the enrolment ({e}); asking again would be refused \
+                         the same way",
+                        self.cfg.server
+                    )))
+                }
                 Err(e) => {
                     backoff = next_wait(&e, backoff);
                     log(&format!(

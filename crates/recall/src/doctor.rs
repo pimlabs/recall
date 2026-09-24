@@ -139,7 +139,21 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
         version_findings(rep, &mut out);
     }
 
-    if rep.server_ok && !rep.merge_ready && rep.merge_worker {
+    let quiet = worker_quiet(rep).filter(|_| rep.server_ok);
+    if let Some(quiet) = quiet {
+        // Before the CLI: what the worker last said about it is only as
+        // current as the worker.
+        out.push(warn(
+            "merge",
+            format!(
+                "the merge worker has not asked for work in {} minutes, so conflicting \
+                 edits wait in its queue unmerged, unless the server's own Claude CLI \
+                 can merge them",
+                quiet.whole_minutes()
+            ),
+            "on the server: docker compose logs recall-worker, and check it is running",
+        ));
+    } else if rep.server_ok && !rep.merge_ready && rep.merge_worker {
         out.push(warn(
             "merge",
             "the merge worker's Claude CLI is not logged in, so conflicting edits wait \
@@ -516,6 +530,22 @@ fn offbox_finding(rep: &Report, out: &mut Vec<Finding>) {
 /// running, or cannot merge.
 const QUEUE_STALE_AFTER: time::Duration = time::Duration::hours(1);
 
+/// How long a merge worker may go without asking for work before it is
+/// worth saying so. A running one asks at least every half minute.
+const WORKER_QUIET_AFTER: time::Duration = time::Duration::minutes(2);
+
+/// How long the merge worker has gone without asking for work, when that is
+/// long enough to say so: [`None`] without a worker, or with one that asks.
+pub(crate) fn worker_quiet(rep: &Report) -> Option<time::Duration> {
+    if !rep.merge_worker {
+        return None;
+    }
+    rep.merge_worker_seen_at
+        .as_deref()
+        .and_then(age_of)
+        .filter(|quiet| *quiet >= WORKER_QUIET_AFTER)
+}
+
 /// The merge worker's queue, when there is a worker: silent while it
 /// drains, loud once the oldest job has waited an hour, the way a merge
 /// that degrades to last-write-wins is made visible rather than silent.
@@ -543,6 +573,21 @@ fn queue_finding(rep: &Report, out: &mut Vec<Finding>) {
                 n => format!("{n} waiting"),
             },
         )),
+    }
+    // A failed merge left the newest push standing and kept the merge in
+    // its job, where nothing retries it by itself.
+    if q.failed > 0 {
+        out.push(warn(
+            "failed merges",
+            format!(
+                "{} merge{} failed; for each, the newest push stands and the merge is kept \
+                 in its job",
+                q.failed,
+                if q.failed == 1 { "" } else { "s" },
+            ),
+            "list them with GET /v1/jobs?state=failed and retry one with \
+             POST /v1/jobs/{id}/retry, both with the operator token",
+        ));
     }
 }
 
@@ -648,6 +693,7 @@ const SECTIONS: &[(&str, &[&str])] = &[
             "version",
             "merge",
             "merge queue",
+            "failed merges",
             "token storage",
             "credentials file",
             "config file",
@@ -816,6 +862,7 @@ mod tests {
             merge_ready: true,
             merge_worker: false,
             merge_queue: None,
+            merge_worker_seen_at: None,
             synced_files: 4,
             last_synced_at: None,
             // No stamp: the ordinary case for a deployment with no off-box
@@ -1275,6 +1322,45 @@ mod tests {
             exit::OK,
             "a warning never fails the command"
         );
+    }
+
+    /// A worker that stopped asking for work is not ready, whatever its
+    /// last report of its CLI said.
+    #[test]
+    fn a_worker_that_stopped_asking_is_a_warning() {
+        let mut rep = with_worker(None, 0);
+        rep.merge_ready = true;
+        rep.merge_worker_seen_at = Some(stamp_minutes_ago(1));
+        assert!(worker_quiet(&rep).is_none());
+        assert!(find(&findings(&rep), "merge").is_none());
+
+        rep.merge_worker_seen_at = Some(stamp_minutes_ago(3));
+        assert!(worker_quiet(&rep).is_some());
+        let found = findings(&rep);
+        let f = find(&found, "merge").unwrap();
+        assert_eq!(f.level, Level::Warn);
+        assert!(f.detail.contains("has not asked for work"), "{}", f.detail);
+        assert!(f.fix.as_deref().unwrap().contains("logs recall-worker"));
+
+        // Without a worker there is nothing to go quiet.
+        rep.merge_worker = false;
+        assert!(worker_quiet(&rep).is_none());
+    }
+
+    /// A failed merge is a warning however new: nothing retries it.
+    #[test]
+    fn a_failed_merge_is_a_warning() {
+        let mut rep = with_worker(None, 0);
+        assert!(find(&findings(&rep), "failed merges").is_none());
+        rep.merge_queue.as_mut().unwrap().failed = 2;
+        let found = findings(&rep);
+        let f = find(&found, "failed merges").unwrap();
+        assert_eq!(f.level, Level::Warn);
+        assert!(f.detail.starts_with("2 merges failed"), "{}", f.detail);
+        assert!(f.fix.as_deref().unwrap().contains("/v1/jobs"));
+        // Also with no worker: a revoked worker's queue, failed here.
+        rep.merge_worker = false;
+        assert!(find(&findings(&rep), "failed merges").is_some());
     }
 
     #[test]

@@ -529,12 +529,26 @@ pub(super) async fn handle_list_devices(State(state): State<Arc<AppState>>) -> R
 
 /// `POST /v1/devices/{id}/revoke`. Revoking twice is not an error; the
 /// first time stands.
+///
+/// Revoking the last worker puts merging back in the server, and what it
+/// left in the queue with it: a drain starts in the background, merging
+/// each job here or, when this server cannot merge, marking it failed.
 pub(super) async fn handle_revoke_device(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Response {
     match state.store.revoke_device(&id, &now()) {
-        Ok(Some(device)) => json(StatusCode::OK, &device),
+        Ok(Some(device)) => {
+            if device.scope == SCOPE_WORKER {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = super::jobs::drain_without_worker(&state).await {
+                        eprintln!("draining the merge queue failed: {e:#}");
+                    }
+                });
+            }
+            json(StatusCode::OK, &device)
+        }
         Ok(None) => error(StatusCode::NOT_FOUND, "no device has that id"),
         Err(e) => internal(e),
     }

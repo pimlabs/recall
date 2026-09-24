@@ -99,6 +99,12 @@ pub(super) const SCHEMA: &str = concat!(
 /// user_version`: whether the constraint allows `worker` is exactly the
 /// question, and a version number is a second thing to keep in step with
 /// it, one another change to the schema could also want to move.
+///
+/// The copy names [`REBUILT_COLUMNS`], so it first checks the table has
+/// exactly those. A table with another column (one a later release added,
+/// then rolled back past) would lose it in the copy without a word; it is
+/// refused instead, before anything changes, and the server does not
+/// start until someone looks.
 pub(super) fn allow_worker_scope(conn: &Connection) -> Result<()> {
     let sql: String = conn.query_row(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'devices'",
@@ -107,6 +113,21 @@ pub(super) fn allow_worker_scope(conn: &Connection) -> Result<()> {
     )?;
     if sql.contains("'worker'") {
         return Ok(());
+    }
+    let columns = {
+        let mut stmt =
+            conn.prepare("SELECT name FROM pragma_table_info('devices') ORDER BY cid")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if columns != REBUILT_COLUMNS {
+        anyhow::bail!(
+            "the devices table has the columns {columns:?}, where this server expects \
+             {REBUILT_COLUMNS:?}, so it will not rebuild the table to allow the worker scope: \
+             the rebuild copies the columns it knows, and would drop the others. Nothing was \
+             changed; look at the table (PRAGMA table_info(devices)) before starting this \
+             server on it again"
+        );
     }
     conn.execute_batch(concat!(
         "BEGIN IMMEDIATE;
@@ -126,6 +147,22 @@ pub(super) fn allow_worker_scope(conn: &Connection) -> Result<()> {
     ))?;
     Ok(())
 }
+
+/// Every column of `devices`, in its order: what [`allow_worker_scope`]
+/// copies, and so what it checks the table has before copying.
+const REBUILT_COLUMNS: [&str; 11] = [
+    "id",
+    "owner_id",
+    "name",
+    "public_key",
+    "scope",
+    "agent",
+    "ephemeral",
+    "authkey_id",
+    "created_at",
+    "last_seen",
+    "revoked_at",
+];
 
 const DEVICE_COLUMNS: &str = "id, name, scope, ephemeral, agent, public_key, authkey_id, \
      created_at, last_seen, revoked_at";
@@ -902,6 +939,86 @@ mod tests {
                 None
             )
             .is_err());
+    }
+
+    /// Every column survives the rebuild, on every kind of row: a revoked
+    /// device stays revoked, and one an authkey enrolled keeps its key and
+    /// its ephemerality.
+    #[test]
+    fn the_rebuild_keeps_every_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(&SCHEMA.replace("'sync', 'admin', 'worker'", "'sync', 'admin'"))
+                .unwrap();
+            conn.execute(
+                "INSERT INTO devices (id, owner_id, name, public_key, scope, agent, ephemeral,
+                                      authkey_id, created_at, last_seen, revoked_at)
+                 VALUES ('dev_gone', 'owner', 'old laptop', ?1, 'sync', 'recall/0.4.0', 0,
+                         NULL, ?2, ?3, ?4),
+                        ('dev_cloud', 'owner', 'cloud-ab12', ?1, 'sync', 'recall/0.4.1', 1,
+                         'akey_x', ?2, ?3, NULL)",
+                (KEY, ts(0), ts(1), ts(2)),
+            )
+            .unwrap();
+        }
+        let st = Store::open(&path).unwrap();
+        let gone = st.device("dev_gone").unwrap().unwrap();
+        assert_eq!(gone.revoked_at, Some(ts(2)), "still revoked");
+        assert_eq!(
+            (gone.name.as_str(), gone.agent.as_str(), gone.last_seen),
+            ("old laptop", "recall/0.4.0", Some(ts(1)))
+        );
+        let cloud = st.device("dev_cloud").unwrap().unwrap();
+        assert!(cloud.ephemeral);
+        assert_eq!(cloud.authkey_id.as_deref(), Some("akey_x"));
+        assert_eq!(cloud.revoked_at, None);
+        assert_eq!(cloud.created_at, ts(0));
+    }
+
+    /// A table with a column the rebuild does not know is left alone, and
+    /// the store refuses to open, rather than dropping that column in the
+    /// copy.
+    #[test]
+    fn a_devices_table_with_other_columns_is_not_rebuilt() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(&SCHEMA.replace("'sync', 'admin', 'worker'", "'sync', 'admin'"))
+                .unwrap();
+            conn.execute_batch(
+                "ALTER TABLE devices ADD COLUMN encryption_key TEXT;
+                 INSERT INTO devices (id, name, public_key, scope, created_at, encryption_key)
+                 VALUES ('dev_a', 'laptop', 'k', 'sync', 'x', 'kept');",
+            )
+            .unwrap();
+        }
+        let err = Store::open(&path).err().expect("refused").to_string();
+        assert!(err.contains("encryption_key"), "{err}");
+        let conn = Connection::open(&path).unwrap();
+        let kept: String = conn
+            .query_row("SELECT encryption_key FROM devices", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, "kept");
+    }
+
+    /// Only the worker scope makes a worker: an admin device, which may do
+    /// everything else, does not put pushes in a queue.
+    #[test]
+    fn an_admin_device_is_no_worker() {
+        let st = Store::open_in_memory().unwrap();
+        for (id, scope) in [("dev_a", "admin"), ("dev_s", "sync")] {
+            inserted(
+                &st,
+                &NewDevice {
+                    scope,
+                    ..device(id, id, None)
+                },
+            );
+        }
+        assert!(st.enrolled_worker().unwrap().is_none());
     }
 
     #[test]

@@ -25,7 +25,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use axum::extract::DefaultBodyLimit;
@@ -85,6 +85,9 @@ struct Runtime {
     claude_status: Status,
     /// When a worker last claimed, since this process started.
     worker_last_claim_at: Option<String>,
+    /// The same, as an instant, or when this process started if no worker
+    /// has claimed since: what says whether a worker's claims have stopped.
+    worker_last_claim: Instant,
     /// The `User-Agent` of that claim.
     worker_agent: String,
     /// The CLI check that claim carried: what `/health` reports as
@@ -112,6 +115,9 @@ struct AppState {
     /// Set once shutdown begins, so waiting claims answer at once rather
     /// than holding the graceful shutdown for their whole wait.
     closing: AtomicBool,
+    /// Set while the queue is being drained here, so two drains never run
+    /// at once.
+    draining: AtomicBool,
 }
 
 impl AppState {
@@ -175,6 +181,7 @@ impl Server {
                     last_merge_error: None,
                     claude_status: Status::default(),
                     worker_last_claim_at: None,
+                    worker_last_claim: Instant::now(),
                     worker_agent: String::new(),
                     worker_cli: None,
                 }),
@@ -182,6 +189,7 @@ impl Server {
                 replay,
                 jobs_ready: Notify::new(),
                 closing: AtomicBool::new(false),
+                draining: AtomicBool::new(false),
             }),
         }
     }
@@ -304,6 +312,29 @@ impl Server {
             .fetch_sub(seconds, Ordering::Relaxed);
     }
 
+    /// Makes the last claim by a worker, or this server's start if there
+    /// has been none, `seconds` older than it is.
+    ///
+    /// Exposed so tests can reach a worker whose claims have stopped
+    /// without waiting minutes for it.
+    pub fn backdate_last_claim(&self, seconds: u64) {
+        let mut rt = self.state.write();
+        if let Some(earlier) = rt
+            .worker_last_claim
+            .checked_sub(std::time::Duration::from_secs(seconds))
+        {
+            rt.worker_last_claim = earlier;
+        }
+    }
+
+    /// Merges the jobs left in the queue here, or marks them failed when
+    /// this server cannot merge, if no worker is enrolled; otherwise does
+    /// nothing. Run by itself when the last worker is revoked and on every
+    /// sweep; exposed so tests can wait for it.
+    pub async fn drain_jobs(&self) -> Result<()> {
+        jobs::drain_without_worker(&self.state).await
+    }
+
     /// Writes a backup now. Failure is logged, never propagated: it becomes
     /// visible through `/health`'s `last_backup_at` going stale.
     pub fn run_backup(&self) {
@@ -318,8 +349,9 @@ impl Server {
     }
 
     /// Starts background work: the first Claude CLI status check, its
-    /// refresh loop, backups, and the device sweep. All of it is
-    /// best-effort — none of it may take the sync API down.
+    /// refresh loop, backups, the device sweep, and draining a queue no
+    /// worker is left to take. All of it is best-effort — none of it may
+    /// take the sync API down.
     pub fn start_background(&self) -> Vec<JoinHandle<()>> {
         let mut tasks = Vec::new();
         {
@@ -341,6 +373,13 @@ impl Server {
                         Ok(Ok(n)) => eprintln!("removed {n} finished merge jobs"),
                         Ok(Err(e)) => eprintln!("job prune failed: {e:#}"),
                     }
+                    // Jobs no worker is left to take: merged here, or
+                    // marked failed. The first sweep usually comes before
+                    // the first check of the CLI has finished, and leaves
+                    // them to the drain that check starts.
+                    if let Err(e) = jobs::drain_without_worker(&state).await {
+                        eprintln!("draining the merge queue failed: {e:#}");
+                    }
                     tokio::time::sleep(SWEEP_EVERY).await;
                 }
             }));
@@ -349,9 +388,18 @@ impl Server {
             let state = self.state.clone();
             tasks.push(tokio::spawn(async move {
                 let every = state.cfg.claude_status_interval;
+                let mut first = true;
                 loop {
                     let status = state.merger.check_status().await;
                     state.write().claude_status = status;
+                    // Now that it is known whether this server can merge,
+                    // jobs a worker left before the last restart need not
+                    // wait for the next sweep.
+                    if std::mem::take(&mut first) {
+                        if let Err(e) = jobs::drain_without_worker(&state).await {
+                            eprintln!("draining the merge queue failed: {e:#}");
+                        }
+                    }
                     tokio::time::sleep(every).await;
                 }
             }));

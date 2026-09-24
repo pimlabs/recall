@@ -96,20 +96,37 @@ break will be described here in full rather than smoothed over.
   as sent, `merged: false`, with a new `merge_job` field naming the queued
   job, and the merged file arrives with the next pull. A merge is written
   only if the file has not changed since; otherwise it is merged again
-  with the newer version. `merge_job` is omitted when no job was queued, so
-  a server without a worker answers byte for byte as before.
+  with the newer version. An empty merge of two versions that were not
+  both empty is never written: it counts as an error and is retried.
+  Deleting a file closes its waiting jobs in the same transaction, so a
+  file made again after a delete never has the deleted notes merged back
+  in. `merge_job` is omitted when no job was queued, so a server without a
+  worker answers byte for byte as before.
+- **Nothing a worker leaves is stranded.** Revoking the last worker puts
+  merging back in the server with the jobs it left: each is merged by the
+  server's own `claude` CLI, through the same check that the file has not
+  changed, or, when that CLI cannot merge, marked failed, visibly, for a
+  retry later. A worker that has not asked for work in two minutes, or a
+  full queue (1000 jobs), no longer means last-write-wins while the
+  server's CLI is logged in: the server merges new conflicts itself.
 - **New routes:** `POST /v1/jobs/claim` and `POST /v1/jobs/{id}/result` for
   the worker (a worker device only, not even `RECALL_TOKEN`), and
   `GET /v1/jobs` and `POST /v1/jobs/{id}/retry` for the owner. A worker
   device can use nothing else: it cannot pull or push memory, and an
   authkey never makes one.
-- **`/health`'s `merge` gains `worker` and `queue`** while a worker is
-  enrolled, and `claude_cli` is then the worker's CLI. Discovery lists a
-  new `merge_queue` capability.
-- **`recall status` and `recall doctor` show the merge queue** on a server
-  with a worker, and warn once the oldest waiting merge is an hour old,
-  which is what a stopped worker looks like. `recall status --json` gains
-  `merge_worker` and, with a worker, `merge_queue`.
+- **`/health`'s `merge` gains `worker` and `queue`**: `worker` while one
+  is enrolled, and `queue` then and whenever the queue holds a job,
+  failed ones included. `claude_cli` is the worker's CLI while there is
+  one. What `last_merge_error` says of a job names the job and never a
+  project or a file, since `/health` answers anyone; `GET /v1/jobs` has
+  those. A worker's error, and its CLI's, are kept to 500 bytes. Discovery
+  lists a new `merge_queue` capability.
+- **`recall status` and `recall doctor` show the merge queue**, and warn
+  when the worker has not asked for work in two minutes (`status` then
+  says `stalled` rather than `ready`, whatever the worker last reported),
+  when any merge has failed, and once the oldest waiting merge is an hour
+  old. `recall status --json` gains `merge_worker`, `merge_queue` and
+  `merge_worker_seen_at`.
 - **`POST /v1/devices/approve` accepts `"scope": "worker"`**, and its
   refusal of an unknown scope now says `scope must be sync, admin or
   worker`.

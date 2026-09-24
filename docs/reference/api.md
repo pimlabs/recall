@@ -561,14 +561,15 @@ stop being merged. These are the fields that make that state visible:
 | `merge.enabled` | `false` means merging is switched off entirely (`RECALL_MERGE_ENABLED`). |
 | `merge.claude_cli.available` | `false` means the binary isn't on the server's `PATH`. |
 | `merge.claude_cli.logged_in` | `false` is the common one: run `claude setup-token` on the host. |
-| `merge.last_merge_error` | Non-null means a real merge was attempted and failed. With a worker, it is set when a job runs out of attempts or its result could not be applied, or when the queue is full. |
-| `merge.worker` | Present while a `worker` device is enrolled. `last_claim_at` is when it last asked for a job since the server started, `null` before it has; `agent` is its `User-Agent`. A worker that has stopped shows here as a `last_claim_at` that no longer moves. |
-| `merge.queue` | Present while a worker is enrolled: jobs `queued`, `leased` and `failed`, and `oldest_queued_at`, `null` when nothing waits. An old `oldest_queued_at` means merges are waiting on a worker that is not taking them. |
+| `merge.last_merge_error` | Non-null means a real merge was attempted and failed. With a worker, it is set when a job runs out of attempts or its result could not be applied, when the queue is full, or when jobs a revoked worker left could not be merged. It names a job, never a project or a file, since this endpoint answers anyone: `merge job job_3m5k7q2x9w4r8t6y failed after 4 attempts; see GET /v1/jobs?state=failed`. [`GET /v1/jobs`](#get-v1jobs-and-post-v1jobsidretry) has the file and the error. |
+| `merge.worker` | Present while a `worker` device is enrolled. `last_claim_at` is when it last asked for a job since the server started, `null` before it has; `agent` is its `User-Agent`, at most 200 bytes. A worker that has stopped shows here as a `last_claim_at` that no longer moves: a running one asks at least every half minute. |
+| `merge.queue` | Present while a worker is enrolled, and whenever the queue holds a job `queued`, `leased` or `failed`, worker or not: jobs `queued`, `leased` and `failed`, and `oldest_queued_at`, `null` when nothing waits. An old `oldest_queued_at` means merges are waiting on a worker that is not taking them; `failed` above 0, merges nothing will retry by itself. |
 
 With a worker enrolled, `merge.claude_cli` is the worker's own check of its
 CLI, sent with each claim, rather than the server's: the merge runs there.
 Until the worker's first claim it reads as unknown (`available` and
-`logged_in` `null`).
+`logged_in` `null`). Its `error` is kept to 500 bytes, and `checked_at` to
+64.
 
 `last_backup_at` and `last_offbox_at` answer different questions and only one
 of them survives the disk. The first is the server's own snapshot, written by
@@ -900,6 +901,10 @@ with `revoked_at` set, and the answer is the device as it now stands.
 Revoking one already revoked keeps the first time. `404` with `{"error":"no
 device has that id"}` for an id that is not there.
 
+Revoking the last `worker` device puts merging back in the server, and
+what the worker left in the queue with it: see "Without a worker" under
+[Jobs](#jobs).
+
 ## `POST /v1/authkeys`
 
 Admin. Makes an **authkey**: a credential for machines that cannot
@@ -977,16 +982,39 @@ worker's device name. If another push landed while the job ran, the push
 stands, and the merged content becomes the `stored` side of a follow-up job
 against the newer version (`applied: false`, `follow_up`). After three
 follow-ups the chase stops: the newest push stands, and the unapplied
-result is kept in the failed job, where a retry picks it up again. A file
-deleted while its job ran stays deleted.
+result is kept in the failed job, where a retry picks it up again. An empty
+merge of two versions that were not both empty is never applied: it counts
+as an error, and is retried.
 
-**Retries.** A result carrying an `error`, or a lease that runs out, puts
-the job back in the queue after 1, then 5, then 30 minutes; after its
-fourth attempt it is `failed`, and `merge.last_merge_error` in
-[`GET /health`](#get-health) says why. Nothing waits on any of it: pushes
-keep landing as last-write-wins while jobs wait, and a worker that comes
-back drains the queue through the same compare-and-swap. Finished jobs are
-removed after 30 days; failed ones stay until retried.
+**A delete closes the file's jobs.** Deleting a file marks every job still
+queued or held for it `done`, unapplied, in the same transaction as the
+delete, so nothing merges the deleted notes into a file pushed after it. A
+result the holder posts afterwards is answered as one already recorded, and
+changes nothing.
+
+**Retries.** A result carrying an `error` (kept to 500 bytes), or a lease
+that runs out, puts the job back in the queue after 1, then 5, then 30
+minutes; after its fourth attempt it is `failed`, and
+`merge.last_merge_error` in [`GET /health`](#get-health) names it. Nothing
+waits on any of it: pushes keep landing as last-write-wins while jobs
+wait, and a worker that comes back drains the queue through the same
+compare-and-swap. Finished jobs are removed after 30 days; failed ones stay
+until retried.
+
+**Without a worker.** When the last worker is revoked, the server drains
+what it left: a job it held is released at once, and every open job is
+merged by the server's own `claude` CLI through the same compare-and-swap,
+attributed to the push that queued it, as an inline merge is. When that CLI
+cannot merge, each is marked `failed` instead, and `/health` shows them in
+`merge.queue.failed`; a retry queues one again for whatever can merge it
+next. The server looks again every ten minutes, and once after each start.
+
+**When the worker stops.** With a worker enrolled but not asking for work
+(no claim for two minutes, and no job held), or with the queue full (1000
+jobs waiting or held), a stale push is merged inline, as with no worker,
+when the server's own CLI is logged in. When it is not, the push is queued
+as usual to wait for the worker, or, with the queue full, stored
+last-write-wins.
 
 ## `POST /v1/jobs/claim`
 
@@ -1007,7 +1035,7 @@ and leases it, waking as soon as a push queues one.
 | `kinds` | Required. `merge` is the only kind so far. Empty is allowed: the claim then waits and answers with no job, which is how a worker whose CLI cannot merge stays visible without taking jobs it would fail. |
 | `wait_seconds` | 0 to 30; 0 when left out. |
 | `lease_seconds` | 30 to 600; 120 when left out. |
-| `claude_cli` | Optional. The worker's own check of its CLI, which `/health` then reports. |
+| `claude_cli` | Optional. The worker's own check of its CLI, which `/health` then reports, its `error` kept to 500 bytes. |
 
 ```json
 {
@@ -1054,9 +1082,9 @@ lease the job was claimed with. Exactly one of `merge` and `error`:
 { "id": "job_3m5k7q2x9w4r8t6y", "state": "done", "applied": true, "follow_up": null }
 ```
 
-`applied` is whether the merged content was written to the file. An error
-answers with the job back in `queued`, or `failed` if that was its last
-attempt. **Posting the same result again is safe**: under the lease that
+`applied` is whether the merged content was written to the file. An error,
+or an empty merge of two versions that were not both empty, answers with
+the job back in `queued`, or `failed` if that was its last attempt. **Posting the same result again is safe**: under the lease that
 settled the job, it changes nothing and gets the same answer, so a worker
 whose first answer was lost can simply send it again.
 

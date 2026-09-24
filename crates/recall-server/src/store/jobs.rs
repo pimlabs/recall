@@ -83,6 +83,26 @@ const RETRY_AFTER: [Duration; 3] = [
 /// stands, and the last result waits in a failed job.
 pub const MAX_LINKS: u32 = 3;
 
+/// The most of an error a job keeps, in bytes. The error is the worker's to
+/// write and a result may be megabytes; what went wrong fits in far less,
+/// and the listing and the server's log need no more.
+pub const MAX_ERROR_BYTES: usize = 500;
+
+/// Why a job whose merge came back empty is retried rather than applied.
+const EMPTY_RESULT: &str = "the merge came back empty from two versions that were not";
+
+/// `s`, cut to at most `max` bytes, on a character boundary.
+pub fn clip(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 const JOB_COLUMNS: &str = "id, kind, state, project_key, file_path, payload, lease_id, \
      lease_expires_at, attempt, parent_id, link, error, result, applied, follow_up, \
      created_at, updated_at";
@@ -183,6 +203,51 @@ fn side_of(content: &str, source_env: &str, updated_at: &str) -> MergeSide {
     }
 }
 
+/// A job that ran out of attempts, or whose result could not be applied.
+///
+/// It is said two ways, because `/health` answers anyone:
+/// [`Failure::public`] names the job and nothing else, never a project or a
+/// path, and [`Failure::logged`], for the server's own log, names the file
+/// and the error as well.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    /// The job.
+    pub id: String,
+    /// The project its file belongs to.
+    pub project_key: String,
+    /// The file.
+    pub file_path: String,
+    /// What became of it, naming no project and no file, such as `failed
+    /// after 4 attempts`.
+    pub what: String,
+    /// The last error it met, at most [`MAX_ERROR_BYTES`]; empty for none.
+    pub error: String,
+}
+
+impl Failure {
+    /// What `/health` shows as the last merge error: the job, what became
+    /// of it, and where to look.
+    pub fn public(&self) -> String {
+        format!(
+            "merge job {} {}; see GET /v1/jobs?state=failed",
+            self.id, self.what
+        )
+    }
+
+    /// What the server's log says: the file and the error too.
+    pub fn logged(&self) -> String {
+        let mut line = format!(
+            "merge job {} for {}/{} {}",
+            self.id, self.project_key, self.file_path, self.what
+        );
+        if !self.error.is_empty() {
+            line.push_str(": ");
+            line.push_str(&self.error);
+        }
+        line
+    }
+}
+
 /// What queueing a merge came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Queued {
@@ -207,9 +272,9 @@ pub struct Settled {
     /// Whether this call queued something a claim may now take: a
     /// follow-up.
     pub queued: bool,
-    /// When this call marked the job failed, why: what `/health` shows as
-    /// the last merge error.
-    pub failed: Option<String>,
+    /// When this call marked the job failed, the failure: what `/health`
+    /// shows as the last merge error.
+    pub failed: Option<Box<Failure>>,
 }
 
 /// What posting a result came to.
@@ -238,14 +303,16 @@ pub enum Retried {
 }
 
 /// After a failed attempt: back in the queue after the delay for that
-/// attempt, or failed for good. Answers the error when it is final.
+/// attempt, or failed for good. Answers the failure when it is final.
+/// `error` is kept to [`MAX_ERROR_BYTES`].
 fn after_failure(
     conn: &Connection,
     job: &JobRow,
     error: &str,
     now: OffsetDateTime,
     keep_lease: bool,
-) -> Result<Option<String>> {
+) -> Result<Option<Failure>> {
+    let error = clip(error, MAX_ERROR_BYTES);
     let lease = if keep_lease {
         job.lease_id.clone()
     } else {
@@ -266,17 +333,20 @@ fn after_failure(
             Ok(None)
         }
         None => {
-            let error = format!("{error} (gave up after {} attempts)", job.attempt);
+            let kept = format!("{error} (gave up after {} attempts)", job.attempt);
             conn.execute(
                 "UPDATE jobs SET state = 'failed', lease_id = ?2, lease_expires_at = NULL,
                      error = ?3, applied = 0, updated_at = ?4
                  WHERE id = ?1",
-                (&job.id, &lease, &error, ts(now)),
+                (&job.id, &lease, &kept, ts(now)),
             )?;
-            Ok(Some(format!(
-                "merge of {}/{} failed: {error}",
-                job.project_key, job.file_path
-            )))
+            Ok(Some(Failure {
+                id: job.id.clone(),
+                project_key: job.project_key.clone(),
+                file_path: job.file_path.clone(),
+                what: format!("failed after {} attempts", job.attempt),
+                error: error.to_string(),
+            }))
         }
     }
 }
@@ -361,9 +431,8 @@ impl Store {
     }
 
     /// Puts every job whose lease ran out back in the queue, or fails it
-    /// when that was its last attempt. Answers the error of each job it
-    /// failed.
-    pub fn expire_leases(&self, now: OffsetDateTime) -> Result<Vec<String>> {
+    /// when that was its last attempt. Answers each job it failed.
+    pub fn expire_leases(&self, now: OffsetDateTime) -> Result<Vec<Failure>> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let expired: Vec<JobRow> = {
@@ -459,7 +528,9 @@ impl Store {
     /// has the hash of the version the job stored, and then attributed to
     /// `worker`. If another push landed meanwhile, the merged content
     /// becomes the `stored` side of a follow-up job, `follow_up_id`,
-    /// against the newer version, at most [`MAX_LINKS`] deep.
+    /// against the newer version, at most [`MAX_LINKS`] deep. An empty
+    /// merge of two versions that were not empty is never applied: it is
+    /// taken as an error, and retried.
     pub fn settle_job(
         &self,
         id: &str,
@@ -494,10 +565,9 @@ impl Store {
             return Ok(Settlement::LeaseEnded);
         }
 
-        let now_text = ts(now);
         let settled = match (&result.merge, &result.error) {
             (_, Some(error)) => {
-                let failed = after_failure(&tx, &job, error, now, true)?;
+                let failed = after_failure(&tx, &job, error, now, true)?.map(Box::new);
                 Settled {
                     response: ResultResponse::default(),
                     applied: false,
@@ -510,117 +580,30 @@ impl Store {
                     return Ok(Settlement::WrongKind);
                 }
                 let input = job.merge_input()?;
-                let merged_side = side_of(&merged.content, worker, &now_text);
-                let current =
-                    read_file(&tx, &input.project_key, &input.file_path)?.filter(|e| !e.deleted);
-                match current {
-                    // The compare-and-swap: nothing landed since the push
-                    // that queued this, so the merge replaces it.
-                    Some(file) if content_sha256(&file.content) == input.incoming.sha256 => {
-                        write_file(
-                            &tx,
-                            &input.project_key,
-                            &input.file_path,
-                            &merged.content,
-                            worker,
-                            &now_text,
-                        )?;
-                        finish(&tx, &job, STATE_DONE, true, None, None, None, now)?;
-                        Settled {
-                            response: ResultResponse::default(),
-                            applied: true,
-                            queued: false,
-                            failed: None,
-                        }
+                // Nothing from two versions that had something is not a
+                // merge but a malfunction, as the inline merge treats it:
+                // retried like an error, and never written, where it would
+                // replace both machines' notes with an empty file.
+                let emptied = merged.content.trim().is_empty()
+                    && !(input.stored.content.trim().is_empty()
+                        && input.incoming.content.trim().is_empty());
+                if emptied {
+                    Settled {
+                        response: ResultResponse::default(),
+                        applied: false,
+                        queued: false,
+                        failed: after_failure(&tx, &job, EMPTY_RESULT, now, true)?.map(Box::new),
                     }
-                    // Something else landed meanwhile, and says exactly
-                    // what the merge came to.
-                    Some(file) if file.content == merged.content => {
-                        finish(&tx, &job, STATE_DONE, true, None, None, None, now)?;
-                        Settled {
-                            response: ResultResponse::default(),
-                            applied: false,
-                            queued: false,
-                            failed: None,
-                        }
-                    }
-                    // Something else landed: merge the result with it,
-                    // unless this conflict has been chased far enough.
-                    Some(file) if job.link < MAX_LINKS => {
-                        let next = MergeInput {
-                            project_key: input.project_key.clone(),
-                            file_path: input.file_path.clone(),
-                            stored: merged_side,
-                            incoming: side_of(&file.content, &file.source_env, &file.updated_at),
-                        };
-                        insert_merge_job(
-                            &tx,
-                            follow_up_id,
-                            &next,
-                            Some((&job.id, job.link + 1)),
-                            now,
-                        )?;
-                        finish(
-                            &tx,
-                            &job,
-                            STATE_DONE,
-                            false,
-                            None,
-                            None,
-                            Some(follow_up_id),
-                            now,
-                        )?;
-                        Settled {
-                            response: ResultResponse::default(),
-                            applied: false,
-                            queued: true,
-                            failed: None,
-                        }
-                    }
-                    Some(_) => {
-                        let error = "the file kept changing while it was merged; the newest \
-                                     push stands, and this result is kept in the job";
-                        finish(
-                            &tx,
-                            &job,
-                            STATE_FAILED,
-                            false,
-                            Some(error),
-                            Some(&merged_side),
-                            None,
-                            now,
-                        )?;
-                        Settled {
-                            response: ResultResponse::default(),
-                            applied: false,
-                            queued: false,
-                            failed: Some(format!(
-                                "merge of {}/{} not applied: {error}",
-                                job.project_key, job.file_path
-                            )),
-                        }
-                    }
-                    // Deleted meanwhile: the delete said to discard it, as
-                    // a push after a delete is never merged either. The
-                    // result is kept in the job all the same.
-                    None => {
-                        finish(
-                            &tx,
-                            &job,
-                            STATE_DONE,
-                            false,
-                            Some("the file was deleted while it was merged; the delete stands"),
-                            Some(&merged_side),
-                            None,
-                            now,
-                        )?;
-                        Settled {
-                            response: ResultResponse::default(),
-                            applied: false,
-                            queued: false,
-                            failed: None,
-                        }
-                    }
+                } else {
+                    apply_merge(
+                        &tx,
+                        &job,
+                        &input,
+                        &merged.content,
+                        worker,
+                        follow_up_id,
+                        now,
+                    )?
                 }
             }
             (None, None) => anyhow::bail!("a result carries a merge or an error"),
@@ -687,6 +670,47 @@ impl Store {
         Ok(Retried::Queued(job.summary()))
     }
 
+    /// Makes every open job claimable at once: a leased one is released,
+    /// its holder being gone, and a queued one's retry delay is dropped.
+    /// Answers how many there are.
+    ///
+    /// For the server draining the queue itself once no worker is left to:
+    /// a revoked worker's lease would otherwise hold its job until it ran
+    /// out, and a job waiting out a delay the worker's failure set has no
+    /// worker left to wait for. Attempts still count, so a job that keeps
+    /// failing here is failed all the same.
+    pub fn release_open_jobs(&self, now: OffsetDateTime) -> Result<usize> {
+        Ok(self.lock().execute(
+            "UPDATE jobs SET state = 'queued', lease_id = NULL, lease_expires_at = NULL,
+                 not_before = ?1
+             WHERE state IN ('queued', 'leased')",
+            (ts(now),),
+        )?)
+    }
+
+    /// Marks every open job failed, with `why` as its error, for a queue
+    /// nothing is left to drain. Each keeps its input, so a retry merges it
+    /// once something can. Answers their ids.
+    pub fn fail_open_jobs(&self, why: &str, now: OffsetDateTime) -> Result<Vec<String>> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let ids = {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM jobs WHERE state IN ('queued', 'leased') ORDER BY created_at, id",
+            )?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        tx.execute(
+            "UPDATE jobs SET state = 'failed', lease_id = NULL, lease_expires_at = NULL,
+                 error = ?1, applied = 0, updated_at = ?2
+             WHERE state IN ('queued', 'leased')",
+            (clip(why, MAX_ERROR_BYTES), ts(now)),
+        )?;
+        tx.commit()?;
+        Ok(ids)
+    }
+
     /// What `/health` says about the queue.
     pub fn queue_status(&self) -> Result<QueueStatus> {
         let conn = self.lock();
@@ -718,6 +742,148 @@ impl Store {
             (before,),
         )?)
     }
+}
+
+/// Applies a merged result to its file, as a compare-and-swap: written
+/// only if the file still has the hash of the version the job stored, and
+/// then attributed to `worker`. If another push landed meanwhile, the
+/// merged content becomes the `stored` side of a follow-up job,
+/// `follow_up_id`, against the newer version, at most [`MAX_LINKS`] deep.
+#[allow(clippy::too_many_arguments)]
+fn apply_merge(
+    tx: &Connection,
+    job: &JobRow,
+    input: &MergeInput,
+    merged: &str,
+    worker: &str,
+    follow_up_id: &str,
+    now: OffsetDateTime,
+) -> Result<Settled> {
+    let now_text = ts(now);
+    let merged_side = side_of(merged, worker, &now_text);
+    let current = read_file(tx, &input.project_key, &input.file_path)?.filter(|e| !e.deleted);
+    let settled = |applied, queued, failed| Settled {
+        response: ResultResponse::default(),
+        applied,
+        queued,
+        failed,
+    };
+    Ok(match current {
+        // The compare-and-swap: nothing landed since the push that queued
+        // this, so the merge replaces it.
+        Some(file) if content_sha256(&file.content) == input.incoming.sha256 => {
+            write_file(
+                tx,
+                &input.project_key,
+                &input.file_path,
+                merged,
+                worker,
+                &now_text,
+            )?;
+            finish(tx, job, STATE_DONE, true, None, None, None, now)?;
+            settled(true, false, None)
+        }
+        // Something else landed meanwhile, and says exactly what the
+        // merge came to.
+        Some(file) if file.content == merged => {
+            finish(tx, job, STATE_DONE, true, None, None, None, now)?;
+            settled(false, false, None)
+        }
+        // Something else landed: merge the result with it, unless this
+        // conflict has been chased far enough.
+        Some(file) if job.link < MAX_LINKS => {
+            let next = MergeInput {
+                project_key: input.project_key.clone(),
+                file_path: input.file_path.clone(),
+                stored: merged_side,
+                incoming: side_of(&file.content, &file.source_env, &file.updated_at),
+            };
+            insert_merge_job(tx, follow_up_id, &next, Some((&job.id, job.link + 1)), now)?;
+            finish(
+                tx,
+                job,
+                STATE_DONE,
+                false,
+                None,
+                None,
+                Some(follow_up_id),
+                now,
+            )?;
+            settled(false, true, None)
+        }
+        Some(_) => {
+            let error = "the file kept changing while it was merged; the newest push stands, \
+                         and this result is kept in the job";
+            finish(
+                tx,
+                job,
+                STATE_FAILED,
+                false,
+                Some(error),
+                Some(&merged_side),
+                None,
+                now,
+            )?;
+            settled(
+                false,
+                false,
+                Some(Box::new(Failure {
+                    id: job.id.clone(),
+                    project_key: job.project_key.clone(),
+                    file_path: job.file_path.clone(),
+                    what: "was not applied: the file kept changing while it was merged".to_string(),
+                    error: String::new(),
+                })),
+            )
+        }
+        // Deleted meanwhile: the delete said to discard it, as a push after
+        // a delete is never merged either. The result is kept in the job
+        // all the same. A delete closes its file's open jobs as it lands
+        // (see [`close_for_delete`]), so this is a job retried after one.
+        None => {
+            finish(
+                tx,
+                job,
+                STATE_DONE,
+                false,
+                Some("the file was deleted while it was merged; the delete stands"),
+                Some(&merged_side),
+                None,
+                now,
+            )?;
+            settled(false, false, None)
+        }
+    })
+}
+
+/// Closes every merge job still waiting on, or held for, one file, as the
+/// delete of that file lands, in the delete's transaction.
+///
+/// A delete says to discard the file, and a push after a delete is never
+/// merged with what was there. A job left open would say otherwise: its
+/// result, landing on the file a later push created, would not match the
+/// hash it was queued against, and would be chased onto the new file as a
+/// follow-up, bringing the deleted notes back into it. Closed now, it is
+/// `done` and unapplied, and a result its holder still posts is answered as
+/// one already recorded, changing nothing.
+pub(super) fn close_for_delete(
+    conn: &Connection,
+    project_key: &str,
+    file_path: &str,
+    now: &str,
+) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE jobs SET state = 'done', payload = '{}', lease_expires_at = NULL, applied = 0,
+             error = ?3, updated_at = ?4
+         WHERE kind = 'merge' AND project_key = ?1 AND file_path = ?2
+           AND state IN ('queued', 'leased')",
+        (
+            project_key,
+            file_path,
+            "the file was deleted before it was merged; the delete stands",
+            now,
+        ),
+    )?)
 }
 
 /// Marks a job settled, keeping the lease it was settled under so the same
@@ -1121,7 +1287,9 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(s.response.state, "failed");
-        assert!(s.failed.unwrap().contains("claude timed out"));
+        let failure = s.failed.unwrap();
+        assert!(failure.error.contains("claude timed out"));
+        assert_eq!(failure.what, "failed after 4 attempts");
         assert_eq!(content(&st).0, "B", "last-write-wins stands");
         let listed = st.jobs(Some("failed"), 10).unwrap();
         assert_eq!(listed[0].attempt, 4);
@@ -1194,14 +1362,261 @@ mod tests {
         assert_eq!(st.retry_job("job_none", at(2)).unwrap(), Retried::NotFound);
     }
 
+    /// Done jobs go once old enough; failed ones stay however old, since
+    /// each may hold a result nobody has seen, and open ones stay too.
     #[test]
     fn finished_jobs_are_pruned_and_failed_ones_kept() {
         let st = conflicted();
+        st.upsert(P, "other.md", "X", "laptop", &ts(at(0))).unwrap();
+        st.write_and_queue_merge(P, "other.md", &side("Y", "cloud", 1), "job_f", at(1))
+            .unwrap();
+        st.upsert(P, "third.md", "X", "laptop", &ts(at(0))).unwrap();
+        st.write_and_queue_merge(P, "third.md", &side("Y", "cloud", 1), "job_q", at(1))
+            .unwrap();
         st.claim_job(&merge_kinds(), "lse", Duration::from_secs(60), at(2))
             .unwrap();
         st.settle_job("job_1", &merged("lse", "AB"), "worker", "j", at(3))
             .unwrap();
+        st.fail_open_jobs("nothing can merge this", at(3)).unwrap();
+        st.upsert(P, "fourth.md", "X", "laptop", &ts(at(0)))
+            .unwrap();
+        st.write_and_queue_merge(P, "fourth.md", &side("Y", "cloud", 4), "job_o", at(4))
+            .unwrap();
         assert_eq!(st.prune_jobs(&ts(at(3))).unwrap(), 0);
-        assert_eq!(st.prune_jobs(&ts(at(4))).unwrap(), 1);
+        assert_eq!(st.prune_jobs(&ts(at(1_000_000))).unwrap(), 1);
+        let mut left: Vec<(String, String)> = st
+            .jobs(None, 10)
+            .unwrap()
+            .into_iter()
+            .map(|j| (j.id, j.state))
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            vec![
+                ("job_f".into(), "failed".into()),
+                ("job_o".into(), "queued".into()),
+                ("job_q".into(), "failed".into()),
+            ]
+        );
+    }
+
+    /// The fence holds as soon as the lease runs out, before anyone has
+    /// claimed the job again: the old holder's late result is refused, not
+    /// taken as the repeat of one already recorded.
+    #[test]
+    fn an_expired_lease_fences_its_holder_before_anyone_claims_again() {
+        let st = conflicted();
+        st.claim_job(&merge_kinds(), "lse_old", Duration::from_secs(60), at(2))
+            .unwrap()
+            .unwrap();
+        assert!(st.expire_leases(at(62)).unwrap().is_empty());
+        assert_eq!(
+            st.settle_job(
+                "job_1",
+                &merged("lse_old", "late"),
+                "worker",
+                "job_f",
+                at(63)
+            )
+            .unwrap(),
+            Settlement::LeaseEnded
+        );
+        assert_eq!(content(&st).0, "B");
+        assert_eq!(st.jobs(Some("queued"), 10).unwrap().len(), 1);
+    }
+
+    /// A push onto a deleted file is not a conflict: the delete said to
+    /// discard what was there.
+    #[test]
+    fn a_push_onto_a_deleted_file_queues_nothing() {
+        let st = Store::open_in_memory().unwrap();
+        st.upsert(P, F, "A", "laptop", &ts(at(0))).unwrap();
+        st.tombstone(P, F, "laptop", &ts(at(1))).unwrap();
+        assert_eq!(
+            st.write_and_queue_merge(P, F, &side("B", "cloud", 2), "job_1", at(2))
+                .unwrap(),
+            Queued::Nothing
+        );
+        assert_eq!(content(&st).0, "B");
+        assert!(st.jobs(None, 10).unwrap().is_empty());
+    }
+
+    /// Deleted, then made again, while its merge waited: the old notes must
+    /// not come back into the new file, whether the job was still queued or
+    /// already held by a worker.
+    #[test]
+    fn a_delete_closes_the_files_open_jobs() {
+        // Queued when the delete landed.
+        let st = conflicted();
+        st.tombstone(P, F, "laptop", &ts(at(2))).unwrap();
+        st.upsert(P, F, "fresh", "laptop", &ts(at(3))).unwrap();
+        assert!(st
+            .claim_job(&merge_kinds(), "lse", Duration::from_secs(60), at(4))
+            .unwrap()
+            .is_none());
+        let job = &st.jobs(None, 10).unwrap()[0];
+        assert_eq!(job.state, "done");
+        assert!(job.error.as_deref().unwrap().contains("deleted"));
+
+        // Held by a worker when the delete landed.
+        let st = conflicted();
+        st.claim_job(&merge_kinds(), "lse", Duration::from_secs(60), at(2))
+            .unwrap()
+            .unwrap();
+        st.tombstone(P, F, "laptop", &ts(at(3))).unwrap();
+        st.upsert(P, F, "fresh", "laptop", &ts(at(4))).unwrap();
+        let s = recorded(
+            st.settle_job("job_1", &merged("lse", "A and B"), "worker", "job_2", at(5))
+                .unwrap(),
+        );
+        assert_eq!(
+            (s.response.state.as_str(), s.applied, s.queued),
+            ("done", false, false)
+        );
+        assert_eq!(s.response.follow_up, None);
+        assert_eq!(content(&st).0, "fresh");
+        assert_eq!(st.jobs(None, 10).unwrap().len(), 1, "no follow-up");
+        // Another file's job is left alone.
+        let st = conflicted();
+        st.tombstone(P, "other.md", "laptop", &ts(at(2))).unwrap();
+        assert_eq!(st.queue_status().unwrap().queued, 1);
+    }
+
+    /// An empty merge of two versions that had content is a malfunction:
+    /// retried like an error, and never written over the file.
+    #[test]
+    fn an_empty_merge_of_non_empty_versions_is_retried_not_written() {
+        let st = conflicted();
+        st.claim_job(&merge_kinds(), "lse", Duration::from_secs(60), at(2))
+            .unwrap()
+            .unwrap();
+        let s = recorded(
+            st.settle_job("job_1", &merged("lse", " \n"), "worker", "job_2", at(3))
+                .unwrap(),
+        );
+        assert_eq!((s.response.state.as_str(), s.applied), ("queued", false));
+        assert_eq!(content(&st), ("B".into(), "cloud".into()));
+        assert!(st.jobs(None, 10).unwrap()[0]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("empty"));
+
+        // Two empty versions may merge to nothing.
+        let st = Store::open_in_memory().unwrap();
+        st.upsert(P, F, "", "laptop", &ts(at(0))).unwrap();
+        st.write_and_queue_merge(P, F, &side("\n", "cloud", 1), "job_1", at(1))
+            .unwrap();
+        st.claim_job(&merge_kinds(), "lse", Duration::from_secs(60), at(2))
+            .unwrap()
+            .unwrap();
+        let s = recorded(
+            st.settle_job("job_1", &merged("lse", ""), "worker", "job_2", at(3))
+                .unwrap(),
+        );
+        assert!(s.applied);
+    }
+
+    /// What `/health` shows of a failure names the job, never the project
+    /// or the file; the worker's error is kept short.
+    #[test]
+    fn a_failure_is_public_without_its_file() {
+        let st = conflicted();
+        st.lock()
+            .execute("UPDATE jobs SET attempt = 3", [])
+            .unwrap();
+        st.claim_job(&merge_kinds(), "lse", Duration::from_secs(60), at(2))
+            .unwrap()
+            .unwrap();
+        let long = format!("{P}/{F}: {}", "é".repeat(2000));
+        let s = recorded(
+            st.settle_job("job_1", &failed("lse", &long), "w", "j", at(3))
+                .unwrap(),
+        );
+        let failure = s.failed.unwrap();
+        let public = failure.public();
+        assert!(public.starts_with("merge job job_1 failed after 4 attempts"));
+        assert!(!public.contains(P) && !public.contains(F), "{public}");
+        assert!(failure.logged().contains(F));
+        assert!(failure.error.len() <= MAX_ERROR_BYTES);
+        let kept = st.jobs(None, 1).unwrap()[0].error.clone().unwrap();
+        assert!(kept.len() <= MAX_ERROR_BYTES + 40, "{}", kept.len());
+
+        // Not applied because the file kept changing: the same.
+        let st = conflicted();
+        st.lock()
+            .execute("UPDATE jobs SET link = ?1", (MAX_LINKS,))
+            .unwrap();
+        st.claim_job(&merge_kinds(), "lse", Duration::from_secs(60), at(2))
+            .unwrap();
+        st.upsert(P, F, "C", "laptop", &ts(at(3))).unwrap();
+        let public = recorded(
+            st.settle_job("job_1", &merged("lse", "AB"), "w", "j", at(4))
+                .unwrap(),
+        )
+        .failed
+        .unwrap()
+        .public();
+        assert!(!public.contains(P) && !public.contains(F), "{public}");
+    }
+
+    #[test]
+    fn clip_keeps_whole_characters() {
+        assert_eq!(clip("abc", 5), "abc");
+        assert_eq!(clip("abcdef", 3), "abc");
+        assert_eq!(clip("aé", 2), "a");
+    }
+
+    /// With no worker left, every open job can be taken at once, a revoked
+    /// holder's lease and a retry delay notwithstanding; or failed, keeping
+    /// its input for a retry.
+    #[test]
+    fn open_jobs_are_released_or_failed_for_a_drain() {
+        let st = conflicted();
+        st.upsert(P, "other.md", "X", "laptop", &ts(at(0))).unwrap();
+        st.write_and_queue_merge(P, "other.md", &side("Y", "cloud", 1), "job_2", at(1))
+            .unwrap();
+        st.claim_job(&merge_kinds(), "lse_gone", Duration::from_secs(600), at(2))
+            .unwrap()
+            .unwrap();
+        st.claim_job(&merge_kinds(), "lse_x", Duration::from_secs(600), at(2))
+            .unwrap()
+            .unwrap();
+        st.settle_job("job_2", &failed("lse_x", "boom"), "w", "j", at(3))
+            .unwrap();
+        assert_eq!(st.release_open_jobs(at(4)).unwrap(), 2);
+        // The revoked holder's lease is over.
+        assert_eq!(
+            st.settle_job("job_1", &merged("lse_gone", "AB"), "w", "j", at(5))
+                .unwrap(),
+            Settlement::LeaseEnded
+        );
+        // Both claimable now, the retry delay dropped.
+        for lease in ["lse_a", "lse_b"] {
+            assert!(st
+                .claim_job(&merge_kinds(), lease, Duration::from_secs(60), at(5))
+                .unwrap()
+                .is_some());
+        }
+
+        let st = conflicted();
+        let ids = st.fail_open_jobs("no worker, and no CLI", at(2)).unwrap();
+        assert_eq!(ids, vec!["job_1".to_string()]);
+        assert_eq!(st.queue_status().unwrap().failed, 1);
+        let Retried::Queued(job) = st.retry_job("job_1", at(3)).unwrap() else {
+            panic!("not retried")
+        };
+        assert_eq!(job.state, "queued");
+        let m = st
+            .claim_job(&merge_kinds(), "lse", Duration::from_secs(60), at(4))
+            .unwrap()
+            .unwrap()
+            .merge
+            .unwrap();
+        assert_eq!(
+            (m.stored.content.as_str(), m.incoming.content.as_str()),
+            ("A", "B")
+        );
     }
 }

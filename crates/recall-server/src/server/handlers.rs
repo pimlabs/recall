@@ -37,6 +37,12 @@ const ADMIN_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; script-s
 const REQUIRED_FIELDS_MSG: &str =
     "project_key, file_path, and content (string) are required, unless deleted is true";
 
+/// How long a worker may go without claiming before its claims count as
+/// stopped. A running worker claims at least every half minute (a claim
+/// waits 25 seconds), and one busy merging holds a lease, which is looked
+/// at separately.
+pub(super) const WORKER_STALE: std::time::Duration = std::time::Duration::from_secs(120);
+
 pub(super) async fn handle_push(
     State(state): State<Arc<AppState>>,
     caller: Option<Extension<Caller>>,
@@ -138,10 +144,19 @@ pub(super) async fn handle_push(
     );
     // With a worker enrolled, the merge is its job: the push is stored as
     // sent and answered at once, and the merged file arrives with a later
-    // pull. Without one, it runs here, exactly as it did before the queue.
+    // pull. Without one, it runs here, exactly as it did before the queue,
+    // and so it does when the worker has stopped taking jobs, or the queue
+    // is full, and this server's own CLI can merge.
     if stale.is_some() {
         match state.store.enrolled_worker() {
-            Ok(Some(_)) => return queue_merge(&state, req, incoming, updated_at),
+            Ok(Some(_)) => match merge_here_instead(&state) {
+                Ok(None) => return queue_merge(&state, req, incoming, updated_at),
+                Ok(Some(why)) => eprintln!(
+                    "{why}, so {}/{} is merged here rather than queued",
+                    req.project_key, req.file_path
+                ),
+                Err(e) => return internal(e),
+            },
             Ok(None) => {}
             Err(e) => return internal(e),
         }
@@ -228,14 +243,14 @@ fn queue_merge(
         }
         Ok(Queued::Nothing) => None,
         Ok(Queued::Full) => {
+            // /health answers anyone, so it names no project and no file;
+            // the log does.
             let message = format!(
-                "the merge queue is full ({} jobs), so {}/{} was stored last-write-wins; \
-                 is the worker running?",
+                "the merge queue is full ({} jobs), so a conflicting push was stored \
+                 last-write-wins; is the worker running?",
                 crate::store::MAX_OPEN_JOBS,
-                req.project_key,
-                req.file_path
             );
-            eprintln!("{message}");
+            eprintln!("{message} ({}/{})", req.project_key, req.file_path);
             state.write().last_merge_error = Some(MergeError { message, at: now() });
             None
         }
@@ -253,6 +268,36 @@ fn queue_merge(
             merge_job,
         },
     )
+}
+
+/// Why a stale push is merged here even though a worker is enrolled, or
+/// [`None`] to queue it for the worker as usual.
+///
+/// Only ever when this server's own CLI can merge: then a worker whose
+/// claims have stopped (none for [`WORKER_STALE`], and no job held), or a
+/// queue with no room, need not mean last-write-wins. Without the CLI, the
+/// push is queued as always, to wait for the worker, or stored
+/// last-write-wins when the queue is full.
+fn merge_here_instead(state: &AppState) -> anyhow::Result<Option<String>> {
+    if !state.read().claude_status.logged_in {
+        return Ok(None);
+    }
+    super::jobs::expire_leases(state)?;
+    let queue = state.store.queue_status()?;
+    if (queue.queued + queue.leased) as usize >= crate::store::MAX_OPEN_JOBS {
+        return Ok(Some(format!(
+            "the merge queue is full ({} jobs)",
+            crate::store::MAX_OPEN_JOBS
+        )));
+    }
+    let quiet = state.read().worker_last_claim.elapsed();
+    if quiet >= WORKER_STALE && queue.leased == 0 {
+        return Ok(Some(format!(
+            "the merge worker has not asked for work in {}s",
+            quiet.as_secs()
+        )));
+    }
+    Ok(None)
 }
 
 /// The stored version to merge against, or `None` when this push needs no
@@ -337,22 +382,21 @@ pub(super) async fn handle_health(State(state): State<Arc<AppState>>) -> Respons
     };
 
     // With a worker enrolled, the merge is its business: /health shows its
-    // CLI rather than this process's, and what the queue holds.
+    // CLI rather than this process's. The queue is shown while there is a
+    // worker, and whenever the queue holds anything, worker or not: jobs a
+    // revoked worker left, waiting to be drained here, or failed ones, are
+    // exactly what must not drop out of sight with it.
     let worker = match state.store.enrolled_worker() {
         Ok(w) => w,
         Err(e) => return internal(e),
     };
-    let queue = match &worker {
-        Some(_) => {
-            if let Err(e) = super::jobs::expire_leases(&state) {
-                return internal(e);
-            }
-            match state.store.queue_status() {
-                Ok(q) => Some(q),
-                Err(e) => return internal(e),
-            }
-        }
-        None => None,
+    if let Err(e) = super::jobs::expire_leases(&state) {
+        return internal(e);
+    }
+    let queue = match state.store.queue_status() {
+        Ok(q) if worker.is_some() || q.queued + q.leased + q.failed > 0 => Some(q),
+        Ok(_) => None,
+        Err(e) => return internal(e),
     };
 
     let rt = state.read();
