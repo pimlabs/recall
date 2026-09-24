@@ -67,10 +67,13 @@ jobs:
             echo "::error::No CI run for $GITHUB_SHA yet. Wait for it, then run this again."
             exit 1
           fi
-          # The whole run, not only the job named `ci`: the Windows jobs
-          # test the client the release ships for Windows, so a red one
-          # blocks a release as much as a red Linux one. On a push to main
-          # every job runs; a run is `success` only when each of them is.
+          # The whole run, not any one job: ci.yml splits its checks across
+          # several jobs (`checks`, `rust`, `image`, `windows`), and the
+          # Windows jobs test the client the release ships for Windows, so a
+          # red one blocks a release as much as a red Linux one. On a push to
+          # main every job runs; a run is `success` only when each of them
+          # is, and a job skipped by ci.yml's own diff gate does not count
+          # against that.
           read -r status conclusion < <(gh run view "$run_id" --json status,conclusion \
             --jq '"\(.status) \(.conclusion // "none")"')
           if [ "$status" != "completed" ] || [ "$conclusion" != "success" ]; then

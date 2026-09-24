@@ -17,10 +17,11 @@ Two workflows are involved:
   tampered checksum that must stop the build. Nothing is pushed anywhere and
   no secrets are needed. It deploys nothing.
 
-  The image build is the expensive part, so on a **pull request** it is
-  skipped unless the diff touches `crates/`, `Cargo.toml`, `Cargo.lock` or
-  `deploy/`. On a **push to `main`** it always runs, whatever changed, and
-  `cut-release.yml` refuses to tag a commit whose `ci` job is not green.
+  The image build is the expensive part, so it runs as its own job (`image`),
+  skipped on a **pull request** unless the diff touches `crates/`,
+  `Cargo.toml`, `Cargo.lock` or `deploy/`. On a **push to `main`** it always
+  runs, whatever changed, and `cut-release.yml` refuses to tag a commit
+  whose CI run is not green in every job.
 - **`.github/workflows/deploy.yml`** puts a release on the server. The
   Release workflow calls it once the GitHub Release exists, so **every
   release deploys itself**. It can also be run by hand, **Actions → Deploy
@@ -226,9 +227,9 @@ The previous version ran `curl -sf http://localhost:8787/health` on the VPS,
 which could never have succeeded — and it fails *after* a deploy that worked,
 which reads like a broken deployment when it is not.
 
-That the image contains `wget` is asserted by the `ci` job on the same image
-the deploy runs, rather than assumed. An untested assumption in this exact
-place is what produced the bug above.
+That the image contains `wget` is asserted by ci.yml's `image` job on the
+same image the deploy runs, rather than assumed. An untested assumption in
+this exact place is what produced the bug above.
 
 ## Every deploy says what production is running
 
