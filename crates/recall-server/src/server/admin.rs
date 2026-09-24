@@ -31,7 +31,7 @@ use sha2::{Digest, Sha256};
 
 use super::auth::Caller;
 pub(super) use super::devices::no_store;
-use super::middleware::{constant_time_eq, limit, ClientIp};
+use super::middleware::{constant_time_eq, limit};
 use super::respond::{internal, json, Refusal};
 use super::AppState;
 use crate::{format_timestamp, parse_timestamp};
@@ -150,6 +150,12 @@ fn session_token(headers: &HeaderMap) -> Option<&str> {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
         })
+}
+
+/// SHA-256 of the request's session cookie, when it has one of ours: how
+/// the store names the session, live or not.
+pub(super) fn session_token_sha256(headers: &HeaderMap) -> Option<String> {
+    session_token(headers).map(sha256_hex)
 }
 
 /// Whether the request carries a session cookie at all.
@@ -299,8 +305,6 @@ pub(super) async fn owner_only(
     if let Err(refused) = check_csrf(&session, req.method(), req.headers()) {
         return refused.into_response();
     }
-    let ip = super::middleware::client_ip(&req, &state.cfg.trusted_ip_header);
-    req.extensions_mut().insert(ClientIp(ip));
     req.extensions_mut().insert(session);
     next.run(req).await
 }

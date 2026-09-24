@@ -19,9 +19,13 @@ use passkey_types::ctap2::{Aaguid, Ctap2Error};
 use passkey_types::webauthn::{CredentialCreationOptions, CredentialRequestOptions};
 use passkey_types::Passkey;
 use recall_server::{Config, Server, Store};
-use recall_wire::signature::{encode_public_key, fingerprint, SigningKey};
+use recall_wire::signature::{
+    encode_public_key, fingerprint, sign_request, SigningKey, Target, CONTENT_DIGEST_HEADER,
+    SIGNATURE_HEADER, SIGNATURE_INPUT_HEADER,
+};
 use recall_wire::{AuthkeyCreated, Device, DeviceList, EnrollPending, PendingEnrollment};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tower::ServiceExt;
 use url::Url;
@@ -83,12 +87,21 @@ struct Harness {
 }
 
 fn harness_with(public_url: &str) -> Harness {
+    harness_configured(public_url, 10_000)
+}
+
+/// A harness whose rate limit is `max` requests a minute.
+fn harness_limited(max: u32) -> Harness {
+    harness_configured(ORIGIN, max)
+}
+
+fn harness_configured(public_url: &str, rate_limit_max: u32) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(dir.path().join("recall.db")).unwrap());
     let cfg = Config {
         token: TOKEN.to_string(),
         merge_enabled: false,
-        rate_limit_max: 10_000,
+        rate_limit_max,
         public_url: public_url.to_string(),
         ..Config::default()
     };
@@ -132,10 +145,23 @@ struct Reply {
 
 impl Harness {
     async fn call(&self, method: &str, uri: &str, who: As<'_>, body: Option<Value>) -> Reply {
-        let mut req = Request::builder()
-            .method(method)
-            .uri(uri)
-            .header("content-type", "application/json");
+        self.call_typed(method, uri, who, Some("application/json"), body)
+            .await
+    }
+
+    /// [`Harness::call`], saying the body is `content_type`, or nothing.
+    async fn call_typed(
+        &self,
+        method: &str,
+        uri: &str,
+        who: As<'_>,
+        content_type: Option<&str>,
+        body: Option<Value>,
+    ) -> Reply {
+        let mut req = Request::builder().method(method).uri(uri);
+        if let Some(content_type) = content_type {
+            req = req.header("content-type", content_type);
+        }
         match who {
             As::Nobody => {}
             As::Token => req = req.header("authorization", format!("Bearer {TOKEN}")),
@@ -150,12 +176,12 @@ impl Harness {
             Some(v) => Body::from(serde_json::to_vec(&v).unwrap()),
             None => Body::empty(),
         };
-        let resp = self
-            .server
-            .router()
-            .oneshot(req.body(body).unwrap())
-            .await
-            .unwrap();
+        self.raw(req.body(body).unwrap()).await
+    }
+
+    /// Sends a request built by hand.
+    async fn raw(&self, req: Request<Body>) -> Reply {
+        let resp = self.server.router().oneshot(req).await.unwrap();
         let status = resp.status();
         let headers = resp.headers().clone();
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
@@ -167,6 +193,49 @@ impl Harness {
             headers,
             body,
         }
+    }
+
+    /// Starts a sign-in as a request from `ip` would, behind the ingress
+    /// that names it.
+    async fn start_from(&self, ip: &str) -> Reply {
+        self.raw(
+            Request::post("/admin/login/start")
+                .header("content-type", "application/json")
+                .header("cf-connecting-ip", ip)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+
+    /// Finishes a sign-in with `credential`, an answer to `started`.
+    async fn finish_sign_in(&self, started: &Reply, credential: Value) -> Reply {
+        self.call(
+            "POST",
+            "/admin/login/finish",
+            As::Nobody,
+            Some(json!({
+                "ceremony_id": started.body["ceremony_id"],
+                "credential": credential,
+            })),
+        )
+        .await
+    }
+
+    /// Enrols a machine and approves it with the token, with `scope`. Its
+    /// id.
+    async fn device(&self, key: &SigningKey, name: &str, scope: &str) -> String {
+        let (code, _) = enrolling_with(self, key, name).await;
+        let approved = self
+            .call(
+                "POST",
+                "/v1/devices/approve",
+                As::Token,
+                Some(json!({ "user_code": code, "scope": scope })),
+            )
+            .await;
+        assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
+        approved.body["id"].as_str().unwrap().to_string()
     }
 
     /// Registers `phone`'s passkey as the first, with the token.
@@ -215,28 +284,39 @@ impl Harness {
     }
 }
 
-fn origin() -> Url {
-    Url::parse(ORIGIN).unwrap()
-}
-
 /// `navigator.credentials.create()`, as a browser at [`ORIGIN`] runs it.
 async fn create(phone: &mut Phone, options: &Value) -> Value {
-    let options: CredentialCreationOptions = serde_json::from_value(options.clone()).unwrap();
-    let created = phone
-        .register(&origin(), options, DefaultClientData)
+    create_at(phone, ORIGIN, options)
         .await
-        .expect("the authenticator registers");
-    serde_json::to_value(created).unwrap()
+        .expect("the authenticator registers")
 }
 
 /// `navigator.credentials.get()`.
 async fn get(phone: &mut Phone, options: &Value) -> Value {
-    let options: CredentialRequestOptions = serde_json::from_value(options.clone()).unwrap();
-    let asserted = phone
-        .authenticate(&origin(), options, DefaultClientData)
+    get_at(phone, ORIGIN, options)
         .await
-        .expect("the authenticator signs");
-    serde_json::to_value(asserted).unwrap()
+        .expect("the authenticator signs")
+}
+
+/// `navigator.credentials.create()` on a page at `at`, which the client
+/// may refuse, as a browser would.
+async fn create_at(phone: &mut Phone, at: &str, options: &Value) -> Result<Value, String> {
+    let options: CredentialCreationOptions = serde_json::from_value(options.clone()).unwrap();
+    phone
+        .register(&Url::parse(at).unwrap(), options, DefaultClientData)
+        .await
+        .map(|c| serde_json::to_value(c).unwrap())
+        .map_err(|e| format!("{e:?}"))
+}
+
+/// `navigator.credentials.get()` on a page at `at`.
+async fn get_at(phone: &mut Phone, at: &str, options: &Value) -> Result<Value, String> {
+    let options: CredentialRequestOptions = serde_json::from_value(options.clone()).unwrap();
+    phone
+        .authenticate(&Url::parse(at).unwrap(), options, DefaultClientData)
+        .await
+        .map(|a| serde_json::to_value(a).unwrap())
+        .map_err(|e| format!("{e:?}"))
 }
 
 fn session_from(reply: &Reply) -> Session {
@@ -260,7 +340,10 @@ fn session_from(reply: &Reply) -> Session {
 
 /// A machine waiting to be approved: its code and its key's fingerprint.
 async fn enrolling(h: &Harness, seed: u8, name: &str) -> (String, String) {
-    let key = SigningKey::from_bytes(&[seed; 32]);
+    enrolling_with(h, &SigningKey::from_bytes(&[seed; 32]), name).await
+}
+
+async fn enrolling_with(h: &Harness, key: &SigningKey, name: &str) -> (String, String) {
     let reply = h
         .call(
             "POST",
@@ -493,6 +576,12 @@ async fn a_state_changing_request_without_the_right_csrf_token_is_403() {
         ("wrong", Some("not-the-token")),
         ("empty", Some("")),
         ("another session's shape", Some(&session.cookie[..])),
+        // Compared whole: a prefix of the right token is not the token.
+        ("a prefix of it", Some(&session.csrf[..10])),
+        (
+            "all but its last character",
+            Some(&session.csrf[..session.csrf.len() - 1]),
+        ),
     ] {
         let reply = h
             .call(
@@ -862,7 +951,7 @@ async fn a_ceremony_is_answered_once_and_only_where_it_was_started() {
         serde_json::from_value(started.body["options"].clone()).unwrap();
     let phished = phone
         .authenticate(
-            &Url::parse("https://recall.example.com.evil.test").unwrap(),
+            &"https://recall.example.com.evil.test".parse().unwrap(),
             options,
             DefaultClientData,
         )
@@ -927,4 +1016,527 @@ async fn the_admin_page_is_served_with_its_hardening_headers() {
     assert_eq!(headers[header::X_FRAME_OPTIONS], "DENY");
     assert_eq!(headers[header::REFERRER_POLICY], "no-referrer");
     assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+}
+
+// ---------------------------------------------------------------------------
+// From the security review. Each test names the finding it fixes, or the
+// mutation of the code it was written to catch: every one of those mutations
+// survived the tests above.
+// ---------------------------------------------------------------------------
+
+/// A request `key` signs as device `id`, as the client sends one, with
+/// `session`'s cookie and CSRF header beside it when there is one.
+fn signed(
+    key: &SigningKey,
+    id: &str,
+    method: &str,
+    path: &str,
+    nonce: &str,
+    session: Option<&Session>,
+) -> Request<Body> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let target = Target {
+        method,
+        authority: "recall.test",
+        path,
+        query: None,
+    };
+    let headers = sign_request(key, id, &target, "1", b"", now, nonce).unwrap();
+    let mut req = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", "recall.test")
+        .header(recall_wire::PROTOCOL_HEADER, "1")
+        .header(CONTENT_DIGEST_HEADER, headers.content_digest)
+        .header(SIGNATURE_INPUT_HEADER, headers.signature_input)
+        .header(SIGNATURE_HEADER, headers.signature);
+    if let Some(session) = session {
+        req = req
+            .header("cookie", format!("{COOKIE}={}", session.cookie))
+            .header("x-recall-csrf", &session.csrf);
+    }
+    req.body(Body::empty()).unwrap()
+}
+
+/// Finding 1: starting a sign-in keeps nothing on the server, so strangers
+/// starting thousands, from as many /64s as they have, cannot keep the
+/// owner from signing in.
+#[tokio::test]
+async fn strangers_starting_sign_ins_cannot_keep_the_owner_out() {
+    let h = harness();
+    let mut phone = phone();
+    h.bootstrap(&mut phone).await;
+    // 512 /64s of one /48, ten unfinished sign-ins each: more than the 4096
+    // in all, and the eight an address, that a table of them once held.
+    for n in 0..512u32 {
+        let ip = format!("2001:db8:1:{n:x}::1");
+        for _ in 0..10 {
+            assert_eq!(h.start_from(&ip).await.status, StatusCode::OK, "{ip}");
+        }
+    }
+    // The owner, from an address of their own and from one of those.
+    for ip in ["198.51.100.7", "2001:db8:1:7::2"] {
+        let started = h.start_from(ip).await;
+        assert_eq!(started.status, StatusCode::OK, "{ip}: {}", started.body);
+        let credential = get(&mut phone, &started.body["options"]).await;
+        let finished = h.finish_sign_in(&started, credential).await;
+        assert_eq!(finished.status, StatusCode::OK, "{ip}: {}", finished.body);
+    }
+}
+
+/// Finding 4: a ceremony's start and finish take JSON and nothing else, so a
+/// page on another site cannot send one without the browser asking this
+/// server first.
+#[tokio::test]
+async fn a_ceremony_request_that_is_not_json_is_415() {
+    let h = harness();
+    let mut phone = phone();
+    h.bootstrap(&mut phone).await;
+    let session = h.sign_in(&mut phone).await;
+    for content_type in [
+        None,
+        Some("text/plain"),
+        Some("application/x-www-form-urlencoded"),
+        Some("multipart/form-data; boundary=x"),
+    ] {
+        for (uri, who) in [
+            ("/admin/login/start", As::Nobody),
+            ("/admin/login/finish", As::Nobody),
+            ("/admin/bootstrap/register", As::Token),
+            ("/admin/bootstrap/register/finish", As::Token),
+            ("/admin/passkeys/register", session.with_csrf()),
+            ("/admin/passkeys/register/finish", session.with_csrf()),
+        ] {
+            let reply = h
+                .call_typed("POST", uri, who, content_type, Some(json!({})))
+                .await;
+            assert_eq!(
+                reply.status,
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "{uri} {content_type:?}: {}",
+                reply.body
+            );
+            assert_eq!(
+                reply.body["error"], "this needs Content-Type: application/json",
+                "{uri}"
+            );
+        }
+    }
+    // Who is asking is still settled first: no token is the usual 401.
+    let reply = h
+        .call_typed(
+            "POST",
+            "/admin/bootstrap/register",
+            As::Nobody,
+            Some("text/plain"),
+            None,
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+    // With JSON, signing in works as ever.
+    h.sign_in(&mut phone).await;
+}
+
+/// Mutation M2: adding a passkey is finished only by the session that
+/// started it.
+#[tokio::test]
+async fn only_the_session_that_started_adding_a_passkey_finishes_it() {
+    let h = harness();
+    let mut phone = phone();
+    h.bootstrap(&mut phone).await;
+    let mine = h.sign_in(&mut phone).await;
+    let other = h.sign_in(&mut phone).await;
+    let started = h
+        .call("POST", "/admin/passkeys/register", mine.with_csrf(), None)
+        .await;
+    assert_eq!(started.status, StatusCode::OK, "{}", started.body);
+    let mut tablet = phone_two();
+    let credential = create(&mut tablet, &started.body["options"]).await;
+    let finish = json!({ "ceremony_id": started.body["ceremony_id"], "credential": credential });
+
+    let theirs = h
+        .call(
+            "POST",
+            "/admin/passkeys/register/finish",
+            other.with_csrf(),
+            Some(finish.clone()),
+        )
+        .await;
+    assert_eq!(theirs.status, StatusCode::BAD_REQUEST, "{}", theirs.body);
+    assert_eq!(
+        theirs.body["error"],
+        "that ceremony is not one this route finishes; start again"
+    );
+    assert_eq!(h.store.admin_credentials().unwrap().len(), 1);
+
+    // Refusing another session did not use the ceremony up.
+    let ours = h
+        .call(
+            "POST",
+            "/admin/passkeys/register/finish",
+            mine.with_csrf(),
+            Some(finish),
+        )
+        .await;
+    assert_eq!(ours.status, StatusCode::OK, "{}", ours.body);
+}
+
+/// Mutation M3: a passkey is the owner's only if it answers for the owner's
+/// user handle as well as with a registered credential id.
+#[tokio::test]
+async fn a_passkey_answering_for_another_user_is_refused() {
+    let h = harness();
+    let mut phone = phone();
+    h.bootstrap(&mut phone).await;
+    // The same credential, now saying it is someone else's. The user
+    // handle is not signed, so the signature still verifies.
+    phone
+        .authenticator_mut()
+        .store_mut()
+        .as_mut()
+        .unwrap()
+        .user_handle = Some(vec![7u8; 16].into());
+    let reply = h.try_sign_in(&mut phone).await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{}", reply.body);
+    assert_eq!(
+        reply.body["error"],
+        "unauthorized: that passkey is not registered here"
+    );
+    assert!(reply.headers.get(header::SET_COOKIE).is_none());
+}
+
+/// Mutation M5: an answer that comes after its ceremony's five minutes, by
+/// the server's clock, is refused.
+#[tokio::test]
+async fn an_answer_after_five_minutes_is_refused() {
+    let h = harness();
+    let mut phone = phone();
+    h.bootstrap(&mut phone).await;
+    let started = h.call("POST", "/admin/login/start", As::Nobody, None).await;
+    let credential = get(&mut phone, &started.body["options"]).await;
+
+    h.server.set_clock_offset(5 * 60);
+    let late = h.finish_sign_in(&started, credential.clone()).await;
+    assert_eq!(late.status, StatusCode::BAD_REQUEST, "{}", late.body);
+    assert_eq!(
+        late.body["error"],
+        "this ceremony has expired or was already used; start again"
+    );
+    assert!(late.headers.get(header::SET_COOKIE).is_none());
+
+    // A second sooner, the same answer would have done.
+    h.server.set_clock_offset(5 * 60 - 1);
+    let in_time = h.finish_sign_in(&started, credential).await;
+    assert_eq!(in_time.status, StatusCode::OK, "{}", in_time.body);
+}
+
+/// Mutations M6 and M7: an answer made at a subdomain of the configured
+/// origin, or at another port of it, is refused, though a browser there
+/// would make one.
+#[tokio::test]
+async fn an_answer_made_at_a_subdomain_or_another_port_is_refused() {
+    let h = harness();
+    let mut phone = phone();
+    h.bootstrap(&mut phone).await;
+    let elsewhere = [
+        "https://x.recall.example.com",
+        "https://recall.example.com:8443",
+    ];
+    for at in elsewhere {
+        let started = h.call("POST", "/admin/login/start", As::Nobody, None).await;
+        let credential = get_at(&mut phone, at, &started.body["options"])
+            .await
+            .unwrap_or_else(|e| panic!("the client refused {at}: {e}"));
+        let reply = h.finish_sign_in(&started, credential).await;
+        assert_eq!(
+            reply.status,
+            StatusCode::UNAUTHORIZED,
+            "{at}: {}",
+            reply.body
+        );
+        assert!(reply.headers.get(header::SET_COOKIE).is_none(), "{at}");
+    }
+    let session = h.sign_in(&mut phone).await;
+    for at in elsewhere {
+        let started = h
+            .call(
+                "POST",
+                "/admin/passkeys/register",
+                session.with_csrf(),
+                None,
+            )
+            .await;
+        let mut other = phone_two();
+        let credential = create_at(&mut other, at, &started.body["options"])
+            .await
+            .unwrap_or_else(|e| panic!("the client refused {at}: {e}"));
+        let reply = h
+            .call(
+                "POST",
+                "/admin/passkeys/register/finish",
+                session.with_csrf(),
+                Some(
+                    json!({ "ceremony_id": started.body["ceremony_id"], "credential": credential }),
+                ),
+            )
+            .await;
+        assert_eq!(
+            reply.status,
+            StatusCode::BAD_REQUEST,
+            "{at}: {}",
+            reply.body
+        );
+    }
+    assert_eq!(h.store.admin_credentials().unwrap().len(), 1);
+}
+
+/// Mutation M8: what the loser of two sign-ins racing sees. Both verified
+/// against the passkey as it was, at counter 2; the winner has since
+/// recorded 3. The loser's answer, 3 as well, passes webauthn-rs's check
+/// against the copy it read, and only the store's conditional update can
+/// refuse it.
+#[tokio::test]
+async fn a_sign_in_that_lost_the_counter_race_is_refused() {
+    let h = harness();
+    let mut key = counting_key();
+    let registered = h.bootstrap(&mut key).await;
+    let id = registered.body["id"].as_str().unwrap().to_string();
+    h.sign_in(&mut key).await;
+    h.sign_in(&mut key).await;
+    let stored = h.store.admin_credential(&id).unwrap().unwrap();
+    assert_eq!(stored.sign_count, 2);
+
+    // The winner's write, as far as the loser can tell: the counter the
+    // store compares moves on, the passkey the loser read does not.
+    assert!(h
+        .store
+        .record_admin_sign_in(&id, 3, &stored.passkey, "2026-09-23T10:00:00.000Z")
+        .unwrap());
+    let reply = h.try_sign_in(&mut key).await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{}", reply.body);
+    assert!(
+        reply.body["error"]
+            .as_str()
+            .unwrap()
+            .contains("signature counter did not move forward"),
+        "{}",
+        reply.body
+    );
+    assert!(reply.headers.get(header::SET_COOKIE).is_none());
+    assert_eq!(
+        h.store.admin_credential(&id).unwrap().unwrap().sign_count,
+        3
+    );
+}
+
+/// Mutation M8 again, as it happens: two copies of a counting key answer two
+/// sign-ins with the same counter, and both answers arrive at once. At most
+/// one may get a session. Whether a round interleaves is up to the
+/// scheduler, so the test above is the one that always reaches the check;
+/// this one says the same of real concurrent requests.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_copies_of_a_key_signing_in_at_once_never_both_succeed() {
+    let h = harness();
+    let mut real = counting_key();
+    assert_eq!(h.bootstrap(&mut real).await.status, StatusCode::OK);
+    let finish = |started: &Reply, credential: Value| {
+        Request::post("/admin/login/finish")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "ceremony_id": started.body["ceremony_id"],
+                    "credential": credential,
+                }))
+                .unwrap(),
+            ))
+            .unwrap()
+    };
+    for round in 0..20 {
+        let mut copy = counting_key();
+        *copy.authenticator_mut().store_mut() = real.authenticator_mut().store_mut().clone();
+        let s1 = h.call("POST", "/admin/login/start", As::Nobody, None).await;
+        let s2 = h.call("POST", "/admin/login/start", As::Nobody, None).await;
+        let c1 = get(&mut real, &s1.body["options"]).await;
+        let c2 = get(&mut copy, &s2.body["options"]).await;
+        let (r1, r2) = (h.server.router(), h.server.router());
+        let (q1, q2) = (finish(&s1, c1), finish(&s2, c2));
+        let a = tokio::spawn(async move { r1.oneshot(q1).await.unwrap().status() });
+        let b = tokio::spawn(async move { r2.oneshot(q2).await.unwrap().status() });
+        let (a, b) = (a.await.unwrap(), b.await.unwrap());
+        assert!(
+            !(a == StatusCode::OK && b == StatusCode::OK),
+            "round {round}: both copies signed in"
+        );
+    }
+}
+
+/// Mutation M10: the routes only a session may use are rate limited like
+/// every other, before the session is looked at.
+#[tokio::test]
+async fn the_session_only_routes_are_rate_limited() {
+    let h = harness_limited(6);
+    let mut phone = phone();
+    h.bootstrap(&mut phone).await;
+    let session = h.sign_in(&mut phone).await;
+    // Four requests so far, from the one address every request here has.
+    let mut statuses = Vec::new();
+    for _ in 0..3 {
+        let reply = h
+            .call("GET", "/admin/passkeys", As::Session(&session, None), None)
+            .await;
+        statuses.push(reply.status);
+    }
+    assert_eq!(
+        statuses,
+        [
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::TOO_MANY_REQUESTS
+        ]
+    );
+    let out = h
+        .call("POST", "/admin/logout", session.with_csrf(), None)
+        .await;
+    assert_eq!(out.status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(out.headers.get(header::SET_COOKIE).is_none());
+}
+
+/// Mutation M11, and finding 6a: on the device routes, a request that
+/// carries an `Authorization` header or a signature is judged by that
+/// alone. A live session cookie beside it changes nothing.
+#[tokio::test]
+async fn a_token_or_signature_beside_a_session_cookie_is_judged_alone() {
+    let h = harness();
+    h.server.backdate_start(600);
+    let mut phone = phone();
+    h.bootstrap(&mut phone).await;
+    let session = h.sign_in(&mut phone).await;
+    let key = SigningKey::from_bytes(&[9; 32]);
+    let id = h.device(&key, "syncer", "sync").await;
+
+    // A sync device's signature: the device's 403, not the cookie's 200.
+    let reply = h
+        .raw(signed(
+            &key,
+            &id,
+            "GET",
+            "/v1/devices",
+            "n1",
+            Some(&session),
+        ))
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    // A signature by another key: 401.
+    let stranger = SigningKey::from_bytes(&[10; 32]);
+    let reply = h
+        .raw(signed(
+            &stranger,
+            &id,
+            "GET",
+            "/v1/devices",
+            "n2",
+            Some(&session),
+        ))
+        .await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{}", reply.body);
+    // A wrong token, or another scheme: 401.
+    for authorization in ["Bearer wrong", "Basic d3Jvbmc=", "Bearer "] {
+        let reply = h
+            .raw(
+                Request::get("/v1/devices")
+                    .header("authorization", authorization)
+                    .header("cookie", format!("{COOKIE}={}", session.cookie))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{authorization}");
+        assert_eq!(reply.body, json!({ "error": "unauthorized" }));
+    }
+    // The cookie alone still does.
+    let reply = h
+        .call("GET", "/v1/devices", As::Session(&session, None), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+}
+
+/// Mutation M15: a session cookie that cannot be one of ours is an ended
+/// session, refused as one, not taken for no cookie at all.
+#[tokio::test]
+async fn a_malformed_session_cookie_is_refused_not_ignored() {
+    let h = harness();
+    let mut phone = phone();
+    h.bootstrap(&mut phone).await;
+    for value in [
+        "short".to_string(),
+        "A".repeat(44),
+        "!".repeat(43),
+        String::new(),
+    ] {
+        let malformed = Session {
+            cookie: value.clone(),
+            csrf: String::new(),
+        };
+        for uri in ["/v1/devices", "/admin/passkeys"] {
+            let reply = h
+                .call("GET", uri, As::Session(&malformed, None), None)
+                .await;
+            assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{value:?} {uri}");
+            assert_eq!(
+                reply.body["error"], "unauthorized: the admin session has ended; sign in again",
+                "{value:?} {uri}"
+            );
+        }
+        let status = h
+            .call("GET", "/admin/session", As::Session(&malformed, None), None)
+            .await;
+        assert_eq!(status.body["session"], Value::Null);
+        assert!(
+            status.headers[header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .contains("Max-Age=0"),
+            "{value:?}: the page is told to forget it"
+        );
+    }
+}
+
+/// Finding 6c: the store's copy of the signature counter starts where the
+/// registration left it, not at zero.
+#[tokio::test]
+async fn the_stored_counter_starts_at_the_registration_counter() {
+    let h = harness();
+    let started = h
+        .call("POST", "/admin/bootstrap/register", As::Token, None)
+        .await;
+    let mut key = counting_key();
+    let mut credential = create(&mut key, &started.body["options"]).await;
+    // As if the key had signed seven times elsewhere. The counter is in the
+    // authenticator data, after the RP id's hash and the flags, and with
+    // "none" attestation nothing signs it at registration. passkey-client
+    // writes its bytes as an array of numbers, which webauthn-rs reads as
+    // readily as base64url.
+    let field = &mut credential["response"]["attestationObject"];
+    let mut attestation: Vec<u8> = serde_json::from_value(field.clone()).unwrap();
+    let rp_id_hash = Sha256::digest(b"recall.example.com");
+    let at = attestation
+        .windows(32)
+        .position(|w| w == rp_id_hash.as_slice())
+        .expect("the authenticator data");
+    attestation[at + 33..at + 37].copy_from_slice(&7u32.to_be_bytes());
+    *field = json!(attestation);
+    let done = h
+        .call(
+            "POST",
+            "/admin/bootstrap/register/finish",
+            As::Token,
+            Some(json!({ "ceremony_id": started.body["ceremony_id"], "credential": credential })),
+        )
+        .await;
+    assert_eq!(done.status, StatusCode::OK, "{}", done.body);
+    let id = done.body["id"].as_str().unwrap();
+    assert_eq!(h.store.admin_credential(id).unwrap().unwrap().sign_count, 7);
 }

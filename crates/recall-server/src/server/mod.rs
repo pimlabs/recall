@@ -83,7 +83,7 @@ mod without_passkeys {
             }
         }
 
-        pub(super) fn prune(&self) -> usize {
+        pub(super) fn prune(&self, _now: i64) -> usize {
             0
         }
     }
@@ -449,8 +449,12 @@ fn sign_in_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
     use passkeys::{
         handle_add_finish, handle_add_start, handle_bootstrap_finish, handle_bootstrap_start,
         handle_list_passkeys, handle_remove, handle_sign_in_finish, handle_sign_in_start,
-        handle_sign_out,
+        handle_sign_out, json_only,
     };
+    // Every ceremony's start and finish takes JSON and says so, which a
+    // cross-site form or a blind `no-cors` fetch cannot. The last layer
+    // added runs first, so each router's own check comes before this one.
+    //
     // Anyone may try to sign in; only a registered passkey finishes.
     let sign_in = Router::new()
         .route(
@@ -461,6 +465,7 @@ fn sign_in_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
             "/admin/login/finish",
             post(handle_sign_in_finish).fallback(not_found),
         )
+        .route_layer(from_fn(json_only))
         .route_layer(DefaultBodyLimit::max(SIGN_IN_BODY_BYTES))
         .route_layer(from_fn_with_state(state.clone(), limited_sign_in));
     // The first passkey: the operator's token, and the handlers refuse it
@@ -474,14 +479,11 @@ fn sign_in_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
             "/admin/bootstrap/register/finish",
             post(handle_bootstrap_finish).fallback(not_found),
         )
+        .route_layer(from_fn(json_only))
         .route_layer(DefaultBodyLimit::max(SIGN_IN_BODY_BYTES))
         .route_layer(from_fn_with_state(state.clone(), guard));
     // Only a signed-in owner: never the token, never a device.
-    let owner = Router::new()
-        .route(
-            "/admin/passkeys",
-            get(handle_list_passkeys).fallback(not_found),
-        )
+    let adding = Router::new()
         .route(
             "/admin/passkeys/register",
             post(handle_add_start).fallback(not_found),
@@ -490,6 +492,14 @@ fn sign_in_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
             "/admin/passkeys/register/finish",
             post(handle_add_finish).fallback(not_found),
         )
+        .route_layer(from_fn(json_only))
+        .route_layer(DefaultBodyLimit::max(SIGN_IN_BODY_BYTES))
+        .route_layer(from_fn_with_state(state.clone(), admin::owner_only));
+    let owner = Router::new()
+        .route(
+            "/admin/passkeys",
+            get(handle_list_passkeys).fallback(not_found),
+        )
         .route(
             "/admin/passkeys/{id}/remove",
             post(handle_remove).fallback(not_found),
@@ -497,7 +507,7 @@ fn sign_in_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/admin/logout", post(handle_sign_out).fallback(not_found))
         .route_layer(DefaultBodyLimit::max(SIGN_IN_BODY_BYTES))
         .route_layer(from_fn_with_state(state.clone(), admin::owner_only));
-    sign_in.merge(bootstrap).merge(owner)
+    sign_in.merge(bootstrap).merge(adding).merge(owner)
 }
 
 #[cfg(not(feature = "passkeys"))]
@@ -507,9 +517,9 @@ fn sign_in_routes(_state: &Arc<AppState>) -> Router<Arc<AppState>> {
 
 fn sweep_devices(state: &AppState) -> Result<(usize, usize)> {
     let now = time::OffsetDateTime::now_utc();
-    // The admin page's leftovers go on the same round: ceremonies nobody
-    // finished, and sessions that have ended.
-    state.passkeys.prune();
+    // The admin page's leftovers go on the same round: ceremonies finished
+    // that would have expired by now, and sessions that have ended.
+    state.passkeys.prune(state.now());
     let clock = state.clock();
     if let Err(e) = state.store.sweep_admin_sessions(
         &format_timestamp(clock),

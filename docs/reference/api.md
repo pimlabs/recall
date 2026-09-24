@@ -946,20 +946,36 @@ owner, so signing in is usernameless: the phone offers the passkey it holds.
 Passkeys are bound to the address people reach the server at, which the
 server cannot learn from a request behind a proxy, so it is configured:
 `RECALL_PUBLIC_URL`, such as `https://recall.example.com` (an origin, with no
-path; `http://` only for `localhost`). Its host is the WebAuthn relying
-party id. Unset or unusable, passkey sign-in is off, `GET /admin/session`
-says why, and the routes below that need it answer `503`. Nothing else
-depends on it: the bearer token works on the page and everywhere else as
-before.
+path; `http://` only for `localhost`, and the server warns at start that
+such passkeys work only from a browser on the same machine). Its host is
+the WebAuthn relying party id, so it must be a full domain name, with no
+trailing dot, or `localhost`. Unset or unusable, passkey sign-in is off,
+`GET /admin/session` says why, and the routes below that need it answer
+`503`. Nothing else depends on it: the bearer token works on the page and
+everywhere else as before.
 
 Each ceremony is two requests: a start that answers with a `ceremony_id`
 and the `options` to hand `navigator.credentials.create()` or `.get()`
 (WebAuthn's JSON form, binary values in base64url), and a finish that
-sends the `ceremony_id` back with the browser's answer. A ceremony lives
-five minutes in the server's memory and can be finished once. At most eight
-may be in flight from one address, and 4096 in all. Starts and finishes
-are answered with `Cache-Control: no-store`, and their bodies are limited
-to 64 KiB.
+sends the `ceremony_id` back with the browser's answer. The server keeps
+nothing when a ceremony starts: the `ceremony_id` is the ceremony's state,
+sealed (AES-256-GCM, under a key the process makes when it starts), so the
+browser can neither read nor change it, and starting any number of them
+takes nothing from anyone else. A ceremony can be finished within five
+minutes of its start, by the server's clock, and only once: the server
+remembers each one whose answer verified until it would have expired. A
+restart ends every ceremony in flight. An id that is not one, has
+expired, or was finished already is `400` with
+`{"error":"this ceremony has expired or was already used; start again"}`.
+Starts and finishes are answered with `Cache-Control: no-store`, and their
+bodies are limited to 64 KiB.
+
+Every start and finish must be sent with `Content-Type: application/json`
+(parameters such as `charset` are fine). Anything else, or none, is `415`
+with `{"error":"this needs Content-Type: application/json"}`, checked after
+the rate limit and, on the routes that need one, the credential. A page on
+another site can send a POST without the browser asking this server first
+only with a type that is not JSON, so it cannot start a ceremony blind.
 
 ### The admin session
 
@@ -978,8 +994,10 @@ even a subdomain, can set or shadow it.
 The session is accepted on the routes marked "admin" above, and on the
 passkey routes below. It is **not** accepted on `/sync` or
 `/v1/devices/me`, which answer a request carrying only the cookie with the
-usual `{"error":"unauthorized"}`. A request that carries the bearer token
-or a signature is judged by that, cookie or not.
+usual `{"error":"unauthorized"}`. A request that carries an
+`Authorization` header or a signature is judged by that alone, cookie or
+not: a wrong token or a bad signature beside a live cookie is `401`, and a
+`sync` device's signature beside one is that device's `403`.
 
 **CSRF.** Besides `SameSite=Strict`, every state-changing request (anything
 but `GET` and `HEAD`) made with the session must carry its CSRF token:

@@ -43,8 +43,10 @@ tokio = { workspace = true, features = ["io-util"] }
 
 # Passkey sign-in for /admin. Pinned exactly: the discoverable (usernameless)
 # flow is behind `conditional-ui`, a preview feature whose API may change in
-# any release.
-webauthn-rs = { version = "=0.5.5", features = ["conditional-ui"], optional = true }
+# any release. `danger-allow-state-serialisation` lets a ceremony's state be
+# sealed into the id the page sends back rather than held in a table
+# strangers can fill; `server/passkeys.rs` says why that is safe here.
+webauthn-rs = { version = "=0.5.5", features = ["conditional-ui", "danger-allow-state-serialisation"], optional = true }
 # The trade-off, stated once: this is where OpenSSL enters the codebase.
 # webauthn-rs-core verifies signatures and attestation with it and cannot be
 # built without it. `vendored` compiles it from source into the binary, so

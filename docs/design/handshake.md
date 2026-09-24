@@ -259,7 +259,15 @@ required). What the sketch left open was settled this way:
   token in a header. It is a third credential on the device routes only,
   never on `/sync`.
 - The signature counter is checked and moved forward in one statement, so
-  a cloned authenticator racing the real one is caught.
+  a cloned authenticator racing the real one is caught, and a refusal is
+  logged.
+- A ceremony's state is not held on the server: it is sealed (AES-256-GCM,
+  under a key made at start) into the id the page sends back, and only the
+  ceremonies that finished are remembered, until they expire. Starting a
+  sign-in, which anyone may do, therefore costs the server nothing, and
+  nobody can fill a table to keep the owner out. Every start and finish
+  must be `Content-Type: application/json`, which a cross-site page cannot
+  send blind.
 - The page's script is inline, allowed by its hash in a CSP with no
   `unsafe-inline` or `unsafe-eval`.
 - This is where OpenSSL enters the codebase (webauthn-rs-core needs it),

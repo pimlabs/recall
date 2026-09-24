@@ -329,11 +329,11 @@ check "without RECALL_PUBLIC_URL passkeys are off, and it says why" 'False True 
 import json,sys; d=json.load(open(sys.argv[1]))
 print(d["passkeys"]["enabled"], "RECALL_PUBLIC_URL is not set" in d["passkeys"]["reason"], d["session"])' "$WORK/session.json")"
 check "signing in with passkeys off is 503" '503' \
-  "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$URL/admin/login/start")"
+  "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${json[@]}" "$URL/admin/login/start")"
 check "the bootstrap needs the token" '401 {"error":"unauthorized"}' \
-  "$(curl -s -o "$WORK/b.json" -w '%{http_code}' -X POST "$URL/admin/bootstrap/register") $(cat "$WORK/b.json")"
+  "$(curl -s -o "$WORK/b.json" -w '%{http_code}' -X POST "${json[@]}" "$URL/admin/bootstrap/register") $(cat "$WORK/b.json")"
 check "the bootstrap with passkeys off is 503" '503' \
-  "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${auth[@]}" "$URL/admin/bootstrap/register")"
+  "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${json[@]}" "${auth[@]}" "$URL/admin/bootstrap/register")"
 check "managing passkeys needs a session, not the token" \
   '401 {"error":"unauthorized: this needs an admin session; sign in with a passkey"}' \
   "$(curl -s -o "$WORK/p.json" -w '%{http_code}' "${auth[@]}" "$URL/admin/passkeys") $(cat "$WORK/p.json")"
@@ -341,6 +341,9 @@ FAKE="__Host-recall_admin=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 check "a session cookie the server did not issue is 401 on the device routes" \
   '{"error":"unauthorized: the admin session has ended; sign in again"}' \
   "$(curl -s -H "Cookie: $FAKE" "$URL/v1/devices")"
+check "a wrong token beside a session cookie is judged by the token" '401 {"error":"unauthorized"}' \
+  "$(curl -s -o "$WORK/w.json" -w '%{http_code}' -H "Cookie: $FAKE" -H 'Authorization: Bearer wrong' \
+     "$URL/v1/devices") $(cat "$WORK/w.json")"
 check "a session cookie is not a credential on /sync" '{"error":"unauthorized"}' \
   "$(curl -s -H "Cookie: $FAKE" -H 'X-Recall-CSRF: x' "$URL/sync?project_key=a/b")"
 
@@ -354,8 +357,13 @@ check "with RECALL_PUBLIC_URL passkeys are on, bound to its origin" "True $PK_UR
   "$(curl -s "$PK_URL/admin/session" | python3 -c '
 import json,sys; d=json.load(sys.stdin); print(d["passkeys"]["enabled"], d["passkeys"]["origin"], d["bootstrapped"])')"
 check "signing in before any passkey exists is 409" '409' \
-  "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$PK_URL/admin/login/start")"
-curl -s -D "$WORK/boot.headers" -X POST "${auth[@]}" "$PK_URL/admin/bootstrap/register" >"$WORK/boot.json"
+  "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${json[@]}" "$PK_URL/admin/login/start")"
+check "a ceremony start that is not JSON is 415" '415 {"error":"this needs Content-Type: application/json"}' \
+  "$(curl -s -o "$WORK/ct.json" -w '%{http_code}' -X POST -H 'Content-Type: text/plain' \
+     "$PK_URL/admin/login/start") $(cat "$WORK/ct.json")"
+check "and so is one that names no type" '415' \
+  "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${auth[@]}" "$PK_URL/admin/bootstrap/register")"
+curl -s -D "$WORK/boot.headers" -X POST "${json[@]}" "${auth[@]}" "$PK_URL/admin/bootstrap/register" >"$WORK/boot.json"
 check "the bootstrap answers with a ceremony and a discoverable-credential challenge" \
   'ceremony_id options localhost required' \
   "$(python3 -c '

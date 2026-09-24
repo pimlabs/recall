@@ -194,7 +194,7 @@ run "cargo build --release"            cargo build --release --locked
 # The two that talk to a real server rather than a stand-in. Both have caught
 # bugs every unit test in the repo missed.
 run "compat-check.sh (19 checks)"      ./scripts/compat-check.sh target/release/recall-server
-run "api-doc-check.sh (88 checks)"     ./scripts/api-doc-check.sh target/release/recall-server
+run "api-doc-check.sh (91 checks)"     ./scripts/api-doc-check.sh target/release/recall-server
 run "trusted-ip-check.sh (9 checks)"   ./scripts/trusted-ip-check.sh target/release/recall-server
 
 built=$(./target/release/recall version)

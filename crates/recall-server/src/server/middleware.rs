@@ -58,9 +58,12 @@ pub(super) async fn admin_guard(
     }
     let mut req = with_client_ip(&state, req);
     // The bearer token and a signature come first, exactly as in `guard`:
-    // a request carrying either is judged by it alone, cookie or not.
+    // a request carrying either is judged by it alone, cookie or not. An
+    // `Authorization` header counts as carrying the token whether or not
+    // it is the right one, so a wrong token beside a live cookie is a 401,
+    // not a fall back to the cookie.
     let headers = req.headers();
-    if !authorized(&state.cfg.token, headers)
+    if !headers.contains_key(axum::http::header::AUTHORIZATION)
         && !auth::is_signed(headers)
         && admin::has_session_cookie(headers)
     {
