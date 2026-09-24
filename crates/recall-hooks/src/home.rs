@@ -614,17 +614,66 @@ impl DevicesLock<'_> {
 /// nonce: one paused past `LOCK_STALE` whose lock was taken over must not
 /// delete the new holder's on its way out. And a stale lock is taken over
 /// by moving it aside first, which only one process can do, then checking
-/// that what was moved is the stale lock that was looked at and not a fresh
-/// one taken in between; a fresh one is put back, never over another.
+/// that what was moved is still the stale lock that was looked at (the
+/// same bytes, and still old) and not a fresh one taken in between; a
+/// fresh one is put back, never over another.
+///
+/// Waiting is bounded on every path, taking over included: a lock that
+/// cannot be read or moved (a directory at its name, a file another user
+/// owns) is waited out to the deadline like any held lock, and taken over
+/// at most [`MAX_TAKEOVERS`] times, so a hook never spins on one.
+///
+/// Two windows remain, both needing a stale lock and a race inside
+/// microseconds, and both written down rather than closed: where the
+/// filesystem has no hard links (FAT, exFAT, some FUSE mounts), a fresh
+/// lock moved aside by mistake is moved back by name only when nothing has
+/// the name, which a lock taken in the same instant could lose to; and a
+/// fresh lock that cannot be moved back at all is left beside the name, as
+/// `<name>.<nonce>.stale`, rather than deleted.
 #[derive(Debug)]
 pub(crate) struct FileLock {
     path: PathBuf,
     nonce: String,
 }
 
+/// How many times one wait takes over a stale lock before it only waits.
+const MAX_TAKEOVERS: u32 = 3;
+
+/// The file operations a lock is taken with: the real ones, and in tests
+/// ones that fail the way a full disk or another filesystem does.
+#[derive(Clone, Copy)]
+pub(crate) struct LockFs {
+    /// Reads a lock's nonce.
+    pub(crate) read: fn(&Path) -> io::Result<Vec<u8>>,
+    /// Writes this holder's nonce into the lock it just created.
+    pub(crate) write: fn(&mut fs::File, &[u8]) -> io::Result<()>,
+    /// Links a lock moved aside back to its name, failing if the name is
+    /// taken.
+    pub(crate) link: fn(&Path, &Path) -> io::Result<()>,
+}
+
+impl LockFs {
+    /// The filesystem as it is.
+    pub(crate) const REAL: LockFs = LockFs {
+        read: |path| fs::read(path),
+        write: |file, bytes| file.write_all(bytes),
+        link: |from, to| fs::hard_link(from, to),
+    };
+}
+
 impl FileLock {
     /// Waits up to `wait` for the lock file `name` in `dir`, and takes it.
     pub(crate) fn take(dir: &Path, name: &str, wait: std::time::Duration) -> Result<Self, Error> {
+        Self::take_with(dir, name, wait, LockFs::REAL)
+    }
+
+    /// [`FileLock::take`], through `lfs`.
+    pub(crate) fn take_with(
+        dir: &Path,
+        name: &str,
+        wait: std::time::Duration,
+        lfs: LockFs,
+    ) -> Result<Self, Error> {
         let path = dir.join(name);
         let err = |source| Error::Write {
             path: path.display().to_string(),
@@ -634,6 +683,7 @@ impl FileLock {
         let nonce = lock_nonce().map_err(err)?;
         let deadline = std::time::Instant::now() + wait;
         let mut denied = 0;
+        let mut takeovers = 0;
         loop {
             match fs::OpenOptions::new()
                 .write(true)
@@ -643,27 +693,26 @@ impl FileLock {
                 Ok(mut file) => {
                     // Written before anyone can judge it stale: a lock is
                     // only stale once it is LOCK_STALE old.
-                    let written = file.write_all(nonce.as_bytes());
+                    let written = (lfs.write)(&mut file, nonce.as_bytes());
                     drop(file);
-                    let lock = FileLock { path, nonce };
-                    written.map_err(|e| Error::Write {
-                        path: lock.path.display().to_string(),
-                        source: e,
-                    })?;
-                    return Ok(lock);
+                    if let Err(e) = written {
+                        // Ours, and empty or half written: taken away now,
+                        // not left for everyone else to wait out.
+                        let _ = fs::remove_file(&path);
+                        return Err(err(e));
+                    }
+                    return Ok(FileLock { path, nonce });
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                     denied = 0;
-                    let stale = fs::metadata(&path)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|at| at.elapsed().ok())
-                        .is_some_and(|age| age > LOCK_STALE);
-                    if stale {
-                        if let Ok(seen) = fs::read(&path) {
-                            take_over(&path, &seen, &nonce);
+                    if takeovers < MAX_TAKEOVERS && lock_age(&path).is_some_and(|a| a > LOCK_STALE)
+                    {
+                        takeovers += 1;
+                        let moved = (lfs.read)(&path)
+                            .is_ok_and(|seen| take_over(&path, &seen, &nonce, lfs));
+                        if moved {
+                            continue;
                         }
-                        continue;
                     }
                     if std::time::Instant::now() >= deadline {
                         return Err(err(io::Error::new(
@@ -703,25 +752,42 @@ impl Drop for FileLock {
     }
 }
 
+/// How old the lock at `path` is, by its modification time.
+fn lock_age(path: &Path) -> Option<std::time::Duration> {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|at| at.elapsed().ok())
+}
+
 /// Takes a stale lock at `path` out of the way, `seen` being what it held
-/// when it was judged stale. Moved aside under a name of this taker's own,
-/// which only one process can do; if what was moved is not what was seen,
-/// it is a lock someone took between the look and the move, and it is put
-/// back, by a link that fails rather than replace a lock taken since.
-fn take_over(path: &Path, seen: &[u8], nonce: &str) {
+/// when it was judged stale; answers whether it did. Moved aside under a
+/// name of this taker's own, which only one process can do; if what was
+/// moved is not what was seen, or is young, it is a lock someone took
+/// between the look and the move (an empty one, not yet written, included),
+/// and it is put back: by a link that fails rather than replace a lock taken
+/// since, or where there are no links by name, only while nothing holds the
+/// name, or else left beside it. Never deleted.
+fn take_over(path: &Path, seen: &[u8], nonce: &str, lfs: LockFs) -> bool {
     let mut aside = path.as_os_str().to_owned();
     aside.push(format!(".{nonce}.stale"));
     let aside = PathBuf::from(aside);
     if fs::rename(path, &aside).is_err() {
-        // Gone, or moved by another taker first.
-        return;
+        // Gone, moved by another taker first, or not a file this can move.
+        return false;
     }
-    if fs::read(&aside).is_ok_and(|moved| moved == seen) {
+    let still_stale = (lfs.read)(&aside).is_ok_and(|moved| moved == seen)
+        && lock_age(&aside).is_some_and(|age| age > LOCK_STALE);
+    if still_stale {
         let _ = fs::remove_file(&aside);
-    } else {
-        let _ = fs::hard_link(&aside, path);
-        let _ = fs::remove_file(&aside);
+        return true;
     }
+    if (lfs.link)(&aside, path).is_ok() {
+        let _ = fs::remove_file(&aside);
+    } else if !path.exists() {
+        let _ = fs::rename(&aside, path);
+    }
+    false
 }
 
 /// A lock's nonce: 128 random bits, hex.
@@ -1253,12 +1319,160 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(DEVICE_LOCK_FILE);
         fs::write(&path, "fresh").unwrap();
-        take_over(&path, b"stale", "taker");
+        age(&path);
+        assert!(!take_over(&path, b"stale", "taker", LockFs::REAL));
         assert_eq!(fs::read(&path).unwrap(), b"fresh");
-        take_over(&path, b"fresh", "taker");
+        assert!(take_over(&path, b"fresh", "taker", LockFs::REAL));
         assert!(!path.exists(), "and the one seen is taken out of the way");
-        let left: Vec<_> = fs::read_dir(dir.path()).unwrap().collect();
-        assert!(left.is_empty(), "nothing left aside: {left:?}");
+        assert_eq!(entries(dir.path()), 0, "nothing left aside");
+    }
+
+    /// How many entries `dir` holds.
+    fn entries(dir: &Path) -> usize {
+        fs::read_dir(dir).unwrap().count()
+    }
+
+    /// An empty lock is one just created and not yet written while it is
+    /// young, not one left behind by a process killed before writing: seen
+    /// stale and empty, then taken again before the move, it is put back.
+    /// Mutation: judge what was moved by its bytes alone.
+    #[test]
+    fn a_young_empty_lock_is_not_taken_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(DEVICE_LOCK_FILE);
+        fs::write(&path, "").unwrap();
+        assert!(!take_over(&path, b"", "taker", LockFs::REAL));
+        assert!(path.exists(), "put back");
+        assert_eq!(entries(dir.path()), 1, "and nothing left aside");
+    }
+
+    /// Where there are no hard links a lock moved aside by mistake is put
+    /// back by name. Mutation: drop the fallback.
+    #[test]
+    fn without_hard_links_a_lock_is_put_back_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(DEVICE_LOCK_FILE);
+        fs::write(&path, "fresh").unwrap();
+        age(&path);
+        let no_links = LockFs {
+            link: |_, _| Err(io::ErrorKind::Unsupported.into()),
+            ..LockFs::REAL
+        };
+        assert!(!take_over(&path, b"stale", "taker", no_links));
+        assert_eq!(fs::read(&path).unwrap(), b"fresh");
+        assert_eq!(entries(dir.path()), 1, "nothing left aside");
+    }
+
+    /// Put back by name, a lock never replaces one taken in the meantime:
+    /// it is left aside instead. Mutation: put it back whatever holds the
+    /// name.
+    #[test]
+    fn a_lock_put_back_by_name_never_replaces_one_taken_meanwhile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(DEVICE_LOCK_FILE);
+        fs::write(&path, "fresh").unwrap();
+        age(&path);
+        let taken_meanwhile = LockFs {
+            link: |_, to| {
+                fs::write(to, "other")?;
+                Err(io::ErrorKind::Unsupported.into())
+            },
+            ..LockFs::REAL
+        };
+        assert!(!take_over(&path, b"stale", "taker", taken_meanwhile));
+        assert_eq!(fs::read(&path).unwrap(), b"other");
+        assert_eq!(entries(dir.path()), 2, "the one moved is left aside");
+    }
+
+    /// Takes the lock in `dir` through `lfs` with a short wait, on another
+    /// thread so that a wait which never ends fails the test rather than
+    /// hanging it; answers whether it was taken.
+    fn take_briefly(dir: &Path, lfs: LockFs) -> bool {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let dir = dir.to_owned();
+        let wait = std::time::Duration::from_millis(300);
+        std::thread::spawn(move || {
+            let taken = FileLock::take_with(&dir, DEVICE_LOCK_FILE, wait, lfs);
+            let _ = tx.send(taken.is_ok());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the wait for the lock ended")
+    }
+
+    /// A stale lock that cannot be taken over, a directory at its name, is
+    /// waited out to the deadline like a held one, never spun on: the pull
+    /// hook takes this lock, and a hook must never hang a session. The same
+    /// bound holds for every lock taken this way, `device.key.lock` (this
+    /// one) and `audit.json.lock` alike. Mutation: go round again after
+    /// every attempt to take it over, as before.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_at_the_lock_is_waited_out_not_spun_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(DEVICE_LOCK_FILE);
+        fs::create_dir(&path).unwrap();
+        fs::File::open(&path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - LOCK_STALE * 2)
+            .unwrap();
+        assert!(!take_briefly(dir.path(), LockFs::REAL));
+        assert!(path.is_dir(), "and it is left as it was");
+    }
+
+    /// So is a stale lock that cannot be read, one another user owns (made
+    /// up here, as the tests may run as root). Mutation: as above.
+    #[test]
+    fn an_unreadable_lock_is_waited_out_not_spun_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(DEVICE_LOCK_FILE);
+        fs::write(&path, "theirs").unwrap();
+        age(&path);
+        let unreadable = LockFs {
+            read: |_| Err(io::ErrorKind::PermissionDenied.into()),
+            ..LockFs::REAL
+        };
+        assert!(!take_briefly(dir.path(), unreadable));
+        assert_eq!(fs::read(&path).unwrap(), b"theirs");
+    }
+
+    /// A lock taken over that is back at once, stale again (a filesystem
+    /// whose times are all old, or a holder racing every takeover), is taken
+    /// over a few times and then waited out. Mutation: take over without a
+    /// cap.
+    #[test]
+    fn takeovers_are_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(DEVICE_LOCK_FILE);
+        fs::write(&path, "held").unwrap();
+        age(&path);
+        let back_at_once = LockFs {
+            read: |at| {
+                let held = fs::read(at)?;
+                if at.extension().is_some_and(|e| e == "stale") {
+                    // Moved aside, and already taken again at its name.
+                    let lock = at.with_extension("").with_extension("");
+                    fs::write(&lock, "held")?;
+                    age(&lock);
+                }
+                Ok(held)
+            },
+            ..LockFs::REAL
+        };
+        assert!(!take_briefly(dir.path(), back_at_once));
+    }
+
+    /// A lock whose nonce could not be written is let go of at once, not
+    /// left empty for every other recall to wait out. Mutation: keep it.
+    #[test]
+    fn a_lock_that_cannot_be_written_is_not_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk_full = LockFs {
+            write: |_, _| Err(io::Error::other("disk full")),
+            ..LockFs::REAL
+        };
+        let wait = std::time::Duration::from_secs(1);
+        assert!(FileLock::take_with(dir.path(), DEVICE_LOCK_FILE, wait, disk_full).is_err());
+        assert!(!dir.path().join(DEVICE_LOCK_FILE).exists());
     }
 
     /// A `~/.recall` made wider than `0700`, by hand or by a restore, is
