@@ -24,6 +24,30 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('uncancellable-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Only ever applies to the dev/test profile — [profile.release] in
+# Cargo.toml (what release.yml ships and what the Docker "release" build
+# fetches) is untouched by any of these.
+#
+# CARGO_INCREMENTAL=0: incremental compilation earns its keep by reusing
+# per-function state from the target dir a *previous build of the same
+# checkout* left behind, which is exactly what Swatinem/rust-cache below
+# does not restore — its cache deliberately excludes target/**/incremental,
+# since that state is fragile across machines and was never worth the
+# storage. With nothing to reuse, CARGO_INCREMENTAL=1 (cargo's default) pays
+# the bookkeeping and the extra object-file splitting for a rebuild every
+# run does anyway. Off, cargo just does a normal build against the cache's
+# .rlibs, which is what actually gets reused run to run.
+#
+# CARGO_PROFILE_*_DEBUG=0: `cargo test`/`clippy`/`doc` build in the dev/test
+# profile, whose default carries full debug info. Nothing here reads a
+# backtrace or attaches a debugger — these are CI checks watching exit codes
+# and stdout — so that debug info is link time and cache bytes spent on
+# something never used.
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
 jobs:
   ci:
     runs-on: ubuntu-latest
@@ -34,7 +58,14 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # Every push to main writes the cache (mainline is the one history a
+      # PR's own restore should fall back to); a PR run only ever restores
+      # it. A cache entry per PR branch would otherwise pile up against the
+      # repository's cache quota and start evicting main's, which is the one
+      # entry every other run depends on.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: cargo fmt
         run: cargo fmt --all --check
@@ -231,14 +262,44 @@ jobs:
           echo "Changed in this pull request:"
           echo "$changed"
 
-          if printf '%s\n' "$changed" | grep -Eq '^(crates/|deploy/|Cargo\.(toml|lock)$)'; then
+          # This workflow itself counts too: a change to the image step
+          # below is only proven by running it.
+          if printf '%s\n' "$changed" | grep -Eq '^(crates/|deploy/|Cargo\.(toml|lock)$|\.github/workflows/ci\.yml$)'; then
             echo "build=true" >> "$GITHUB_OUTPUT"
           else
             echo "build=false" >> "$GITHUB_OUTPUT"
             # One line on purpose: a `\` continuation inside a quoted
             # string keeps the next line's indentation in the annotation.
-            echo "::notice::Nothing under crates/, deploy/, Cargo.toml or Cargo.lock changed, so the server image build was skipped. It runs unconditionally on every push to main."
+            echo "::notice::Nothing under crates/, deploy/, Cargo.toml, Cargo.lock or this workflow changed, so the server image build was skipped. It runs unconditionally on every push to main."
           fi
+
+      # A second, non-default builder, used only by the two `buildx build`
+      # calls below (`--builder "$BUILDER"`). `docker build` a few lines down
+      # keeps using the original one untouched: those calls pass `--network
+      # host` to reach the plain `python3 -m http.server` below over
+      # 127.0.0.1, which needs the classic builder's network namespace, not
+      # a container-driver builder's own — buildx's `--network host` would
+      # need the builder itself created with that driver option to do the
+      # same, and that is a second thing to get right for no benefit, since
+      # nothing downstream of a release fetch is compile-heavy enough for a
+      # layer cache to matter. use: false is what keeps `docker build`
+      # pointed at the original builder rather than this new one.
+      - name: Set up a cache-backed builder for the source build
+        if: steps.image.outputs.build == 'true'
+        id: buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          use: false
+
+      # BuildKit's `type=gha` cache talks to the Actions cache service with
+      # ACTIONS_RUNTIME_TOKEN and the cache URLs, which the runner hands
+      # only to JavaScript actions, never to a `run:` step. Without this,
+      # `docker buildx build --cache-to type=gha` below fails for want of a
+      # token. It exports those values into the environment of the steps
+      # after it, and nothing else.
+      - name: Expose the Actions cache service to the build step
+        if: steps.image.outputs.build == 'true'
+        uses: crazy-max/ghaction-github-runtime@v3
 
       # The image, both ways it can be built. This is where a crate rename
       # slipped through once: the Dockerfile has no file extension and was
@@ -252,19 +313,53 @@ jobs:
       # directory. The download, the checksum check and the runtime around
       # them are then exercised exactly as a deploy exercises them. A
       # tampered checksum must stop the build, so that is tried too.
+      #
+      # The two `source` builds below run on a runner that starts every time
+      # with an empty Docker cache, so without help each one recompiles
+      # recall-server (and recall-worker) from nothing — the same cargo
+      # build the steps above already pay for, paid a second time inside the
+      # container, with none of rust-cache's warmth. GitHub's actions/cache
+      # backend (`type=gha`) is BuildKit's, not cargo's, but it works the
+      # same way for this Dockerfile: a layer is skipped when neither its
+      # instructions nor its input changed, so a docs-only push to main (the
+      # image still builds unconditionally there) replays every layer from
+      # cache, and a PR that does touch crates/ still keeps the base image,
+      # apk/npm layers untouched by the diff. `mode=max` on both so the
+      # cache holds every intermediate layer (recall-server's own compile
+      # included), not only the ones the final image is made of.
       - name: Server image builds, from source and from a release
         if: steps.image.outputs.build == 'true'
+        env:
+          BUILDER: ${{ steps.buildx.outputs.name }}
         run: |
           set -eu
-          docker build -f deploy/Dockerfile --build-arg RECALL_SOURCE=source -t recall-server-ci .
+          # Main writes the layer cache and a PR only reads it, for the same
+          # reason rust-cache saves only from main: an entry per PR branch
+          # would crowd main's out of the repository's cache quota.
+          cache_to=""
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            cache_to="--cache-to type=gha,scope=recall-docker-source,mode=max"
+          fi
+          # shellcheck disable=SC2086 # cache_to is empty or several words on purpose
+          docker buildx build --builder "$BUILDER" --load \
+            --cache-from type=gha,scope=recall-docker-source $cache_to \
+            -f deploy/Dockerfile --build-arg RECALL_SOURCE=source -t recall-server-ci .
           # The worker's image from source too: its own target, whose
           # binary stage is picked by the same argument.
-          docker build -f deploy/Dockerfile --target worker --build-arg RECALL_SOURCE=source -t recall-worker-ci .
+          # shellcheck disable=SC2086
+          docker buildx build --builder "$BUILDER" --load \
+            --cache-from type=gha,scope=recall-docker-source $cache_to \
+            -f deploy/Dockerfile --target worker --build-arg RECALL_SOURCE=source -t recall-worker-ci .
 
           rel="$RUNNER_TEMP/releases/v0.0.0-ci"
           mkdir -p "$rel"
-          # source-worker holds both binaries, as a release does.
-          docker build -f deploy/Dockerfile --target source-worker -t recall-server-bin .
+          # source-worker holds both binaries, as a release does. Its layers
+          # are already in the two builds above (the worker one reaches
+          # source-worker to get recall-worker), so this is cache-from only:
+          # nothing new to save.
+          docker buildx build --builder "$BUILDER" --load \
+            --cache-from type=gha,scope=recall-docker-source \
+            -f deploy/Dockerfile --target source-worker -t recall-server-bin .
           id=$(docker create recall-server-bin)
           for name in recall-server recall-worker; do
             docker cp "$id:/out/$name" "$rel/${name}_linux_amd64"
@@ -349,6 +444,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.os }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: cargo fmt
         run: cargo fmt --all --check
