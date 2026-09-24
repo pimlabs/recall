@@ -90,10 +90,12 @@ pub(super) const SCHEMA: &str = concat!(
 /// rebuilt table sees exactly what it wrote.
 ///
 /// A `worker` row is the exception to that, and why a rollback revokes the
-/// worker first (`deploy/README.md`): a server from before the scope knows
-/// only `admin` and everything else, and treats everything else as `sync`.
-/// To it, an unrevoked worker is a device that may pull and push every
-/// project's memory. A revoked one may do nothing on either.
+/// worker first (`deploy/README.md`). A server from before the scope that
+/// decides by `admin` alone treats everything else as `sync`: to it, an
+/// unrevoked worker is a device that may pull and push every project's
+/// memory. 0.4.1 guards against exactly this, refusing a device whose scope
+/// it does not know, so there a worker can do nothing; a revoked one can do
+/// nothing on any server.
 ///
 /// Guarded by the table's own definition rather than `PRAGMA
 /// user_version`: whether the constraint allows `worker` is exactly the

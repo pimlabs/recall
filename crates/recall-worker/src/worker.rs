@@ -110,7 +110,8 @@ pub enum Fatal {
     /// The owner approved it with a scope other than `worker`.
     #[error(
         "this device was approved with the {0} scope, not worker, so it cannot claim jobs. \
-         Revoke it, delete {1} and restart, then approve the new code with --scope worker"
+         Revoke it, delete {1} and restart, then approve the new code as a worker \
+         (recall devices approve <code> --worker)"
     )]
     WrongScope(String, String),
     /// The server no longer knows this device, or revoked it.
@@ -467,7 +468,9 @@ impl Worker {
             self.id.fingerprint()
         ));
         log(&format!(
-            "approve it from an admin device: recall devices approve {code} --scope worker"
+            "approve it from an admin device: recall devices approve {code} --worker \
+             --fingerprint {}",
+            self.id.fingerprint()
         ));
         log(&format!(
             "or with the operator token: POST /v1/devices/approve \

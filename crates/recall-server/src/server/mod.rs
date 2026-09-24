@@ -18,8 +18,12 @@
 //! own tests: `middleware.rs` (rate limiting, then the protocol check, then
 //! auth), `auth.rs` (device signatures and the replay cache),
 //! `handlers.rs` (one function per route), `devices.rs` (the device
-//! routes), `jobs.rs` (the merge queue's routes), `respond.rs` (the JSON shape of every reply, errors included)
-//! and `limit.rs` (the per-IP window the middleware consults).
+//! routes), `jobs.rs` (the merge queue's routes and its drain),
+//! `respond.rs` (the JSON shape of every reply, errors included), `limit.rs`
+//! (the per-IP window the middleware consults) and `tls.rs` (the direct-TLS
+//! accept loop, used only when `Config::tls` is on; plain HTTP, the default,
+//! never touches it). Both transports serve the one router
+//! [`Server::router`] builds, every route group and layer included.
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -40,6 +44,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
+use crate::config::TlsMode;
 use crate::merge::{Merger, Status};
 use crate::{format_timestamp, now, Config, Store};
 
@@ -50,6 +55,7 @@ mod jobs;
 mod limit;
 mod middleware;
 mod respond;
+mod tls;
 
 use auth::ReplayCache;
 use devices::{
@@ -427,18 +433,34 @@ impl Server {
         let listener = TcpListener::bind(&self.state.cfg.addr)
             .await
             .with_context(|| format!("binding {}", self.state.cfg.addr))?;
-        eprintln!(
-            "recall server listening on {} (db: {})",
-            self.state.cfg.addr, self.state.cfg.db_path
-        );
         self.serve_with_shutdown(listener, shutdown_signal()).await
     }
 
-    /// Serves on an already-bound listener until `shutdown` resolves.
+    /// Serves on an already-bound listener until `shutdown` resolves, in
+    /// whichever transport `cfg.tls` names (see `server/tls.rs`; plain HTTP,
+    /// the default, still goes through `axum::serve` directly, unchanged).
     pub async fn serve_with_shutdown<F>(&self, listener: TcpListener, shutdown: F) -> Result<()>
     where
         F: Future<Output = ()> + Send + 'static,
     {
+        // The certificate is loaded (or the ACME state built) before
+        // anything claims the server is up, so a bad path or an unreadable
+        // key is the last line in the log rather than one after
+        // "listening".
+        let transport = match &self.state.cfg.tls {
+            TlsMode::Off => None,
+            mode => Some(tls::prepare(mode).await?),
+        };
+        eprintln!(
+            "recall server listening on {} ({}, db: {})",
+            listener
+                .local_addr()
+                .map_or_else(|_| self.state.cfg.addr.clone(), |a| a.to_string()),
+            transport
+                .as_ref()
+                .map_or("plain http", tls::Prepared::description),
+            self.state.cfg.db_path
+        );
         let tasks = self.start_background();
         let state = self.state.clone();
         let shutdown = async move {
@@ -448,17 +470,30 @@ impl Server {
             state.closing.store(true, Ordering::Relaxed);
             state.jobs_ready.notify_waiters();
         };
-        let result = axum::serve(
-            listener,
-            self.router()
-                .into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(shutdown)
-        .await;
+        let result = match transport {
+            None => axum::serve(
+                listener,
+                self.router()
+                    .into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown)
+            .await
+            .map_err(Into::into),
+            Some(prepared) => {
+                // axum-server runs its own accept loop rather than
+                // axum::serve's, so the listener crosses over to std here.
+                // It is already non-blocking (tokio bound it), which is
+                // exactly what tokio::net::TcpListener::from_std, which
+                // axum-server calls internally, requires.
+                let listener = listener.into_std().context("preparing the TLS listener")?;
+                let limits = tls::Limits::from_config(&self.state.cfg);
+                tls::serve(self.router(), listener, prepared, limits, shutdown).await
+            }
+        };
         for task in tasks {
             task.abort();
         }
-        result.map_err(Into::into)
+        result
     }
 }
 

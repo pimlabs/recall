@@ -16,59 +16,6 @@ break will be described here in full rather than smoothed over.
 
 ## Unreleased
 
-- **The server enrols devices.** A machine can now be enrolled with a key
-  pair of its own and sign its requests (RFC 9421, Ed25519) instead of
-  sending `RECALL_TOKEN`: it asks `POST /v1/devices/enroll` for a short
-  code, the owner approves the code, and the machine is a device that can
-  be listed and revoked on its own. Cloud sessions can enrol with an
-  expiring authkey instead of a code. This release is the server
-  half; the client does not enrol yet, so nothing changes for a machine
-  until it does. See "Devices" in `docs/reference/api.md`.
-- **`RECALL_TOKEN` works exactly as before**, on every route, and is how
-  the first device is approved. Nothing that worked stops working.
-- **A device's pushes carry its own name.** A push a device signed is
-  stored with that device's name as `source_env`, whatever the push says,
-  so one machine cannot write as another. Pushes with `RECALL_TOKEN` keep
-  the name they send.
-- **New routes:** `POST /v1/devices/enroll`, `POST /v1/devices/enroll/poll`,
-  `GET /v1/devices/me` for a device to check the server knows it, and, for
-  the owner, `GET /v1/devices/pending/{user_code}` (what a code would
-  approve, name and key fingerprint, before approving it),
-  `POST /v1/devices/approve` (which can name the fingerprint it expects),
-  `POST /v1/devices/deny`, `GET /v1/devices`, `POST /v1/devices/{id}/revoke`,
-  `POST /v1/authkeys`, `GET /v1/authkeys` and
-  `POST /v1/authkeys/{id}/revoke`.
-- **Device names are plain and unique.** A name with control, format or
-  invisible characters (a zero-width space, a right-to-left override) is
-  refused, no two unrevoked devices share a name or names that read alike
-  (`Laptop`, or `lаptop` with a Cyrillic `а`, beside `laptop`), and a
-  device an authkey enrols is named by the server after the key's
-  tag. A name already taken is refused when its code is approved, not when
-  the machine enrols, so the unauthenticated enrol route says nothing about
-  which names exist.
-- **Authkeys** enrol ephemeral devices unless told otherwise, enrol
-  at most 25 unrevoked devices unless `max_devices` says otherwise, and can
-  be revoked together with every device they enrolled.
-- **`GET /admin/stats` needs the `admin` scope from a device.** Nothing
-  changes for `RECALL_TOKEN`, which is all anything uses today.
-- **Signed requests are checked before their body is read**, the
-  enrolment routes take 8 KiB bodies, one address may have five
-  enrolments waiting, and a signature dated up to five seconds after the
-  server started is refused, since the nonces that would catch its replay
-  went with the process before. A signature's `created` may be a minute
-  behind the server's clock but only five seconds ahead of it.
-- **The rate limit counts an IPv6 client by its /64**, on every route,
-  `/sync` included, rather than address by address, so one machine
-  cannot give itself a fresh bucket per request. An IPv4 address written
-  as IPv6 counts as the IPv4 address. Clients on IPv4 see no change.
-- **`GET /.well-known/recall` lists `device-sig-v1`** after `bearer` in
-  `auth.methods`, and a new `devices` capability.
-- **New setting: `RECALL_EPHEMERAL_DEVICE_TTL_HOURS`** (default 24). An
-  ephemeral device, one a cloud session enrolled with an ephemeral
-  authkey, is removed after that long without a signed request.
-- **Three new tables in the database**, `devices`, `device_enrollments`
-  and `authkeys`, created on start. `memory_files` is untouched, and an
-  older server ignores the new tables, so rolling back still works.
 - **Merging can move out of the server, into `recall-worker`.** A new
   binary and a second compose service with no port at all: an enrolled
   device with a new `worker` scope, which claims conflicting pushes from
@@ -129,14 +76,140 @@ break will be described here in full rather than smoothed over.
   `merge_worker_seen_at`.
 - **`POST /v1/devices/approve` accepts `"scope": "worker"`**, and its
   refusal of an unknown scope now says `scope must be sync, admin or
-  worker`.
+  worker`. `recall devices approve <code> --worker` approves one.
 - **Two database changes, both made on start:** a `jobs` table, and the
   `devices` table rebuilt so its scope may be `worker`, keeping every row.
-  An older server ignores `jobs`, but reads a worker as an ordinary `sync`
-  device, one that may pull and push memory: **revoke the worker before
-  rolling back** past this release.
+  0.4.1 ignores `jobs` and refuses a worker device, whose scope it does
+  not know, so rolling back to it still works; revoke the worker first
+  all the same (see "Revoking it" in `deploy/README.md`).
 - **Releases publish `recall-worker`** for Linux amd64 and arm64, static,
   beside `recall-server`, in the same `checksums.txt`, and on crates.io.
+
+## 0.4.1 — 2026-09-23
+
+0.4.0 was tagged but never published: its release build stopped at a
+packaging check before anything reached a registry or a server. Everything
+listed under 0.4.0 below ships for the first time in this release, together
+with what is listed here.
+
+
+- **`recall connect` enrols this machine as a device** when the server
+  supports it (this release's server does). It makes an Ed25519 key pair,
+  shows a code and the key's fingerprint, and is approved either from a
+  machine already enrolled as admin (`recall devices approve <code>`) or,
+  for your first machine, with the server's `RECALL_TOKEN` after asking,
+  which makes it an admin device. From then on the machine signs every
+  request and sends no token, and the token `connect` had saved in
+  `~/.recall/credentials.toml` is removed; it still works on the server.
+  `--yes` and `--name` still work for scripts. Against an older server,
+  `connect` saves the token exactly as before.
+- **The device key is a file, `~/.recall/device.key`**, created readable by
+  you only, one key per server. Not the OS keychain: a hook runs on every
+  memory write and must never stop for a keychain dialog, which macOS shows
+  after an upgrade. `recall disconnect` removes it too. A hook that finds
+  it readable by other users makes it yours alone and says so, and a write
+  to `~/.recall` narrows the directory to `0700` if it was wider.
+- **A `device.key` that cannot be read stops the hooks** with a line
+  saying so, rather than sending `RECALL_TOKEN` in its place; `recall
+  connect` refuses until it is fixed or moved aside, and `recall doctor`
+  fails it.
+- **Cloud sessions enrol themselves with `RECALL_AUTHKEY`.** Set an
+  authkey on the cloud environment instead of `RECALL_TOKEN`, and
+  each session's first `recall pull` enrols it (approved at once,
+  ephemeral) and carries on. Nothing is typed, and a failure falls back to
+  `RECALL_TOKEN` or leaves memory untouched, as a pull always has.
+- **A swept cloud session enrols again by itself** when `RECALL_AUTHKEY`
+  is set: a hook refused as "unknown device" with an ephemeral key enrols
+  once, replacing that server's key only, and retries. Hooks that start at
+  once enrol one device between them. **A revoked device is never enrolled
+  again by a hook**, authkey or not: the hook says so, keeps the key, and
+  the session still starts, so revoking a device cuts that machine off.
+  A lasting device the server does not know, and any machine without an
+  authkey, is told to run `recall connect`.
+- **`recall connect` checks a device key it holds** with the server
+  whatever the discovery document says, and never falls back to saving
+  `RECALL_TOKEN` for a server it has a device key for; a discovery
+  document that fails, other than with a `404`, stops it as unreachable.
+- **Redirects are not followed.** A `3xx` from the server is reported as
+  "the server redirected to …; update RECALL_URL", and nothing, the body
+  included, is sent where it pointed.
+- **New command: `recall devices`.** `list` (scope, ephemeral, last seen,
+  agent), `approve <code>` (shows the machine's name, agent and fingerprint
+  and asks first; `--fingerprint` refuses a key with any other, `--admin`
+  gives the admin scope) and `revoke <name>`. `--yes` and `--json` for
+  scripts.
+- **New command: `recall authkey`.** `create --tag cloud --expires 90d`
+  (the key is shown once), `list` and `revoke <id>` (`--revoke-devices`
+  revokes what it enrolled too), with `--json`.
+- **`recall doctor` reports the device**: its name, scope and where its
+  key lives, checked with the server. It warns while a machine the server
+  could enrol still uses the shared token, and while a token is kept that
+  an enrolled machine no longer sends. `RECALL_TOKEN` unset is no longer a
+  failure on a machine with a device key or `RECALL_AUTHKEY`.
+- **`recall status --json` gains** `auth` (`device`, `bearer` or `none`),
+  `device` (id, name, scope, ephemeral, key storage and file, and whether
+  the server confirmed it), `device_file`, `device_error`,
+  `device_file_exposed`, `authkey_set` and `server_devices`. Every
+  existing field is unchanged: a device key that cannot be used is
+  reported in `device_error`, and `server_ok` still says only whether
+  `GET /health` answered.
+
+- **The server enrols devices.** A machine can now be enrolled with a key
+  pair of its own and sign its requests (RFC 9421, Ed25519) instead of
+  sending `RECALL_TOKEN`: it asks `POST /v1/devices/enroll` for a short
+  code, the owner approves the code, and the machine is a device that can
+  be listed and revoked on its own. Cloud sessions can enrol with an
+  expiring authkey instead of a code. See "Devices" in
+  `docs/reference/api.md`.
+- **`RECALL_TOKEN` works exactly as before**, on every route, and is how
+  the first device is approved. Nothing that worked stops working.
+- **A device's pushes carry its own name.** A push a device signed is
+  stored with that device's name as `source_env`, whatever the push says,
+  so one machine cannot write as another. Pushes with `RECALL_TOKEN` keep
+  the name they send.
+- **New routes:** `POST /v1/devices/enroll`, `POST /v1/devices/enroll/poll`,
+  `GET /v1/devices/me` for a device to check the server knows it, and, for
+  the owner, `GET /v1/devices/pending/{user_code}` (what a code would
+  approve, name and key fingerprint, before approving it),
+  `POST /v1/devices/approve` (which can name the fingerprint it expects),
+  `POST /v1/devices/deny`, `GET /v1/devices`, `POST /v1/devices/{id}/revoke`,
+  `POST /v1/authkeys`, `GET /v1/authkeys` and
+  `POST /v1/authkeys/{id}/revoke`.
+- **Device names are plain and unique.** A name with control, format or
+  invisible characters (a zero-width space, a right-to-left override) is
+  refused, no two unrevoked devices share a name or names that read alike
+  (`Laptop`, or `lаptop` with a Cyrillic `а`, beside `laptop`), and a
+  device an authkey enrols is named by the server after the key's
+  tag. A name already taken is refused when its code is approved, not when
+  the machine enrols, so the unauthenticated enrol route says nothing about
+  which names exist.
+- **Authkeys** enrol ephemeral devices unless told otherwise, enrol
+  at most 25 unrevoked devices unless `max_devices` says otherwise, and can
+  be revoked together with every device they enrolled.
+- **A device whose scope the server does not know is refused** (403),
+  rather than treated as a `sync` device. A later version adds scopes
+  that must not reach memory; if the server is ever rolled back to this
+  one, such a device can do nothing until it is revoked.
+- **`GET /admin/stats` needs the `admin` scope from a device.** Nothing
+  changes for `RECALL_TOKEN`, which is all anything uses today.
+- **Signed requests are checked before their body is read**, the
+  enrolment routes take 8 KiB bodies, one address may have five
+  enrolments waiting, and a signature dated up to five seconds after the
+  server started is refused, since the nonces that would catch its replay
+  went with the process before. A signature's `created` may be a minute
+  behind the server's clock but only five seconds ahead of it.
+- **The rate limit counts an IPv6 client by its /64**, on every route,
+  `/sync` included, rather than address by address, so one machine
+  cannot give itself a fresh bucket per request. An IPv4 address written
+  as IPv6 counts as the IPv4 address. Clients on IPv4 see no change.
+- **`GET /.well-known/recall` lists `device-sig-v1`** after `bearer` in
+  `auth.methods`, and a new `devices` capability.
+- **New setting: `RECALL_EPHEMERAL_DEVICE_TTL_HOURS`** (default 24). An
+  ephemeral device, one a cloud session enrolled with an ephemeral
+  authkey, is removed after that long without a signed request.
+- **Three new tables in the database**, `devices`, `device_enrollments`
+  and `authkeys`, created on start. `memory_files` is untouched, and an
+  older server ignores the new tables, so rolling back still works.
 - **`recall-server admin`: rename, remove or restore a project from the
   server's host.** `list` shows every project key with its files, tombstones
   and last update (or one key's files, or what a backup holds, with
@@ -161,8 +234,21 @@ break will be described here in full rather than smoothed over.
   among the good ones.
   Nothing else about the server changed, and `recall-server` with no
   arguments still serves.
+- **`recall-server` can terminate TLS itself now**, for a machine with no
+  ingress in front of it: `RECALL_TLS_CERT`/`RECALL_TLS_KEY` for a
+  certificate already on disk, or `RECALL_TLS_ACME_DOMAINS`/
+  `RECALL_TLS_ACME_EMAIL` for one it gets and renews on its own from Let's
+  Encrypt. Off by default; the two existing ingress-based deployments are
+  unaffected. See `deploy/README.md` and `deploy/docker-compose.direct.yml`.
+  With TLS on, the server hardens its own connections the way an ingress
+  otherwise would: a cap on open connections (`RECALL_TLS_MAX_CONNECTIONS`,
+  default 512), and deadlines for the TLS handshake, request headers and
+  idle connections. `RECALL_TLS_REQUIRED=true`, which the direct compose
+  file sets, refuses to start without TLS rather than falling back to plain
+  HTTP. A certificate from files is reloaded on `SIGHUP` and every 12
+  hours.
 
-## 0.4.0 — 2026-09-23
+## 0.4.0 — 2026-09-23 (tagged, never published; shipped in 0.4.1)
 
 - **Breaking: the server is its own binary, `recall-server`.** `recall serve`
   is gone from the client; typing it now says where the server went and

@@ -207,11 +207,21 @@ can choose, and choosing your own bucket defeats the limit. It is trustworthy
 only because the container has no published port, so every request really
 does arrive through that ingress.
 
-An IPv6 address is counted as its /64, the least a provider gives one
-subscriber: every address in it is one client's to send from, so counting
-each alone would hand one machine as many buckets as it liked. An IPv4
-address written as IPv6 (`::ffff:198.51.100.4`) is counted as the IPv4
-address. The cap on enrolments waiting from one address counts the same way.
+`recall-server`'s own direct-TLS mode (`RECALL_TLS_CERT`/`RECALL_TLS_KEY`, or
+`RECALL_TLS_ACME_DOMAINS`) has no ingress at all, so no header is read there
+either: the client's address comes straight from the TCP connection, and the
+server refuses to start if `RECALL_TRUSTED_IP_HEADER` names a header alongside
+it (set empty, meaning "trust none", it is allowed). That address is only as
+good as the port publishing in front of it: see `deploy/README.md` on rootless
+Docker and IPv6.
+
+Whether it came from the header or the connection, an IPv6 address is
+counted as its /64, the least a provider gives one subscriber: every address
+in it is one client's to send from, so counting each alone would hand one
+machine as many buckets as it liked. An IPv4 address written as IPv6
+(`::ffff:198.51.100.4`, which is how a dual-stack listener sees an IPv4 peer)
+is counted as the IPv4 address. The cap on enrolments waiting from one
+address counts the same way.
 
 ## Protocol and client identity
 

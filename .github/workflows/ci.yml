@@ -100,6 +100,15 @@ jobs:
           cargo build --release -p recall-server --locked
           ./scripts/trusted-ip-check.sh target/release/recall-server
 
+      # Same property, direct TLS: with no ingress in front and
+      # RECALL_TRUSTED_IP_HEADER left unset, does the rate limiter still key
+      # on the real socket peer over an actual TLS handshake? Runs against a
+      # self-signed certificate generated in the script itself — no ACME, no
+      # network dependency, since the client-IP rule is what this checks,
+      # not certificate issuance.
+      - name: Rate-limit bucket cannot be chosen by the client, over direct TLS
+        run: ./scripts/tls-trusted-ip-check.sh target/release/recall-server
+
       # The Worker that publishes recall.pimlabs.id/install. Its routing is
       # easy to get subtly wrong in ways no one would notice: a redirect
       # where a 410 belongs would forward a stale client's POST /sync to a
@@ -131,6 +140,7 @@ jobs:
           bash -n scripts/compat-check.sh
           bash -n scripts/api-doc-check.sh
           bash -n scripts/trusted-ip-check.sh
+          bash -n scripts/tls-trusted-ip-check.sh
           bash -n scripts/release.sh
           bash -n deploy/backup-offbox.sh
           bash -n scripts/backup-offbox-check.sh

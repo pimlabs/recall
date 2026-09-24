@@ -23,15 +23,16 @@ nothing here changes except where you run it.
 
 ## Which ingress
 
-Two compose files, same server, same image, same volume:
+Three compose files, same server, same image, same volume:
 
 | File | Ingress | Use it when |
 |---|---|---|
 | `docker-compose.yml` | Cloudflare Tunnel | The machine runs nothing else public. Brings its own ingress and needs no open ports. |
 | `docker-compose.traefik.yml` | An existing Traefik | The machine already routes other services through Traefik. One ingress you understand beats a second one you have to remember. |
+| `docker-compose.direct.yml` | None — the server terminates TLS itself | The machine has no ingress at all and you would rather not add one just for this. |
 
-Whichever you pick, two properties have to hold together, and neither is
-optional:
+The first two put something else in front of the container and have two
+properties that have to hold together, neither optional:
 
 1. **The container has no published port.** Both files use `expose`, never
    `ports`. The origin must be unreachable except through the ingress.
@@ -46,6 +47,16 @@ attempts at guessing the token. Exactly one header is read, so anything sent
 under another name is ignored — but only the missing `ports:` keeps the
 ingress in the path at all.
 
+**`docker-compose.direct.yml` is a different model, not a variant of the
+above.** There is no ingress, so the container's port *is* published, and
+`RECALL_TRUSTED_IP_HEADER` is deliberately left unset: with nothing in front
+of the server, the only address that isn't the client's own choosing is the
+one the TCP connection itself arrived from, so the server reads that
+instead. Setting the variable anyway is refused at startup rather than
+silently ignored — see `crates/recall-server/src/config.rs` and
+`scripts/tls-trusted-ip-check.sh`, which proves the same property this
+section proves for the other two, on a real TLS socket.
+
 Running Recall directly on the host instead of in a container is a worse
 trade than it looks: the semantic merge shells out to the `claude` CLI, which
 is a Node package, so "just one Rust binary" is not what gets installed. The
@@ -55,7 +66,7 @@ running as non-root over a pre-existing root-owned volume, and rollback.
 
 ## Prerequisites
 
-Both ingresses need:
+All three need:
 
 - **Docker Engine with Compose v2** (`docker compose`, not the old
   `docker-compose`). Any distribution of it will do.
@@ -90,6 +101,12 @@ five-minute smoke test.
 The Traefik option needs a Traefik already running on that machine, and a DNS
 record for your chosen hostname pointing at it. Set the DNS up first —
 Let's Encrypt cannot issue a certificate until it resolves.
+
+The direct-TLS option needs port 443 free on that machine (nothing else
+already bound to it) and, for its ACME sub-mode, the same DNS-first rule as
+Traefik above — `recall-server` cannot get a certificate for a hostname that
+does not resolve to it yet. Its `RECALL_TLS_CERT`/`RECALL_TLS_KEY` sub-mode
+needs no DNS at all, since it never talks to a certificate authority itself.
 
 ## 1. Set up the ingress
 
@@ -130,6 +147,148 @@ own header comment says the same thing; this is how to find each one.
 3. **The hostname** in `traefik.http.routers.recall.rule: Host(...)`. It has
    to match what `RECALL_URL` will be on every client.
 
+### If you are using direct TLS
+
+Nothing to create up front, but the trade-offs are worth reading before you
+pick this over the other two:
+
+- **Certificate renewal lives inside `recall-server` itself**, not in a
+  separate tool you have to remember to keep running. Two ways to give it a
+  certificate, both off unless configured, and configuring both — or half of
+  either — is a startup error:
+  - **`RECALL_TLS_CERT` + `RECALL_TLS_KEY`** point at a PEM certificate and
+    key already on disk (a bind mount into the container), kept renewed by
+    something else — certbot, a script, a certificate copied out of another
+    Traefik. The server never writes to these files. It reads them at
+    startup, again on `SIGHUP`, and every 12 hours regardless, swapping in
+    the new pair only if it changed and loads cleanly (a half-written or
+    mismatched pair is logged and the old certificate keeps serving). See
+    [Certificates from certbot](#certificates-from-certbot) for mounting
+    them.
+  - **`RECALL_TLS_ACME_DOMAINS` + `RECALL_TLS_ACME_EMAIL`** ask the server to
+    get and renew its own certificate from Let's Encrypt, over TLS-ALPN-01 —
+    the challenge is answered on the same port the server already listens
+    on, so nothing else needs port 80 or a separate ACME client. The DNS for
+    every domain listed must already point at this machine before the first
+    run, and the issued certificate is cached under `RECALL_TLS_ACME_DIR`
+    (default `/data/acme`, inside the same named volume as the database, so
+    it survives rebuilds; the server keeps that directory `0700` and its
+    files `0600`, since it holds the ACME account key and the certificate's
+    private key). `RECALL_TLS_ACME_STAGING=true` (or `1`/`yes`, any case)
+    switches to Let's Encrypt's staging directory, for testing without
+    burning the real rate limit — its certificate is not one any real client
+    will trust; any value that is not a yes or a no refuses to start rather
+    than silently meaning production. Wildcard domains are refused at
+    startup (TLS-ALPN-01 cannot validate them). A failed order is logged
+    with its attempt number and when the next retry is (one second,
+    doubling up to about 18 hours); a certificate already issued keeps
+    serving until it expires, so watch the log for `acme: certificate order
+    failed`.
+- **It fails closed.** `docker-compose.direct.yml` sets
+  `RECALL_TLS_REQUIRED=true`, so if its TLS variables ever arrive missing or
+  empty the server refuses to start instead of serving the bearer token over
+  plain HTTP on a published port. It also sets `RECALL_TRUSTED_IP_HEADER`
+  explicitly empty ("trust no header"), which is what TLS forces anyway;
+  naming a header there while TLS is on refuses to start.
+- **Port 443 is exposed directly to whatever can reach this machine.** The
+  other two files never publish a port at all; this one has to, since there
+  is no ingress to publish it for. `docker-compose.direct.yml` runs
+  `recall-server` on an unprivileged internal port and maps only `443` on the
+  host to it, so the process itself never needs root or a Linux capability
+  to bind a privileged port.
+- **The published port has to preserve each client's address.** The rate
+  limiter keys on it, and with no ingress there is nothing else to key on.
+  Docker's normal publish (rootful Docker, iptables DNAT) preserves it.
+  Two setups do not, and in both every client lands in one shared
+  rate-limit bucket, so one abusive client locks out everyone, the owner
+  included:
+  - **Rootless Docker.** Its port forwarding makes every connection appear
+    to come from inside the container's network. Use rootful Docker for
+    this file.
+  - **IPv6 without IPv6 on the Docker network.** Docker then forwards IPv6
+    connections through its userland proxy, and every IPv6 client appears
+    as the bridge gateway. That is why `docker-compose.direct.yml` publishes
+    on `0.0.0.0` only; the cost is that IPv6-only clients cannot connect.
+    To serve IPv6 too, enable IPv6 on the compose network (and ip6tables
+    in the daemon) and add a `[::]:443:8443` publish.
+
+#### What an ingress did that this mode now does itself, and what it doesn't
+
+Behind Cloudflare Tunnel or Traefik, the ingress is what faces the internet:
+it holds the idle and half-open connections, times out slow clients, and
+only ever hands `recall-server` complete requests. With direct TLS,
+`recall-server` does that itself (`crates/recall-server/src/server/tls.rs`):
+
+- **A connection cap**, counting connections still in their TLS handshake:
+  `RECALL_TLS_MAX_CONNECTIONS`, default 512. Past it, a new connection is
+  closed as soon as it is accepted, and the refusals are logged at most once
+  a minute. The compose file sets `nofile` to 8192 so the cap, not the
+  process's file-descriptor limit, is what a flood runs into.
+- **A 10-second TLS handshake deadline**, in both modes.
+- **A 15-second deadline for an HTTP/1 request's headers**, which also
+  closes a keep-alive connection left idle that long (slowloris).
+- **A 30-second idle deadline** for a connection with no request in flight:
+  one that finishes the handshake and then sends nothing, or an HTTP/2
+  connection with no stream open. HTTP/2 connections are also pinged every
+  20 seconds and dropped if the ping goes unanswered for 10.
+- **A ceiling on a single request**: the merge timeout plus a minute, from
+  its headers to the last byte of its response, after which the idle
+  deadline applies again, so a client that stops reading its response
+  cannot hold the connection forever.
+
+What it still does not do:
+
+- **No DDoS absorption.** A flood big enough to fill the connection cap, or
+  the machine's bandwidth, takes the server off the air for its duration,
+  the owner's own clients included; an edge network like Cloudflare's
+  absorbs that before it reaches the machine. The cap keeps the process
+  alive and responsive to what it does accept, nothing more.
+- **No per-address connection limit.** One client address can use every
+  slot under the cap; the per-address rate limit applies to requests, not
+  to connections.
+- **No request filtering, bot detection or geo-blocking**, and no hiding the
+  machine's address: its IP is in DNS for anyone to find.
+
+If any of that matters for your machine, put an ingress in front and use one
+of the other two files instead.
+
+#### Certificates from certbot
+
+`RECALL_TLS_CERT`/`RECALL_TLS_KEY` need both files readable by the
+container's `node` user (uid 1000), and neither of the obvious mounts gives
+that:
+
+- `/etc/letsencrypt/live/<domain>` mounted on its own: the files there are
+  symlinks into `../../archive/`, which does not exist inside the container.
+- `/etc/letsencrypt` mounted whole: the links resolve, but certbot keeps
+  every `privkey.pem` readable by root only, so the server cannot read it.
+
+Copy them out instead, with a deploy hook that runs after every renewal.
+Save this as `/etc/letsencrypt/renewal-hooks/deploy/recall.sh` and make it
+executable:
+
+```sh
+#!/bin/sh
+# Copies the renewed certificate somewhere the recall-server container can
+# read it, with the key private to that container's user, then tells the
+# server to reload it.
+set -e
+install -d -m 0700 -o 1000 -g 1000 /srv/recall-certs
+install -m 0644 -o 1000 -g 1000 "$RENEWED_LINEAGE/fullchain.pem" /srv/recall-certs/fullchain.pem
+install -m 0600 -o 1000 -g 1000 "$RENEWED_LINEAGE/privkey.pem" /srv/recall-certs/privkey.pem
+docker kill -s HUP recall-server
+```
+
+Run it once by hand for the first copy (`sudo RENEWED_LINEAGE=/etc/letsencrypt/live/<domain>
+sh /etc/letsencrypt/renewal-hooks/deploy/recall.sh`; the `docker kill` fails
+harmlessly if the container is not up yet), then mount
+`/srv/recall-certs:/certs:ro` and set `RECALL_TLS_CERT: /certs/fullchain.pem`
+and `RECALL_TLS_KEY: /certs/privkey.pem`, as the comment in
+`docker-compose.direct.yml` shows. The server logs `tls: reloaded
+certificate` when the signal lands; without the signal it still picks the
+new files up within 12 hours. It warns at startup if the key is readable by
+anyone but its owner: keep it `0600`, owned by uid 1000.
+
 ## 2. Configure secrets
 
 ```sh
@@ -138,10 +297,15 @@ cp .env.example .env
 ```
 
 Fill in `.env`:
-- `RECALL_TOKEN` — generate with `openssl rand -hex 32`. Required for both
-  ingresses.
+- `RECALL_TOKEN` — generate with `openssl rand -hex 32`. Required for all
+  three.
 - `CLOUDFLARE_TUNNEL_TOKEN` — the token copied in step 1.3. **Cloudflare
-  only**; leave it empty with Traefik.
+  only**; leave it empty otherwise.
+- `RECALL_TLS_ACME_DOMAINS`, `RECALL_TLS_ACME_EMAIL`, `RECALL_TLS_ACME_STAGING`
+  — **direct TLS only**, and only for the ACME sub-mode described above; leave
+  them empty otherwise. Switching to the `RECALL_TLS_CERT`/`RECALL_TLS_KEY`
+  sub-mode instead needs its own volume mount, which isn't in `.env` — see the
+  comments in `docker-compose.direct.yml`.
 
 `.env` is gitignored — never commit it.
 
@@ -161,6 +325,14 @@ An existing Traefik:
 cd deploy
 docker compose -f docker-compose.traefik.yml up -d --build
 docker compose -f docker-compose.traefik.yml logs -f
+```
+
+Direct TLS:
+
+```sh
+cd deploy
+docker compose -f docker-compose.direct.yml up -d --build
+docker compose -f docker-compose.direct.yml logs -f
 ```
 
 The first build takes a minute or two, most of it installing the `claude`
@@ -617,7 +789,9 @@ files behind a profile, `worker`, and `docker compose up` leaves it alone
 until `deploy/.env` names that profile (step 1).
 
 `scripts/compose-check.py` asserts each of those in both compose files, and
-CI runs it.
+CI runs it. `docker-compose.direct.yml` has no worker service: there the
+server terminates TLS for its public name only, and a worker beside it
+has no private way in.
 
 What that buys, and what it does not: a compromise of the server process
 no longer reaches the `claude` login, once the server's own copy is removed
@@ -654,7 +828,13 @@ docker compose logs recall-worker
 ```
 
 Approve that code with the `worker` scope, naming the fingerprint so only
-that key can be approved. From the host, with the operator token:
+that key can be approved. From a machine enrolled as an admin device:
+
+```sh
+recall devices approve WDJB-MJHT --worker --fingerprint SHA256:…
+```
+
+or from the host, with the operator token:
 
 ```sh
 curl -sS -X POST "https://recall.yourdomain.com/v1/devices/approve" \
@@ -777,12 +957,15 @@ takes the login off the container the internet reaches, at the cost of the
 fallback degrading to last-write-wins.
 
 Rolling back to a release from before the worker: **revoke the worker
-first**, on the newer server, before starting the older one. The older
-server has no `worker` scope, and reads a worker as an ordinary `sync`
-device, which may pull and push every project's memory; revoked, it may do
-nothing on either. Then roll back, and `docker compose up -d
---remove-orphans` stops the worker's container, which the older compose
-file has no service for. The older server ignores the queue's table.
+first**, on the newer server, before starting the older one. 0.4.1 has no
+`worker` scope and refuses a device whose scope it does not know, so an
+unrevoked worker can do nothing there either; but a server without that
+guard would read it as an ordinary `sync` device, which may pull and push
+every project's memory, and revoked, it is refused everywhere. Then roll
+back, and `docker compose up -d --remove-orphans` stops the worker's
+container, which the older compose file has no service for. The older
+server ignores the queue's table, and a merge still waiting in it is not
+made.
 
 ## Renaming, removing or restoring a project
 
@@ -805,7 +988,7 @@ and the only way to reach it is a shell on this machine.
 Run it as `node`, the user the server runs as. `docker exec` runs as root
 unless told otherwise, and the commands refuse to change the database as
 anyone but its owner: a root-owned journal left behind by a crash is a file
-the server cannot open. Both compose files name the container
+the server cannot open. All three compose files name the container
 `recall-server`, so this works from any directory, whichever file you
 deployed with:
 
@@ -1007,7 +1190,9 @@ Two read-oriented views come up with `docker compose up -d` alongside the
 server, both for the owner's own use:
 
 - **sqlite-web** (`coleifer/sqlite-web`) mounts the `recall-data` volume
-  read-only and browses the live `recall.db` at
+  read-only (with direct TLS, just the `recall.db` file out of it, since the
+  volume also holds the ACME cache's private keys) and browses the live
+  `recall.db` at
   `http://localhost:8081` — but **only on the machine running Docker**,
   since its port is bound to `127.0.0.1` on purpose, never exposed
   through the Cloudflare tunnel. From another machine, tunnel over SSH
