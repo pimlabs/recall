@@ -128,29 +128,51 @@ pub async fn pull() -> anyhow::Result<i32> {
             eprintln!("recall-pull: fetch failed ({err}), leaving local memory untouched")
         }
     }
-    warn_if_rewritten(&cfg);
+    audit_notes(&cfg);
     Ok(exit::OK)
 }
 
-/// Says so at every session start while this machine holds a finding that
-/// the server's audit log no longer extends a checkpoint it saved: loud,
-/// and still exit 0, since a hook must not be what stops a session. Only
-/// reads the file; the pull itself saved its checkpoint through the
+/// What a session start is told about this machine's witness of the
+/// server's audit log, in a line each, and still exit 0, since a hook must
+/// not be what stops a session: a rewrite found, a record that cannot be
+/// read (it may be the only one of a rewrite), checkpoints dropped
+/// unchecked, and, as a nudge, more than a handful waiting to be checked.
+/// Only reads the file; the pull itself saved its checkpoint through the
 /// client, and checking is `recall doctor`'s (see `recall_hooks::audit`).
-fn warn_if_rewritten(cfg: &recall_hooks::ClientConfig) {
+fn audit_notes(cfg: &recall_hooks::ClientConfig) {
+    use recall_hooks::audit::{Witness, NUDGE_AFTER};
     let Some(file) = &cfg.audit_file else {
         return;
     };
-    let witness = recall_hooks::audit::Witness::new(file, &cfg.url);
-    if let Ok(recall_hooks::audit::Saved {
-        inconsistent: Some(found),
-        ..
-    }) = witness.load()
-    {
+    if cfg.url.is_empty() {
+        return;
+    }
+    let saved = match Witness::new(file, &cfg.url).load() {
+        Ok(saved) => saved,
+        Err(e) => {
+            eprintln!(
+                "recall-pull: WARNING: {e}; it may hold the only record of a rewrite of the \
+                 server's audit log. Run recall doctor."
+            );
+            return;
+        }
+    };
+    if let Some(found) = &saved.inconsistent {
         eprintln!(
             "recall-pull: WARNING: the server's audit log no longer extends a checkpoint this \
              machine saved ({}), found {}. Run recall doctor.",
             found.detail, found.found_at
+        );
+    } else if saved.dropped > 0 {
+        eprintln!(
+            "recall-pull: WARNING: {} audit checkpoint(s) were dropped before they were \
+             checked. Run recall doctor.",
+            saved.dropped
+        );
+    } else if saved.unchecked.len() > NUDGE_AFTER {
+        eprintln!(
+            "recall-pull: {} audit checkpoints wait to be checked; recall doctor checks them",
+            saved.unchecked.len()
         );
     }
 }

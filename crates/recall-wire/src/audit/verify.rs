@@ -41,6 +41,14 @@
 //! what was typed, which a keyboard composes; the difference is written
 //! down rather than paid for with those tables in every client.
 //!
+//! Two more, both where this module is the stricter and the server never
+//! writes what they turn on: `"seq":-0`, which Python reads as the integer
+//! 0 and `serde_json` as a float, so this refuses the leaf as having no
+//! integer `seq`; and a lone surrogate escape such as `"\ud800"`, which
+//! Python's `json` decodes into a string and `serde_json` refuses as not
+//! JSON. Each is refused here and accepted there, never the other way
+//! round.
+//!
 //! Every check is pinned by a test that fails without it: see
 //! `verify_tests.rs`, and the server's `tests/audit.rs`, which runs this
 //! beside the script over every forgery it knows.
@@ -1155,16 +1163,29 @@ fn py_truthy(value: &Value) -> bool {
     }
 }
 
-/// Python's `==` between what a body asked for and the subject's integer:
-/// numbers by value, a boolean as 0 or 1, anything else unequal.
+/// Python's `==` between what a body asked for and the subject's integer,
+/// exactly: an integer by its value, never through a float, so 2^53 + 1 is
+/// not 2^53; a float only when it is a whole number a `u64` can hold, as
+/// Python compares `3.0 == 3`; a boolean as 0 or 1; anything else unequal.
+/// A JSON integer past `u64` reaches here as a float, and never equals a
+/// subject, which is at most `u64::MAX`.
 fn py_number_eq(asked: &Value, subject: &Value) -> bool {
-    let as_number = |v: &Value| match v {
-        Value::Bool(b) => Some(f64::from(u8::from(*b))),
-        Value::Number(n) => n.as_f64(),
-        _ => None,
+    let Some(s) = subject.as_u64() else {
+        return false;
     };
-    match (as_number(asked), subject.as_u64()) {
-        (Some(a), Some(s)) => a == s as f64,
+    match asked {
+        Value::Bool(b) => u64::from(*b) == s,
+        Value::Number(n) => match (n.as_u64(), n.as_i64(), n.as_f64()) {
+            (Some(a), _, _) => a == s,
+            // A negative integer: no subject is one.
+            (None, Some(_), _) => false,
+            (None, None, Some(f)) => {
+                f.fract() == 0.0
+                    && (0.0..18_446_744_073_709_551_616.0).contains(&f)
+                    && f as u64 == s
+            }
+            _ => false,
+        },
         _ => false,
     }
 }

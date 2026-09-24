@@ -704,33 +704,70 @@ fn offbox_finding(rep: &Report, out: &mut Vec<Finding>) {
 /// machine saved: the plan's "`recall doctor` asks for a consistency proof
 /// from it to the current tree and fails loudly without one".
 ///
-/// A rewrite found, now or earlier, fails until `recall audit reset`, and
-/// so does a server that answered without a proof, or that no longer keeps
-/// the log it was witnessed keeping. A server that could not be asked only
-/// warns: nothing about its log follows from that.
+/// It fails on a rewrite found, now or earlier, until `recall audit
+/// reset`; on an `audit.json` it cannot read, which may hold the only
+/// record of one; on a server that answered without a proof, or no longer
+/// keeps the log it was witnessed keeping; on checkpoints dropped unchecked;
+/// and on checks that have gone unanswered for too long (the oldest
+/// waiting [`recall_hooks::audit::STALE_DAYS`] days, or
+/// [`recall_hooks::audit::UNANSWERED_LIMIT`] checks in a row). A server
+/// that did not answer this once only warns, and so do checkpoints that
+/// were not checked this time: nothing about the log follows from either,
+/// yet.
 fn audit_finding(rep: &Report, out: &mut Vec<Finding>) {
+    use recall_hooks::audit::{STALE_DAYS, UNANSWERED_LIMIT};
     const CHECK: &str = "audit log";
     let Some(audit) = &rep.audit else {
         return;
     };
     if let Some(found) = &audit.inconsistent {
+        let unsaved = match &audit.unsaved {
+            Some(why) => format!(" (and it could not be written into audit.json: {why})"),
+            None => String::new(),
+        };
         out.push(fail(
             CHECK,
             format!(
-                "the server's log no longer extends a checkpoint saved here (found {}): {}",
+                "the server's log no longer extends a checkpoint saved here (found {}): {}{unsaved}",
                 found.found_at, found.detail
             ),
             crate::audit::AFTER_A_REWRITE,
         ));
         return;
     }
-    if let Some(why) = &audit.unproven {
+    if let Some(why) = &audit.file_error {
         out.push(fail(
             CHECK,
             format!(
-                "the server did not prove its log extends the checkpoints saved here: {why}"
+                "{why}; it may hold the only record of a rewrite, so nothing is checked or \
+                 saved until it can be read"
             ),
-            "recall audit verify; if it persists, recall audit export -o audit.jsonl and              recall audit verify audit.jsonl",
+            format!(
+                "look at {} first; move it aside only once you know what it held",
+                audit.file
+            ),
+        ));
+        return;
+    }
+    if let Some(why) = &audit.unproven {
+        out.push(fail(
+            CHECK,
+            format!("the server did not prove its log extends the checkpoints saved here: {why}"),
+            "recall audit verify; if it persists, recall audit export -o audit.jsonl and \
+             recall audit verify audit.jsonl",
+        ));
+        return;
+    }
+    if audit.dropped > 0 {
+        out.push(fail(
+            CHECK,
+            format!(
+                "{} checkpoint(s) were dropped before they were checked, a gap a rewrite could \
+                 go unseen in",
+                audit.dropped
+            ),
+            "recall audit verify checks the rest; recall audit reset once you have decided \
+             to trust the log as it is",
         ));
         return;
     }
@@ -743,13 +780,46 @@ fn audit_finding(rep: &Report, out: &mut Vec<Finding>) {
             out.push(fail(
                 CHECK,
                 format!(
-                    "the server keeps no audit log, and this machine saved {saved}                      checkpoint(s) of one: a server that went back to before 0.4.2 lost it"
+                    "the server keeps no audit log, and this machine saved {saved} \
+                     checkpoint(s) of one: a server that went back to before 0.4.2 lost it"
                 ),
                 crate::audit::AFTER_A_REWRITE,
             ));
             return;
         }
         _ => {}
+    }
+    let waited = audit
+        .unchecked_since
+        .as_deref()
+        .and_then(age_of)
+        .filter(|age| *age >= time::Duration::days(STALE_DAYS));
+    if let Some(waited) = waited {
+        out.push(fail(
+            CHECK,
+            format!(
+                "{} checkpoint(s) saved here have waited {} days to be checked, the oldest \
+                 since {}",
+                audit.unchecked,
+                waited.whole_days(),
+                audit.unchecked_since.as_deref().unwrap_or_default()
+            ),
+            "recall audit verify; a server that never answers the proofs is not proving its \
+             log",
+        ));
+        return;
+    }
+    if audit.unanswered >= UNANSWERED_LIMIT {
+        out.push(fail(
+            CHECK,
+            format!(
+                "the server has left the last {} checks of its log unanswered",
+                audit.unanswered
+            ),
+            "recall audit verify; a server that never answers the proofs is not proving its \
+             log",
+        ));
+        return;
     }
     if let Some(err) = &audit.error {
         out.push(warn(
@@ -770,9 +840,13 @@ fn audit_finding(rep: &Report, out: &mut Vec<Finding>) {
             ),
         ));
     } else if audit.saved() > 0 {
-        out.push(ok(
+        out.push(warn(
             CHECK,
-            format!("{} checkpoint(s) saved, not checked", audit.saved()),
+            format!(
+                "{} checkpoint(s) saved here, and none was checked this time",
+                audit.saved()
+            ),
+            "recall audit verify",
         ));
     }
 }
@@ -995,8 +1069,7 @@ fn tone_of(f: &Finding) -> ui::Tone {
                 || f.detail.starts_with("not needed")
                 || f.detail.starts_with("not available")
                 || f.detail.starts_with("not in a git repository")
-                || f.detail.starts_with("not kept by this server")
-                || f.detail.ends_with("not checked") =>
+                || f.detail.starts_with("not kept by this server") =>
         {
             ui::Tone::Quiet
         }
@@ -1814,6 +1887,160 @@ mod tests {
         let found = findings(&rep);
         assert_eq!(find(&found, "audit log").unwrap().level, Level::Warn);
         assert_eq!(verdict(&found), exit::OK);
+    }
+
+    fn audit_level(rep: &Report) -> Level {
+        find(&findings(rep), "audit log").unwrap().level
+    }
+
+    /// A rewrite found that could not be written down still fails, and
+    /// says it was not saved.
+    #[test]
+    fn a_rewrite_found_and_not_saved_still_fails() {
+        let rep = audit(|a| {
+            a.extends = Some(false);
+            a.unsaved = Some("another recall held audit.json.lock for too long".into());
+            a.inconsistent = Some(recall_hooks::audit::Inconsistency {
+                found_at: "2026-10-02T09:14:05.402Z".into(),
+                saved: "r.example\n9\nAAAA\n".into(),
+                seen: "r.example\n5\nBBBB\n".into(),
+                detail: "the log has 5 leaves, fewer than the 9".into(),
+            });
+        });
+        let found = findings(&rep);
+        let f = find(&found, "audit log").unwrap();
+        assert_eq!(f.level, Level::Fail);
+        assert!(f.detail.contains("could not be written"), "{}", f.detail);
+    }
+
+    /// `audit.json` that cannot be read may hold the only record of a
+    /// rewrite: that fails, it is not a detail. Mutation: warn on it.
+    #[test]
+    fn an_audit_file_that_cannot_be_read_fails() {
+        let rep = audit(|a| {
+            a.extends = None;
+            a.file_error = Some("~/.recall/audit.json is not a file Recall can read".into());
+        });
+        assert_eq!(audit_level(&rep), Level::Fail);
+    }
+
+    /// Checkpoints dropped unchecked are a gap in the witnessing, said out
+    /// loud until reset. Mutation: say nothing of them.
+    #[test]
+    fn checkpoints_dropped_unchecked_fail() {
+        let rep = audit(|a| a.dropped = 3);
+        let found = findings(&rep);
+        let f = find(&found, "audit log").unwrap();
+        assert_eq!(f.level, Level::Fail);
+        assert!(
+            f.detail.starts_with("3 checkpoint(s) were dropped"),
+            "{}",
+            f.detail
+        );
+    }
+
+    /// Checkpoints saved and not checked this time (no credential, or the
+    /// discovery document failed before the fix) warn rather than pass
+    /// quietly. Mutation: report them as ok.
+    #[test]
+    fn checkpoints_not_checked_this_time_warn() {
+        let rep = audit(|a| {
+            a.extends = None;
+            a.server_log = None;
+            a.unchecked = 2;
+        });
+        assert_eq!(audit_level(&rep), Level::Warn);
+    }
+
+    /// A server that keeps not answering cannot keep a check pending for
+    /// ever: the oldest waiting a week, or ten checks unanswered in a row,
+    /// fail. Mutation: only ever warn.
+    #[test]
+    fn checks_that_never_finish_fail_in_the_end() {
+        let at = |days: i64| {
+            let fmt = time::macros::format_description!(
+                "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+            );
+            (time::OffsetDateTime::now_utc() - time::Duration::days(days))
+                .format(&fmt)
+                .unwrap()
+        };
+        let waiting = |days: i64| {
+            audit(|a| {
+                a.extends = None;
+                a.error = Some("server returned 429".into());
+                a.unchecked = 4;
+                a.unchecked_since = Some(at(days));
+            })
+        };
+        assert_eq!(audit_level(&waiting(6)), Level::Warn);
+        assert_eq!(audit_level(&waiting(8)), Level::Fail);
+
+        let unanswered = |n: u64| {
+            audit(|a| {
+                a.extends = None;
+                a.error = Some("could not reach the server".into());
+                a.unanswered = n;
+            })
+        };
+        assert_eq!(
+            audit_level(&unanswered(recall_hooks::audit::UNANSWERED_LIMIT - 1)),
+            Level::Warn
+        );
+        assert_eq!(
+            audit_level(&unanswered(recall_hooks::audit::UNANSWERED_LIMIT)),
+            Level::Fail
+        );
+    }
+
+    /// Every audit finding reads as one sentence: no run of spaces left by
+    /// a line continuation that lost its backslash. Mutation: drop one.
+    /// One change to a healthy report's audit section.
+    type Edit = dyn Fn(&mut crate::status::AuditReport);
+
+    #[test]
+    fn audit_findings_have_no_runs_of_spaces() {
+        let finding = recall_hooks::audit::Inconsistency {
+            found_at: "2026-10-02T09:14:05.402Z".into(),
+            saved: "r.example\n9\nAAAA\n".into(),
+            seen: "r.example\n5\nBBBB\n".into(),
+            detail: "the log has 5 leaves".into(),
+        };
+        let edits: Vec<Box<Edit>> = vec![
+            Box::new(|_| {}),
+            Box::new(move |a| a.inconsistent = Some(finding.clone())),
+            Box::new(|a| a.file_error = Some("unreadable".into())),
+            Box::new(|a| a.unproven = Some("server returned 500".into())),
+            Box::new(|a| a.dropped = 2),
+            Box::new(|a| a.server_log = Some(false)),
+            Box::new(|a| {
+                *a = crate::status::AuditReport {
+                    server_log: Some(false),
+                    ..Default::default()
+                }
+            }),
+            Box::new(|a| {
+                a.extends = None;
+                a.unchecked = 1;
+                a.unchecked_since = Some("2000-01-01T00:00:00.000Z".into());
+            }),
+            Box::new(|a| {
+                a.extends = None;
+                a.unanswered = 99;
+            }),
+            Box::new(|a| {
+                a.extends = None;
+                a.error = Some("server returned 429".into());
+            }),
+            Box::new(|a| a.extends = None),
+        ];
+        for edit in edits {
+            let found = findings(&audit(edit));
+            let f = find(&found, "audit log").unwrap();
+            for text in [Some(&f.detail), f.fix.as_ref()].into_iter().flatten() {
+                assert!(!text.contains("  "), "a run of spaces in {text:?}");
+            }
+        }
     }
 
     // ---------------------------------------------------------------- Git Bash

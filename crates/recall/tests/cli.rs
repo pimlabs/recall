@@ -3976,3 +3976,209 @@ fn an_export_needs_an_admin_and_says_so() {
     let r = run(&["audit", "verify"], repo.path(), &env, None);
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
 }
+
+/// A root, standard base64, for checkpoints a test makes up.
+const A_ROOT: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+
+/// Saves `sizes` as checkpoints this machine saw from the server at `url`,
+/// in `home`, as pulls would have.
+fn saw_checkpoints(home: &Path, url: &str, sizes: std::ops::RangeInclusive<u64>) {
+    let witness = recall_hooks::audit::Witness::new(home.join("audit.json"), url);
+    for size in sizes {
+        witness.record(&format!("{size} {A_ROOT}")).unwrap();
+    }
+}
+
+/// A server whose `/health` answers and whose discovery document fails,
+/// with an audit log of five leaves whose root is [`A_ROOT`].
+fn discovery_down(seen: &Seen) -> (u16, serde_json::Value) {
+    match seen.path.as_str() {
+        "/health" => (
+            200,
+            serde_json::to_value(recall_wire::Health {
+                status: "ok".into(),
+                ..Default::default()
+            })
+            .unwrap(),
+        ),
+        "/.well-known/recall" => (500, serde_json::json!({ "error": "boom" })),
+        "/sync" => (
+            200,
+            serde_json::json!({ "project_key": "acme/app", "files": [] }),
+        ),
+        "/v1/audit/checkpoint" => (
+            200,
+            serde_json::json!({ "tree_size": 5, "root_hash": A_ROOT }),
+        ),
+        _ => (404, serde_json::json!({ "error": "not found" })),
+    }
+}
+
+/// Discovery failing is no reason to leave saved checkpoints unproven: the
+/// audit routes answer for themselves. Mutation: check only a server whose
+/// discovery document lists the log, as before.
+#[test]
+fn saved_checkpoints_are_checked_when_discovery_fails() {
+    let server = fake_server(discovery_down);
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+    saw_checkpoints(home.path(), &server.url, 5..=5);
+    let env = [
+        ("RECALL_HOME", home_str.as_str()),
+        ("RECALL_URL", server.url.as_str()),
+        ("RECALL_TOKEN", "right"),
+    ];
+    let status = status_json(repo.path(), &env);
+    assert_eq!(status["audit"]["extends"], true, "{}", status["audit"]);
+    assert!(
+        server
+            .seen()
+            .iter()
+            .any(|s| s.path == "/v1/audit/checkpoint"),
+        "the server was asked"
+    );
+}
+
+/// `recall audit verify` with no file, against a server that answers the
+/// audit routes 404: a log this machine saw it keep is a history lost, 1,
+/// as doctor fails it; a log never seen is not there to check, 2.
+/// Mutation: answer 2 for both.
+#[test]
+fn a_log_that_went_away_fails_verify_and_one_never_kept_cannot_be_checked() {
+    let server = fake_server(|_| (404, serde_json::json!({ "error": "not found" })));
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [
+        ("RECALL_HOME", home_str.as_str()),
+        ("RECALL_URL", server.url.as_str()),
+        ("RECALL_TOKEN", "right"),
+    ];
+    let r = run(&["audit", "verify"], repo.path(), &env, None);
+    assert_eq!(r.code, 2, "never kept: {}", r.stderr);
+    saw_checkpoints(home.path(), &server.url, 5..=5);
+    let r = run(&["audit", "verify"], repo.path(), &env, None);
+    assert_eq!(r.code, 1, "went away: {}", r.stderr);
+    assert!(r.stderr.contains("keeps no audit log"), "{}", r.stderr);
+}
+
+/// Not set up to ask is "could not be checked", 2, as install.md says: no
+/// server, and no credential. Mutation: 1, as before.
+#[test]
+fn not_set_up_to_ask_cannot_be_checked() {
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+    let r = run(
+        &["audit", "verify"],
+        repo.path(),
+        &[("RECALL_HOME", &home_str)],
+        None,
+    );
+    assert_eq!(r.code, 2, "no server: {}", r.stderr);
+    let r = run(
+        &["audit", "export"],
+        repo.path(),
+        &[("RECALL_HOME", &home_str), ("RECALL_URL", DEAD_SERVER)],
+        None,
+    );
+    assert_eq!(r.code, 2, "no credential: {}", r.stderr);
+}
+
+/// The pull hook says what the session should know about the witness, and
+/// still exits 0: more than a handful waiting to be checked, and a record
+/// it cannot read, which doctor then fails on. Mutation: say nothing of
+/// either.
+#[test]
+fn the_pull_hook_nudges_and_warns_about_the_audit_record() {
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [
+        ("RECALL_HOME", home_str.as_str()),
+        ("RECALL_URL", DEAD_SERVER),
+        ("RECALL_TOKEN", "right"),
+    ];
+    saw_checkpoints(home.path(), DEAD_SERVER, 1..=16);
+    let r = run(&["pull"], repo.path(), &env, None);
+    assert_eq!(r.code, 0);
+    assert!(!r.stderr.contains("wait to be checked"), "{}", r.stderr);
+    saw_checkpoints(home.path(), DEAD_SERVER, 17..=17);
+    let r = run(&["pull"], repo.path(), &env, None);
+    assert_eq!(r.code, 0);
+    assert!(
+        r.stderr
+            .contains("17 audit checkpoints wait to be checked; recall doctor checks them"),
+        "{}",
+        r.stderr
+    );
+
+    std::fs::write(home.path().join("audit.json"), "{ not json").unwrap();
+    let r = run(&["pull"], repo.path(), &env, None);
+    assert_eq!(r.code, 0);
+    assert!(
+        r.stderr.contains("may hold the only record of a rewrite"),
+        "{}",
+        r.stderr
+    );
+    let found = doctor_finding(repo.path(), &env, "audit log");
+    assert_eq!(found["level"], "fail", "{found}");
+}
+
+/// An export that cannot hold itself to the checkpoints saved here, because
+/// `audit.json` cannot be read, does not pass: it says so and exits 2, and
+/// leaves the file as it was. Mutation: say so and exit 0, as before.
+#[test]
+fn an_export_that_cannot_check_the_saved_checkpoints_does_not_pass() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let home = recall_home_with(&[(&server.url, "right")], &server.url);
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [("RECALL_HOME", home_str.as_str())];
+    std::fs::write(home.path().join("audit.json"), "{ not json").unwrap();
+    let out = home.path().join("audit.jsonl");
+    let out_str = out.to_string_lossy().to_string();
+    let r = run(
+        &["audit", "export", "-o", &out_str],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(r.code, 2, "stderr: {}", r.stderr);
+    assert!(r.stderr.contains("could not be checked"), "{}", r.stderr);
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("audit.json")).unwrap(),
+        "{ not json"
+    );
+}
+
+/// An export writes through no link left in its way: a `.partial` that is
+/// a symlink is removed, not followed to whatever it points at. Mutation:
+/// create the file by opening that name.
+#[cfg(unix)]
+#[test]
+fn an_export_never_writes_through_a_link_in_its_way() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let home = recall_home_with(&[(&server.url, "right")], &server.url);
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [("RECALL_HOME", home_str.as_str())];
+    let victim = home.path().join("precious.txt");
+    std::fs::write(&victim, "precious").unwrap();
+    let out = home.path().join("audit.jsonl");
+    std::os::unix::fs::symlink(&victim, home.path().join("audit.jsonl.partial")).unwrap();
+
+    let out_str = out.to_string_lossy().to_string();
+    let r = run(
+        &["audit", "export", "-o", &out_str],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious");
+    let written = std::fs::read_to_string(&out).unwrap();
+    assert!(written.split_once(' ').is_some(), "{written}");
+    assert!(!home.path().join("audit.jsonl.partial").exists());
+}

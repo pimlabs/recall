@@ -676,6 +676,61 @@ fn a_kept_body_must_ask_for_what_was_done() {
     );
 }
 
+/// An authkey's `max_devices` the body asked for is compared with the
+/// subject's exactly, as Python compares integers: never through a float,
+/// where 2^53 + 1 and 2^53 are one number, and 2^64 + 1 and `u64::MAX`.
+/// The review's two probes, which the script refuses. Mutation: compare
+/// as `f64`, as before.
+#[test]
+fn max_devices_is_compared_exactly() {
+    let asked = |raw: &str, recorded: Value| {
+        edited(at::AUTHKEY_CREATE, |l| {
+            l["subject"]["max_devices"] = recorded;
+            l["request"] = laptop().signed(
+                "POST",
+                "/v1/authkeys",
+                None,
+                &format!(r#"{{"tag":"cloud","max_devices":{raw}}}"#),
+                true,
+            );
+        })
+    };
+    for (raw, recorded) in [
+        ("9007199254740993", json!(9_007_199_254_740_992u64)),
+        ("18446744073709551617", json!(u64::MAX)),
+    ] {
+        let leaves = asked(raw, recorded);
+        refused_leaf(
+            &verify(&export_of(&leaves), &[]),
+            at::AUTHKEY_CREATE,
+            "another max_devices",
+        );
+    }
+    // What Python holds equal still is: the same integer, 3.0 for 3, and
+    // true for 1.
+    for (raw, recorded) in [
+        ("9007199254740993", json!(9_007_199_254_740_993u64)),
+        ("3.0", json!(3)),
+        ("true", json!(1)),
+    ] {
+        let verdict = verify(&export_of(&asked(raw, recorded)), &[]);
+        assert!(verdict.ok(), "{raw}: {verdict:#?}");
+    }
+}
+
+/// Where this verifier is stricter than the script, and only there: a
+/// `seq` of `-0`, and a lone surrogate escape, which Python reads and
+/// `serde_json` does not. Both refused, as the module docs say.
+#[test]
+fn negative_zero_and_lone_surrogates_are_refused() {
+    let mut leaves = captured();
+    leaves[0] = leaves[0].replacen("\"seq\":0,", "\"seq\":-0,", 1);
+    refused_leaf(&verify(&export_of(&leaves), &[]), 0, "seq is");
+    let mut leaves = captured();
+    leaves[5] = leaves[5].replacen("\"name\":\"laptop\"", "\"name\":\"lap\\ud800top\"", 1);
+    refused_leaf(&verify(&export_of(&leaves), &[]), 5, "not JSON");
+}
+
 #[test]
 fn only_an_admin_device_manages_devices() {
     let mut leaves = built();

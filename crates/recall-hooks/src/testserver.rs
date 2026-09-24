@@ -59,6 +59,12 @@ struct Inner {
     /// from them. Rewriting one is what a server that rewrote history
     /// looks like from outside.
     audit: Option<Vec<Vec<u8>>>,
+    /// Consistency proofs answered before the fake's rate limit refuses
+    /// every one after: [`None`] for no limit.
+    proofs_before_limit: Option<usize>,
+    /// Whether a consistency proof is never answered at all, as by a
+    /// server too slow to wait for.
+    hang_proofs: bool,
 }
 
 pub struct FakeServer {
@@ -132,6 +138,11 @@ impl FakeServer {
         self.inner.lock().expect("test lock").fail_with = Some((code, body.to_string()));
     }
 
+    /// Answers every request as before [`FakeServer::fail_with`] again.
+    pub fn stop_failing(&self) {
+        self.inner.lock().expect("test lock").fail_with = None;
+    }
+
     /// How many pushes were attempted, whether or not they were accepted.
     pub fn push_attempts(&self) -> usize {
         self.inner.lock().expect("test lock").push_attempts
@@ -198,6 +209,17 @@ impl FakeServer {
     pub fn truncate_audit_log(&self, n: usize) {
         let mut inner = self.inner.lock().expect("test lock");
         inner.audit.as_mut().expect("an audit log").truncate(n);
+    }
+
+    /// Answers `n` more consistency proofs, then refuses each after as its
+    /// rate limit would; [`None`] lifts the limit.
+    pub fn limit_proofs_after(&self, n: Option<usize>) {
+        self.inner.lock().expect("test lock").proofs_before_limit = n;
+    }
+
+    /// Never answers a consistency proof from now on.
+    pub fn hang_proofs(&self) {
+        self.inner.lock().expect("test lock").hang_proofs = true;
     }
 
     /// The log's checkpoint now.
@@ -347,7 +369,20 @@ async fn audit_consistency(
     if let Some(failure) = intercept(&state, &headers) {
         return failure;
     }
-    let inner = state.lock().expect("test lock");
+    if state.lock().expect("test lock").hang_proofs {
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    }
+    let mut inner = state.lock().expect("test lock");
+    if let Some(left) = inner.proofs_before_limit.as_mut() {
+        if *left == 0 {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                r#"{"error":"too many requests"}"#,
+            )
+                .into_response();
+        }
+        *left -= 1;
+    }
     let Some(log) = &inner.audit else {
         return (StatusCode::NOT_FOUND, r#"{"error":"not found"}"#).into_response();
     };

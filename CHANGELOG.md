@@ -29,6 +29,16 @@ break will be described here in full rather than smoothed over.
   showing it, and every session's pull warns about it (still exiting 0),
   until `recall audit reset`. `recall status --json` gains an `audit`
   object.
+- **Checkpoints waiting to be checked are kept, all of them**, up to
+  4096; past that the ones dropped are counted and `doctor` fails until a
+  reset. Each is written down as proven the moment its proof verifies, so
+  a check the server's rate limit or a deadline cuts short carries on
+  next time. The pull says so once more than 16 wait. `doctor` also fails
+  when `audit.json` cannot be read, when the server answers with anything
+  but a proof, and once checks have gone unanswered for a week or ten in a
+  row; a check the server did not answer this once only warns. `status`
+  and `doctor` stop waiting on a slow server after 90 seconds in all, 20
+  of them for the audit check.
 - **`recall audit`**, with three commands. `export` writes the server's
   whole log (admin device or `RECALL_TOKEN`) in the format
   `scripts/audit-verify.py` reads, and checks the saved checkpoints

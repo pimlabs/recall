@@ -22,33 +22,49 @@
 //! ```json
 //! { "version": 1, "servers": { "https://recall.example.com": {
 //!     "checkpoints": ["recall.example.com\n1042\nCsUY…=\n"],
-//!     "unchecked":   ["recall.example.com\n1050\nt8Qm…=\n"] } } }
+//!     "unchecked":   ["recall.example.com\n1050\nt8Qm…=\n"],
+//!     "unchecked_since": "2026-10-02T09:14:05.402Z" } } }
 //! ```
 //!
 //! `checkpoints` are the ones a proof has shown the log extends, the newest
-//! last; `unchecked`, the ones seen since and not yet proven. The newest
-//! checked one implies all the older ones, since the log that extends it
-//! extends everything it extended, so only 32 of each are kept: the older
-//! checked ones are for a person reading the file, not for the proof.
+//! last. The newest implies every older one, since a log that extends it
+//! extends everything it extended, so only the newest 32 are kept; the
+//! older ones are for a person reading the file, not for the proof.
+//!
+//! `unchecked` are the ones seen since and not yet proven, and each of
+//! those is evidence: the one saved just before a rewrite is the one that
+//! shows it, whichever of them that turns out to be. So they are not
+//! thinned. Up to 4096 are kept, a year and more of session starts on a
+//! machine that never runs a check, and past that the ones dropped are
+//! counted in `dropped`, which `recall doctor` fails on until
+//! `recall audit reset`: a gap in the witnessing is said out loud, never
+//! left to look like a clean record. `unchecked_since` is when the oldest
+//! still unchecked was saved, and `unanswered` how many checks in a row the
+//! server did not answer; `recall doctor` fails once the first is
+//! [`STALE_DAYS`] old or the second reaches [`UNANSWERED_LIMIT`], so a
+//! server that keeps not answering cannot keep a check pending for ever.
+//! Fields this build does not know are kept as they are.
 //!
 //! # When it is checked
 //!
 //! Not in the hooks. A pull only saves the checkpoint it received, which
-//! costs a read and a write of this small file and no request; the check
-//! costs a request per checkpoint to prove, and a session start is not the
-//! place to spend them. The plan puts the check in `recall doctor`, so
+//! costs a read and a write of this file and no request; the check costs a
+//! request per checkpoint to prove, and a session start is not the place to
+//! spend them. The plan puts the check in `recall doctor`, so
 //! [`Witness::check`] runs there and in `recall status`, which share one
 //! collection, and in `recall audit verify` with no file: it asks the server
 //! for its checkpoint now and for an RFC 9162 consistency proof from each
-//! saved one to it, and verifies each with
-//! [`recall_wire::audit::merkle::verify_consistency`]. `recall audit export`
+//! saved one to it, smallest first, and verifies each with
+//! [`recall_wire::audit::merkle::verify_consistency`]. Each is written down
+//! as checked the moment its proof verifies, so a check cut short by the
+//! server's rate limit, a deadline or a lost connection keeps what it
+//! proved, and the next one carries on from there. `recall audit export`
 //! checks them too, without proofs, against the leaves it fetched.
 //!
 //! What waiting costs is time: a rewrite is found at the next of those,
-//! not at the pull after it. Nothing is lost by waiting, because nothing
-//! is taken on trust in the meantime: a checkpoint stays unchecked, and so
-//! kept, until a proof covers it. When more than 32 wait, the smallest is
-//! kept (the one most likely to predate a rewrite) with the 31 newest.
+//! not at the pull after it. While more than [`NUDGE_AFTER`] wait, every
+//! session's pull says so. Until then a checkpoint waits unproven, and
+//! kept.
 //!
 //! One thing is found at once, by the pull itself: a checkpoint at a size
 //! already saved with another root. Two roots for one size need no proof
@@ -61,11 +77,15 @@
 //! ([`Witness::reset`]). Until then `recall doctor` fails on it, `recall
 //! status` shows it, the pull hook says so at every session start (still
 //! exiting 0), and no later checkpoint is taken as the new truth: a log
-//! that has been rewritten once is not trusted again by default. A backup
-//! restored on the server rolls its log back and is found exactly like a
-//! rewrite, on purpose; the owner who did it knows why, and resets.
+//! that has been rewritten once is not trusted again by default. A finding
+//! that cannot be written down (the file's lock held too long, a disk
+//! full) is still the answer, flagged as not saved, never an error in its
+//! place. A backup restored on the server rolls its log back and is found
+//! exactly like a rewrite, on purpose; the owner who did it knows why, and
+//! resets.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -73,6 +93,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use recall_wire::audit::merkle::{self, Hash, Tree};
 use recall_wire::{AuditCheckpoint, AuditConsistencyResponse};
+use serde_json::Value;
 
 use crate::client::{self, Client};
 use crate::home::{self, Error, FileLock};
@@ -87,8 +108,24 @@ const LOCK_FILE: &str = "audit.json.lock";
 /// file says which it is.
 pub const FORMAT: u32 = 1;
 
-/// How many checkpoints of each kind are kept: see the module docs.
-const KEEP: usize = 32;
+/// How many checked checkpoints are kept: the newest stands for the rest.
+const KEEP_CHECKED: usize = 32;
+
+/// How many unchecked checkpoints are kept before any is dropped, and
+/// counted: see the module docs.
+const KEEP_UNCHECKED: usize = 4096;
+
+/// How many may wait to be checked before every pull says so.
+pub const NUDGE_AFTER: usize = 16;
+
+/// How old, in days, the oldest unchecked checkpoint may grow before
+/// `recall doctor` fails on it rather than warn.
+pub const STALE_DAYS: i64 = 7;
+
+/// How many checks in a row the server may leave unanswered (rate limited,
+/// unreachable, too slow) before `recall doctor` fails on it rather than
+/// warn.
+pub const UNANSWERED_LIMIT: u64 = 10;
 
 /// How long a hook waits for the lock before it gives up saving: the
 /// checkpoint is then one fewer witnessed, and the pull is not held up.
@@ -96,6 +133,10 @@ const HOOK_WAIT: Duration = Duration::from_secs(2);
 
 /// How long a command waits for it.
 const COMMAND_WAIT: Duration = Duration::from_secs(20);
+
+/// How long a check waits after the server's rate limit refuses a request
+/// before asking again. The check's own deadline bounds how often.
+const RETRY_WAIT: Duration = Duration::from_secs(5);
 
 /// One checkpoint of a server's audit log: how many leaves, and their root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -191,12 +232,16 @@ fn note_as_header(note: &str) -> String {
     note.lines().skip(1).collect::<Vec<_>>().join(" ")
 }
 
-/// The file, as it is stored.
+/// The file, as it is stored. Anything this build does not know, at either
+/// level, is kept as it was read: a newer build's field survives an older
+/// one's write.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct AuditFile {
     version: u32,
     #[serde(default)]
     servers: BTreeMap<String, Entry>,
+    #[serde(flatten)]
+    other: BTreeMap<String, Value>,
 }
 
 impl Default for AuditFile {
@@ -204,6 +249,7 @@ impl Default for AuditFile {
         Self {
             version: FORMAT,
             servers: BTreeMap::new(),
+            other: BTreeMap::new(),
         }
     }
 }
@@ -216,7 +262,19 @@ struct Entry {
     #[serde(default)]
     unchecked: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    unchecked_since: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    dropped: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    unanswered: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     inconsistent: Option<Inconsistency>,
+    #[serde(flatten)]
+    other: BTreeMap<String, Value>,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// What this machine holds for one server.
@@ -226,8 +284,17 @@ pub struct Saved {
     pub checkpoints: Vec<Checkpoint>,
     /// Checkpoints seen and not yet proven, smallest first.
     pub unchecked: Vec<Checkpoint>,
+    /// When the oldest of [`Saved::unchecked`] was saved, in the API's
+    /// timestamp format; [`None`] while none waits.
+    pub unchecked_since: Option<String>,
+    /// How many unchecked checkpoints were dropped to keep within the
+    /// bound, since the last reset: a gap in the witnessing.
+    pub dropped: u64,
+    /// How many checks in a row the server left unanswered.
+    pub unanswered: u64,
     /// What checking found, once it found the log does not extend one.
     pub inconsistent: Option<Inconsistency>,
+    other: BTreeMap<String, Value>,
 }
 
 impl Saved {
@@ -238,7 +305,10 @@ impl Saved {
 
     /// Whether nothing is held at all.
     pub fn is_empty(&self) -> bool {
-        self.checkpoints.is_empty() && self.unchecked.is_empty() && self.inconsistent.is_none()
+        self.checkpoints.is_empty()
+            && self.unchecked.is_empty()
+            && self.inconsistent.is_none()
+            && self.dropped == 0
     }
 
     /// Every checkpoint held, checked or not, smallest first: what an
@@ -255,8 +325,8 @@ impl Saved {
         all
     }
 
-    /// What a check has to prove: the newest checked checkpoint, which
-    /// stands for every older one, and each unchecked one.
+    /// What a check has to prove, smallest first: the newest checked
+    /// checkpoint, which stands for every older one, and each unchecked one.
     fn to_prove(&self) -> Vec<Checkpoint> {
         let mut out: Vec<Checkpoint> = self
             .newest()
@@ -286,28 +356,47 @@ impl Saved {
         Ok(Self {
             checkpoints: parse(&entry.checkpoints)?,
             unchecked: parse(&entry.unchecked)?,
+            unchecked_since: entry.unchecked_since.clone(),
+            dropped: entry.dropped,
+            unanswered: entry.unanswered,
             inconsistent: entry.inconsistent.clone(),
+            other: entry.other.clone(),
         })
     }
 
-    fn write(&self, origin: &str) -> Entry {
+    /// The entry to store, within `keep` unchecked checkpoints: past that,
+    /// the second smallest goes first (the smallest is the one most likely
+    /// to predate a rewrite, the newest cover the most leaves), and each one
+    /// that goes is counted.
+    fn write(&self, origin: &str, keep: usize) -> Entry {
         let mut checkpoints = self.checkpoints.clone();
         checkpoints.sort();
         checkpoints.dedup();
-        if checkpoints.len() > KEEP {
-            checkpoints.drain(..checkpoints.len() - KEEP);
+        if checkpoints.len() > KEEP_CHECKED {
+            checkpoints.drain(..checkpoints.len() - KEEP_CHECKED);
         }
         let mut unchecked = self.unchecked.clone();
         unchecked.sort();
         unchecked.dedup();
-        if unchecked.len() > KEEP {
-            // The smallest, and the newest after it.
-            unchecked.drain(1..unchecked.len() - (KEEP - 1));
+        let mut dropped = self.dropped;
+        let keep = keep.max(2);
+        if unchecked.len() > keep {
+            let over = unchecked.len() - keep;
+            unchecked.drain(1..1 + over);
+            dropped += over as u64;
         }
+        let unchecked_since = match unchecked.is_empty() {
+            true => None,
+            false => self.unchecked_since.clone().or_else(|| Some(now())),
+        };
         Entry {
             checkpoints: checkpoints.iter().map(|c| c.note(origin)).collect(),
             unchecked: unchecked.iter().map(|c| c.note(origin)).collect(),
+            unchecked_since,
+            dropped,
+            unanswered: self.unanswered,
             inconsistent: self.inconsistent.clone(),
+            other: self.other.clone(),
         }
     }
 }
@@ -324,7 +413,14 @@ pub enum Witnessed {
         proved: usize,
     },
     /// It does not: recorded, and reported until `recall audit reset`.
-    Inconsistent(Inconsistency),
+    Inconsistent {
+        /// What was found: the one written down earlier when there is one,
+        /// since the first finding stands.
+        finding: Inconsistency,
+        /// Why it could not be written down, when it could not. The finding
+        /// stands all the same; it is only not yet on disk.
+        unsaved: Option<String>,
+    },
 }
 
 /// Why [`Witness::check`] could not say either way.
@@ -340,15 +436,30 @@ pub enum CheckError {
     /// proof for what was asked.
     #[error("{0}")]
     Malformed(String),
+    /// The check did not finish within its deadline. What it proved before
+    /// then is kept.
+    #[error("the server did not answer within {} seconds", .0.as_secs())]
+    Deadline(Duration),
 }
 
 impl CheckError {
-    /// Whether the server was not asked at all, or asked to wait: nothing
-    /// about its log follows from that.
+    /// Whether the server did not answer at all: it could not be reached,
+    /// asked to wait, or took longer than the deadline; or the request was
+    /// never sent. Nothing about its log follows from any of those, which is
+    /// why they warn rather than fail, until [`UNANSWERED_LIMIT`] of them in
+    /// a row. Anything else the server sent in place of a proof (another
+    /// status, a body that is not one, a redirect) is an answer, and not a
+    /// proof: `recall doctor` fails on it.
     pub fn unanswered(&self) -> bool {
         match self {
             CheckError::Server(client::Error::Status { code, .. }) => *code == 429,
-            CheckError::Server(_) => true,
+            CheckError::Server(
+                client::Error::Transport(_)
+                | client::Error::Sign(_)
+                | client::Error::Nonce(_)
+                | client::Error::Invalid(_),
+            ) => true,
+            CheckError::Deadline(_) => true,
             _ => false,
         }
     }
@@ -361,6 +472,15 @@ impl CheckError {
             CheckError::Server(client::Error::Status { code: 404, .. })
         )
     }
+
+    /// Whether `audit.json` itself could not be read: it may hold the only
+    /// record of a rewrite, so that is never taken lightly.
+    pub fn unreadable(&self) -> bool {
+        matches!(
+            self,
+            CheckError::File(Error::Read { .. } | Error::Parse { .. })
+        )
+    }
 }
 
 /// This machine's record of one server's audit log, in one `audit.json`.
@@ -369,6 +489,12 @@ pub struct Witness {
     file: PathBuf,
     key: String,
     origin: String,
+    /// How many unchecked checkpoints are kept: [`KEEP_UNCHECKED`], less in
+    /// tests.
+    keep: usize,
+    /// How long a command waits for the file's lock: [`COMMAND_WAIT`], less
+    /// in tests.
+    wait: Duration,
 }
 
 impl Witness {
@@ -378,6 +504,8 @@ impl Witness {
             file: file.into(),
             key: home::normalize_url(url),
             origin: origin(url),
+            keep: KEEP_UNCHECKED,
+            wait: COMMAND_WAIT,
         }
     }
 
@@ -447,71 +575,107 @@ impl Witness {
 
     /// Asks the server whether its log still extends every checkpoint saved
     /// here: its checkpoint now, and a consistency proof from each saved one
-    /// that needs one. On success, what was proven moves to the checked
-    /// ones and the server's checkpoint now becomes the newest; on an
-    /// inconsistency, that is written down and nothing else changes.
+    /// that needs one, smallest first. Each saved checkpoint moves to the
+    /// checked ones as soon as its proof verifies, and the server's
+    /// checkpoint now becomes the newest once all have; on an
+    /// inconsistency, that is written down and nothing else changes. A
+    /// request the server's rate limit refuses is asked again after a
+    /// pause, and the whole check stops at `deadline`, keeping what it
+    /// proved.
     ///
     /// With nothing saved yet, the server's checkpoint now is saved as the
     /// first, taken on trust: every log has to be first seen some time.
-    pub async fn check(&self, client: &Client) -> Result<Witnessed, CheckError> {
-        let saved = self.load()?;
-        if let Some(found) = saved.inconsistent {
-            return Ok(Witnessed::Inconsistent(found));
+    ///
+    /// How many checks in a row went unanswered is kept, and reset by any
+    /// answer: see [`UNANSWERED_LIMIT`].
+    pub async fn check(
+        &self,
+        client: &Client,
+        deadline: Duration,
+    ) -> Result<Witnessed, CheckError> {
+        let outcome = match tokio::time::timeout(deadline, self.check_now(client)).await {
+            Ok(outcome) => outcome,
+            Err(_) => Err(CheckError::Deadline(deadline)),
+        };
+        let unanswered = match &outcome {
+            Err(e) if e.unanswered() => Some(true),
+            Err(CheckError::File(_)) => None,
+            _ => Some(false),
+        };
+        if let Some(unanswered) = unanswered {
+            // Best effort: the outcome is the answer whether or not the
+            // count could be written.
+            let _ = self.update(self.wait, |held| {
+                let before = held.unanswered;
+                held.unanswered = if unanswered { before + 1 } else { 0 };
+                held.unanswered != before
+            });
         }
-        let answer = client.audit_checkpoint().await?;
+        outcome
+    }
+
+    async fn check_now(&self, client: &Client) -> Result<Witnessed, CheckError> {
+        let saved = self.load()?;
+        if let Some(finding) = saved.inconsistent {
+            return Ok(Witnessed::Inconsistent {
+                finding,
+                unsaved: None,
+            });
+        }
+        let answer = patiently(|| client.audit_checkpoint()).await?;
         let current = Checkpoint::from_wire(&answer).ok_or_else(|| {
             CheckError::Malformed(format!(
                 "the server's checkpoint is not a size and a 32-byte root: {}",
                 answer.to_header_value()
             ))
         })?;
-        let mut proved = Vec::new();
+        let mut proved = 0;
         for held in saved.to_prove() {
             let holds = match compare(held, current) {
                 Compared::Holds => Ok(()),
                 Compared::Fails(detail) => Err(detail),
                 Compared::NeedsProof => {
-                    let proof = client.audit_consistency(held.size, current.size).await?;
+                    let proof =
+                        patiently(|| client.audit_consistency(held.size, current.size)).await?;
                     prove(held, current, &proof)?
                 }
             };
             match holds {
-                Ok(()) => proved.push(held),
-                Err(detail) => {
-                    return Ok(Witnessed::Inconsistent(self.found(
-                        held,
-                        current,
-                        detail,
-                        COMMAND_WAIT,
-                    )?))
+                Ok(()) => {
+                    // Kept now, not at the end: a check cut short keeps it.
+                    self.commit(&[held], None)?;
+                    proved += 1;
                 }
+                Err(detail) => return Ok(self.found(held, current, detail)),
             }
         }
-        self.commit(&proved, current)?;
-        Ok(Witnessed::Extends {
-            current,
-            proved: proved.len(),
-        })
+        self.commit(&[], Some(current))?;
+        // Another process may have found something meanwhile; it stands.
+        if let Some(finding) = self.load()?.inconsistent {
+            return Ok(Witnessed::Inconsistent {
+                finding,
+                unsaved: None,
+            });
+        }
+        Ok(Witnessed::Extends { current, proved })
     }
 
     /// [`Witness::check`] for `recall audit export`, which holds every leaf
     /// up to `current`: each saved checkpoint is checked against the tree
-    /// they make, with no proof to ask for.
+    /// they make, with no proof to ask for. An error only when the file
+    /// could not be read, or what checked out could not be written down.
     pub fn witness_export(&self, tree: &Tree, current: Checkpoint) -> Result<Witnessed, Error> {
         let saved = self.load()?;
-        if let Some(found) = saved.inconsistent {
-            return Ok(Witnessed::Inconsistent(found));
+        if let Some(finding) = saved.inconsistent {
+            return Ok(Witnessed::Inconsistent {
+                finding,
+                unsaved: None,
+            });
         }
         let mut proved = Vec::new();
         for held in saved.all() {
             if held.size > tree.size() {
-                let detail = shorter(held, current);
-                return Ok(Witnessed::Inconsistent(self.found(
-                    held,
-                    current,
-                    detail,
-                    COMMAND_WAIT,
-                )?));
+                return Ok(self.found(held, current, shorter(held, current)));
             }
             if tree.root_at(held.size) != held.root {
                 let detail = format!(
@@ -521,26 +685,22 @@ impl Witness {
                     STANDARD.encode(tree.root_at(held.size)),
                     STANDARD.encode(held.root)
                 );
-                return Ok(Witnessed::Inconsistent(self.found(
-                    held,
-                    current,
-                    detail,
-                    COMMAND_WAIT,
-                )?));
+                return Ok(self.found(held, current, detail));
             }
             proved.push(held);
         }
-        self.commit(&proved, current)?;
+        self.commit(&proved, Some(current))?;
         Ok(Witnessed::Extends {
             current,
             proved: proved.len(),
         })
     }
 
-    /// Forgets everything held for this server: its checkpoints and any
-    /// inconsistency found in them. Answers what was held.
+    /// Forgets everything held for this server: its checkpoints, the count
+    /// of any dropped, and any inconsistency found in them. Answers what was
+    /// held.
     pub fn reset(&self) -> Result<Saved, Error> {
-        let _lock = FileLock::take(self.dir(), LOCK_FILE, COMMAND_WAIT)?;
+        let _lock = FileLock::take(self.dir(), LOCK_FILE, self.wait)?;
         let mut file = self.read_file()?;
         let held = match file.servers.remove(&self.key) {
             Some(entry) => Saved::read(&entry, &self.origin, &self.file)?,
@@ -551,38 +711,44 @@ impl Witness {
     }
 
     /// Writes an inconsistency down, unless one already is, and answers
-    /// the one that stands.
-    fn found(
-        &self,
-        saved: Checkpoint,
-        seen: Checkpoint,
-        detail: String,
-        wait: Duration,
-    ) -> Result<Inconsistency, Error> {
+    /// the one that stands: the first found. When it cannot be written, the
+    /// answer is still that inconsistency, flagged as not saved.
+    fn found(&self, saved: Checkpoint, seen: Checkpoint, detail: String) -> Witnessed {
+        let fresh = self.inconsistency(saved, seen, detail);
         let mut standing = None;
-        self.update(wait, |held| {
-            if held.inconsistent.is_none() {
-                held.inconsistent = Some(self.inconsistency(saved, seen, detail));
+        let written = self.update(self.wait, |held| {
+            let first = held.inconsistent.is_none();
+            if first {
+                held.inconsistent = Some(fresh.clone());
             }
             standing = held.inconsistent.clone();
-            true
-        })?;
-        Ok(standing.expect("set above"))
+            first
+        });
+        match written {
+            Ok(_) => Witnessed::Inconsistent {
+                finding: standing.unwrap_or(fresh),
+                unsaved: None,
+            },
+            Err(e) => Witnessed::Inconsistent {
+                finding: fresh,
+                unsaved: Some(e.to_string()),
+            },
+        }
     }
 
-    /// `proved` are prefixes of the log at `current`: they move to the
-    /// checked ones, and `current` joins them as the newest. Read afresh
-    /// under the lock, so a checkpoint a hook saved meanwhile stays
-    /// unchecked rather than being lost, and an inconsistency found
-    /// meanwhile stays found.
-    fn commit(&self, proved: &[Checkpoint], current: Checkpoint) -> Result<(), Error> {
-        self.update(COMMAND_WAIT, |held| {
+    /// `proved` are prefixes of the log the server showed: they move to the
+    /// checked ones, and `current`, when given, joins them as the newest.
+    /// Read afresh under the lock, so a checkpoint a hook saved meanwhile
+    /// stays unchecked rather than being lost, and an inconsistency found
+    /// meanwhile stays found: nothing is marked checked beside it.
+    fn commit(&self, proved: &[Checkpoint], current: Option<Checkpoint>) -> Result<(), Error> {
+        self.update(self.wait, |held| {
             if held.inconsistent.is_some() {
                 return false;
             }
             held.unchecked.retain(|c| !proved.contains(c));
             held.checkpoints.extend_from_slice(proved);
-            if current.size > 0 {
+            if let Some(current) = current.filter(|c| c.size > 0) {
                 held.checkpoints.push(current);
             }
             true
@@ -618,7 +784,7 @@ impl Witness {
             return Ok(false);
         }
         file.servers
-            .insert(self.key.clone(), held.write(&self.origin));
+            .insert(self.key.clone(), held.write(&self.origin, self.keep));
         self.write_file(&file)?;
         Ok(true)
     }
@@ -659,6 +825,22 @@ impl Witness {
             serde_json::to_vec_pretty(file).map_err(|e| err(std::io::Error::other(e)))?;
         body.push(b'\n');
         crate::atomic::write(&self.file, ".recall-", ".tmp", &body).map_err(err)
+    }
+}
+
+/// A request asked again, after a pause, while the server's rate limit
+/// refuses it. Only a deadline around it stops it: the server's window is
+/// a minute, and a check that gives up first proves nothing more.
+async fn patiently<T, F, Fut>(mut call: F) -> Result<T, client::Error>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, client::Error>>,
+{
+    loop {
+        match call().await {
+            Err(client::Error::Status { code: 429, .. }) => tokio::time::sleep(RETRY_WAIT).await,
+            other => return other,
+        }
     }
 }
 

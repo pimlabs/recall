@@ -1262,11 +1262,18 @@ changed byte, a removed or swapped leaf, a checkpoint the log does not
 extend, a signature that does not verify, a request replayed or moved onto
 another action — and 2 when it could not check as asked. It is meant to be
 run by the owner against a log exported this way, not by any automated
-pipeline. `recall audit verify` exits the same three ways. The one place the
-two can differ is an authkey's tag sent decomposed (a letter and its accent
-as two characters): the script composes the body's tag (NFC) as the server
-does before comparing, and the Rust verifier, which carries no Unicode
-tables, compares bytes and refuses it.
+pipeline. `recall audit verify` exits the same three ways.
+
+The two verifiers give the same verdict on every export the server's tests
+build, and differ in three places, each where the Rust one refuses what the
+script accepts and never the other way round, and none of them something
+the server writes: an authkey's tag sent decomposed (a letter and its
+accent as two characters), which the script composes (NFC) as the server
+does before comparing and the Rust verifier, which carries no Unicode
+tables, compares as bytes; a `seq` written `-0`, an integer to Python and a
+float to `serde_json`; and a lone surrogate escape such as `"\ud800"`, which
+Python decodes and `serde_json` refuses as not JSON. Numbers a kept body
+asks for are compared exactly by both, never through a float.
 
 ### The client as witness
 
@@ -1278,24 +1285,47 @@ note: the server's address without its scheme as the origin, the size, the
 root, and no signature, since the owner's devices fetch it over TLS from
 the server they are checking. The hooks only save: a pull that cannot save
 its checkpoint still succeeds, and the check costs no request at session
-start.
+start. Fields the file holds that this client does not know are kept as
+they are.
 
 `recall doctor`, `recall status` and `recall audit verify` with no file
 then ask for `GET /v1/audit/checkpoint` and, for the newest checkpoint
-proven so far and each one saved since, `GET /v1/audit/consistency` from it
-to the log now, and verify each proof by rebuilding both roots (RFC 9162
-§2.1.4). What is proven is kept, the newest 32, and the log now becomes
-the newest; the first time, with nothing saved, the log is taken as it is.
-`recall audit export` checks the saved checkpoints against the leaves it
-fetched instead, with no proof to ask for.
+proven so far and each one saved since, smallest first,
+`GET /v1/audit/consistency` from it to the log now, and verify each proof
+by rebuilding both roots (RFC 9162 §2.1.4). Each checkpoint is written down
+as proven the moment its proof verifies, so a check the server's rate
+limit refuses (asked again after five seconds), or that meets its deadline
+(20 seconds in `doctor` and `status`, 90 in `audit verify`), keeps what it
+proved, and the next one carries on. Once all are proven the log now
+becomes the newest; the newest 32 proven are kept, the newest standing for
+all the older ones. The first time, with nothing saved, the log is taken
+as it is. `recall audit export` checks the saved checkpoints against the
+leaves it fetched instead, with no proof to ask for.
+
+Checkpoints not yet proven are evidence, and are not thinned: whichever
+was saved just before a rewrite is the one that shows it. Up to 4096 wait
+(more than a year of session starts with no check); past that the ones
+dropped are counted, and `recall doctor` fails on the count until `recall
+audit reset`, so a gap is never left looking like a clean record. Once
+more than 16 wait, every session's pull says so. A check the server does
+not answer (rate limited, unreachable, past the deadline) only warns,
+until the oldest checkpoint waiting is seven days old or ten checks in a
+row went unanswered, when `recall doctor` fails: a server that never
+answers is not proving its log. A server that answers with anything but a
+proof (an error, a body that is not one, a redirect) fails at once.
 
 A log that does not extend one (a proof that does not verify, a log
 shorter than a saved checkpoint, a second root for a size already saved) is
 written into `audit.json` and stays there: `recall doctor` fails on it,
 `recall status` shows it, every session's pull warns about it (and still
 exits 0), and no later checkpoint is taken as the truth until `recall audit
-reset`. Restoring the server from a backup rolls its log back, and is found
-exactly this way; see [`deploy/README.md`](../../deploy/README.md#backups).
+reset`. The first finding stands; a later one does not replace it. A
+finding that cannot be written down (the file's lock held, a disk full) is
+still reported as one, flagged as not saved. An `audit.json` that cannot be
+read is never written over, and fails `recall doctor` too, since it may
+hold the only record of a rewrite. Restoring the server from a backup rolls
+its log back, and is found exactly this way; see
+[`deploy/README.md`](../../deploy/README.md#backups).
 
 ---
 

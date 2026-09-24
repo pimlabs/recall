@@ -608,9 +608,18 @@ impl DevicesLock<'_> {
 /// costs is a lock left behind by a process killed while holding it, which
 /// is why one older than `LOCK_STALE` is taken over: nothing holds one that
 /// long on purpose.
+///
+/// Each holder writes a nonce of its own into the file, and two rules
+/// follow from it. A holder lets go only of a lock that still holds its
+/// nonce: one paused past `LOCK_STALE` whose lock was taken over must not
+/// delete the new holder's on its way out. And a stale lock is taken over
+/// by moving it aside first, which only one process can do, then checking
+/// that what was moved is the stale lock that was looked at and not a fresh
+/// one taken in between; a fresh one is put back, never over another.
 #[derive(Debug)]
 pub(crate) struct FileLock {
     path: PathBuf,
+    nonce: String,
 }
 
 impl FileLock {
@@ -622,6 +631,7 @@ impl FileLock {
             source,
         };
         create_private_dir(dir).map_err(err)?;
+        let nonce = lock_nonce().map_err(err)?;
         let deadline = std::time::Instant::now() + wait;
         let mut denied = 0;
         loop {
@@ -630,7 +640,18 @@ impl FileLock {
                 .create_new(true)
                 .open(&path)
             {
-                Ok(_) => return Ok(FileLock { path }),
+                Ok(mut file) => {
+                    // Written before anyone can judge it stale: a lock is
+                    // only stale once it is LOCK_STALE old.
+                    let written = file.write_all(nonce.as_bytes());
+                    drop(file);
+                    let lock = FileLock { path, nonce };
+                    written.map_err(|e| Error::Write {
+                        path: lock.path.display().to_string(),
+                        source: e,
+                    })?;
+                    return Ok(lock);
+                }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                     denied = 0;
                     let stale = fs::metadata(&path)
@@ -639,7 +660,9 @@ impl FileLock {
                         .and_then(|at| at.elapsed().ok())
                         .is_some_and(|age| age > LOCK_STALE);
                     if stale {
-                        let _ = fs::remove_file(&path);
+                        if let Ok(seen) = fs::read(&path) {
+                            take_over(&path, &seen, &nonce);
+                        }
                         continue;
                     }
                     if std::time::Instant::now() >= deadline {
@@ -672,9 +695,40 @@ impl FileLock {
 }
 
 impl Drop for FileLock {
+    /// Lets go of the lock only while it is still this holder's.
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        if fs::read(&self.path).is_ok_and(|held| held == self.nonce.as_bytes()) {
+            let _ = fs::remove_file(&self.path);
+        }
     }
+}
+
+/// Takes a stale lock at `path` out of the way, `seen` being what it held
+/// when it was judged stale. Moved aside under a name of this taker's own,
+/// which only one process can do; if what was moved is not what was seen,
+/// it is a lock someone took between the look and the move, and it is put
+/// back, by a link that fails rather than replace a lock taken since.
+fn take_over(path: &Path, seen: &[u8], nonce: &str) {
+    let mut aside = path.as_os_str().to_owned();
+    aside.push(format!(".{nonce}.stale"));
+    let aside = PathBuf::from(aside);
+    if fs::rename(path, &aside).is_err() {
+        // Gone, or moved by another taker first.
+        return;
+    }
+    if fs::read(&aside).is_ok_and(|moved| moved == seen) {
+        let _ = fs::remove_file(&aside);
+    } else {
+        let _ = fs::hard_link(&aside, path);
+        let _ = fs::remove_file(&aside);
+    }
+}
+
+/// A lock's nonce: 128 random bits, hex.
+fn lock_nonce() -> io::Result<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|e| io::Error::other(e.to_string()))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// A machine name as `config.toml` may hold it, or [`None`] if it cannot be
@@ -1158,6 +1212,53 @@ mod tests {
         home.save_device("https://a.example.com", entry("dev_a"))
             .unwrap();
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    /// Makes the lock at `path` look as old as a lock left behind.
+    fn age(path: &Path) {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - LOCK_STALE * 2)
+            .unwrap();
+    }
+
+    /// A holder paused past the stale age, whose lock was taken over, lets
+    /// go of nothing: the lock is the new holder's now. Mutation: remove
+    /// the lock file on drop whoever holds it.
+    #[test]
+    fn a_lock_taken_over_is_not_let_go_of_by_its_old_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(DEVICE_LOCK_FILE);
+        let wait = std::time::Duration::from_secs(5);
+        let paused = FileLock::take(dir.path(), DEVICE_LOCK_FILE, wait).unwrap();
+        age(&path);
+        let taker = FileLock::take(dir.path(), DEVICE_LOCK_FILE, wait).unwrap();
+        drop(paused);
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            taker.nonce.as_bytes(),
+            "the new holder's lock is still there"
+        );
+        drop(taker);
+        assert!(!path.exists());
+    }
+
+    /// Taking over a lock seen stale never removes one taken in between:
+    /// what was moved aside is put back when it is not what was seen.
+    /// Mutation: remove the stale lock by name.
+    #[test]
+    fn taking_over_never_removes_a_lock_taken_since() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(DEVICE_LOCK_FILE);
+        fs::write(&path, "fresh").unwrap();
+        take_over(&path, b"stale", "taker");
+        assert_eq!(fs::read(&path).unwrap(), b"fresh");
+        take_over(&path, b"fresh", "taker");
+        assert!(!path.exists(), "and the one seen is taken out of the way");
+        let left: Vec<_> = fs::read_dir(dir.path()).unwrap().collect();
+        assert!(left.is_empty(), "nothing left aside: {left:?}");
     }
 
     /// A `~/.recall` made wider than `0700`, by hand or by a restore, is

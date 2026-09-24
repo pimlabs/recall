@@ -827,6 +827,25 @@ doctor` fails on it, `recall status` shows it, and every session's pull
 warns about it (and still exits 0), until you reset it. Restoring the server
 from a backup rolls its log back and looks exactly like this, on purpose.
 
+Until they are checked, the checkpoints wait in `audit.json`, all of them:
+the one saved just before a rewrite is the one that shows it. Once more than
+16 wait, each session's pull says so; run `recall doctor` or `recall audit
+verify`, which prove them in turn and keep each as it is proven, so a check
+the server's rate limit cuts short carries on next time. `recall doctor`
+also fails the `audit log` check when:
+
+- `audit.json` cannot be read, since it may hold the only record of a
+  rewrite; nothing writes over it, so look at it before moving it aside;
+- more than 4096 waited and some were dropped unchecked, a gap in the
+  witnessing (`recall audit reset` once you have decided to trust the log);
+- the oldest waiting checkpoint is seven days old, or ten checks in a row
+  went unanswered: a server that never answers the proofs is not proving
+  its log;
+- the server answered with something that is not a proof, or no longer
+  keeps the log this machine saw it keep.
+
+A check the server simply did not answer this time only warns.
+
 ```sh
 recall audit verify                      # have the server prove it, as doctor does
 recall audit export -o audit.jsonl       # the whole log; an admin device or RECALL_TOKEN
@@ -844,8 +863,13 @@ approve or enroll leaf carries. `--checkpoint SIZE:ROOT`, as the script
 takes it, adds one saved elsewhere. The checkpoints used are the ones saved
 for the server in effect, so `RECALL_URL=… recall audit verify FILE` holds
 an export from another server to that one's. All three exit 0 when
-everything checks out, 1 when something does not, and 2 when it could not
-be checked: the same codes as the script.
+everything checks out; 1 when something does not, the server answering
+without a proof or no longer keeping a log this machine saw it keep
+included; and 2 when it could not be checked at all (no server or
+credential configured, a file that cannot be read, a server that cannot
+be reached, did not answer in time, or never kept a log): the same codes as
+the script. `reset` exits 0 once it forgot, 1 when you said no, and 2 when
+it could not ask (no terminal and no `--yes`).
 
 ## Cloud environments need the binary too
 

@@ -21,11 +21,14 @@
 //! **How loudly they fail.** Loudly: these are run by a person asking a
 //! question about tampering, and the answer is the exit code. 0 when
 //! everything checks out; 1 when something does not (the export fails a
-//! check, the log does not extend a saved checkpoint) or when this machine
-//! is not set up to ask; 2 when it could not be checked at all (a file that
-//! cannot be read, a server that cannot be reached or keeps no log). The
-//! same three as the script's, so the two can stand in for each other in a
-//! script.
+//! check, the log does not extend a saved checkpoint, the server answers
+//! without a proof, or no longer keeps a log this machine saw it keep); 2
+//! when it could not be checked at all (no server or home configured, no
+//! credential, a file that cannot be read, a server that cannot be reached,
+//! did not answer in time, or never kept a log). The same three as the
+//! script's, so the two can stand in for each other in a script. `reset`
+//! answers 0 when it forgot, or there was nothing to forget; 1 when asked
+//! and told no; 2 when it could not ask or could not read the file.
 
 use std::fs::File;
 use std::io::{self, BufWriter, IsTerminal, Write};
@@ -184,16 +187,27 @@ async fn export(cfg: &ClientConfig, output: Option<&Path>) -> i32 {
             0 => "no checkpoint was saved here to hold it to; this one now is".to_string(),
             n => format!("it extends the {n} checkpoint(s) saved here"),
         },
-        Ok(Witnessed::Inconsistent(found)) => {
+        Ok(Witnessed::Inconsistent { finding, unsaved }) => {
             eprintln!(
                 "recall audit: wrote {} leaves to {}",
                 current.size,
                 describe(output)
             );
-            report_inconsistency(&found);
+            report_inconsistency(&finding, unsaved.as_deref());
             return FAILED;
         }
-        Err(e) => format!("the checkpoints saved here could not be checked: {e}"),
+        Err(e) => {
+            // The export is whole; what it could not be held to is the
+            // checkpoints saved here, which is not a clean answer.
+            eprintln!(
+                "recall audit: wrote {} leaves at checkpoint {} to {}, but the checkpoints \
+                 saved here could not be checked against it: {e}",
+                current.size,
+                current.header(),
+                describe(output)
+            );
+            return UNUSABLE;
+        }
     };
     eprintln!(
         "recall audit: wrote {} leaves at checkpoint {} to {}; {said}.",
@@ -344,8 +358,24 @@ impl Sink {
                 let mut partial = path.as_os_str().to_owned();
                 partial.push(".partial");
                 let partial = PathBuf::from(partial);
+                // Created, never opened: a link left at that name (by an
+                // earlier export, or planted) is removed, not written
+                // through to wherever it points.
+                let create = || {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&partial)
+                };
+                let file = match create() {
+                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                        std::fs::remove_file(&partial)?;
+                        create()?
+                    }
+                    other => other?,
+                };
                 Sink::File {
-                    writer: Some(BufWriter::new(File::create(&partial)?)),
+                    writer: Some(BufWriter::new(file)),
                     partial,
                     path: path.to_path_buf(),
                 }
@@ -512,7 +542,11 @@ async fn check(cfg: &ClientConfig) -> i32 {
         Ok(client) => client,
         Err(e) => return refuse(&e.to_string(), ""),
     };
-    match witness.check(&client).await {
+    let saved = match witness.load() {
+        Ok(saved) => saved.all().len(),
+        Err(e) => return unreadable(&e.to_string()),
+    };
+    match witness.check(&client, CHECK_DEADLINE).await {
         Ok(Witnessed::Extends { current, proved }) => {
             let kept = witness.load().map(|s| s.checkpoints.len()).unwrap_or(0);
             println!(
@@ -524,17 +558,55 @@ async fn check(cfg: &ClientConfig) -> i32 {
             );
             exit::OK
         }
-        Ok(Witnessed::Inconsistent(found)) => {
-            report_inconsistency(&found);
+        Ok(Witnessed::Inconsistent { finding, unsaved }) => {
+            report_inconsistency(&finding, unsaved.as_deref());
+            FAILED
+        }
+        // A log this machine witnessed and the server no longer keeps is a
+        // history lost, as `recall doctor` says; one never kept is not.
+        Err(e) if e.no_log() && saved > 0 => {
+            eprintln!(
+                "FAIL: the server keeps no audit log, and this machine saved {saved} \
+                 checkpoint(s) of one: a server that went back to before 0.4.2 lost it"
+            );
+            eprintln!("  {AFTER_A_REWRITE}");
             FAILED
         }
         Err(e) if e.no_log() => no_log(),
-        Err(CheckError::Server(e)) => server_error(&e),
-        Err(e) => {
+        Err(e) if e.unreadable() => unreadable(&e.to_string()),
+        Err(e) if e.unanswered() => {
+            eprintln!("recall audit: {e}; what was proven before then is kept");
+            UNUSABLE
+        }
+        Err(e @ CheckError::File(_)) => {
             eprintln!("recall audit: {e}");
             UNUSABLE
         }
+        // The server answered, with something that is not a proof.
+        Err(e) => {
+            eprintln!(
+                "FAIL: the server did not prove its log extends the checkpoints saved here: {e}"
+            );
+            FAILED
+        }
     }
+}
+
+/// How long `recall audit verify` with no file gives the server, its rate
+/// limit's pauses included: longer than `recall doctor`, since someone
+/// asked for this check and nothing else, and a little over the server's
+/// one-minute rate-limit window.
+const CHECK_DEADLINE: Duration = Duration::from_secs(90);
+
+/// `audit.json` could not be read: it may hold the only record of a
+/// rewrite, so it is said as loudly as one, and nothing writes over it.
+fn unreadable(why: &str) -> i32 {
+    eprintln!(
+        "recall audit: {why}; it may hold the only record of a rewrite, so nothing was checked \
+         or saved"
+    );
+    eprintln!("  Look at it first; move it aside only once you know what it held.");
+    UNUSABLE
 }
 
 fn checkpoint_root(cp: &Checkpoint) -> String {
@@ -546,7 +618,7 @@ fn checkpoint_root(cp: &Checkpoint) -> String {
 
 /// What an inconsistency looks like on a terminal, and what to do about
 /// it, which depends on whether the owner knows why.
-pub(crate) fn report_inconsistency(found: &Inconsistency) {
+pub(crate) fn report_inconsistency(found: &Inconsistency, unsaved: Option<&str>) {
     eprintln!(
         "FAIL: the server's audit log no longer extends a checkpoint this machine saved: {}",
         found.detail
@@ -554,6 +626,9 @@ pub(crate) fn report_inconsistency(found: &Inconsistency) {
     eprintln!("  found  {}", found.found_at);
     eprintln!("  saved  {}", found.saved_header());
     eprintln!("  seen   {}", found.seen_header());
+    if let Some(why) = unsaved {
+        eprintln!("  NOT SAVED to audit.json ({why}): keep this output");
+    }
     eprintln!("  {}", AFTER_A_REWRITE);
 }
 
@@ -574,12 +649,7 @@ fn reset(cfg: &ClientConfig, yes: bool) -> i32 {
     };
     let held = match witness.load() {
         Ok(held) => held,
-        Err(e) => {
-            return refuse(
-                &e.to_string(),
-                "Move the file aside by hand; nothing here writes over a file it cannot read.",
-            )
-        }
+        Err(e) => return unreadable(&e.to_string()),
     };
     if held.is_empty() {
         println!("Nothing is saved here for {}.", witness.origin());
@@ -596,7 +666,8 @@ fn reset(cfg: &ClientConfig, yes: bool) -> i32 {
         );
         match cliclack::confirm(question).initial_value(false).interact() {
             Ok(true) => {}
-            _ => return exit::CONFIG,
+            // Asked, and not done.
+            _ => return FAILED,
         }
     }
     match witness.reset() {
@@ -624,12 +695,15 @@ fn describe_saved(held: &Saved) -> String {
 // saying no
 // ---------------------------------------------------------------------------
 
+/// Stops before anything could be checked, with the reason: 2, as the
+/// script says it could not check as asked, whether what is missing is a
+/// server, a home for `audit.json`, a credential or an argument.
 fn refuse(what: &str, then: &str) -> i32 {
     eprintln!("recall audit: {what}");
     if !then.is_empty() {
         eprintln!("  {then}");
     }
-    exit::CONFIG
+    UNUSABLE
 }
 
 fn no_log() -> i32 {
