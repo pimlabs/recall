@@ -52,17 +52,19 @@ them that `curl` can reach.
 | [`POST /admin/bootstrap/register/finish`](#post-adminbootstrapregister-and-finish) | token, once | Finish registering it |
 | [`POST /admin/login/start`](#post-adminloginstart-and-finish) | **no** | Start a passkey sign-in |
 | [`POST /admin/login/finish`](#post-adminloginstart-and-finish) | **no** | Finish it, and get a session |
-| [`POST /admin/logout`](#post-adminlogout) | session | End the session |
+| [`POST /admin/logout`](#post-adminlogout-and-post-adminlogoutothers) | session | End the session |
+| [`POST /admin/logout/others`](#post-adminlogout-and-post-adminlogoutothers) | session, recent | End every other session |
 | [`GET /admin/passkeys`](#passkeys-get-adminpasskeys-and-the-rest) | session | Every passkey |
-| [`POST /admin/passkeys/register`](#passkeys-get-adminpasskeys-and-the-rest) | session | Add another passkey |
+| [`POST /admin/passkeys/register`](#passkeys-get-adminpasskeys-and-the-rest) | session, recent | Add another passkey |
 | [`POST /admin/passkeys/register/finish`](#passkeys-get-adminpasskeys-and-the-rest) | session | Finish adding it |
-| [`POST /admin/passkeys/{id}/remove`](#passkeys-get-adminpasskeys-and-the-rest) | session | Remove one, never the last |
+| [`POST /admin/passkeys/{id}/remove`](#passkeys-get-adminpasskeys-and-the-rest) | session, recent | Remove one, never the last |
 
 "yes" is either credential below; "admin" is `RECALL_TOKEN`, a device
 approved with the `admin` scope, or the admin page's [passkey
 session](#the-admin-session); "device" is any device's signature;
-"session" is the passkey session alone; "token, once" is `RECALL_TOKEN`,
-and only until a passkey exists.
+"session" is the passkey session alone, and "recent" one that signed in
+within the last five minutes; "token, once" is `RECALL_TOKEN` with the
+one-time bootstrap code, and only until a passkey exists.
 `/admin/stats` was "yes" until 0.4.1, and still is for the token: only a
 `sync` device is refused there.
 
@@ -988,8 +990,18 @@ Set-Cookie: __Host-recall_admin=<43 characters>; HttpOnly; Secure; SameSite=Stri
 Its value is 256 random bits, and the server stores only its SHA-256. A
 session ends after **12 hours unused** (each use moves that on), **30 days
 after it began** however much it is used, when the passkey that signed it
-in is removed, and when it signs out. `__Host-` means no other host, not
-even a subdomain, can set or shadow it.
+in is removed, when it signs out, when another session [signs out the
+others](#post-adminlogout-and-post-adminlogoutothers), and when the same
+browser signs in again: a sign-in that arrives with a session's cookie
+replaces that session. `__Host-` means no other host, not even a
+subdomain, can set or shadow it.
+
+**A recent sign-in.** Adding a passkey, removing one, and signing out the
+other sessions also need the session to have signed in within the last
+**five minutes**, since those are what a copied cookie would need to keep
+the owner out. An older session gets `403` with
+`{"error":"forbidden: this needs a sign-in in the last five minutes; sign in with a passkey again"}`,
+and the page then signs in again, which asks for the passkey, and retries.
 
 The session is accepted on the routes marked "admin" above, and on the
 passkey routes below. It is **not** accepted on `/sync` or
@@ -1034,17 +1046,36 @@ cookie naming no live session also gets a `Set-Cookie` that clears it.
 
 ## `POST /admin/bootstrap/register` and `…/finish`
 
-`RECALL_TOKEN` only (not a device, not a session), and only while **no
-passkey exists**. Once one does, both answer `403` with
+`RECALL_TOKEN` only (not a device, not a session), with a **one-time
+bootstrap code**, and only while **no passkey exists**. Once one does, both
+answer `403` with
 `{"error":"forbidden: a passkey is registered already, and RECALL_TOKEN cannot register another; sign in with the passkey to add more"}`,
 whatever token is presented, so a token that leaks later cannot register a
-"first" passkey of its own. The check is repeated in the statement that
+"first" passkey of its own. The check is repeated in the transaction that
 stores the passkey, so two bootstraps at once cannot both succeed. A device
-with the `admin` scope gets `403` too.
+with the `admin` scope gets `403` with
+`{"error":"forbidden: registering the first passkey needs RECALL_TOKEN"}`.
 
-The start takes no body and answers `{"ceremony_id", "options"}`. The
-options ask for a discoverable credential (`residentKey: "required"`) and
-user verification. The finish takes:
+**The bootstrap code** is what keeps the token alone from being enough.
+The server prints one to its log when it starts with passkey sign-in on and
+no passkey registered, and `recall-server reset-passkeys` prints one too:
+sixteen letters, shown as `BCDF-GHJK-LMNP-QRST`, read without regard to
+case, dashes or spaces. It works for **an hour**, and once: registering the
+first passkey uses it up, and a new one (a restart, or another
+`reset-passkeys`) replaces it. The server stores only its SHA-256. So
+someone holding a leaked token still needs to read the server's log, or run
+a command on it, to plant a passkey.
+
+The start takes `{"bootstrap_code": "BCDF-GHJK-LMNP-QRST"}` and answers
+`{"ceremony_id", "options"}`. A missing, mistyped or replaced code is
+`403` with
+`{"error":"forbidden: registering the first passkey needs the one-time bootstrap code the server printed where it runs, as well as RECALL_TOKEN"}`,
+and one past its hour
+`{"error":"forbidden: that bootstrap code has expired; restart the server, or run recall-server reset-passkeys where it runs, for a new one"}`.
+The ceremony is bound to the code it started with, and the finish answers
+the same way if that code has since expired or been replaced. The options
+ask for a discoverable credential (`residentKey: "required"`) and user
+verification. The finish takes:
 
 ```json
 { "ceremony_id": "cer_…", "name": "iPhone", "credential": { "id": "…", "rawId": "…", "type": "public-key", "response": { "attestationObject": "…", "clientDataJSON": "…" } } }
@@ -1052,13 +1083,19 @@ user verification. The finish takes:
 
 and answers with the passkey as [`GET /admin/passkeys`](#passkeys-get-adminpasskeys-and-the-rest)
 lists it. `name` is optional: at most 64 characters, none of them
-invisible. Registering does not sign in; the page signs in straight after,
-which also proves the passkey works.
+invisible. The page sends `credential.clientExtensionResults` as the
+browser gave them; when they say the authenticator did not keep the
+credential (`credProps.rk` is `false`), which a usernameless sign-in cannot
+use, registering is `400`. Registering does not sign in; the page signs in
+straight after, which also proves the passkey works.
 
 An owner who has lost every passkey runs `recall-server reset-passkeys`
-where the server runs (for example with `docker compose exec`). It removes
-every passkey and session, and the bootstrap is open again. That takes a
-shell on the server, which is more than the token gives.
+where the server runs, as the database's owner (for example
+`docker compose exec -u node recall-server recall-server reset-passkeys`).
+It removes every passkey and session, and prints a new bootstrap code. That
+takes a shell on the server, which is more than the token gives. If the
+page ever offers to sign in though the owner never registered a passkey,
+someone else did: rotate `RECALL_TOKEN` before resetting.
 
 ## `POST /admin/login/start` and `…/finish`
 
@@ -1088,10 +1125,19 @@ passkeys report every time, is accepted. The check and the update of the
 stored counter are one statement, so two sign-ins racing with the same
 counter cannot both pass.
 
-## `POST /admin/logout`
+## `POST /admin/logout` and `POST /admin/logout/others`
 
-The session, with its CSRF header. Removes the session at the server and
-answers `{"signed_out": true}`, with a `Set-Cookie` that clears it.
+The session, with its CSRF header. `/admin/logout` removes the session at
+the server and answers `{"signed_out": true}`, with a `Set-Cookie` that
+clears it.
+
+`/admin/logout/others` ends every other session, such as one on a device
+the owner no longer has, and keeps this one. It needs a [recent
+sign-in](#the-admin-session). It answers how many ended:
+
+```json
+{ "other_sessions_ended": 2 }
+```
 
 ## Passkeys: `GET /admin/passkeys` and the rest
 
@@ -1113,12 +1159,15 @@ with `{"error":"unauthorized: this needs an admin session; sign in with a passke
 `current` marks the passkey this session signed in with.
 
 `POST /admin/passkeys/register` and `…/register/finish` add another, as the
-bootstrap does, for the same owner. The options exclude the passkeys
-already registered, so a phone that has one is not asked to replace it. A
-passkey registered already is `409`.
+bootstrap does, for the same owner, with no code. The start needs a
+[recent sign-in](#the-admin-session); the finish only the session that
+started it, and any other session's finish is `400`. The options exclude
+the passkeys already registered, so a phone that has one is not asked to
+replace it. A passkey registered already is `409`.
 
 `POST /admin/passkeys/{id}/remove` removes one, and ends every session it
-signed in, clearing the cookie if that is this one. The last one is `409`
+signed in, clearing the cookie if that is this one. It needs a recent
+sign-in. The last one is `409`
 with `{"error":"that is the only passkey; add another before removing it"}`,
 and an id that is not there is `404`.
 

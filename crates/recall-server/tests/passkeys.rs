@@ -84,6 +84,9 @@ struct Harness {
     server: Server,
     _dir: TempDir,
     store: Arc<Store>,
+    /// The bootstrap code the server issued as it started, as
+    /// `recall-server` prints it; empty when passkeys are off.
+    code: String,
 }
 
 fn harness_with(public_url: &str) -> Harness {
@@ -105,10 +108,17 @@ fn harness_configured(public_url: &str, rate_limit_max: u32) -> Harness {
         public_url: public_url.to_string(),
         ..Config::default()
     };
+    let server = Server::new(cfg, store.clone());
+    let code = server
+        .issue_bootstrap_code()
+        .unwrap()
+        .map(|c| c.code)
+        .unwrap_or_default();
     Harness {
-        server: Server::new(cfg, store.clone()),
+        server,
         _dir: dir,
         store,
+        code,
     }
 }
 
@@ -238,11 +248,20 @@ impl Harness {
         approved.body["id"].as_str().unwrap().to_string()
     }
 
+    /// Starts registering the first passkey, with the token and the code.
+    async fn bootstrap_start(&self) -> Reply {
+        self.call(
+            "POST",
+            "/admin/bootstrap/register",
+            As::Token,
+            Some(json!({ "bootstrap_code": self.code })),
+        )
+        .await
+    }
+
     /// Registers `phone`'s passkey as the first, with the token.
     async fn bootstrap(&self, phone: &mut Phone) -> Reply {
-        let started = self
-            .call("POST", "/admin/bootstrap/register", As::Token, None)
-            .await;
+        let started = self.bootstrap_start().await;
         assert_eq!(started.status, StatusCode::OK, "{}", started.body);
         let credential = create(phone, &started.body["options"]).await;
         self.call(
@@ -495,12 +514,8 @@ async fn bootstrap_then_sign_in_then_the_session_manages_devices() {
 async fn the_bootstrap_is_refused_once_a_passkey_exists_whatever_the_token() {
     let h = harness();
     // Two bootstraps started while none exists; only one may finish.
-    let first = h
-        .call("POST", "/admin/bootstrap/register", As::Token, None)
-        .await;
-    let second = h
-        .call("POST", "/admin/bootstrap/register", As::Token, None)
-        .await;
+    let first = h.bootstrap_start().await;
+    let second = h.bootstrap_start().await;
     assert_eq!(first.status, StatusCode::OK);
     assert_eq!(second.status, StatusCode::OK);
 
@@ -517,9 +532,7 @@ async fn the_bootstrap_is_refused_once_a_passkey_exists_whatever_the_token() {
     assert_eq!(done.status, StatusCode::OK, "{}", done.body);
 
     // Starting again, with the valid token: refused.
-    let again = h
-        .call("POST", "/admin/bootstrap/register", As::Token, None)
-        .await;
+    let again = h.bootstrap_start().await;
     assert_eq!(again.status, StatusCode::FORBIDDEN, "{}", again.body);
     assert!(again.body["error"]
         .as_str()
@@ -1034,6 +1047,20 @@ fn signed(
     nonce: &str,
     session: Option<&Session>,
 ) -> Request<Body> {
+    signed_with(key, id, method, path, nonce, session, None)
+}
+
+/// [`signed`], with a JSON body.
+fn signed_with(
+    key: &SigningKey,
+    id: &str,
+    method: &str,
+    path: &str,
+    nonce: &str,
+    session: Option<&Session>,
+    body: Option<&Value>,
+) -> Request<Body> {
+    let body = body.map(|v| serde_json::to_vec(v).unwrap());
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -1044,7 +1071,16 @@ fn signed(
         path,
         query: None,
     };
-    let headers = sign_request(key, id, &target, "1", b"", now, nonce).unwrap();
+    let headers = sign_request(
+        key,
+        id,
+        &target,
+        "1",
+        body.as_deref().unwrap_or_default(),
+        now,
+        nonce,
+    )
+    .unwrap();
     let mut req = Request::builder()
         .method(method)
         .uri(path)
@@ -1058,7 +1094,13 @@ fn signed(
             .header("cookie", format!("{COOKIE}={}", session.cookie))
             .header("x-recall-csrf", &session.csrf);
     }
-    req.body(Body::empty()).unwrap()
+    match body {
+        Some(body) => req
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap(),
+        None => req.body(Body::empty()).unwrap(),
+    }
 }
 
 /// Finding 1: starting a sign-in keeps nothing on the server, so strangers
@@ -1509,9 +1551,7 @@ async fn a_malformed_session_cookie_is_refused_not_ignored() {
 #[tokio::test]
 async fn the_stored_counter_starts_at_the_registration_counter() {
     let h = harness();
-    let started = h
-        .call("POST", "/admin/bootstrap/register", As::Token, None)
-        .await;
+    let started = h.bootstrap_start().await;
     let mut key = counting_key();
     let mut credential = create(&mut key, &started.body["options"]).await;
     // As if the key had signed seven times elsewhere. The counter is in the
@@ -1539,4 +1579,309 @@ async fn the_stored_counter_starts_at_the_registration_counter() {
     assert_eq!(done.status, StatusCode::OK, "{}", done.body);
     let id = done.body["id"].as_str().unwrap();
     assert_eq!(h.store.admin_credential(id).unwrap().unwrap().sign_count, 7);
+}
+
+/// Finding 2: a session that signed in more than five minutes ago, such as
+/// a cookie someone copied, cannot add a passkey, remove one, or sign out
+/// the others, which is what would let it keep the owner out. It can still
+/// do everything else. Signing in again, as the page does first, lets it,
+/// and replaces the session the browser had.
+#[tokio::test]
+async fn changing_the_passkeys_needs_a_sign_in_in_the_last_five_minutes() {
+    let h = harness();
+    let mut phone = phone();
+    let first = h.bootstrap(&mut phone).await;
+    let first_id = first.body["id"].as_str().unwrap().to_string();
+    let old = h.sign_in(&mut phone).await;
+
+    h.server.set_clock_offset(5 * 60);
+    let recent = "forbidden: this needs a sign-in in the last five minutes; sign in with a \
+                  passkey again";
+    for uri in [
+        "/admin/passkeys/register".to_string(),
+        format!("/admin/passkeys/{first_id}/remove"),
+        "/admin/logout/others".to_string(),
+    ] {
+        let reply = h.call("POST", &uri, old.with_csrf(), None).await;
+        assert_eq!(reply.status, StatusCode::FORBIDDEN, "{uri}: {}", reply.body);
+        assert_eq!(reply.body["error"], recent, "{uri}");
+    }
+    assert_eq!(h.store.admin_credentials().unwrap().len(), 1);
+    // Everything else it can still do.
+    for uri in ["/admin/passkeys", "/v1/devices", "/admin/stats"] {
+        let reply = h.call("GET", uri, As::Session(&old, None), None).await;
+        assert_eq!(reply.status, StatusCode::OK, "{uri}");
+    }
+
+    // Signing in again from the same browser: a new session, and the one
+    // it replaces is gone.
+    let started = h
+        .call("POST", "/admin/login/start", As::Session(&old, None), None)
+        .await;
+    let credential = get(&mut phone, &started.body["options"]).await;
+    let again = h
+        .call(
+            "POST",
+            "/admin/login/finish",
+            As::Session(&old, None),
+            Some(json!({ "ceremony_id": started.body["ceremony_id"], "credential": credential })),
+        )
+        .await;
+    assert_eq!(again.status, StatusCode::OK, "{}", again.body);
+    let fresh = session_from(&again);
+    let gone = h
+        .call("GET", "/v1/devices", As::Session(&old, None), None)
+        .await;
+    assert_eq!(gone.status, StatusCode::UNAUTHORIZED);
+    let started = h
+        .call("POST", "/admin/passkeys/register", fresh.with_csrf(), None)
+        .await;
+    assert_eq!(started.status, StatusCode::OK, "{}", started.body);
+
+    // And a minute short of five, the check passes: it is not refusing
+    // everything.
+    h.server.set_clock_offset(5 * 60 + 4 * 60);
+    let reply = h
+        .call("POST", "/admin/logout/others", fresh.with_csrf(), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+}
+
+/// Finding 2: signing out every other session, from a session that signed
+/// in recently, keeps this one.
+#[tokio::test]
+async fn signing_out_the_other_sessions_keeps_this_one() {
+    let h = harness();
+    let mut phone = phone();
+    h.bootstrap(&mut phone).await;
+    let theirs = h.sign_in(&mut phone).await;
+    let also = h.sign_in(&mut phone).await;
+    let mine = h.sign_in(&mut phone).await;
+
+    // Like every POST with a session, it needs the CSRF header.
+    let forged = h
+        .call(
+            "POST",
+            "/admin/logout/others",
+            As::Session(&mine, None),
+            None,
+        )
+        .await;
+    assert_eq!(forged.status, StatusCode::FORBIDDEN);
+
+    let reply = h
+        .call("POST", "/admin/logout/others", mine.with_csrf(), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.body, json!({ "other_sessions_ended": 2 }));
+    assert!(reply.headers.get(header::SET_COOKIE).is_none());
+    for other in [&theirs, &also] {
+        let reply = h
+            .call("GET", "/v1/devices", As::Session(other, None), None)
+            .await;
+        assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+    }
+    let reply = h
+        .call("GET", "/v1/devices", As::Session(&mine, None), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+
+    // The token cannot do it: there is no session of its own to keep.
+    let reply = h
+        .call("POST", "/admin/logout/others", As::Token, None)
+        .await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+}
+
+/// Finding 3: the token alone does not register the first passkey. It
+/// takes the one-time code the server printed where it runs, before the
+/// code expires, and the code works once.
+#[tokio::test]
+async fn the_first_passkey_needs_the_bootstrap_code() {
+    let h = harness();
+    assert_eq!(h.code.len(), 19, "{:?}", h.code);
+    let without = "forbidden: registering the first passkey needs the one-time bootstrap code \
+                   the server printed where it runs, as well as RECALL_TOKEN";
+    for body in [
+        None,
+        Some(json!({})),
+        Some(json!({ "bootstrap_code": "" })),
+        Some(json!({ "bootstrap_code": "BCDF-GHJK-LMNP-QRST" })),
+        Some(json!({ "bootstrap_code": &h.code[..h.code.len() - 1] })),
+    ] {
+        let reply = h
+            .call("POST", "/admin/bootstrap/register", As::Token, body.clone())
+            .await;
+        assert_eq!(
+            reply.status,
+            StatusCode::FORBIDDEN,
+            "{body:?}: {}",
+            reply.body
+        );
+        assert_eq!(reply.body["error"], without, "{body:?}");
+    }
+    // However it is typed.
+    let typed = h.code.to_lowercase().replace('-', " ");
+    let reply = h
+        .call(
+            "POST",
+            "/admin/bootstrap/register",
+            As::Token,
+            Some(json!({ "bootstrap_code": typed })),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+
+    // A ceremony started with a code cannot finish once that code is
+    // replaced, as a restart or reset-passkeys replaces it.
+    let started = h.bootstrap_start().await;
+    let mut phone = phone();
+    let credential = create(&mut phone, &started.body["options"]).await;
+    let replacing = h.server.issue_bootstrap_code().unwrap().unwrap();
+    let finish = json!({ "ceremony_id": started.body["ceremony_id"], "credential": credential });
+    let stale = h
+        .call(
+            "POST",
+            "/admin/bootstrap/register/finish",
+            As::Token,
+            Some(finish),
+        )
+        .await;
+    assert_eq!(stale.status, StatusCode::FORBIDDEN, "{}", stale.body);
+    assert_eq!(stale.body["error"], without);
+    assert!(!h.store.has_admin_credentials().unwrap());
+
+    // An hour on, the new one has expired too.
+    let h = Harness {
+        code: replacing.code,
+        ..h
+    };
+    h.server.set_clock_offset(60 * 60);
+    let late = h.bootstrap_start().await;
+    assert_eq!(late.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        late.body["error"],
+        "forbidden: that bootstrap code has expired; restart the server, or run \
+         recall-server reset-passkeys where it runs, for a new one"
+    );
+    let fresh = h.server.issue_bootstrap_code().unwrap().unwrap();
+
+    // With the new one, it registers, and the code is used up.
+    let h = Harness {
+        code: fresh.code,
+        ..h
+    };
+    assert_eq!(h.bootstrap(&mut phone_two()).await.status, StatusCode::OK);
+    let hash = recall_server::bootstrap::sha256(&h.code).unwrap();
+    assert_eq!(
+        h.store
+            .check_bootstrap_code(&hash, "2000-01-01T00:00:00.000Z")
+            .unwrap(),
+        recall_server::store::BootstrapCode::Wrong
+    );
+    assert_eq!(
+        h.server.issue_bootstrap_code().unwrap(),
+        None,
+        "no code once a passkey exists"
+    );
+}
+
+/// With passkeys off there is nothing to bootstrap, so no code is issued.
+#[tokio::test]
+async fn no_bootstrap_code_is_issued_while_passkeys_are_off() {
+    let h = harness_with("");
+    assert_eq!(h.code, "");
+    assert_eq!(h.server.issue_bootstrap_code().unwrap(), None);
+}
+
+/// Mutation M4: an admin device cannot register the first passkey, even
+/// with the code. api.md promises 403.
+#[tokio::test]
+async fn an_admin_device_cannot_bootstrap() {
+    let h = harness();
+    h.server.backdate_start(600);
+    let key = SigningKey::from_bytes(&[11; 32]);
+    let id = h.device(&key, "desk", "admin").await;
+    let reply = h
+        .raw(signed_with(
+            &key,
+            &id,
+            "POST",
+            "/admin/bootstrap/register",
+            "b1",
+            None,
+            Some(&json!({ "bootstrap_code": h.code })),
+        ))
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    assert_eq!(
+        reply.body["error"],
+        "forbidden: registering the first passkey needs RECALL_TOKEN"
+    );
+}
+
+/// Mutation M16: a bootstrap the token started is finished only by the
+/// token: the finish checks who is asking itself, not only the start.
+#[tokio::test]
+async fn a_bootstrap_the_token_started_is_not_finished_by_a_device() {
+    let h = harness();
+    h.server.backdate_start(600);
+    let key = SigningKey::from_bytes(&[12; 32]);
+    let id = h.device(&key, "desk", "admin").await;
+    let started = h.bootstrap_start().await;
+    let mut phone = phone();
+    let credential = create(&mut phone, &started.body["options"]).await;
+    let finish = json!({ "ceremony_id": started.body["ceremony_id"], "credential": credential });
+    let reply = h
+        .raw(signed_with(
+            &key,
+            &id,
+            "POST",
+            "/admin/bootstrap/register/finish",
+            "b2",
+            None,
+            Some(&finish),
+        ))
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    assert!(!h.store.has_admin_credentials().unwrap());
+    // The token still can.
+    let reply = h
+        .call(
+            "POST",
+            "/admin/bootstrap/register/finish",
+            As::Token,
+            Some(finish),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+}
+
+/// Finding 6d: a registration the browser says kept no discoverable
+/// credential is refused, since it could never sign in here.
+#[tokio::test]
+async fn a_passkey_the_browser_says_was_not_kept_is_refused() {
+    let h = harness();
+    let started = h.bootstrap_start().await;
+    let mut phone = phone();
+    let mut credential = create(&mut phone, &started.body["options"]).await;
+    assert_eq!(
+        credential["clientExtensionResults"]["credProps"]["rk"], true,
+        "the client reports it, as a browser does: {credential}"
+    );
+    credential["clientExtensionResults"]["credProps"]["rk"] = json!(false);
+    let reply = h
+        .call(
+            "POST",
+            "/admin/bootstrap/register/finish",
+            As::Token,
+            Some(json!({ "ceremony_id": started.body["ceremony_id"], "credential": credential })),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert!(reply.body["error"]
+        .as_str()
+        .unwrap()
+        .contains("credProps.rk is false"));
+    assert!(!h.store.has_admin_credentials().unwrap());
 }

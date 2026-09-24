@@ -190,13 +190,16 @@
       <h2>Sign in</h2>
       <p class="muted">Use the passkey saved on this phone or computer.</p>
       <div class="row"><button id="signin-button" type="button">Sign in with a passkey</button></div>
+      <p class="muted">Never registered a passkey here? Then someone else did. Rotate RECALL_TOKEN first, then run recall-server reset-passkeys on the server.</p>
     </div>
 
     <div id="passkey-bootstrap" hidden>
       <h2>Set up a passkey</h2>
-      <p class="muted">No passkey is registered yet. Enter the server's RECALL_TOKEN once to register one on this device. After that the token is not needed here, and it cannot register another passkey.</p>
+      <p class="muted">No passkey is registered yet. Enter the server's RECALL_TOKEN and the one-time bootstrap code the server printed where it runs (its log, or recall-server reset-passkeys) to register one on this device. After that neither is needed here, and the token cannot register another passkey.</p>
       <label for="bootstrap-token">RECALL_TOKEN</label>
       <input type="password" id="bootstrap-token" autocomplete="off">
+      <label for="bootstrap-code">Bootstrap code</label>
+      <input type="text" class="code" id="bootstrap-code" placeholder="BCDF-GHJK-LMNP-QRST" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="24">
       <label for="bootstrap-name">Name for this passkey</label>
       <input type="text" id="bootstrap-name" value="Phone" maxlength="64" autocomplete="off">
       <div class="row"><button id="bootstrap-button" type="button">Register a passkey</button></div>
@@ -299,8 +302,16 @@
         <label for="passkey-name">Name for a new passkey</label>
         <input type="text" id="passkey-name" value="" placeholder="Laptop" maxlength="64" autocomplete="off">
         <div class="row"><button id="passkey-add" type="button">Add a passkey on this device</button></div>
+        <p class="muted">Adding or removing a passkey, and signing out other sessions, asks for your passkey again unless you signed in in the last five minutes.</p>
         <p class="error" id="passkeys-error" hidden></p>
         <p class="ok" id="passkeys-ok" hidden></p>
+      </section>
+      <section class="card">
+        <h2>Sessions</h2>
+        <p class="muted">Signed in on a device you no longer have, or not sure? This ends every session but this one.</p>
+        <div class="row"><button class="secondary" id="sign-out-others" type="button">Sign out other sessions</button></div>
+        <p class="error" id="sessions-error" hidden></p>
+        <p class="ok" id="sessions-ok" hidden></p>
       </section>
     </div>
   </div>
@@ -391,7 +402,18 @@
     (pk.allowCredentials || []).forEach(function (c) { c.id = b64urlToBuf(c.id); });
     return { publicKey: pk };
   }
+  // What the browser says about the credential beyond the signed answer:
+  // credProps says whether the authenticator kept it, which signing in
+  // here, with no user name, needs.
+  function extensionResults(cred) {
+    try { return cred.getClientExtensionResults ? (cred.getClientExtensionResults() || {}) : {}; }
+    catch (e) { return {}; }
+  }
   function registrationJSON(cred) {
+    var ext = extensionResults(cred);
+    if (ext.credProps && ext.credProps.rk === false) {
+      throw new Error("This authenticator did not keep the passkey on itself, and signing in here needs one that does. Use a phone, or a password manager that saves passkeys.");
+    }
     return {
       id: cred.id,
       rawId: bufToB64url(cred.rawId),
@@ -400,7 +422,7 @@
         attestationObject: bufToB64url(cred.response.attestationObject),
         clientDataJSON: bufToB64url(cred.response.clientDataJSON)
       },
-      extensions: {}
+      extensions: ext
     };
   }
   function assertionJSON(cred) {
@@ -415,7 +437,7 @@
         signature: bufToB64url(r.signature),
         userHandle: r.userHandle ? bufToB64url(r.userHandle) : null
       },
-      extensions: {}
+      extensions: extensionResults(cred)
     };
   }
   function webauthnError(e) {
@@ -476,10 +498,9 @@
     }).catch(function () { status = null; return null; });
   }
 
-  function signIn() {
-    say($("signin-error"), "");
-    $("signin-button").disabled = true;
-    api("POST", "/admin/login/start").then(function (r) {
+  // The passkey ceremony: a new session, replacing any this browser had.
+  function passkeySignIn() {
+    return api("POST", "/admin/login/start").then(function (r) {
       if (!r.ok) throw new Error(failure(r));
       return navigator.credentials.get(requestOptions(r.data.options)).then(function (cred) {
         return api("POST", "/admin/login/finish", { ceremony_id: r.data.ceremony_id, credential: assertionJSON(cred) });
@@ -487,15 +508,36 @@
     }).then(function (r) {
       if (!r.ok) throw new Error(failure(r));
       auth.csrf = r.data.csrf_token;
+    });
+  }
+
+  function signIn() {
+    say($("signin-error"), "");
+    $("signin-button").disabled = true;
+    passkeySignIn().then(function () {
       signedIn("Signed in with a passkey");
     }).catch(function (e) {
       say($("signin-error"), e.message);
     }).then(function () { $("signin-button").disabled = false; });
   }
 
+  // Changing the passkeys, or signing out the other sessions, needs a
+  // sign-in in the last five minutes, so a copied cookie cannot. When the
+  // server says this session's is older, ask for the passkey, then try
+  // once more.
+  var RECENT = "forbidden: this needs a sign-in in the last five minutes";
+  function recently(call) {
+    return call().then(function (r) {
+      if (r.status !== 403 || !r.data || !r.data.error || r.data.error.indexOf(RECENT) !== 0) return r;
+      return passkeySignIn().then(call);
+    });
+  }
+
   function bootstrap() {
     var token = $("bootstrap-token").value.trim();
+    var code = $("bootstrap-code").value.trim();
     if (!token) { say($("signin-error"), "Enter RECALL_TOKEN first."); return; }
+    if (!code) { say($("signin-error"), "Enter the bootstrap code the server printed."); return; }
     say($("signin-error"), "");
     $("bootstrap-button").disabled = true;
     var bearer = { "Content-Type": "application/json", "Authorization": "Bearer " + token };
@@ -507,7 +549,7 @@
           });
         });
     }
-    post("/admin/bootstrap/register").then(function (r) {
+    post("/admin/bootstrap/register", { bootstrap_code: code }).then(function (r) {
       if (r.status === 401) throw new Error("That is not the server's RECALL_TOKEN.");
       if (!r.ok) throw new Error(failure(r));
       return navigator.credentials.create(creationOptions(r.data.options)).then(function (cred) {
@@ -520,6 +562,7 @@
     }).then(function (r) {
       if (!r.ok) throw new Error(failure(r));
       $("bootstrap-token").value = "";
+      $("bootstrap-code").value = "";
       return loadStatus().then(function () {
         renderSignIn();
         // Signing in straight away also proves the new passkey works.
@@ -778,11 +821,18 @@
           var warning = p.current ? " You signed in with it, so you will be signed out." : "";
           if (!window.confirm("Remove the passkey " + p.name + "?" + warning)) return;
           b.disabled = true;
-          api("POST", "/admin/passkeys/" + encodeURIComponent(p.id) + "/remove").then(function (r) {
+          say($("passkeys-error"), "");
+          recently(function () {
+            return api("POST", "/admin/passkeys/" + encodeURIComponent(p.id) + "/remove");
+          }).then(function (r) {
             if (!r.ok) { say($("passkeys-error"), failure(r)); loadPasskeys(); return; }
-            if (p.current) { signedOut("That passkey was removed. Sign in with another."); return; }
-            loadPasskeys();
-          });
+            // Signing in again for it may have been with this very passkey,
+            // so ask the server rather than trust what the list said.
+            loadStatus().then(function (s) {
+              if (!s || !s.session) { signedOut("That passkey was removed. Sign in with another."); return; }
+              loadPasskeys();
+            });
+          }).catch(function (e) { say($("passkeys-error"), e.message); loadPasskeys(); });
         });
         li.appendChild(b);
         list.appendChild(li);
@@ -794,7 +844,7 @@
     say($("passkeys-error"), "");
     say($("passkeys-ok"), "");
     $("passkey-add").disabled = true;
-    api("POST", "/admin/passkeys/register").then(function (r) {
+    recently(function () { return api("POST", "/admin/passkeys/register"); }).then(function (r) {
       if (!r.ok) throw new Error(failure(r));
       return navigator.credentials.create(creationOptions(r.data.options)).then(function (cred) {
         return api("POST", "/admin/passkeys/register/finish", {
@@ -811,6 +861,20 @@
     }).catch(function (e) {
       say($("passkeys-error"), e.message);
     }).then(function () { $("passkey-add").disabled = false; });
+  }
+
+  function signOutOthers() {
+    say($("sessions-error"), "");
+    say($("sessions-ok"), "");
+    if (!window.confirm("Sign out every other session? This one stays signed in.")) return;
+    $("sign-out-others").disabled = true;
+    recently(function () { return api("POST", "/admin/logout/others"); }).then(function (r) {
+      if (!r.ok) throw new Error(failure(r));
+      var n = r.data.other_sessions_ended;
+      say($("sessions-ok"), n === 1 ? "Signed out 1 other session." : "Signed out " + n + " other sessions.");
+    }).catch(function (e) {
+      say($("sessions-error"), e.message);
+    }).then(function () { $("sign-out-others").disabled = false; });
   }
 
   // ---- Wiring. No inline handlers: the CSP would block them.
@@ -831,6 +895,7 @@
   $("key-copy").addEventListener("click", copyKey);
   $("key-done").addEventListener("click", forgetKey);
   $("passkey-add").addEventListener("click", addPasskey);
+  $("sign-out-others").addEventListener("click", signOutOthers);
   Array.prototype.forEach.call(document.querySelectorAll("nav.tabs button"), function (b) {
     b.addEventListener("click", function () { selectTab(b.getAttribute("data-tab")); });
   });

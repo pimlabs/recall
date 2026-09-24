@@ -23,7 +23,8 @@ pub use devices::{
     plain_name, Created, Decision, Inserted, NewAuthkey, NewDevice, NewEnrollment, Poll, Waiting,
 };
 pub use passkeys::{
-    AddedCredential, AdminCredential, AdminSession, NewAdminCredential, RemovedCredential,
+    AddedCredential, AdminCredential, AdminSession, BootstrapCode, FirstPasskey,
+    NewAdminCredential, RemovedCredential,
 };
 
 /// Frozen: an already-deployed database was created with exactly this.

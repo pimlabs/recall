@@ -337,6 +337,9 @@ check "the bootstrap with passkeys off is 503" '503' \
 check "managing passkeys needs a session, not the token" \
   '401 {"error":"unauthorized: this needs an admin session; sign in with a passkey"}' \
   "$(curl -s -o "$WORK/p.json" -w '%{http_code}' "${auth[@]}" "$URL/admin/passkeys") $(cat "$WORK/p.json")"
+check "and so does signing out the other sessions" \
+  '401 {"error":"unauthorized: this needs an admin session; sign in with a passkey"}' \
+  "$(curl -s -o "$WORK/lo.json" -w '%{http_code}' -X POST "${auth[@]}" "$URL/admin/logout/others") $(cat "$WORK/lo.json")"
 FAKE="__Host-recall_admin=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 check "a session cookie the server did not issue is 401 on the device routes" \
   '{"error":"unauthorized: the admin session has ended; sign in again"}' \
@@ -363,7 +366,25 @@ check "a ceremony start that is not JSON is 415" '415 {"error":"this needs Conte
      "$PK_URL/admin/login/start") $(cat "$WORK/ct.json")"
 check "and so is one that names no type" '415' \
   "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${auth[@]}" "$PK_URL/admin/bootstrap/register")"
-curl -s -D "$WORK/boot.headers" -X POST "${json[@]}" "${auth[@]}" "$PK_URL/admin/bootstrap/register" >"$WORK/boot.json"
+# The code a server with no passkey prints as it starts: four groups of
+# four letters, the only such line in its log.
+code_in() { grep -Eo '^ *[B-Z]{4}-[B-Z]{4}-[B-Z]{4}-[B-Z]{4} *$' "$1" | tail -1 | tr -d ' '; }
+CODE=$(code_in "$WORK/pk.log")
+check "starting with no passkey, the server prints a one-time bootstrap code" 'True' \
+  "$(python3 -c 'import sys; print(len(sys.argv[1]) == 19)' "$CODE")"
+check "the token without that code is 403" \
+  '403 {"error":"forbidden: registering the first passkey needs the one-time bootstrap code the server printed where it runs, as well as RECALL_TOKEN"}' \
+  "$(curl -s -o "$WORK/nc.json" -w '%{http_code}' -X POST "${json[@]}" "${auth[@]}" -d '{"bootstrap_code":"BCDF-GHJK-LMNP-QRST"}' \
+     "$PK_URL/admin/bootstrap/register") $(cat "$WORK/nc.json")"
+# reset-passkeys replaces it, and says so; the old one stops working.
+RECALL_DB_PATH="$WORK/pk.sqlite" "$BIN" reset-passkeys >"$WORK/reset.out" 2>&1
+OLD_CODE=$CODE
+CODE=$(code_in "$WORK/reset.out")
+check "reset-passkeys prints a new code, and the one before stops working" 'True 403' \
+  "$(python3 -c 'import sys; print(len(sys.argv[1]) == 19 and sys.argv[1] != sys.argv[2])' "$CODE" "$OLD_CODE") $(curl -s -o /dev/null -w '%{http_code}' -X POST "${json[@]}" "${auth[@]}" \
+     -d "{\"bootstrap_code\":\"$OLD_CODE\"}" "$PK_URL/admin/bootstrap/register")"
+curl -s -D "$WORK/boot.headers" -X POST "${json[@]}" "${auth[@]}" -d "{\"bootstrap_code\":\"$CODE\"}" \
+  "$PK_URL/admin/bootstrap/register" >"$WORK/boot.json"
 check "the bootstrap answers with a ceremony and a discoverable-credential challenge" \
   'ceremony_id options localhost required' \
   "$(python3 -c '

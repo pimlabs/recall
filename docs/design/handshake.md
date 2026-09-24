@@ -247,17 +247,22 @@ required). What the sketch left open was settled this way:
 - The site a passkey is bound to is configured, as `RECALL_PUBLIC_URL`,
   since behind Traefik the server cannot learn it from a request. Unset,
   passkeys are off, the page says why, and the token still works.
-- The bootstrap is `POST /admin/bootstrap/register` with `RECALL_TOKEN`,
-  and it refuses in code once any passkey exists, whatever token it is
-  shown. More passkeys are added only from a signed-in session. So the
-  bootstrap secret need not be disabled for a leak of it to stop mattering
-  here; recovering from losing every passkey is `recall-server
+- The bootstrap is `POST /admin/bootstrap/register` with `RECALL_TOKEN`
+  and a one-time code the server prints where it runs (in its log when it
+  starts with no passkey, and from `reset-passkeys`), good for an hour and
+  stored only as a hash. It refuses in code once any passkey exists,
+  whatever it is shown. More passkeys are added only from a signed-in
+  session. So the bootstrap secret need not be disabled for a leak of it
+  to stop mattering here, and a leaked token alone never could plant a
+  passkey; recovering from losing every passkey is `recall-server
   reset-passkeys`, which needs a shell on the server.
 - A session is a `__Host-` cookie, `HttpOnly`, `Secure`,
   `SameSite=Strict`, of which the server keeps only the SHA-256: 12 hours
   idle, 30 days at most. Every state-changing request also carries a CSRF
   token in a header. It is a third credential on the device routes only,
-  never on `/sync`.
+  never on `/sync`. Adding or removing a passkey, and signing out the other
+  sessions, need a sign-in in the last five minutes, so a copied cookie
+  cannot lock the owner out.
 - The signature counter is checked and moved forward in one statement, so
   a cloned authenticator racing the real one is caught, and a refusal is
   logged.

@@ -14,6 +14,12 @@
 //! the cookie is needed to check it, and knowing the token tells nobody
 //! the cookie.
 //!
+//! A session is a bearer credential once it exists, and a copied cookie
+//! works until it ends. So what would let a copy keep the owner out, adding
+//! a passkey, removing one, and signing out every other session, also needs
+//! the session to have signed in within the last five minutes: the page
+//! asks for the passkey again first when it has not.
+//!
 //! The passkey ceremonies that start a session live in `passkeys.rs`,
 //! behind the `passkeys` feature; everything here builds without it.
 
@@ -53,6 +59,10 @@ pub(super) const SESSION_IDLE: Duration = Duration::from_secs(12 * 60 * 60);
 
 /// A session ends this long after it began, however much it is used.
 pub(super) const SESSION_LIMIT: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// How recently a session must have signed in with a passkey to add or
+/// remove one, or to sign out the others.
+pub(super) const RECENT_SIGN_IN: Duration = Duration::from_secs(5 * 60);
 
 /// A session's `last_used_at` is written at most this often: each request
 /// would be a write, and against twelve hours a minute is nothing.
@@ -175,6 +185,8 @@ pub(super) struct OwnerSession {
     pub(super) token_sha256: String,
     /// The passkey that signed in.
     pub(super) credential_id: String,
+    /// When it signed in.
+    pub(super) signed_in_at: String,
     /// What the page sends back as [`CSRF_HEADER`].
     pub(super) csrf_token: String,
     /// When it ends, however much it is used.
@@ -236,10 +248,29 @@ pub(super) fn live_session(
     Ok(Some(OwnerSession {
         token_sha256,
         credential_id: session.credential_id,
+        signed_in_at: session.created_at,
         csrf_token: csrf_token(token),
         expires_at: session.expires_at,
         idle_expires_at: format_timestamp((used + SESSION_IDLE).min(limit)),
     }))
+}
+
+/// Refuses unless `session` signed in within [`RECENT_SIGN_IN`].
+pub(super) fn require_recent_sign_in(
+    state: &AppState,
+    session: &OwnerSession,
+) -> Result<(), Refusal> {
+    let recent = parse_timestamp(&session.signed_in_at)
+        .is_some_and(|at| state.clock() - at < RECENT_SIGN_IN);
+    if recent {
+        Ok(())
+    } else {
+        Err(Refusal::new(
+            StatusCode::FORBIDDEN,
+            "forbidden: this needs a sign-in in the last five minutes; sign in with a passkey \
+             again",
+        ))
+    }
 }
 
 /// A state-changing request must carry the session's CSRF token.

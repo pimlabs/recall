@@ -55,14 +55,19 @@ fn an_unknown_argument_is_a_usage_error() {
 }
 
 /// The way back in for an owner who lost every passkey: a command run where
-/// the database is, never a route the token can reach.
+/// the database is, never a route the token can reach. It prints a new
+/// bootstrap code, and refuses a database that is not there rather than
+/// making one.
 #[test]
-fn reset_passkeys_empties_the_passkeys_and_needs_the_database() {
+fn reset_passkeys_empties_the_passkeys_and_prints_a_bootstrap_code() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("r.db");
     let db_str = db.to_string_lossy().to_string();
     let out = run(&["reset-passkeys"], &[("RECALL_DB_PATH", &db_str)]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "no database there yet");
+    assert!(stderr.contains("there is no database at"), "{stderr}");
+    assert!(!db.exists(), "and it did not make one");
 
     let store = recall_server::Store::open(&db).unwrap();
     store
@@ -75,7 +80,7 @@ fn reset_passkeys_empties_the_passkeys_and_needs_the_database() {
                 sign_count: 0,
                 created_at: "2026-09-23T10:00:00.000Z",
             },
-            true,
+            None,
         )
         .unwrap();
     drop(store);
@@ -85,4 +90,18 @@ fn reset_passkeys_empties_the_passkeys_and_needs_the_database() {
     assert!(stdout.contains("Removed 1 passkey"), "{stdout}");
     let store = recall_server::Store::open(&db).unwrap();
     assert!(!store.has_admin_credentials().unwrap());
+
+    // The code it printed is the one the bootstrap will take.
+    let code = stdout
+        .lines()
+        .map(str::trim)
+        .find(|l| l.len() == 19 && l.matches('-').count() == 3)
+        .unwrap_or_else(|| panic!("no code in {stdout}"));
+    let hash = recall_server::bootstrap::sha256(code).unwrap();
+    assert_eq!(
+        store
+            .check_bootstrap_code(&hash, &recall_server::now())
+            .unwrap(),
+        recall_server::store::BootstrapCode::Valid
+    );
 }

@@ -2,14 +2,16 @@
 //!
 //! Three ceremonies, each started by one request and finished by the next:
 //!
-//! - **Bootstrap.** The operator's `RECALL_TOKEN` registers the first
-//!   passkey, and only the first: once one exists, the route refuses
-//!   whatever token it is shown, so a token that leaks later cannot
+//! - **Bootstrap.** The operator's `RECALL_TOKEN`, with the one-time code
+//!   the server prints where it runs (see [`crate::bootstrap`]), registers
+//!   the first passkey, and only the first: once one exists, the route
+//!   refuses whatever it is shown, so a token that leaks later cannot
 //!   register a "first" passkey of its own.
 //! - **Sign-in.** Anyone may start one; only a registered passkey finishes
 //!   it. It is discoverable (usernameless): there is one owner, so the page
 //!   asks for no name and the authenticator offers the passkey it holds.
-//! - **Adding a passkey.** Only a signed-in owner, never the token.
+//! - **Adding a passkey.** Only a signed-in owner, never the token, and
+//!   only a session that signed in within the last five minutes.
 //!
 //! A ceremony's state is not kept on the server. It is sealed with
 //! AES-256-GCM, under a key made when the process starts and never written
@@ -48,14 +50,17 @@ use webauthn_rs::prelude::{
 };
 
 use super::admin::{
-    cleared_cookie, csrf_token, no_store, session_cookie, session_token_sha256, OwnerSession,
-    PasskeyStatus, SessionView, SESSION_IDLE, SESSION_LIMIT,
+    cleared_cookie, csrf_token, no_store, require_recent_sign_in, session_cookie,
+    session_token_sha256, OwnerSession, PasskeyStatus, SessionView, SESSION_IDLE, SESSION_LIMIT,
 };
 use super::auth::Caller;
 use super::respond::{error, internal, json, Refusal};
 use super::AppState;
 use crate::format_timestamp;
-use crate::store::{AddedCredential, AdminCredential, NewAdminCredential, RemovedCredential};
+use crate::store::{
+    AddedCredential, AdminCredential, BootstrapCode, FirstPasskey, NewAdminCredential,
+    RemovedCredential,
+};
 
 /// How long a ceremony may take, from its challenge to its answer. Also
 /// the timeout the browser is given: long enough to find a phone, unlock
@@ -84,6 +89,9 @@ enum Pending {
     Bootstrap {
         registration: PasskeyRegistration,
         user_handle: Uuid,
+        /// The bootstrap code it was started with, which finishing it uses
+        /// up: SHA-256, as the store knows it.
+        code_sha256: String,
     },
     /// Registering another, from a session.
     Add {
@@ -401,6 +409,12 @@ struct Started {
 }
 
 #[derive(Debug, Deserialize)]
+struct StartBootstrap {
+    #[serde(default)]
+    bootstrap_code: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct FinishRegistration {
     ceremony_id: String,
     #[serde(default)]
@@ -526,17 +540,35 @@ fn not_registered(e: WebauthnError) -> Refusal {
     )
 }
 
-/// Finishes a registration and stores the passkey.
+/// Finishes a registration and stores the passkey. `first` is the
+/// bootstrap code's hash, for the first passkey.
 fn register(
     state: &AppState,
     ceremony: &Ceremony,
     registration: &PasskeyRegistration,
     user_handle: Uuid,
     finish: &FinishRegistration,
-    first_only: bool,
+    first: Option<&str>,
 ) -> Result<AdminCredential, Refusal> {
     let site = state.passkeys.site()?;
     let name = passkey_name(&finish.name)?;
+    // What the browser says, unsigned, so only ever a reason to refuse: an
+    // authenticator that kept no discoverable credential could never sign
+    // in here, where nobody types a user name.
+    let kept = finish
+        .credential
+        .extensions
+        .cred_props
+        .as_ref()
+        .and_then(|p| p.rk);
+    if kept == Some(false) {
+        return Err(Refusal::new(
+            StatusCode::BAD_REQUEST,
+            "this authenticator did not keep the passkey on itself (the browser says credProps.rk \
+             is false), and signing in here needs one that does; use a phone, or a password \
+             manager that saves passkeys",
+        ));
+    }
     let passkey = site
         .webauthn
         .finish_passkey_registration(&finish.credential, registration)
@@ -558,12 +590,16 @@ fn register(
                 sign_count,
                 created_at: &now,
             },
-            first_only,
+            first.map(|code_sha256| FirstPasskey {
+                code_sha256,
+                now: &now,
+            }),
         )
         .map_err(Refusal::internal)?;
     match added {
         AddedCredential::Added => {}
         AddedCredential::NotFirst => return Err(already_bootstrapped()),
+        AddedCredential::Code(refused) => return Err(code_refused(refused)),
         AddedCredential::Duplicate => {
             return Err(Refusal::new(
                 StatusCode::CONFLICT,
@@ -586,6 +622,22 @@ fn already_bootstrapped() -> Refusal {
     )
 }
 
+fn code_refused(why: BootstrapCode) -> Refusal {
+    Refusal::new(
+        StatusCode::FORBIDDEN,
+        match why {
+            BootstrapCode::Expired => {
+                "forbidden: that bootstrap code has expired; restart the server, or run \
+                 recall-server reset-passkeys where it runs, for a new one"
+            }
+            _ => {
+                "forbidden: registering the first passkey needs the one-time bootstrap code the \
+                 server printed where it runs, as well as RECALL_TOKEN"
+            }
+        },
+    )
+}
+
 /// The bootstrap routes: the operator's token, and only while no passkey
 /// exists. Checked before anything else, whatever else the request says.
 fn bootstrap_allowed(state: &AppState, caller: &Caller) -> Result<(), Refusal> {
@@ -602,20 +654,38 @@ fn bootstrap_allowed(state: &AppState, caller: &Caller) -> Result<(), Refusal> {
     }
 }
 
-/// `POST /admin/bootstrap/register`.
+/// `POST /admin/bootstrap/register`, with `{"bootstrap_code": "…"}`.
 pub(super) async fn handle_bootstrap_start(
     State(state): State<Arc<AppState>>,
     Extension(caller): Extension<Caller>,
+    bytes: Bytes,
 ) -> Response {
     let run = || -> Result<Response, Refusal> {
         bootstrap_allowed(&state, &caller)?;
         let site = state.passkeys.site()?;
+        let typed = if bytes.is_empty() {
+            String::new()
+        } else {
+            parse::<StartBootstrap>(&bytes)?.bootstrap_code
+        };
+        let code_sha256 =
+            crate::bootstrap::sha256(&typed).ok_or_else(|| code_refused(BootstrapCode::Wrong))?;
+        let (_, now) = now_at(&state);
+        match state
+            .store
+            .check_bootstrap_code(&code_sha256, &now)
+            .map_err(Refusal::internal)?
+        {
+            BootstrapCode::Valid => {}
+            refused => return Err(code_refused(refused)),
+        }
         let user_handle = Uuid::from_bytes(random::<16>()?);
         let (options, registration) = registration_options(site, user_handle, Vec::new())?;
         let id = state.passkeys.begin(
             Pending::Bootstrap {
                 registration,
                 user_handle,
+                code_sha256,
             },
             state.now(),
         )?;
@@ -637,11 +707,19 @@ pub(super) async fn handle_bootstrap_finish(
         let Pending::Bootstrap {
             registration,
             user_handle,
+            code_sha256,
         } = &ceremony.pending
         else {
             return Err(wrong_ceremony());
         };
-        let credential = register(&state, &ceremony, registration, *user_handle, &finish, true)?;
+        let credential = register(
+            &state,
+            &ceremony,
+            registration,
+            *user_handle,
+            &finish,
+            Some(code_sha256),
+        )?;
         Ok(json(StatusCode::OK, &PasskeyView::of(credential, None)))
     };
     run().unwrap_or_else(IntoResponse::into_response)
@@ -822,6 +900,27 @@ pub(super) async fn handle_sign_out(
     resp
 }
 
+/// `POST /admin/logout/others`: every session but this one, such as one
+/// signed in somewhere the owner no longer is.
+pub(super) async fn handle_sign_out_others(
+    State(state): State<Arc<AppState>>,
+    Extension(session): Extension<OwnerSession>,
+) -> Response {
+    if let Err(refused) = require_recent_sign_in(&state, &session) {
+        return refused.into_response();
+    }
+    match state
+        .store
+        .delete_other_admin_sessions(&session.token_sha256)
+    {
+        Ok(n) => json(
+            StatusCode::OK,
+            &serde_json::json!({ "other_sessions_ended": n }),
+        ),
+        Err(e) => internal(e),
+    }
+}
+
 /// `GET /admin/passkeys`.
 pub(super) async fn handle_list_passkeys(
     State(state): State<Arc<AppState>>,
@@ -847,6 +946,7 @@ pub(super) async fn handle_add_start(
     Extension(session): Extension<OwnerSession>,
 ) -> Response {
     let run = || -> Result<Response, Refusal> {
+        require_recent_sign_in(&state, &session)?;
         let site = state.passkeys.site()?;
         let existing = stored_passkeys(&state)?;
         // Every passkey has the owner's one user handle, so an
@@ -891,14 +991,7 @@ pub(super) async fn handle_add_finish(
         if *started_by != session.token_sha256 {
             return Err(wrong_ceremony());
         }
-        let credential = register(
-            &state,
-            &ceremony,
-            registration,
-            *user_handle,
-            &finish,
-            false,
-        )?;
+        let credential = register(&state, &ceremony, registration, *user_handle, &finish, None)?;
         Ok(json(
             StatusCode::OK,
             &PasskeyView::of(credential, Some(&session.credential_id)),
@@ -914,6 +1007,9 @@ pub(super) async fn handle_remove(
     Extension(session): Extension<OwnerSession>,
     Path(id): Path<String>,
 ) -> Response {
+    if let Err(refused) = require_recent_sign_in(&state, &session) {
+        return refused.into_response();
+    }
     match state.store.remove_admin_credential(&id) {
         Ok(RemovedCredential::Removed(credential)) => {
             let own = credential.id == session.credential_id;

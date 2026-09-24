@@ -1,4 +1,5 @@
-//! The owner's passkeys and the admin page's sessions.
+//! The owner's passkeys, the admin page's sessions, and the one-time code
+//! that registers the first passkey.
 //!
 //! A passkey is stored as `webauthn-rs` serialises it, in `passkey`, and
 //! that JSON is opaque to everything here: the store never needs to look
@@ -9,7 +10,7 @@
 //! Timestamps are [`crate::now`]'s format, so they compare as strings.
 
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension, Row};
+use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior};
 
 use super::Store;
 
@@ -43,6 +44,16 @@ pub(super) const SCHEMA: &str = "
         last_used_at  TEXT NOT NULL,
         -- The absolute limit, however recently it was used.
         expires_at    TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS admin_bootstrap (
+        -- One row at most: a new code replaces the last.
+        id          INTEGER PRIMARY KEY CHECK (id = 1),
+        -- SHA-256 of the code, lowercase hex, as `bootstrap_code` reads
+        -- it. The code itself is never stored.
+        code_sha256 TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        -- Registering the first passkey with it must happen before this.
+        expires_at  TEXT NOT NULL
     );
 ";
 
@@ -82,6 +93,16 @@ pub struct NewAdminCredential<'a> {
     pub created_at: &'a str,
 }
 
+/// The bootstrap code a first passkey is being registered with: the hash
+/// of what was given, and the moment it is judged at.
+#[derive(Debug, Clone, Copy)]
+pub struct FirstPasskey<'a> {
+    /// SHA-256 of the code, as `bootstrap_code` reads it.
+    pub code_sha256: &'a str,
+    /// Now.
+    pub now: &'a str,
+}
+
 /// What storing a passkey came to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddedCredential {
@@ -92,6 +113,19 @@ pub enum AddedCredential {
     NotFirst,
     /// A passkey with that credential id is stored already.
     Duplicate,
+    /// The bootstrap code is not the one outstanding, or has expired.
+    Code(BootstrapCode),
+}
+
+/// Whether a bootstrap code will register a first passkey.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapCode {
+    /// It is the one outstanding, and has not expired.
+    Valid,
+    /// It was, but it has expired.
+    Expired,
+    /// It is not one this server issued, or was replaced or used already.
+    Wrong,
 }
 
 /// What removing a passkey came to.
@@ -143,6 +177,35 @@ fn get_credential(conn: &Connection, id: &str) -> Result<Option<AdminCredential>
         .optional()?)
 }
 
+fn bootstrap_code(conn: &Connection, code_sha256: &str, now: &str) -> Result<BootstrapCode> {
+    let expires_at: Option<String> = conn
+        .query_row(
+            "SELECT expires_at FROM admin_bootstrap WHERE code_sha256 = ?1",
+            (code_sha256,),
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(match expires_at {
+        Some(expires_at) if expires_at.as_str() > now => BootstrapCode::Valid,
+        Some(_) => BootstrapCode::Expired,
+        None => BootstrapCode::Wrong,
+    })
+}
+
+fn set_bootstrap_code(
+    conn: &Connection,
+    code_sha256: &str,
+    now: &str,
+    expires_at: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO admin_bootstrap (id, code_sha256, created_at, expires_at)
+         VALUES (1, ?1, ?2, ?3)",
+        (code_sha256, now, expires_at),
+    )?;
+    Ok(())
+}
+
 impl Store {
     /// Whether the owner has registered any passkey.
     pub fn has_admin_credentials(&self) -> Result<bool> {
@@ -151,29 +214,39 @@ impl Store {
         Ok(n > 0)
     }
 
-    /// Stores a passkey. With `first_only`, only while none is stored:
-    /// checked in the same statement that inserts, so two bootstraps at
-    /// once cannot both be the first.
+    /// Stores a passkey.
+    ///
+    /// With `first`, only while none is stored, and only with the bootstrap
+    /// code outstanding, which it uses up. All three are one transaction,
+    /// so two bootstraps at once cannot both be the first, nor one code
+    /// register two passkeys. `IMMEDIATE`, so the write lock is taken before
+    /// anything is read: `reset-passkeys` writes from another process.
     pub fn add_admin_credential(
         &self,
         c: &NewAdminCredential<'_>,
-        first_only: bool,
+        first: Option<FirstPasskey<'_>>,
     ) -> Result<AddedCredential> {
-        let conn = self.lock();
-        if get_credential(&conn, c.id)?.is_some() {
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if get_credential(&tx, c.id)?.is_some() {
             return Ok(AddedCredential::Duplicate);
         }
-        let guard = if first_only {
-            "WHERE NOT EXISTS (SELECT 1 FROM admin_credentials)"
-        } else {
-            ""
-        };
-        let inserted = conn.execute(
-            &format!(
-                "INSERT INTO admin_credentials
-                     (id, user_handle, name, passkey, sign_count, created_at)
-                 SELECT ?1, ?2, ?3, ?4, ?5, ?6 {guard}"
-            ),
+        if let Some(first) = first {
+            let n: i64 =
+                tx.query_row("SELECT COUNT(*) FROM admin_credentials", [], |r| r.get(0))?;
+            if n > 0 {
+                return Ok(AddedCredential::NotFirst);
+            }
+            match bootstrap_code(&tx, first.code_sha256, first.now)? {
+                BootstrapCode::Valid => {}
+                refused => return Ok(AddedCredential::Code(refused)),
+            }
+            tx.execute("DELETE FROM admin_bootstrap", [])?;
+        }
+        tx.execute(
+            "INSERT INTO admin_credentials
+                 (id, user_handle, name, passkey, sign_count, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             (
                 c.id,
                 c.user_handle,
@@ -183,11 +256,19 @@ impl Store {
                 c.created_at,
             ),
         )?;
-        Ok(if inserted == 1 {
-            AddedCredential::Added
-        } else {
-            AddedCredential::NotFirst
-        })
+        tx.commit()?;
+        Ok(AddedCredential::Added)
+    }
+
+    /// Whether `code_sha256` is the bootstrap code outstanding at `now`.
+    pub fn check_bootstrap_code(&self, code_sha256: &str, now: &str) -> Result<BootstrapCode> {
+        bootstrap_code(&self.lock(), code_sha256, now)
+    }
+
+    /// Makes `code_sha256` the one bootstrap code, until `expires_at`,
+    /// replacing any other.
+    pub fn set_bootstrap_code(&self, code_sha256: &str, now: &str, expires_at: &str) -> Result<()> {
+        set_bootstrap_code(&self.lock(), code_sha256, now, expires_at)
     }
 
     /// One passkey.
@@ -248,14 +329,24 @@ impl Store {
         Ok(RemovedCredential::Removed(credential))
     }
 
-    /// Removes every passkey and every session: what `recall-server
-    /// reset-passkeys` does, for an owner who has lost them all. Answers how
-    /// many passkeys went.
-    pub fn reset_admin_credentials(&self) -> Result<usize> {
+    /// Removes every passkey and every session, and makes `code_sha256`
+    /// the bootstrap code until `expires_at`: what `recall-server
+    /// reset-passkeys` does, for an owner who has lost them all. One
+    /// transaction, and it creates the tables first if this database has
+    /// never been opened by a server that has them. Answers how many
+    /// passkeys went.
+    pub fn reset_admin_credentials(
+        &self,
+        code_sha256: &str,
+        now: &str,
+        expires_at: &str,
+    ) -> Result<usize> {
         let mut conn = self.lock();
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute_batch(SCHEMA)?;
         let n = tx.execute("DELETE FROM admin_credentials", [])?;
         tx.execute("DELETE FROM admin_sessions", [])?;
+        set_bootstrap_code(&tx, code_sha256, now, expires_at)?;
         tx.commit()?;
         Ok(n)
     }
@@ -312,6 +403,15 @@ impl Store {
         Ok(())
     }
 
+    /// Ends every session but `keep`. Answers how many ended.
+    pub fn delete_other_admin_sessions(&self, keep: &str) -> Result<usize> {
+        let conn = self.lock();
+        Ok(conn.execute(
+            "DELETE FROM admin_sessions WHERE token_sha256 != ?1",
+            (keep,),
+        )?)
+    }
+
     /// Ends a session.
     pub fn delete_admin_session(&self, token_sha256: &str) -> Result<()> {
         let conn = self.lock();
@@ -350,28 +450,44 @@ mod tests {
 
     const T0: &str = "2026-09-23T10:00:00.000Z";
     const T1: &str = "2026-09-23T11:00:00.000Z";
+    const T2: &str = "2026-09-23T12:00:00.000Z";
+
+    fn first(code_sha256: &str) -> Option<FirstPasskey<'_>> {
+        Some(FirstPasskey {
+            code_sha256,
+            now: T0,
+        })
+    }
+
+    /// A store with the bootstrap code "code" outstanding until T1.
+    fn bootstrapping() -> Store {
+        let st = Store::open_in_memory().unwrap();
+        st.set_bootstrap_code("code", T0, T1).unwrap();
+        st
+    }
 
     #[test]
     fn only_the_first_passkey_can_be_added_as_the_first() {
-        let st = Store::open_in_memory().unwrap();
+        let st = bootstrapping();
         assert!(!st.has_admin_credentials().unwrap());
         assert_eq!(
-            st.add_admin_credential(&credential("a", T0), true).unwrap(),
+            st.add_admin_credential(&credential("a", T0), first("code"))
+                .unwrap(),
             AddedCredential::Added
         );
         assert!(st.has_admin_credentials().unwrap());
+        st.set_bootstrap_code("again", T0, T1).unwrap();
         assert_eq!(
-            st.add_admin_credential(&credential("b", T0), true).unwrap(),
+            st.add_admin_credential(&credential("b", T0), first("again"))
+                .unwrap(),
             AddedCredential::NotFirst
         );
         assert_eq!(
-            st.add_admin_credential(&credential("a", T0), false)
-                .unwrap(),
+            st.add_admin_credential(&credential("a", T0), None).unwrap(),
             AddedCredential::Duplicate
         );
         assert_eq!(
-            st.add_admin_credential(&credential("b", T1), false)
-                .unwrap(),
+            st.add_admin_credential(&credential("b", T1), None).unwrap(),
             AddedCredential::Added
         );
         let ids: Vec<String> = st
@@ -386,10 +502,67 @@ mod tests {
     /// The counter rule, including the case webauthn-rs's own check cannot
     /// see: two sign-ins verified against the same stored counter, of which
     /// only the first may be recorded.
+    /// Finding 3: the first passkey needs the code outstanding, before it
+    /// expires, and uses it up.
+    #[test]
+    fn the_first_passkey_needs_the_bootstrap_code_once() {
+        let st = bootstrapping();
+        assert_eq!(
+            st.check_bootstrap_code("code", T0).unwrap(),
+            BootstrapCode::Valid
+        );
+        assert_eq!(
+            st.check_bootstrap_code("code", T1).unwrap(),
+            BootstrapCode::Expired
+        );
+        assert_eq!(
+            st.check_bootstrap_code("other", T0).unwrap(),
+            BootstrapCode::Wrong
+        );
+        assert_eq!(
+            st.add_admin_credential(&credential("a", T0), first("other"))
+                .unwrap(),
+            AddedCredential::Code(BootstrapCode::Wrong)
+        );
+        let late = Some(FirstPasskey {
+            code_sha256: "code",
+            now: T1,
+        });
+        assert_eq!(
+            st.add_admin_credential(&credential("a", T0), late).unwrap(),
+            AddedCredential::Code(BootstrapCode::Expired)
+        );
+        assert!(!st.has_admin_credentials().unwrap(), "nothing stored");
+        assert_eq!(
+            st.add_admin_credential(&credential("a", T0), first("code"))
+                .unwrap(),
+            AddedCredential::Added
+        );
+        assert_eq!(
+            st.check_bootstrap_code("code", T0).unwrap(),
+            BootstrapCode::Wrong,
+            "used up"
+        );
+
+        // Reset clears the passkey and makes a new code the only one.
+        assert_eq!(st.reset_admin_credentials("new", T0, T2).unwrap(), 1);
+        assert_eq!(
+            st.check_bootstrap_code("new", T1).unwrap(),
+            BootstrapCode::Valid
+        );
+        st.set_bootstrap_code("newer", T0, T2).unwrap();
+        assert_eq!(
+            st.check_bootstrap_code("new", T1).unwrap(),
+            BootstrapCode::Wrong,
+            "replaced"
+        );
+    }
+
     #[test]
     fn a_sign_in_is_recorded_only_if_its_counter_moved_forward() {
-        let st = Store::open_in_memory().unwrap();
-        st.add_admin_credential(&credential("a", T0), true).unwrap();
+        let st = bootstrapping();
+        st.add_admin_credential(&credential("a", T0), first("code"))
+            .unwrap();
         // Both zero: a synced passkey, every time.
         assert!(st.record_admin_sign_in("a", 0, "{}", T1).unwrap());
         assert!(st.record_admin_sign_in("a", 0, "{}", T1).unwrap());
@@ -406,14 +579,14 @@ mod tests {
 
     #[test]
     fn the_last_passkey_cannot_be_removed_and_removing_one_ends_its_sessions() {
-        let st = Store::open_in_memory().unwrap();
-        st.add_admin_credential(&credential("a", T0), true).unwrap();
+        let st = bootstrapping();
+        st.add_admin_credential(&credential("a", T0), first("code"))
+            .unwrap();
         assert_eq!(
             st.remove_admin_credential("a").unwrap(),
             RemovedCredential::Last
         );
-        st.add_admin_credential(&credential("b", T1), false)
-            .unwrap();
+        st.add_admin_credential(&credential("b", T1), None).unwrap();
         assert!(st.create_admin_session("s1", "a", T1, T1).unwrap());
         assert!(st.create_admin_session("s2", "b", T1, T1).unwrap());
         assert!(matches!(
@@ -433,9 +606,24 @@ mod tests {
     }
 
     #[test]
+    fn signing_out_the_others_keeps_this_session() {
+        let st = bootstrapping();
+        st.add_admin_credential(&credential("a", T0), first("code"))
+            .unwrap();
+        for s in ["mine", "theirs", "old"] {
+            st.create_admin_session(s, "a", T0, T2).unwrap();
+        }
+        assert_eq!(st.delete_other_admin_sessions("mine").unwrap(), 2);
+        assert!(st.admin_session("mine").unwrap().is_some());
+        assert_eq!(st.admin_session("theirs").unwrap(), None);
+        assert_eq!(st.delete_other_admin_sessions("mine").unwrap(), 0);
+    }
+
+    #[test]
     fn sessions_are_swept_when_idle_or_past_their_limit() {
-        let st = Store::open_in_memory().unwrap();
-        st.add_admin_credential(&credential("a", T0), true).unwrap();
+        let st = bootstrapping();
+        st.add_admin_credential(&credential("a", T0), first("code"))
+            .unwrap();
         st.create_admin_session("idle", "a", T0, "2026-10-23T10:00:00.000Z")
             .unwrap();
         st.create_admin_session("old", "a", T1, T1).unwrap();
@@ -447,7 +635,7 @@ mod tests {
             2
         );
         assert!(st.admin_session("fine").unwrap().is_some());
-        assert_eq!(st.reset_admin_credentials().unwrap(), 1);
+        assert_eq!(st.reset_admin_credentials("new", T0, T2).unwrap(), 1);
         assert_eq!(st.admin_session("fine").unwrap(), None);
         assert!(!st.has_admin_credentials().unwrap());
     }

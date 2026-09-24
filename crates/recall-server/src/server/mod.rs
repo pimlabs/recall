@@ -11,8 +11,8 @@
 //! | `POST /v1/devices/enroll`, `POST /v1/devices/enroll/poll` | none, but rate limited, and small bodies only |
 //! | `GET /admin/stats`, the rest of `/v1/devices`, and `/v1/authkeys` | bearer token, an admin device's signature, or the admin page's passkey session (with its CSRF header on a POST) |
 //! | `GET /admin/session`, `POST /admin/login/start`, `POST /admin/login/finish` | none, but rate limited |
-//! | `POST /admin/bootstrap/register` and `…/finish` | bearer token only, and only while no passkey exists |
-//! | `GET /admin/passkeys`, `POST /admin/passkeys/…`, `POST /admin/logout` | the passkey session only, with its CSRF header on a POST |
+//! | `POST /admin/bootstrap/register` and `…/finish` | bearer token only, with the one-time bootstrap code, and only while no passkey exists |
+//! | `GET /admin/passkeys`, `POST /admin/passkeys/…`, `POST /admin/logout`, `POST /admin/logout/others` | the passkey session only, with its CSRF header on a POST; adding or removing a passkey and signing out the others also need a sign-in in the last five minutes |
 //! | anything else | 404 JSON |
 //!
 //! This module owns the shared state, the router, and the background jobs.
@@ -142,7 +142,7 @@ struct AppState {
     runtime: RwLock<Runtime>,
     limiter: RateLimiter,
     replay: ReplayCache,
-    /// Passkey sign-in for the admin page, and its ceremonies in flight.
+    /// Passkey sign-in for the admin page, and the ceremonies it finished.
     passkeys: Passkeys,
 }
 
@@ -351,6 +351,22 @@ impl Server {
         run_backup(&self.state);
     }
 
+    /// Issues a new bootstrap code, when passkey sign-in is on and no
+    /// passkey is registered: the one-time code that, with `RECALL_TOKEN`,
+    /// registers the first. [`None`] otherwise. `recall-server` calls it on
+    /// start and prints what it gets; see [`crate::bootstrap`].
+    pub fn issue_bootstrap_code(&self) -> Result<Option<crate::bootstrap::BootstrapCode>> {
+        if !self.state.passkeys.status().enabled || self.state.store.has_admin_credentials()? {
+            return Ok(None);
+        }
+        crate::bootstrap::issue(&self.state.store, self.state.clock()).map(Some)
+    }
+
+    /// Where the admin page is, when `RECALL_PUBLIC_URL` says.
+    pub fn public_url(&self) -> Option<&str> {
+        Some(self.state.cfg.public_url.as_str()).filter(|u| !u.is_empty())
+    }
+
     /// Removes ephemeral devices idle for longer than
     /// [`Config::ephemeral_device_ttl`], and enrolments that expired over
     /// an hour ago. Answers how many of each went.
@@ -449,7 +465,7 @@ fn sign_in_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
     use passkeys::{
         handle_add_finish, handle_add_start, handle_bootstrap_finish, handle_bootstrap_start,
         handle_list_passkeys, handle_remove, handle_sign_in_finish, handle_sign_in_start,
-        handle_sign_out, json_only,
+        handle_sign_out, handle_sign_out_others, json_only,
     };
     // Every ceremony's start and finish takes JSON and says so, which a
     // cross-site form or a blind `no-cors` fetch cannot. The last layer
@@ -505,6 +521,10 @@ fn sign_in_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
             post(handle_remove).fallback(not_found),
         )
         .route("/admin/logout", post(handle_sign_out).fallback(not_found))
+        .route(
+            "/admin/logout/others",
+            post(handle_sign_out_others).fallback(not_found),
+        )
         .route_layer(DefaultBodyLimit::max(SIGN_IN_BODY_BYTES))
         .route_layer(from_fn_with_state(state.clone(), admin::owner_only));
     sign_in.merge(bootstrap).merge(adding).merge(owner)

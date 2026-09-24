@@ -211,29 +211,52 @@ sends the memory that project already had. See
 The admin page approves new machines, revokes lost ones and makes
 authkeys for cloud sessions. It signs in with a passkey, so all of
 that works from a phone with nothing typed but a code. Setting it up takes
-`RECALL_TOKEN` once.
+`RECALL_TOKEN` and a one-time code the server prints, once.
 
 1. Make sure `RECALL_PUBLIC_URL` in `.env` is exactly the address you will
    open, such as `https://recall.yourdomain.com`, and that the server was
    restarted after it was set (`docker compose up -d`, with `-f` for
    Traefik). The page tells you if it is not set.
-2. On your phone, open `https://recall.yourdomain.com/admin`. It says
+2. Read the **bootstrap code** from the server's log. While no passkey is
+   registered, the server prints one each time it starts:
+
+   ```sh
+   docker compose logs recall-server | grep -A3 'bootstrap code'
+   ```
+
+   It looks like `BCDF-GHJK-LMNP-QRST`, works for an hour, and works once.
+   Expired? `docker compose restart recall-server` prints a new one.
+3. On your phone, open `https://recall.yourdomain.com/admin`. It says
    **Set up a passkey**.
-3. Paste `RECALL_TOKEN` (from `.env`; a password manager is the easy way to
-   get it onto the phone), give the passkey a name such as `iPhone`, and
-   tap **Register a passkey**. The phone asks for Face ID, a fingerprint
-   or its PIN, and saves the passkey.
-4. The page signs in with it straight away. From now on, open `/admin` and
-   tap **Sign in with a passkey**. The token is not needed here again.
+4. Paste `RECALL_TOKEN` (from `.env`; a password manager is the easy way to
+   get it onto the phone), type the bootstrap code, give the passkey a
+   name such as `iPhone`, and tap **Register a passkey**. The phone asks
+   for Face ID, a fingerprint or its PIN, and saves the passkey.
+5. The page signs in with it straight away. From now on, open `/admin` and
+   tap **Sign in with a passkey**. Neither the token nor a code is needed
+   here again.
+
+The code is there so that the token alone is not enough: `RECALL_TOKEN`
+lives in `.env`, a password manager and every machine not yet enrolled as
+a device, and a copy of it that leaked could otherwise register a passkey
+of its own, one that would outlast rotating the token. The code is printed
+only where the server runs.
 
 Once one passkey exists, `RECALL_TOKEN` can no longer register another:
-the bootstrap refuses, whatever token it is shown, so a token that leaks
-later cannot add its own. To use a second device, sign in and add it from
-the **Passkeys** tab. The last passkey cannot be removed.
+the bootstrap refuses, whatever it is shown. To use a second device, sign
+in and add it from the **Passkeys** tab. The last passkey cannot be
+removed. Adding or removing a passkey, and **Sign out other sessions**
+there, ask for your passkey again unless you signed in in the last five
+minutes.
 
 A session lasts 12 hours unused and 30 days at most. Passkeys synced by
 iCloud Keychain or Google Password Manager work on every device signed in
 to that account.
+
+**The page says Sign in, but you never registered a passkey?** Someone
+else did, with your token and a code from your server's log. Rotate
+`RECALL_TOKEN` first (step 2 of this guide, then every machine), then
+reset as below.
 
 **Lost every passkey?** On the server, run:
 
@@ -242,9 +265,11 @@ docker compose exec -u node recall-server recall-server reset-passkeys
 ```
 
 (with `-f docker-compose.traefik.yml` for Traefik). It removes every
-passkey and admin session, and the page offers **Set up a passkey** again.
-It needs a shell on the server on purpose: nothing reachable over the
-network can do it.
+passkey and admin session, prints a new bootstrap code, and the page
+offers **Set up a passkey** again. It needs a shell on the server on
+purpose: nothing reachable over the network can do it. Run it as `node`,
+the database's owner, as shown; as anyone else it refuses, since files it
+left behind could stop the server opening the database.
 
 ## Switching ingress on a server that is already running
 

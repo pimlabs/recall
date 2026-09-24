@@ -29,10 +29,11 @@ With no argument it serves until stopped. RECALL_TOKEN is required.
 memory from a shell on the host and open no listener.
 
 reset-passkeys removes every passkey registered for /admin, and every
-session they signed in, from the database at RECALL_DB_PATH. It is for an
-owner who has lost all of them; RECALL_TOKEN can then register a first
-passkey again. Run it where the server runs, such as with
-docker compose exec.";
+session they signed in, from the database at RECALL_DB_PATH, and prints a
+one-time bootstrap code. It is for an owner who has lost all of them:
+RECALL_TOKEN and that code can then register a first passkey again. Run it
+where the server runs, as the database's owner, such as with
+docker compose exec -u node.";
 
 /// What `recall-server version` prints: the same shape as `recall
 /// version`, so one reading of either tells the same story.
@@ -47,36 +48,6 @@ fn version_line() -> String {
             "recall-server {version} ({commit}, dev build {})",
             recall_wire::discovery::version()
         ),
-    }
-}
-
-/// Removes every admin passkey, so the bootstrap is open again.
-///
-/// A command rather than a route on purpose: the one way back in after the
-/// last passkey is lost must not be something `RECALL_TOKEN` can do over
-/// the network, or a leaked token could replace the owner's passkeys. This
-/// needs a shell where the database is, which is more than the token.
-fn reset_passkeys() -> ExitCode {
-    let db = std::env::var("RECALL_DB_PATH")
-        .ok()
-        .filter(|p| !p.is_empty())
-        .unwrap_or_else(|| "data/recall.db".to_string());
-    if !std::path::Path::new(&db).exists() {
-        eprintln!("recall-server: no database at {db}; set RECALL_DB_PATH");
-        return ExitCode::FAILURE;
-    }
-    match Store::open(&db).and_then(|store| store.reset_admin_credentials()) {
-        Ok(n) => {
-            println!(
-                "Removed {n} passkey(s) and their sessions from {db}. \
-                 Open /admin and register a new one with RECALL_TOKEN."
-            );
-            ExitCode::SUCCESS
-        }
-        Err(err) => {
-            eprintln!("recall-server: {err:#}");
-            ExitCode::FAILURE
-        }
     }
 }
 
@@ -96,7 +67,7 @@ fn main() -> ExitCode {
         // command runs beside a server, never as one, so it reads no token
         // and binds nothing.
         ["admin", ..] => return recall_server::admin::main(&args[1..]),
-        ["reset-passkeys"] => return reset_passkeys(),
+        ["reset-passkeys"] => return recall_server::admin::reset_passkeys(),
         _ => {
             eprintln!(
                 "recall-server: unexpected arguments: {}\n\n{USAGE}",
@@ -111,7 +82,13 @@ fn main() -> ExitCode {
         // Opening the store before binding means a bad database path fails
         // at once with a clear error, not after the port is taken.
         let store = Arc::new(Store::open(&cfg.db_path)?);
-        Server::new(cfg, store).serve().await
+        let server = Server::new(cfg, store);
+        // Printed where only someone on the host reads it: with the token,
+        // it registers the first passkey.
+        if let Some(code) = server.issue_bootstrap_code()? {
+            eprintln!("{}", code.instructions(server.public_url()));
+        }
+        server.serve().await
     };
     let result = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
