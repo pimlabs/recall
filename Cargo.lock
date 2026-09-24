@@ -2114,7 +2114,7 @@ dependencies = [
 
 [[package]]
 name = "recall"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anstream",
  "anstyle",
@@ -2135,7 +2135,7 @@ dependencies = [
 
 [[package]]
 name = "recall-hooks"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -2152,7 +2152,7 @@ dependencies = [
 
 [[package]]
 name = "recall-server"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2194,7 +2194,7 @@ dependencies = [
 
 [[package]]
 name = "recall-wire"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "base64 0.22.1",
  "curve25519-dalek",
@@ -2207,7 +2207,7 @@ dependencies = [
 
 [[package]]
 name = "recall-worker"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.4.3",
