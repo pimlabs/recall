@@ -105,11 +105,22 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
 
     if rep.token_set {
         out.push(ok("RECALL_TOKEN", source_detail(rep, rep.token_source)));
+    } else if rep.device.is_some() {
+        out.push(ok(
+            "RECALL_TOKEN",
+            "not needed, this machine signs its requests with its device key",
+        ));
+    } else if rep.authkey_set {
+        out.push(ok(
+            "RECALL_TOKEN",
+            "not needed, RECALL_AUTHKEY enrols this session as a device",
+        ));
     } else {
         out.push(fail("RECALL_TOKEN", "not set anywhere", WHERE_TO_SET));
     }
 
     credentials_findings(rep, &mut out);
+    device_findings(rep, &mut out);
 
     // Only asked once there is somewhere to ask. Reporting "unreachable"
     // when no URL is set would be true and useless.
@@ -245,6 +256,167 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
     out
 }
 
+/// Whether this machine is an enrolled device, and whether it should be.
+///
+/// Two warnings carry the move off the shared token (Part 2 of
+/// `docs/design/handshake.md`): one while a machine that could enrol has
+/// not, and one while a machine that has still holds the token it no longer
+/// sends. Neither fails the command: the token still works.
+fn device_findings(rep: &Report, out: &mut Vec<Finding>) {
+    let key_file = rep.device_file.as_deref().unwrap_or("~/.recall/device.key");
+    // A failure rather than a warning: the hooks send nothing at all while
+    // it lasts, not even `RECALL_TOKEN` in the key's place.
+    if let Some(err) = &rep.device_error {
+        out.push(fail(
+            "device key",
+            format!("{err}, so this machine sends nothing to the server"),
+            "move it aside and run recall connect to enrol again",
+        ));
+    }
+    if rep.device_file_exposed {
+        out.push(warn(
+            "device key",
+            format!("{key_file} is readable by other users"),
+            format!("chmod 600 {key_file}"),
+        ));
+    }
+
+    let Some(d) = &rep.device else {
+        match (rep.server_devices, rep.remote_session) {
+            (Some(true), true) if rep.authkey_set => out.push(warn(
+                "device",
+                "RECALL_AUTHKEY is set, but this session has not enrolled yet",
+                "recall pull enrols it, and says why when it cannot",
+            )),
+            (Some(true), true) if rep.token_set => out.push(warn(
+                "device",
+                "this session uses the shared RECALL_TOKEN",
+                "on an admin device: recall authkey create --tag cloud --expires 90d, \
+                 then set RECALL_AUTHKEY on the cloud environment and remove RECALL_TOKEN",
+            )),
+            (Some(true), false) if rep.token_set => out.push(warn(
+                "device",
+                "not enrolled, so this machine still uses the shared RECALL_TOKEN",
+                "recall connect",
+            )),
+            (Some(false), _) => out.push(ok(
+                "device",
+                "not available, the server does not enrol devices",
+            )),
+            _ => {}
+        }
+        return;
+    };
+
+    let what = format!(
+        "{} ({}{})",
+        d.name,
+        d.scope,
+        if d.ephemeral { ", ephemeral" } else { "" }
+    );
+    let reenroll = if rep.remote_session && rep.authkey_set {
+        "the next session start enrols again with RECALL_AUTHKEY"
+    } else {
+        "recall connect"
+    };
+    match d.confirmed {
+        Some(true) => out.push(ok(
+            "device",
+            format!(
+                "enrolled as {what}, key in {} ({})",
+                d.key_file,
+                key_protection(&d.key_file)
+            ),
+        )),
+        Some(false) if d.gone => out.push(fail(
+            "device",
+            format!(
+                "the server no longer accepts this machine's device {}: {}",
+                d.name,
+                d.check_error.as_deref().unwrap_or("unknown device")
+            ),
+            reenroll,
+        )),
+        Some(false) if rep.server_devices == Some(false) => out.push(fail(
+            "device",
+            format!(
+                "this machine signs its requests as {}, and the server does not accept \
+                 device signatures",
+                d.name
+            ),
+            "upgrade the server to 0.4.1 or later",
+        )),
+        Some(false) => out.push(warn(
+            "device",
+            format!(
+                "{what}: the server did not confirm it: {}",
+                d.check_error.as_deref().unwrap_or("no answer")
+            ),
+            "run recall doctor again; if it persists, recall connect",
+        )),
+        None => out.push(ok(
+            "device",
+            format!("enrolled as {what}, key in {} (not checked)", d.key_file),
+        )),
+    }
+
+    // The token is never sent while there is a device key, so a copy of it
+    // left on the machine protects nothing and can still leak.
+    if rep.token_set {
+        let (detail, fix) = match rep.token_source {
+            Source::CredentialsFile => (
+                format!(
+                    "RECALL_TOKEN is still saved in {}, though this machine never sends it",
+                    rep.credentials_file
+                        .as_deref()
+                        .unwrap_or("the credentials file")
+                ),
+                "recall connect removes it".to_string(),
+            ),
+            _ => {
+                let from = rep
+                    .declared_env
+                    .iter()
+                    .find(|d| d.name == "RECALL_TOKEN")
+                    .map(|d| d.file.clone())
+                    .unwrap_or_else(|| {
+                        if rep.remote_session {
+                            "the cloud environment's variables".to_string()
+                        } else {
+                            "your shell profile".to_string()
+                        }
+                    });
+                (
+                    "RECALL_TOKEN is still set, though this machine never sends it".to_string(),
+                    format!("remove RECALL_TOKEN from {from}"),
+                )
+            }
+        };
+        out.push(warn("shared token", detail, fix));
+    }
+}
+
+/// How the device key file is protected, said plainly: a file, and what
+/// keeps others out of it on this platform. Not the OS keychain, and the
+/// report does not pretend otherwise; `recall_hooks::home` says why.
+#[cfg(unix)]
+fn key_protection(_key_file: &str) -> &'static str {
+    "a file readable by you only"
+}
+
+/// On Windows, what keeps others out is the user profile's access list,
+/// which covers only what is inside the profile: a `RECALL_HOME` elsewhere
+/// gets whatever that directory allows, which nothing here reads.
+#[cfg(not(unix))]
+fn key_protection(key_file: &str) -> &'static str {
+    let profile = std::env::var("USERPROFILE").unwrap_or_default();
+    if recall_hooks::home::inside_profile(std::path::Path::new(key_file), &profile) {
+        "a file in your user profile, which only you and administrators can read"
+    } else {
+        "a file outside your user profile, so who else can read it is up to that directory"
+    }
+}
+
 /// Whether this client and the server can talk at all, from the server's
 /// discovery document. Silent against a server too old to publish one:
 /// such a server speaks protocol 1, which is what this client speaks.
@@ -367,7 +539,9 @@ fn source_detail(rep: &Report, source: Source) -> String {
 /// line sits in shell history. The same `CLAUDE_CODE_REMOTE` signal decides
 /// the memory-dir check below.
 fn credentials_findings(rep: &Report, out: &mut Vec<Finding>) {
-    if rep.token_source == Source::Environment && !rep.remote_session {
+    // With a device key the token is never sent, and `device_findings`
+    // says so instead.
+    if rep.token_source == Source::Environment && !rep.remote_session && rep.device.is_none() {
         // A settings file can be named because it was read. The shell
         // cannot: by the time a process sees a variable, which profile
         // exported it is gone, and naming a guess would send someone to
@@ -505,7 +679,7 @@ fn offbox_finding(rep: &Report, out: &mut Vec<Finding>) {
 ///
 /// [`None`] rather than a guess when it cannot be parsed — a report that
 /// invents an age is worse than one that admits it cannot read the value.
-fn age_of(stamp: &str) -> Option<time::Duration> {
+pub(crate) fn age_of(stamp: &str) -> Option<time::Duration> {
     let fmt = time::macros::format_description!(
         "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
     );
@@ -604,6 +778,9 @@ const SECTIONS: &[(&str, &[&str])] = &[
             "merge",
             "token storage",
             "credentials file",
+            "device",
+            "device key",
+            "shared token",
             "config file",
             "config overridden",
         ],
@@ -645,6 +822,7 @@ fn tone_of(f: &Finding) -> ui::Tone {
         Level::Ok
             if f.detail == "off"
                 || f.detail.starts_with("not needed")
+                || f.detail.starts_with("not available")
                 || f.detail.starts_with("not in a git repository") =>
         {
             ui::Tone::Quiet
@@ -755,6 +933,14 @@ mod tests {
             credentials_file: Some("/h/.recall/credentials.json".into()),
             credentials_error: None,
             credentials_exposed: false,
+            auth: "bearer",
+            device: None,
+            device_file: Some("/h/.recall/device.key".into()),
+            device_error: None,
+            device_file_exposed: false,
+            authkey_set: false,
+            // A server too old to say: the case that must raise nothing.
+            server_devices: None,
             config_file: Some("/h/.recall/config.toml".into()),
             machine_source: Source::Unset,
             config_problems: Vec::new(),

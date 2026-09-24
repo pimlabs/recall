@@ -22,7 +22,7 @@ use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
-use recall_wire::devices::SCOPE_ADMIN;
+use recall_wire::devices::{SCOPE_ADMIN, SCOPE_SYNC};
 use recall_wire::signature::{
     self, Received, SignatureInput, Target, LABEL, MAX_AHEAD_SECONDS, SIGNATURE_HEADER,
     SIGNATURE_INPUT_HEADER, WINDOW_SECONDS,
@@ -128,6 +128,18 @@ pub(super) struct Checked {
     signature: Vec<u8>,
 }
 
+/// Whether this server knows what a device of `scope` may do.
+///
+/// The rest of the server treats a device that is not `admin` as a `sync`
+/// device, so a scope a later version adds would otherwise be read as
+/// `sync`. A worker device, which a newer server keeps away from memory,
+/// would then read and write every project after a rollback to this
+/// version. So a scope this server does not know is refused rather than
+/// guessed at.
+fn known_scope(scope: &str) -> bool {
+    scope == SCOPE_SYNC || scope == SCOPE_ADMIN
+}
+
 fn rejected(why: &dyn std::fmt::Display) -> Refusal {
     Refusal::new(StatusCode::UNAUTHORIZED, format!("unauthorized: {why}"))
 }
@@ -163,6 +175,16 @@ pub(super) fn check_headers(state: &AppState, parts: &Parts) -> Result<Checked, 
     };
     if device.revoked_at.is_some() {
         return Err(rejected(&"this device has been revoked"));
+    }
+    if !known_scope(&device.scope) {
+        return Err(Refusal::new(
+            StatusCode::FORBIDDEN,
+            format!(
+                "forbidden: this server does not know the scope {:?}; revoke the device \
+                 or run the server version that enrolled it",
+                device.scope
+            ),
+        ));
     }
     let key = signature::parse_public_key(&device.public_key).map_err(|e| {
         Refusal::internal(anyhow::anyhow!("device {} has a bad key: {e}", device.id))
@@ -642,5 +664,14 @@ mod tests {
         assert!(Caller::Operator.is_admin());
         assert!(device("admin").is_admin());
         assert!(!device("sync").is_admin());
+    }
+
+    #[test]
+    fn a_scope_this_server_does_not_know_is_not_read_as_sync() {
+        assert!(known_scope("sync"));
+        assert!(known_scope("admin"));
+        for later in ["worker", "Sync", "", "sync "] {
+            assert!(!known_scope(later), "{later:?}");
+        }
     }
 }

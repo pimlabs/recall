@@ -16,14 +16,129 @@ break will be described here in full rather than smoothed over.
 
 ## Unreleased
 
+- **The server keeps an audit log**: a Merkle tree (RFC 9162) over every
+  authenticated push, pull, delete, and change to a device or authkey,
+  including a device an authkey enrols. Each leaf records who acted, what
+  changed, and a content hash — never the content itself. A change and its
+  leaf commit in one transaction, and the table refuses any `UPDATE`,
+  `DELETE`, or insert that is not the next leaf.
+- **What it protects against today, and what it does not.** A checkpoint
+  (the tree's size and root) that the owner saves somewhere the server
+  cannot reach lets `scripts/audit-verify.py` show later that the log
+  still extends it: removing or rewriting anything before that checkpoint,
+  by the server or by anyone with its database, is caught. Nothing saves
+  checkpoints automatically yet — the client does not keep them — so until
+  it does, history no one saved a checkpoint of can be rewritten
+  unnoticed. A device's leaves carry its signed request and the log
+  carries its public key, so what a device sent can be checked from the
+  log alone, even after the device is revoked or swept; what the server
+  says it did with a push is still the server's word (see "Audit" in
+  `docs/reference/api.md`).
+- **New routes:** `GET /v1/audit/checkpoint` (the tree's size and root)
+  and `GET /v1/audit/consistency` (the proof that one size extends
+  another), any credential; `GET /v1/audit/entries` (the leaves, 1,000 or
+  2 MiB at a time), `RECALL_TOKEN` or an admin device only, since the
+  leaves name every project, file, device and authkey. `GET /sync`
+  answers now carry a `Recall-Audit-Checkpoint` header.
+- **`GET /.well-known/recall` lists an `audit` capability**, `{
+  "leaf_version": 1, "max_page": 1000, "max_page_bytes": 2097152 }`.
+- **`scripts/audit-verify.py`** checks an exported log offline: the tree
+  with nothing but Python's standard library, and every device signature,
+  with the `cryptography` package when it works and a built-in Ed25519
+  otherwise (slower, never skipped unless `--no-signatures` says so). Page
+  through `GET /v1/audit/checkpoint` and `/entries` into a file (one
+  checkpoint line, then one leaf per line) and run
+  `python3 scripts/audit-verify.py that-file --checkpoint SIZE:ROOT` with
+  each checkpoint you saved. A CLI command that does the paging itself is
+  client work, not this release's.
+- **A new table, `audit_log`**, created on start, and read back in full
+  when the server starts: a leaf missing, out of place, or no longer
+  matching its hash stops the server from starting until the database is
+  restored from a backup. An older server ignores the table, so rolling
+  back still works. Restoring a backup truncates the log, which any
+  checkpoint saved since will report as a rewrite; see `deploy/README.md`.
+- **Tighter limits on requests the log records.** A push's `base_sha256`
+  must be 64 hex digits (what every client has always sent), `project_key`
+  and `file_path` at most 4096 bytes, and a body on the admin routes at
+  most 8 KiB. Revoking an authkey's devices after the key was revoked on
+  its own now revokes them.
+
+## 0.4.1 — 2026-09-23
+
+0.4.0 was tagged but never published: its release build stopped at a
+packaging check before anything reached a registry or a server. Everything
+listed under 0.4.0 below ships for the first time in this release, together
+with what is listed here.
+
+
+- **`recall connect` enrols this machine as a device** when the server
+  supports it (this release's server does). It makes an Ed25519 key pair,
+  shows a code and the key's fingerprint, and is approved either from a
+  machine already enrolled as admin (`recall devices approve <code>`) or,
+  for your first machine, with the server's `RECALL_TOKEN` after asking,
+  which makes it an admin device. From then on the machine signs every
+  request and sends no token, and the token `connect` had saved in
+  `~/.recall/credentials.toml` is removed; it still works on the server.
+  `--yes` and `--name` still work for scripts. Against an older server,
+  `connect` saves the token exactly as before.
+- **The device key is a file, `~/.recall/device.key`**, created readable by
+  you only, one key per server. Not the OS keychain: a hook runs on every
+  memory write and must never stop for a keychain dialog, which macOS shows
+  after an upgrade. `recall disconnect` removes it too. A hook that finds
+  it readable by other users makes it yours alone and says so, and a write
+  to `~/.recall` narrows the directory to `0700` if it was wider.
+- **A `device.key` that cannot be read stops the hooks** with a line
+  saying so, rather than sending `RECALL_TOKEN` in its place; `recall
+  connect` refuses until it is fixed or moved aside, and `recall doctor`
+  fails it.
+- **Cloud sessions enrol themselves with `RECALL_AUTHKEY`.** Set an
+  authkey on the cloud environment instead of `RECALL_TOKEN`, and
+  each session's first `recall pull` enrols it (approved at once,
+  ephemeral) and carries on. Nothing is typed, and a failure falls back to
+  `RECALL_TOKEN` or leaves memory untouched, as a pull always has.
+- **A swept cloud session enrols again by itself** when `RECALL_AUTHKEY`
+  is set: a hook refused as "unknown device" with an ephemeral key enrols
+  once, replacing that server's key only, and retries. Hooks that start at
+  once enrol one device between them. **A revoked device is never enrolled
+  again by a hook**, authkey or not: the hook says so, keeps the key, and
+  the session still starts, so revoking a device cuts that machine off.
+  A lasting device the server does not know, and any machine without an
+  authkey, is told to run `recall connect`.
+- **`recall connect` checks a device key it holds** with the server
+  whatever the discovery document says, and never falls back to saving
+  `RECALL_TOKEN` for a server it has a device key for; a discovery
+  document that fails, other than with a `404`, stops it as unreachable.
+- **Redirects are not followed.** A `3xx` from the server is reported as
+  "the server redirected to …; update RECALL_URL", and nothing, the body
+  included, is sent where it pointed.
+- **New command: `recall devices`.** `list` (scope, ephemeral, last seen,
+  agent), `approve <code>` (shows the machine's name, agent and fingerprint
+  and asks first; `--fingerprint` refuses a key with any other, `--admin`
+  gives the admin scope) and `revoke <name>`. `--yes` and `--json` for
+  scripts.
+- **New command: `recall authkey`.** `create --tag cloud --expires 90d`
+  (the key is shown once), `list` and `revoke <id>` (`--revoke-devices`
+  revokes what it enrolled too), with `--json`.
+- **`recall doctor` reports the device**: its name, scope and where its
+  key lives, checked with the server. It warns while a machine the server
+  could enrol still uses the shared token, and while a token is kept that
+  an enrolled machine no longer sends. `RECALL_TOKEN` unset is no longer a
+  failure on a machine with a device key or `RECALL_AUTHKEY`.
+- **`recall status --json` gains** `auth` (`device`, `bearer` or `none`),
+  `device` (id, name, scope, ephemeral, key storage and file, and whether
+  the server confirmed it), `device_file`, `device_error`,
+  `device_file_exposed`, `authkey_set` and `server_devices`. Every
+  existing field is unchanged: a device key that cannot be used is
+  reported in `device_error`, and `server_ok` still says only whether
+  `GET /health` answered.
+
 - **The server enrols devices.** A machine can now be enrolled with a key
   pair of its own and sign its requests (RFC 9421, Ed25519) instead of
   sending `RECALL_TOKEN`: it asks `POST /v1/devices/enroll` for a short
   code, the owner approves the code, and the machine is a device that can
   be listed and revoked on its own. Cloud sessions can enrol with an
-  expiring authkey instead of a code. This release is the server
-  half; the client does not enrol yet, so nothing changes for a machine
-  until it does. See "Devices" in `docs/reference/api.md`.
+  expiring authkey instead of a code. See "Devices" in
+  `docs/reference/api.md`.
 - **`RECALL_TOKEN` works exactly as before**, on every route, and is how
   the first device is approved. Nothing that worked stops working.
 - **A device's pushes carry its own name.** A push a device signed is
@@ -49,6 +164,10 @@ break will be described here in full rather than smoothed over.
 - **Authkeys** enrol ephemeral devices unless told otherwise, enrol
   at most 25 unrevoked devices unless `max_devices` says otherwise, and can
   be revoked together with every device they enrolled.
+- **A device whose scope the server does not know is refused** (403),
+  rather than treated as a `sync` device. A later version adds scopes
+  that must not reach memory; if the server is ever rolled back to this
+  one, such a device can do nothing until it is revoked.
 - **`GET /admin/stats` needs the `admin` scope from a device.** Nothing
   changes for `RECALL_TOKEN`, which is all anything uses today.
 - **Signed requests are checked before their body is read**, the
@@ -69,33 +188,45 @@ break will be described here in full rather than smoothed over.
 - **Three new tables in the database**, `devices`, `device_enrollments`
   and `authkeys`, created on start. `memory_files` is untouched, and an
   older server ignores the new tables, so rolling back still works.
-- **The server keeps an audit log**: a Merkle tree (RFC 9162) over every
-  authenticated push, pull, delete, and change to a device or authkey,
-  so the server, or anyone with its database, cannot quietly remove
-  or rewrite history a device has already checkpointed. Each leaf records
-  who acted, what changed, and a content hash — never the content itself —
-  and a device's is signed, so an action can be attributed even after the
-  device that made it is later revoked or swept.
-- **New routes:** `GET /v1/audit/checkpoint` (the tree's size and root),
-  `GET /v1/audit/entries` (leaves `start` to `end - 1`, 1,000 at a time)
-  and `GET /v1/audit/consistency` (the proof that one size extends
-  another), any credential. `GET /sync` answers now carry a
-  `Recall-Audit-Checkpoint` header, so every pull leaves the client a
-  checkpoint to verify later reads against without another request.
-- **`GET /.well-known/recall` lists an `audit` capability**, `{
-  "leaf_version": 1, "max_page": 1000 }`.
-- **`scripts/audit-verify.py`** checks an exported log offline, with
-  nothing but Python's standard library for the tree itself: page through
-  `GET /v1/audit/checkpoint` and `/entries` into a file (one checkpoint
-  line, then one leaf per line) and run
-  `python3 scripts/audit-verify.py that-file`. A CLI command that does
-  the paging itself is client work, not this release's. See "Audit" in
-  `docs/reference/api.md`.
-- **A new table, `audit_log`**, created on start; `UPDATE` and `DELETE`
-  against it are refused at the database level. An older server ignores
-  it, so rolling back still works.
+- **`recall-server admin`: rename, remove or restore a project from the
+  server's host.** `list` shows every project key with its files, tombstones
+  and last update (or one key's files, or what a backup holds, with
+  `--backup`); `rename <from> <to>`, `remove <key>` and `restore
+  <backup-file> <key>` replace the hand-written SQL in `deploy/README.md`.
+  Each change names its keys exactly, is confirmed by typing each key back,
+  a rename's target included (or `--yes`), takes a backup first into
+  `backups/admin/` (never rotated) and checks it holds the rows shown, and
+  runs in one transaction that commits only if exactly the rows it showed
+  changed; `--dry-run` shows the change and makes none. A rename refuses a
+  target key that holds any rows, and points to the safe way to fold one key
+  into another; `remove` warns how many files hold content no other key has.
+  A restore never overwrites a differing row without `--overwrite`, and never
+  turns a live file into a tombstone without `--restore-deletions` as well.
+  It runs with the server up: after committing, it waits out the server's
+  merge window and checks that no push already in flight partly undid the
+  change, and says what to run if one did (exit status 3). In Docker:
+  `docker exec -it -u node recall-server recall-server admin list`. There is
+  still no HTTP route that can delete or move a project: the commands open no
+  listener and need no token. A backup that fails part way, the server's
+  periodic ones included, is now deleted instead of left as a partial file
+  among the good ones.
+  Nothing else about the server changed, and `recall-server` with no
+  arguments still serves.
+- **`recall-server` can terminate TLS itself now**, for a machine with no
+  ingress in front of it: `RECALL_TLS_CERT`/`RECALL_TLS_KEY` for a
+  certificate already on disk, or `RECALL_TLS_ACME_DOMAINS`/
+  `RECALL_TLS_ACME_EMAIL` for one it gets and renews on its own from Let's
+  Encrypt. Off by default; the two existing ingress-based deployments are
+  unaffected. See `deploy/README.md` and `deploy/docker-compose.direct.yml`.
+  With TLS on, the server hardens its own connections the way an ingress
+  otherwise would: a cap on open connections (`RECALL_TLS_MAX_CONNECTIONS`,
+  default 512), and deadlines for the TLS handshake, request headers and
+  idle connections. `RECALL_TLS_REQUIRED=true`, which the direct compose
+  file sets, refuses to start without TLS rather than falling back to plain
+  HTTP. A certificate from files is reloaded on `SIGHUP` and every 12
+  hours.
 
-## 0.4.0 — 2026-09-23
+## 0.4.0 — 2026-09-23 (tagged, never published; shipped in 0.4.1)
 
 - **Breaking: the server is its own binary, `recall-server`.** `recall serve`
   is gone from the client; typing it now says where the server went and

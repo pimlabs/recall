@@ -46,8 +46,25 @@ pub async fn push() -> anyhow::Result<i32> {
         return Ok(exit::OK);
     }
 
-    let ctx = here.hook_context()?;
-    match recall_hooks::push(&ctx, &triggered).await {
+    let cfg = here.config();
+    here.protect_device_key(&cfg, "recall-push");
+    let cfg = here.enroll_if_needed(cfg, "recall-push").await;
+    let ctx = here.hook_context_for(&cfg)?;
+    let result = match recall_hooks::push(&ctx, &triggered).await {
+        // Once, and only for the refusals that name the device.
+        Err(err) => match err.server_error().filter(|e| e.device_gone()) {
+            Some(refusal) => match here.after_refusal(&cfg, "recall-push", refusal).await {
+                Some(cfg) => {
+                    let ctx = here.hook_context_for(&cfg)?;
+                    recall_hooks::push(&ctx, &triggered).await
+                }
+                None => Err(err),
+            },
+            None => Err(err),
+        },
+        ok => ok,
+    };
+    match result {
         Ok(res) => {
             if res.pushed.is_some() || !res.deleted.is_empty() {
                 eprintln!(
@@ -70,14 +87,42 @@ pub async fn push() -> anyhow::Result<i32> {
 pub async fn pull() -> anyhow::Result<i32> {
     // An unconfigured or unreachable server warns on stderr and exits 0,
     // leaving whatever is already on disk alone.
-    let ctx = match project::resolve().hook_context() {
+    let here = project::resolve();
+    // A cloud session with RECALL_AUTHKEY and no device key yet becomes
+    // a device here, before its first request, with nobody asked anything.
+    let cfg = here.config();
+    here.protect_device_key(&cfg, "recall-pull");
+    let cfg = here.enroll_if_needed(cfg, "recall-pull").await;
+    if cfg.device_error.is_none()
+        && cfg.device.is_none()
+        && cfg.token.is_empty()
+        && cfg.authkey.is_some()
+    {
+        eprintln!("recall-pull: no device key and no RECALL_TOKEN, leaving local memory untouched");
+        return Ok(exit::OK);
+    }
+    let ctx = match here.hook_context_for(&cfg) {
         Ok(ctx) => ctx,
         Err(err) => {
             eprintln!("recall-pull: {err}, leaving local memory untouched");
             return Ok(exit::OK);
         }
     };
-    match recall_hooks::pull(&ctx).await {
+    let result = match recall_hooks::pull(&ctx).await {
+        Err(err) => match err.server_error().filter(|e| e.device_gone()) {
+            Some(refusal) => match here
+                .after_refusal(&cfg, "recall-pull", refusal)
+                .await
+                .and_then(|cfg| here.hook_context_for(&cfg).ok())
+            {
+                Some(ctx) => recall_hooks::pull(&ctx).await,
+                None => Err(err),
+            },
+            None => Err(err),
+        },
+        ok => ok,
+    };
+    match result {
         Ok(res) => {
             eprintln!("{}", res.describe(ctx.project_key()));
             Ok(exit::OK)
