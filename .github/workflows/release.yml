@@ -22,7 +22,7 @@ on:
         required: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   # Before the native builds, not after: npm's postinstall downloads the
@@ -260,6 +260,11 @@ jobs:
   publish:
     needs: [build, build-server]
     runs-on: ubuntu-latest
+    # The one job here that writes anything: softprops/action-gh-release
+    # below needs contents: write to create the Release and upload its
+    # assets. Every other job in this workflow only reads the checkout.
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:

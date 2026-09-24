@@ -24,6 +24,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('uncancellable-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Neither job pushes, tags or uploads anything with GITHUB_TOKEN — both only
+# read the checkout and build against it — so read is all either needs.
+permissions:
+  contents: read
+
 # Only ever applies to the dev/test profile — [profile.release] in
 # Cargo.toml (what release.yml ships and what the Docker "release" build
 # fetches) is untouched by any of these.
@@ -53,6 +58,78 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+
+      # These seven checks are plain scripts against files already in the
+      # checkout: no Rust toolchain, no compile, a few seconds combined. Moved
+      # ahead of cargo fmt/clippy/test/the image build so a broken script,
+      # doc link, formula, manifest or compose leak fails in seconds rather
+      # than after several minutes of Rust and Docker work nobody needed yet.
+
+      # The Worker that publishes recall.pimlabs.id/install. Its routing is
+      # easy to get subtly wrong in ways no one would notice: a redirect
+      # where a 410 belongs would forward a stale client's POST /sync to a
+      # host it never authenticated against, and an upstream failure served
+      # as 200 would pipe a truncated script into someone's shell.
+      - name: Install worker still routes correctly
+        run: |
+          node scripts/install-worker-test.js
+          python3 scripts/wrangler-check.py
+
+      # recall-worker holds a device key and the `claude` login, and is safe
+      # beside the server only while it has no port, no ingress label or
+      # network, and no volume the server has. One YAML line undoes any of
+      # those, so each is asserted, and each assertion is shown to fail on a
+      # copy of the file with that line added.
+      - name: The merge worker stays unreachable in both compose files
+        run: python3 scripts/compose-check.py
+
+      # Not a style check. The doc set has been reorganised twice — `docs/`
+      # split into reference/ and history/, `tests/` renamed to `fixtures/` —
+      # and a link left pointing at nothing is exactly what neither move
+      # would have announced.
+      - name: Documentation links still resolve
+        run: python3 scripts/link-check.py
+
+      - name: Shipped shell scripts still parse
+        run: |
+          bash -n install.sh
+          bash -n scripts/compat-check.sh
+          bash -n scripts/api-doc-check.sh
+          bash -n scripts/trusted-ip-check.sh
+          bash -n scripts/tls-trusted-ip-check.sh
+          bash -n scripts/release.sh
+          bash -n deploy/backup-offbox.sh
+          bash -n scripts/backup-offbox-check.sh
+          bash -n .claude/hooks/session-start.sh
+          bash -n scripts/push-tap.sh
+          bash -n scripts/update-formula-check.sh
+          bash -n scripts/capture-wire-fixtures.sh
+          sh -n deploy/fetch-release.sh
+
+      # The formula rewrite runs once per release, from CI or from a laptop,
+      # and a mistake in it surfaces later on someone else's machine as a
+      # checksum error. Checked here against the committed formula, which a
+      # real release wrote — no network, no release needed.
+      - name: Formula rewrite round-trips and refuses cleanly
+        run: ./scripts/update-formula-check.sh
+
+      # winget manifest generation, against a fixture checksums.txt (its
+      # hashes are not real archive digests, only syntactically valid ones —
+      # see packaging/winget/fixtures/checksums.txt) and the JSON schemas
+      # vendored under packaging/winget/schemas/, so this needs no release
+      # and no live fetch from microsoft/winget-cli. See that directory's
+      # SOURCE.txt for where the schemas came from.
+      - name: winget manifest still matches the schema
+        run: |
+          pip install --quiet --disable-pip-version-check jsonschema PyYAML
+          python3 packaging/winget/test_manifest.py
+
+      # The off-box backup runs against a stub rclone, so it needs no bucket
+      # and no credentials. What it asserts cannot be seen from the script's
+      # output: a run that wrongly deleted the remote and one that did not
+      # look identical from here.
+      - name: Off-box backup never asks rclone to delete
+        run: ./scripts/backup-offbox-check.sh
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -139,72 +216,6 @@ jobs:
       # not certificate issuance.
       - name: Rate-limit bucket cannot be chosen by the client, over direct TLS
         run: ./scripts/tls-trusted-ip-check.sh target/release/recall-server
-
-      # The Worker that publishes recall.pimlabs.id/install. Its routing is
-      # easy to get subtly wrong in ways no one would notice: a redirect
-      # where a 410 belongs would forward a stale client's POST /sync to a
-      # host it never authenticated against, and an upstream failure served
-      # as 200 would pipe a truncated script into someone's shell.
-      - name: Install worker still routes correctly
-        run: |
-          node scripts/install-worker-test.js
-          python3 scripts/wrangler-check.py
-
-      # recall-worker holds a device key and the `claude` login, and is safe
-      # beside the server only while it has no port, no ingress label or
-      # network, and no volume the server has. One YAML line undoes any of
-      # those, so each is asserted, and each assertion is shown to fail on a
-      # copy of the file with that line added.
-      - name: The merge worker stays unreachable in both compose files
-        run: python3 scripts/compose-check.py
-
-      # Not a style check. The doc set has been reorganised twice — `docs/`
-      # split into reference/ and history/, `tests/` renamed to `fixtures/` —
-      # and a link left pointing at nothing is exactly what neither move
-      # would have announced.
-      - name: Documentation links still resolve
-        run: python3 scripts/link-check.py
-
-      - name: Shipped shell scripts still parse
-        run: |
-          bash -n install.sh
-          bash -n scripts/compat-check.sh
-          bash -n scripts/api-doc-check.sh
-          bash -n scripts/trusted-ip-check.sh
-          bash -n scripts/tls-trusted-ip-check.sh
-          bash -n scripts/release.sh
-          bash -n deploy/backup-offbox.sh
-          bash -n scripts/backup-offbox-check.sh
-          bash -n .claude/hooks/session-start.sh
-          bash -n scripts/push-tap.sh
-          bash -n scripts/update-formula-check.sh
-          bash -n scripts/capture-wire-fixtures.sh
-          sh -n deploy/fetch-release.sh
-
-      # The formula rewrite runs once per release, from CI or from a laptop,
-      # and a mistake in it surfaces later on someone else's machine as a
-      # checksum error. Checked here against the committed formula, which a
-      # real release wrote — no network, no release needed.
-      - name: Formula rewrite round-trips and refuses cleanly
-        run: ./scripts/update-formula-check.sh
-
-      # winget manifest generation, against a fixture checksums.txt (its
-      # hashes are not real archive digests, only syntactically valid ones —
-      # see packaging/winget/fixtures/checksums.txt) and the JSON schemas
-      # vendored under packaging/winget/schemas/, so this needs no release
-      # and no live fetch from microsoft/winget-cli. See that directory's
-      # SOURCE.txt for where the schemas came from.
-      - name: winget manifest still matches the schema
-        run: |
-          pip install --quiet --disable-pip-version-check jsonschema PyYAML
-          python3 packaging/winget/test_manifest.py
-
-      # The off-box backup runs against a stub rclone, so it needs no bucket
-      # and no credentials. What it asserts cannot be seen from the script's
-      # output: a run that wrongly deleted the remote and one that did not
-      # look identical from here.
-      - name: Off-box backup never asks rclone to delete
-        run: ./scripts/backup-offbox-check.sh
 
       # 124 seconds of a 177-second run — 70% of the whole thing — went into
       # the step below, on runs that could not possibly have learned anything
