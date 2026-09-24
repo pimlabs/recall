@@ -14,7 +14,7 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
-## Unreleased
+## 0.4.2 — 2026-09-24
 
 - **Merging can move out of the server, into `recall-worker`.** A new
   binary and a second compose service with no port at all: an enrolled
