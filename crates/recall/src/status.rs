@@ -7,9 +7,7 @@
 
 use recall_hooks::config::Source;
 use recall_hooks::declared_env::{Declared, Ignored};
-use recall_hooks::{
-    claude, client::Client, config, exit, project, scope, settings, state, ClientConfig,
-};
+use recall_hooks::{claude, config, exit, project, scope, settings, state, ClientConfig};
 
 use crate::project as proj;
 
@@ -68,6 +66,35 @@ pub struct Override {
     pub setting: &'static str,
     /// That setting's value.
     pub config: String,
+}
+
+/// This machine's device at the server in effect, as `status --json`
+/// reports it. Never the key itself.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DeviceReport {
+    /// `dev_…`.
+    pub id: String,
+    /// The name the server knows it by, which its pushes are stored under.
+    pub name: String,
+    /// `sync` or `admin`.
+    pub scope: String,
+    /// Whether the server removes it once idle.
+    pub ephemeral: bool,
+    /// Where the private key is kept: always `file` today, see
+    /// `recall_hooks::home`.
+    pub key_storage: &'static str,
+    /// The file.
+    pub key_file: String,
+    /// Whether the server confirmed it with `GET /v1/devices/me`: absent
+    /// when it was not asked, because it did not answer at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmed: Option<bool>,
+    /// Whether the server refused it as unknown or revoked, which only
+    /// enrolling again mends.
+    pub gone: bool,
+    /// What the server said when it did not confirm it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_error: Option<String>,
 }
 
 /// The `--json` shape. Stable enough to script against; that is the point of
@@ -190,6 +217,31 @@ pub struct Report {
     /// Whether anyone but its owner can read the credentials file.
     /// `recall connect` never writes one like that; a copy or a restore can.
     pub credentials_exposed: bool,
+    /// Which credential this machine's requests carry: `device` when it
+    /// signs them with its device key, `bearer` when it sends
+    /// `RECALL_TOKEN`, `none` when it has neither.
+    pub auth: &'static str,
+    /// This machine's device at the server in effect, when it is enrolled
+    /// there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device: Option<DeviceReport>,
+    /// `~/.recall/device.key`, when there is a `~/.recall` to look in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_file: Option<String>,
+    /// Why the device key file could not be used, when it exists and could
+    /// not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_error: Option<String>,
+    /// Whether anyone but its owner can read the device key file.
+    pub device_file_exposed: bool,
+    /// Whether `RECALL_AUTHKEY` is set, with which a session enrols
+    /// itself at its first pull.
+    pub authkey_set: bool,
+    /// Whether the server enrols devices and accepts their signatures, per
+    /// its discovery document. Absent when it did not say: unreachable, or
+    /// older than the document.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_devices: Option<bool>,
     /// Whether `GET /health` answered.
     pub server_ok: bool,
     /// Why it didn't, when it didn't.
@@ -214,8 +266,20 @@ pub struct Report {
     /// This client's version, as it reports itself to the server.
     pub client_version: String,
     /// Whether the server can actually merge, or is silently falling back to
-    /// last-write-wins.
+    /// last-write-wins. With a merge worker, whether the worker's CLI can.
     pub merge_ready: bool,
+    /// Whether a merge worker is enrolled, so merges run there, from a
+    /// queue, rather than inside the server.
+    pub merge_worker: bool,
+    /// The worker's queue, when there is a worker, or when it holds
+    /// anything (a queue a revoked worker left, or failed merges).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_queue: Option<recall_wire::QueueStatus>,
+    /// When the merge worker was last heard from: its last request for
+    /// work, or the server's start when it has made none since. [`None`]
+    /// without a worker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_worker_seen_at: Option<String>,
     /// How many live files the server holds for this project.
     pub synced_files: usize,
     /// When any project last synced.
@@ -322,6 +386,40 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
             .as_deref()
             .is_some_and(recall_hooks::home::readable_by_others),
         config_file: cfg.config_file.as_ref().map(|p| p.display().to_string()),
+        // Nothing is sent while `device.key` cannot be read, whatever else
+        // there is: see `ClientConfig::client`.
+        auth: if cfg.device_error.is_some() {
+            "none"
+        } else if cfg.device.is_some() {
+            "device"
+        } else if !cfg.token.is_empty() {
+            "bearer"
+        } else {
+            "none"
+        },
+        device: cfg.device.as_ref().map(|d| DeviceReport {
+            id: d.device_id.clone(),
+            name: d.name.clone(),
+            scope: d.scope.clone(),
+            ephemeral: d.ephemeral,
+            key_storage: "file",
+            key_file: cfg
+                .device_file
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            confirmed: None,
+            gone: false,
+            check_error: None,
+        }),
+        device_file: cfg.device_file.as_ref().map(|p| p.display().to_string()),
+        device_error: cfg.device_error.clone(),
+        device_file_exposed: cfg
+            .device_file
+            .as_deref()
+            .is_some_and(recall_hooks::home::readable_by_others),
+        authkey_set: cfg.authkey.is_some(),
+        server_devices: None,
         machine_source: cfg.machine_source,
         config_problems: cfg.config_problems.clone(),
         overridden: overrides(here, cfg),
@@ -334,6 +432,9 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
         min_client: None,
         client_version: recall_wire::discovery::version(),
         merge_ready: false,
+        merge_worker: false,
+        merge_queue: None,
+        merge_worker_seen_at: None,
         synced_files: 0,
         last_synced_at: None,
         last_offbox_at: None,
@@ -343,13 +444,34 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
         return rep;
     }
 
-    match Client::new(&cfg.url, &cfg.token) {
+    // A device key that cannot be used is the device's problem, reported as
+    // `device_error`, and says nothing about whether the server is up.
+    // `/health` and the discovery document are asked anyway, with no
+    // credential at all: neither needs one, and this machine has none it
+    // may send.
+    let (client, usable) = match cfg.client() {
+        Ok(client) => (Ok(client), true),
+        Err(e) if e.is_device() => {
+            rep.device_error.get_or_insert_with(|| e.to_string());
+            rep.auth = "none";
+            let anonymous = recall_hooks::client::Client::new(&cfg.url, "");
+            (anonymous.map_err(|e| e.to_string()), false)
+        }
+        Err(e) => (Err(e.to_string()), false),
+    };
+    match client {
         Ok(client) => {
             match client.health().await {
                 Ok(health) => {
                     rep.server_ok = true;
                     rep.git_commit = Some(health.git_commit);
                     rep.merge_ready = health.merge.claude_cli.logged_in.unwrap_or(false);
+                    rep.merge_worker = health.merge.worker.is_some();
+                    rep.merge_queue = health.merge.queue;
+                    rep.merge_worker_seen_at = health
+                        .merge
+                        .worker
+                        .map(|w| w.last_claim_at.unwrap_or_else(|| health.started_at.clone()));
                     if !health.last_sync_at.is_empty() {
                         rep.last_synced_at = Some(health.last_sync_at);
                     }
@@ -363,19 +485,43 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
             // already been reported, and a second error would say nothing new.
             if rep.server_ok {
                 if let Ok(Some(doc)) = client.discover().await {
+                    rep.server_devices = Some(
+                        doc.accepts(recall_wire::discovery::AUTH_DEVICE_SIG)
+                            && doc.devices().is_some(),
+                    );
                     rep.server_version = Some(doc.server.version);
                     rep.server_channel = Some(doc.server.build.channel);
                     rep.server_protocols = doc.protocol.supported;
                     rep.min_client = Some(doc.min_client);
                 }
             }
-            if rep.token_set {
+            // The one request that says whether this machine is still
+            // enrolled: a device key the server has revoked or swept looks
+            // exactly like a working one from here.
+            if rep.server_ok && usable {
+                if let Some(device) = rep.device.as_mut() {
+                    match client.me().await {
+                        Ok(me) => {
+                            device.confirmed = Some(true);
+                            device.name = me.name;
+                            device.scope = me.scope;
+                            device.ephemeral = me.ephemeral;
+                        }
+                        Err(e) => {
+                            device.confirmed = Some(false);
+                            device.gone = e.device_gone();
+                            device.check_error = Some(e.reason());
+                        }
+                    }
+                }
+            }
+            if usable && (rep.token_set || rep.device.is_some()) {
                 if let Ok(resp) = client.pull(&rep.project_key).await {
                     rep.synced_files = resp.files.iter().filter(|f| !f.deleted).count();
                 }
             }
         }
-        Err(err) => rep.server_error = Some(err.to_string()),
+        Err(err) => rep.server_error = Some(err),
     }
     rep
 }
@@ -645,14 +791,33 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
     field!(
         "RECALL_TOKEN : {}",
         match rep.token_source {
+            Source::Unset if rep.device.is_some() => {
+                "(unset, not needed: this machine signs its requests)".to_string()
+            }
             Source::Unset => "(unset)".to_string(),
             Source::Environment => match declared_in(rep, "RECALL_TOKEN") {
                 Some(file) => format!("set, by {file}"),
                 None => "set, in this shell".to_string(),
             },
-            Source::CredentialsFile | Source::ConfigFile => format!("saved in {from_file}"),
+            Source::CredentialsFile | Source::ConfigFile => {
+                format!("saved in {from_file}")
+            }
         }
     );
+    if let Some(d) = &rep.device {
+        field!(
+            "device       : {} ({}{}), key in {}",
+            d.name,
+            d.scope,
+            if d.ephemeral { ", ephemeral" } else { "" },
+            d.key_file
+        );
+    } else if rep.authkey_set {
+        field!("device       : none yet, RECALL_AUTHKEY enrols one at the next pull");
+    }
+    if let Some(err) = &rep.device_error {
+        field!("device       : UNREADABLE ({err})");
+    }
     for problem in &rep.config_problems {
         field!("config       : {problem} ({from_config})");
     }
@@ -693,13 +858,62 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
         ),
     }
     field!("client       : {}", rep.client_version);
-    field!(
-        "merge        : {}",
-        if rep.merge_ready {
-            "ready (claude CLI logged in)"
-        } else {
-            "not configured, so the server uses last-write-wins"
+    match (&rep.device, rep.server_devices) {
+        (Some(d), _) if d.gone => field!(
+            "device       : REFUSED by the server ({}), run recall connect",
+            d.check_error.as_deref().unwrap_or("unknown device")
+        ),
+        (Some(d), _) if d.confirmed == Some(false) => field!(
+            "device       : not confirmed ({})",
+            d.check_error.as_deref().unwrap_or("no answer")
+        ),
+        (Some(_), _) => field!("device       : confirmed by the server"),
+        (None, Some(true)) => {
+            field!("device       : not enrolled, this machine uses the shared token")
         }
-    );
+        _ => {}
+    }
+    match crate::doctor::worker_quiet(rep) {
+        // What the worker last said about its CLI is only as current as
+        // the worker: one that stopped asking for work is not ready,
+        // whatever its last report was.
+        Some(quiet) => field!(
+            "merge        : stalled: the merge worker has not asked for work in {} minutes; \
+             is recall-worker running?",
+            quiet.whole_minutes()
+        ),
+        None => field!(
+            "merge        : {}",
+            match (rep.merge_ready, rep.merge_worker) {
+                (true, false) => "ready (claude CLI logged in)",
+                (true, true) => "ready (merge worker, claude CLI logged in)",
+                (false, false) => "not configured, so the server uses last-write-wins",
+                (false, true) => "waiting: the merge worker's claude CLI is not logged in",
+            }
+        ),
+    }
+    if let Some(q) = &rep.merge_queue {
+        match &q.oldest_queued_at {
+            // An hour is long past what a running worker takes: say so
+            // here, as doctor does, rather than leave the date to be read.
+            Some(since)
+                if crate::doctor::age_of(since)
+                    .is_some_and(|age| age >= time::Duration::hours(1)) =>
+            {
+                field!(
+                    "merge queue  : {} waiting since {since}; is recall-worker running?",
+                    q.queued
+                )
+            }
+            Some(since) => field!(
+                "merge queue  : {} waiting, the oldest since {since}",
+                q.queued
+            ),
+            None => field!("merge queue  : nothing waiting"),
+        }
+        if q.failed > 0 {
+            field!("failed merges: {}; see GET /v1/jobs?state=failed", q.failed);
+        }
+    }
     field!("synced files : {} on server", rep.synced_files);
 }

@@ -57,7 +57,7 @@ check "discovery needs no token" "200" \
 check "discovery's top-level keys" 'protocol server min_client auth capabilities' \
   "$(curl -s "$URL/.well-known/recall" | python3 -c '
 import json,sys; print(" ".join(json.load(sys.stdin).keys()))')"
-check "discovery's capabilities" 'devices limits merge_base scopes' \
+check "discovery's capabilities" 'devices limits merge_base merge_queue scopes' \
   "$(curl -s "$URL/.well-known/recall" | python3 -c '
 import json,sys; print(" ".join(json.load(sys.stdin)["capabilities"].keys()))')"
 check "discovery's auth methods" 'bearer device-sig-v1' \
@@ -350,7 +350,7 @@ check "a wrong token beside a session cookie is judged by the token" '401 {"erro
 check "a session cookie is not a credential on /sync" '{"error":"unauthorized"}' \
   "$(curl -s -H "Cookie: $FAKE" -H 'X-Recall-CSRF: x' "$URL/sync?project_key=a/b")"
 
-PK_PORT=8933
+PK_PORT=8934
 PK_URL="http://localhost:$PK_PORT"
 RECALL_TOKEN="$TOKEN" RECALL_PORT="$PK_PORT" RECALL_DB_PATH="$WORK/pk.sqlite" \
   RECALL_MERGE_ENABLED=false RECALL_PUBLIC_URL="$PK_URL" "$BIN" >"$WORK/pk.log" 2>&1 &
@@ -396,6 +396,99 @@ check "finishing a ceremony that does not exist is 400" \
   "$(curl -s -X POST "${json[@]}" -d '{"ceremony_id":"cer_nope","credential":{"id":"x","rawId":"eA","type":"public-key","response":{"authenticatorData":"eA","clientDataJSON":"eA","signature":"eA","userHandle":null}}}' \
      "$PK_URL/admin/login/finish")"
 kill $PK 2>/dev/null
+
+echo "Jobs, without a worker"
+# Claiming and posting results need a worker's signature, which takes a
+# signing client rather than curl; crates/recall-server/tests/jobs.rs covers
+# those. What curl can show: who is refused, and what the owner sees.
+check "claiming with no credential is 401" '{"error":"unauthorized"}' \
+  "$(curl -s -X POST "${json[@]}" -d '{"kinds":["merge"]}' "$URL/v1/jobs/claim")"
+check "claiming with the token is 403: only a worker claims" \
+  '403 {"error":"forbidden: this needs a device with the worker scope"}' \
+  "$(curl -s -o "$WORK/claim.json" -w '%{http_code}' -X POST "${auth[@]}" "${json[@]}" \
+     -d '{"kinds":["merge"]}' "$URL/v1/jobs/claim") $(cat "$WORK/claim.json")"
+check "posting a result with the token is 403" '403' \
+  "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${auth[@]}" "${json[@]}" \
+     -d '{"lease_id":"lse_x","error":"x"}' "$URL/v1/jobs/job_x/result")"
+check "listing jobs needs a token" '401' \
+  "$(curl -s -o /dev/null -w '%{http_code}' "$URL/v1/jobs")"
+check "no worker, no jobs" '{"jobs":[]}' "$(curl -s "${auth[@]}" "$URL/v1/jobs")"
+check "an unknown state is 400" '{"error":"state must be queued, leased, done or failed"}' \
+  "$(curl -s "${auth[@]}" "$URL/v1/jobs?state=stuck")"
+check "retrying an unknown job is 404" '{"error":"no job has that id"}' \
+  "$(curl -s -X POST "${auth[@]}" "$URL/v1/jobs/job_nothing/retry")"
+check "a scope that does not exist is 400" '{"error":"scope must be sync, admin or worker"}' \
+  "$(curl -s -X POST "${auth[@]}" "${json[@]}" -d '{"user_code":"BCDF-GHJK","scope":"root"}' \
+     "$URL/v1/devices/approve")"
+
+echo "Jobs, with a worker"
+# Its own server, with merging on and a claude that does not exist: a stale
+# push is only ever queued here, never merged, which is what is checked.
+JQ_PORT=8933
+JQ="http://127.0.0.1:$JQ_PORT"
+RECALL_TOKEN="$TOKEN" RECALL_PORT="$JQ_PORT" RECALL_DB_PATH="$WORK/jq.sqlite" \
+  RECALL_MERGE_ENABLED=true RECALL_CLAUDE_BIN="$WORK/no-claude-here" RECALL_RATE_LIMIT_MAX=1000 \
+  "$BIN" >"$WORK/jq.log" 2>&1 &
+JQS=$!
+for _ in $(seq 1 40); do curl -sf "$JQ/health" >/dev/null 2>&1 && break; sleep 0.25; done
+merge_keys() {
+  curl -s "$JQ/health" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["merge"].keys()))'
+}
+jq_push() { # content, base
+  curl -s -X POST "${auth[@]}" "${json[@]}" \
+    -d "{\"project_key\":\"acme/app\",\"file_path\":\"topics/auth.md\",\"content\":\"$1\",\"source_env\":\"laptop\",\"base_sha256\":\"$2\"}" \
+    "$JQ/sync"
+}
+OLDER=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+check "no worker enrolled: health has no worker or queue" 'enabled claude_cli last_merge_error' "$(merge_keys)"
+curl -s -X POST "${json[@]}" \
+  -d "{\"name\":\"worker\",\"public_key\":\"$KEY\",\"agent\":\"recall-worker/doc-check\"}" \
+  "$JQ/v1/devices/enroll" >"$WORK/wenroll.json"
+curl -s -X POST "${auth[@]}" "${json[@]}" \
+  -d "{\"user_code\":\"$(field "$WORK/wenroll.json" user_code)\",\"scope\":\"worker\"}" \
+  "$JQ/v1/devices/approve" >"$WORK/worker.json"
+check "approving with the worker scope" 'worker' "$(field "$WORK/worker.json" scope)"
+check "a worker enrolled: health gains worker and queue" \
+  'enabled claude_cli last_merge_error worker queue' "$(merge_keys)"
+check "the worker, before its first claim" '{"last_claim_at": null, "agent": "recall-worker/doc-check"}' \
+  "$(curl -s "$JQ/health" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["merge"]["worker"]))')"
+jq_push "# Auth\\n" "" >/dev/null
+jq_push "# Auth, again\\n" "$OLDER" >"$WORK/queued.json"
+check "a stale push is queued: merged false, and the job" \
+  'ok project_key file_path deleted merged updated_at merge_job False True' \
+  "$(python3 -c '
+import json,sys; d=json.load(open(sys.argv[1])); print(" ".join(d.keys()), d["merged"], d["merge_job"].startswith("job_"))' "$WORK/queued.json")"
+check "stored as sent" '# Auth, again' \
+  "$(curl -s "${auth[@]}" "$JQ/sync?project_key=acme/app" | python3 -c '
+import json,sys; print(json.load(sys.stdin)["files"][0]["content"].strip())')"
+curl -s "${auth[@]}" "$JQ/v1/jobs" >"$WORK/jobs.json"
+check "the job, as listed, without file content" \
+  "id kind state project_key file_path attempt created_at updated_at error follow_up merge queued" \
+  "$(python3 -c '
+import json,sys; j=json.load(open(sys.argv[1]))["jobs"][0]; print(" ".join(j.keys()), j["kind"], j["state"])' "$WORK/jobs.json")"
+check "the queue in health" '{"queued": 1, "leased": 0, "failed": 0}' \
+  "$(curl -s "$JQ/health" | python3 -c '
+import json,sys; q=json.load(sys.stdin)["merge"]["queue"]; print(json.dumps({k: q[k] for k in ("queued","leased","failed")}))')"
+check "only a failed job is retried" '{"error":"only a failed job can be retried; this one is queued"}' \
+  "$(curl -s -X POST "${auth[@]}" "$JQ/v1/jobs/$(field "$WORK/queued.json" merge_job)/retry")"
+curl -s -X POST "${auth[@]}" "$JQ/v1/devices/$(field "$WORK/worker.json" id)/revoke" >/dev/null
+# The revocation starts a drain in the background; this server's claude
+# does not exist, so the waiting job is failed rather than merged.
+jq_queue() {
+  curl -s "$JQ/health" | python3 -c '
+import json,sys; q=json.load(sys.stdin)["merge"].get("queue"); print(json.dumps(q and {k: q[k] for k in ("queued","leased","failed")}))'
+}
+for _ in $(seq 1 40); do [ "$(jq_queue)" = '{"queued": 0, "leased": 0, "failed": 1}' ] && break; sleep 0.25; done
+check "the worker revoked: its waiting job is failed, and health still shows the queue" \
+  '{"queued": 0, "leased": 0, "failed": 1}' "$(jq_queue)"
+check "health names the failed job, and no project or file" 'True False' \
+  "$(curl -s "$JQ/health" | python3 -c '
+import json,sys; m=json.load(sys.stdin)["merge"]["last_merge_error"]["message"]
+print("see GET /v1/jobs?state=failed" in m, "acme" in m or "topics" in m)')"
+check "the worker revoked: a stale push answers as before" \
+  'ok project_key file_path deleted merged updated_at' \
+  "$(jq_push "# Auth, once more\\n" "$OLDER" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin).keys()))')"
+kill $JQS 2>/dev/null
 
 echo "Rate limiting"
 RL_PORT=8932

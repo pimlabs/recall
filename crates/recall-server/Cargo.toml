@@ -24,6 +24,9 @@ passkeys = ["dep:webauthn-rs", "dep:openssl"]
 
 [dependencies]
 recall-wire.workspace = true
+# Only for the inline merge a server without a worker still runs. Built
+# without the worker's `client` feature, so no HTTP client comes with it.
+recall-worker.workspace = true
 
 anyhow.workspace = true
 axum.workspace = true
@@ -59,9 +62,23 @@ webauthn-rs = { version = "=0.5.5", features = ["conditional-ui", "danger-allow-
 # rustls, and `cargo tree -p recall -e normal | grep -i openssl` prints
 # nothing.
 openssl = { version = "0.10", features = ["vendored"], optional = true }
+# Direct TLS (server/tls.rs), both modes off unless configured. Only this
+# crate uses any of these; see the workspace Cargo.toml for the `ring`
+# choice.
+rustls.workspace = true
+axum-server.workspace = true
+rustls-acme.workspace = true
+futures-util.workspace = true
+hyper-util.workspace = true
+tower-service.workspace = true
+http-body.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# The end-to-end test: a real worker, client and all, against this server
+# on a real socket. Tests only, so the server binary still has no client.
+recall-worker = { workspace = true, features = ["client"] }
+reqwest.workspace = true
 # Only to drive the Router in tests without binding a real socket.
 tower = { version = "0.5", features = ["util"] }
 # A software authenticator and WebAuthn client, so the passkey ceremonies
@@ -75,3 +92,8 @@ coset = "0.3"
 # Named only to spell the client's type; passkey-client already uses it.
 public-suffix = "0.1"
 url = "2"
+# Only for server/tls.rs's tests: a self-signed certificate to serve, and a
+# TLS client to hold connections open against it. Both already in the tree
+# (through rustls-acme and axum-server), and both with aws-lc-rs left out.
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+tokio-rustls = { version = "0.26", default-features = false }

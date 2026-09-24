@@ -1,6 +1,6 @@
-# The Recall server image.
+# The Recall server image, and (target `worker`) the merge worker's.
 #
-# Its binary comes from one of two places, picked by RECALL_SOURCE:
+# Each binary comes from one of two places, picked by RECALL_SOURCE:
 #
 #   release (the default)  the recall-server a GitHub Release published,
 #                          checked against that release's checksums. This is
@@ -14,7 +14,21 @@
 # RECALL_VERSION names the release. Left empty it is read from the checkout's
 # Cargo.toml, so `docker compose up -d --build` in a checkout of tag v0.4.0
 # deploys 0.4.0.
+#
+# The server is the last stage, so a build that names no target builds it,
+# as every build did before the worker existed. The worker is
+# `--target worker`: the same Node and `claude` CLI, and recall-worker in
+# place of recall-server. Only the worker's image needs a release that
+# publishes recall-worker.
 ARG RECALL_SOURCE=release
+
+# The `claude` CLI both images carry, pinned, so a rebuild installs the
+# version the merge's flags were checked against rather than whatever npm
+# resolves that day. The merge passes `--tools ""` and `--max-turns 1`
+# (recall-worker's merge.rs), both checked against this version; move the
+# pin only after checking them again against the new one's `claude --help`
+# (`--max-turns` is a hidden option there, so search the CLI for it).
+ARG CLAUDE_CODE_VERSION=2.1.280
 
 # ---- source: build the binary from this checkout.
 FROM rust:1-alpine AS source
@@ -41,6 +55,12 @@ ENV RECALL_BUILD_CHANNEL=dev
 RUN cargo build --release --locked -p recall-server \
  && mkdir -p /out && cp target/release/recall-server /out/recall-server
 
+# ---- source, for the worker: the same build directory, one more binary.
+# A stage of its own so the server's image does not wait for it.
+FROM source AS source-worker
+RUN cargo build --release --locked -p recall-worker \
+ && cp target/release/recall-worker /out/recall-worker
+
 # ---- release: fetch the published binary.
 FROM alpine:3 AS release
 RUN apk add --no-cache curl
@@ -58,16 +78,66 @@ RUN set -eu; \
     arch="${TARGETARCH:-$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')}"; \
     sh fetch-release.sh "$version" "$arch" /out/recall-server "$RECALL_RELEASES_URL"
 
-# ---- whichever of the two was asked for. BuildKit builds only this one.
-FROM ${RECALL_SOURCE} AS binary
+# ---- release, for the worker: its own archive from the same release.
+FROM alpine:3 AS release-worker
+RUN apk add --no-cache curl
+ARG RECALL_VERSION=
+ARG RECALL_RELEASES_URL=https://github.com/pimlabs/recall/releases/download
+ARG TARGETARCH
+WORKDIR /fetch
+COPY Cargo.toml ./
+COPY deploy/fetch-release.sh ./
+RUN set -eu; \
+    version="${RECALL_VERSION:-$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)}"; \
+    arch="${TARGETARCH:-$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')}"; \
+    sh fetch-release.sh "$version" "$arch" /out/recall-worker "$RECALL_RELEASES_URL" recall-worker
 
-# ---- the runtime, which still has Node in it.
+# ---- whichever of the two was asked for. BuildKit builds only the stages
+# the target it was asked for needs.
+FROM ${RECALL_SOURCE} AS binary
+FROM ${RECALL_SOURCE}-worker AS worker-binary
+
+# ---- the worker: an enrolled device that merges queued conflicts with the
+# `claude` CLI. It opens no port, so there is no EXPOSE, and the compose
+# files give it none. Its key and the CLI's login live on its own /data
+# volume, never the server's.
+FROM node:22-alpine AS worker
+
+RUN apk add --no-cache su-exec
+
+# The CLI the merge shells out to. Like the server's, it needs a one-time
+# `claude setup-token`, run against this container; see deploy/README.md.
+# Until then the worker takes no jobs, and they wait in the queue.
+ARG CLAUDE_CODE_VERSION
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+
+COPY --from=worker-binary /out/recall-worker /usr/local/bin/recall-worker
+COPY deploy/docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+ARG GIT_COMMIT=
+ARG RECALL_VERSION=
+LABEL org.opencontainers.image.title="recall-worker" \
+      org.opencontainers.image.description="Recall's merge worker" \
+      org.opencontainers.image.source="https://github.com/pimlabs/recall" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.version="$RECALL_VERSION" \
+      org.opencontainers.image.revision="$GIT_COMMIT"
+ENV RECALL_WORKER_DIR=/data
+ENV CLAUDE_CONFIG_DIR=/data/claude-config
+VOLUME /data
+
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["recall-worker"]
+
+# ---- the server's runtime, which still has Node in it.
 #
 # Worth being explicit about: rewriting the server did NOT make this image
 # small. The semantic merge shells out to the `claude` CLI, which is a Node
 # package, so the runtime needs Node regardless of what language the server
-# is written in.
-FROM node:22-alpine
+# is written in. A deployment with a worker merges there instead; until
+# every one has, the server keeps the CLI for the inline merge.
+FROM node:22-alpine AS server
 
 RUN apk add --no-cache su-exec
 
@@ -76,7 +146,8 @@ RUN apk add --no-cache su-exec
 # `claude setup-token` run against the running container — see
 # deploy/README.md. Until then the server still runs and syncs; merge just
 # degrades to last-write-wins, visible at GET /health.
-RUN npm install -g @anthropic-ai/claude-code
+ARG CLAUDE_CODE_VERSION
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
 COPY --from=binary /out/recall-server /usr/local/bin/recall-server
 COPY deploy/docker-entrypoint.sh /usr/local/bin/

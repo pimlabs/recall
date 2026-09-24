@@ -16,14 +16,205 @@ break will be described here in full rather than smoothed over.
 
 ## Unreleased
 
+- **Merging can move out of the server, into `recall-worker`.** A new
+  binary and a second compose service with no port at all: an enrolled
+  device with a new `worker` scope, which claims conflicting pushes from
+  a queue, merges them with its own `claude` CLI, and posts the result
+  back. The `claude` login then lives on the worker's volume, not in the
+  container the internet reaches. The service is opt-in: it starts only
+  with `COMPOSE_PROFILES=worker` in `deploy/.env`, and even then nothing
+  changes until you approve its code with `"scope": "worker"`; see "The
+  merge worker" in `deploy/README.md`. Without an approved worker the
+  server merges inline exactly as before.
+- **`recall-worker` is told its server by `RECALL_WORKER_SERVER`**, and
+  never reads the client's `RECALL_URL`; with only that set it refuses to
+  start. `RECALL_WORKER_DIR` (the image sets `/data`) is required too. It
+  asks for `/.well-known/recall` first and works only for a server that
+  lists `merge_queue`, records that server in its identity file and refuses
+  any other, and treats a refusal no retry will change (a `404` on
+  enrolment among them) as final: it says why once and idles, rather than
+  exiting into a restart loop.
+- **Every merge, the server's inline one included, runs `claude` with no
+  tools, one turn and no saved session** (`--tools "" --max-turns 1
+  --no-session-persistence`), and both images pin the CLI to 2.1.280, the
+  version those flags were checked against, rather than whatever npm
+  resolves on the day of the build.
+- **With a worker, a conflicting push is answered at once.** It is stored
+  as sent, `merged: false`, with a new `merge_job` field naming the queued
+  job, and the merged file arrives with the next pull. A merge is written
+  only if the file has not changed since; otherwise it is merged again
+  with the newer version. An empty merge of two versions that were not
+  both empty is never written: it counts as an error and is retried.
+  Deleting a file closes its waiting jobs in the same transaction, so a
+  file made again after a delete never has the deleted notes merged back
+  in. `merge_job` is omitted when no job was queued, so a server without a
+  worker answers byte for byte as before.
+- **Nothing a worker leaves is stranded.** Revoking the last worker puts
+  merging back in the server with the jobs it left: each is merged by the
+  server's own `claude` CLI, through the same check that the file has not
+  changed, or, when that CLI cannot merge, marked failed, visibly, for a
+  retry later. A worker that has not asked for work in two minutes, or a
+  full queue (1000 jobs), no longer means last-write-wins while the
+  server's CLI is logged in: the server merges new conflicts itself.
+- **New routes:** `POST /v1/jobs/claim` and `POST /v1/jobs/{id}/result` for
+  the worker (a worker device only, not even `RECALL_TOKEN`), and
+  `GET /v1/jobs` and `POST /v1/jobs/{id}/retry` for the owner. A worker
+  device can use nothing else: it cannot pull or push memory, and an
+  authkey never makes one.
+- **`/health`'s `merge` gains `worker` and `queue`**: `worker` while one
+  is enrolled, and `queue` then and whenever the queue holds a job,
+  failed ones included. `claude_cli` is the worker's CLI while there is
+  one. What `last_merge_error` says of a job names the job and never a
+  project or a file, since `/health` answers anyone; `GET /v1/jobs` has
+  those. A worker's error, and its CLI's, are kept to 500 bytes. Discovery
+  lists a new `merge_queue` capability.
+- **`recall status` and `recall doctor` show the merge queue**, and warn
+  when the worker has not asked for work in two minutes (`status` then
+  says `stalled` rather than `ready`, whatever the worker last reported),
+  when any merge has failed, and once the oldest waiting merge is an hour
+  old. `recall status --json` gains `merge_worker`, `merge_queue` and
+  `merge_worker_seen_at`.
+- **`POST /v1/devices/approve` accepts `"scope": "worker"`**, and its
+  refusal of an unknown scope now says `scope must be sync, admin or
+  worker`. `recall devices approve <code> --worker` approves one.
+- **Two database changes, both made on start:** a `jobs` table, and the
+  `devices` table rebuilt so its scope may be `worker`, keeping every row.
+  0.4.1 ignores `jobs` and refuses a worker device, whose scope it does
+  not know, so rolling back to it still works; revoke the worker first
+  all the same (see "Revoking it" in `deploy/README.md`).
+- **Releases publish `recall-worker`** for Linux amd64 and arm64, static,
+  beside `recall-server`, in the same `checksums.txt`, and on crates.io.
+- **The `/admin` page manages devices, and signs in with a passkey.** A new
+  Devices tab approves a machine by its code (showing its name, agent and
+  key fingerprint first, and with the `sync`, `admin` or `worker` scope),
+  lists and revokes devices, and makes and revokes authkeys, so an owner
+  with only a phone can do everything `RECALL_TOKEN` could. The page signs
+  in with a passkey; the token still works on it as before.
+- **New setting: `RECALL_PUBLIC_URL`**, such as
+  `https://recall.example.com`. Passkeys are bound to that address, so it
+  must be a full domain name with no trailing dot (`http://` only for
+  `localhost`, with a warning that such passkeys work on that machine
+  only). Unset or unusable, passkey sign-in is off and the page says why;
+  nothing else changes. All three compose files pass it through from
+  `deploy/.env`.
+- **The first passkey takes `RECALL_TOKEN` and a one-time bootstrap
+  code.** The server prints the code to its log when it starts with
+  passkey sign-in on and no passkey registered; it works for an hour, and
+  once. So a copy of the token that leaked cannot plant a passkey of its
+  own. Once a passkey exists the token cannot register another, whatever
+  it is shown; further passkeys are added from a signed-in session. Lost
+  every passkey? `recall-server reset-passkeys`, run on the server as the
+  database's owner, clears them and prints a new code. See step 6 of
+  `deploy/README.md`.
+- **Adding or removing a passkey, and signing out the other sessions, need
+  a sign-in in the last five minutes**, so a copied session cookie cannot
+  lock the owner out; the page asks for the passkey again first. A new
+  **Sign out other sessions** button ends every session but the current
+  one, and signing in again from a browser replaces the session it had.
+- **New routes** under `/admin`: `GET /admin/session`,
+  `POST /admin/bootstrap/register` and `…/finish`, `POST /admin/login/start`
+  and `…/finish`, `POST /admin/logout`, `POST /admin/logout/others`,
+  `GET /admin/passkeys`, `POST /admin/passkeys/register` and `…/finish`,
+  and `POST /admin/passkeys/{id}/remove`. The device and authkey routes
+  that took `RECALL_TOKEN` or an admin device also take the page's session
+  (with its `X-Recall-CSRF` header on a `POST`); `/sync` and `/v1/jobs`
+  never do. A request with an `Authorization` header or a signature is
+  judged by that alone, whatever cookie it also carries.
+- **Starting a passkey sign-in makes the server hold nothing.** A
+  ceremony's state is sealed into the `ceremony_id` the page sends back,
+  so strangers starting sign-ins cannot fill anything and keep the owner
+  out. Every ceremony's start and finish must be
+  `Content-Type: application/json`, or it is `415`, which a page on
+  another site cannot send blind.
+- **`GET /admin` is served with a stricter CSP**: the page's inline script
+  and stylesheet are allowed by hash rather than `'unsafe-inline'`, plus
+  `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`.
+- **Three more tables**, `admin_credentials`, `admin_sessions` and
+  `admin_bootstrap`, created on start. An older server ignores them.
+- **`recall-server version` prints a second line, `features: passkeys`**,
+  and a release refuses to publish a server binary that does not say it.
+- **The server binary is about 5 MiB larger** (3.0 MB to 8.3 MB, static
+  x86_64 musl): it now carries OpenSSL, built in, and webauthn-rs, which
+  the passkey verification needs. The client does not.
+  Building the server from source needs perl and make as well as a C
+  compiler, and Rust 1.88.
+
+## 0.4.1 — 2026-09-23
+
+0.4.0 was tagged but never published: its release build stopped at a
+packaging check before anything reached a registry or a server. Everything
+listed under 0.4.0 below ships for the first time in this release, together
+with what is listed here.
+
+
+- **`recall connect` enrols this machine as a device** when the server
+  supports it (this release's server does). It makes an Ed25519 key pair,
+  shows a code and the key's fingerprint, and is approved either from a
+  machine already enrolled as admin (`recall devices approve <code>`) or,
+  for your first machine, with the server's `RECALL_TOKEN` after asking,
+  which makes it an admin device. From then on the machine signs every
+  request and sends no token, and the token `connect` had saved in
+  `~/.recall/credentials.toml` is removed; it still works on the server.
+  `--yes` and `--name` still work for scripts. Against an older server,
+  `connect` saves the token exactly as before.
+- **The device key is a file, `~/.recall/device.key`**, created readable by
+  you only, one key per server. Not the OS keychain: a hook runs on every
+  memory write and must never stop for a keychain dialog, which macOS shows
+  after an upgrade. `recall disconnect` removes it too. A hook that finds
+  it readable by other users makes it yours alone and says so, and a write
+  to `~/.recall` narrows the directory to `0700` if it was wider.
+- **A `device.key` that cannot be read stops the hooks** with a line
+  saying so, rather than sending `RECALL_TOKEN` in its place; `recall
+  connect` refuses until it is fixed or moved aside, and `recall doctor`
+  fails it.
+- **Cloud sessions enrol themselves with `RECALL_AUTHKEY`.** Set an
+  authkey on the cloud environment instead of `RECALL_TOKEN`, and
+  each session's first `recall pull` enrols it (approved at once,
+  ephemeral) and carries on. Nothing is typed, and a failure falls back to
+  `RECALL_TOKEN` or leaves memory untouched, as a pull always has.
+- **A swept cloud session enrols again by itself** when `RECALL_AUTHKEY`
+  is set: a hook refused as "unknown device" with an ephemeral key enrols
+  once, replacing that server's key only, and retries. Hooks that start at
+  once enrol one device between them. **A revoked device is never enrolled
+  again by a hook**, authkey or not: the hook says so, keeps the key, and
+  the session still starts, so revoking a device cuts that machine off.
+  A lasting device the server does not know, and any machine without an
+  authkey, is told to run `recall connect`.
+- **`recall connect` checks a device key it holds** with the server
+  whatever the discovery document says, and never falls back to saving
+  `RECALL_TOKEN` for a server it has a device key for; a discovery
+  document that fails, other than with a `404`, stops it as unreachable.
+- **Redirects are not followed.** A `3xx` from the server is reported as
+  "the server redirected to …; update RECALL_URL", and nothing, the body
+  included, is sent where it pointed.
+- **New command: `recall devices`.** `list` (scope, ephemeral, last seen,
+  agent), `approve <code>` (shows the machine's name, agent and fingerprint
+  and asks first; `--fingerprint` refuses a key with any other, `--admin`
+  gives the admin scope) and `revoke <name>`. `--yes` and `--json` for
+  scripts.
+- **New command: `recall authkey`.** `create --tag cloud --expires 90d`
+  (the key is shown once), `list` and `revoke <id>` (`--revoke-devices`
+  revokes what it enrolled too), with `--json`.
+- **`recall doctor` reports the device**: its name, scope and where its
+  key lives, checked with the server. It warns while a machine the server
+  could enrol still uses the shared token, and while a token is kept that
+  an enrolled machine no longer sends. `RECALL_TOKEN` unset is no longer a
+  failure on a machine with a device key or `RECALL_AUTHKEY`.
+- **`recall status --json` gains** `auth` (`device`, `bearer` or `none`),
+  `device` (id, name, scope, ephemeral, key storage and file, and whether
+  the server confirmed it), `device_file`, `device_error`,
+  `device_file_exposed`, `authkey_set` and `server_devices`. Every
+  existing field is unchanged: a device key that cannot be used is
+  reported in `device_error`, and `server_ok` still says only whether
+  `GET /health` answered.
+
 - **The server enrols devices.** A machine can now be enrolled with a key
   pair of its own and sign its requests (RFC 9421, Ed25519) instead of
   sending `RECALL_TOKEN`: it asks `POST /v1/devices/enroll` for a short
   code, the owner approves the code, and the machine is a device that can
   be listed and revoked on its own. Cloud sessions can enrol with an
-  expiring authkey instead of a code. This release is the server
-  half; the client does not enrol yet, so nothing changes for a machine
-  until it does. See "Devices" in `docs/reference/api.md`.
+  expiring authkey instead of a code. See "Devices" in
+  `docs/reference/api.md`.
 - **`RECALL_TOKEN` works exactly as before**, on every route, and is how
   the first device is approved. Nothing that worked stops working.
 - **A device's pushes carry its own name.** A push a device signed is
@@ -49,6 +240,10 @@ break will be described here in full rather than smoothed over.
 - **Authkeys** enrol ephemeral devices unless told otherwise, enrol
   at most 25 unrevoked devices unless `max_devices` says otherwise, and can
   be revoked together with every device they enrolled.
+- **A device whose scope the server does not know is refused** (403),
+  rather than treated as a `sync` device. A later version adds scopes
+  that must not reach memory; if the server is ever rolled back to this
+  one, such a device can do nothing until it is revoked.
 - **`GET /admin/stats` needs the `admin` scope from a device.** Nothing
   changes for `RECALL_TOKEN`, which is all anything uses today.
 - **Signed requests are checked before their body is read**, the
@@ -69,38 +264,6 @@ break will be described here in full rather than smoothed over.
 - **Three new tables in the database**, `devices`, `device_enrollments`
   and `authkeys`, created on start. `memory_files` is untouched, and an
   older server ignores the new tables, so rolling back still works.
-- **The `/admin` page manages devices, and signs in with a passkey.** A new
-  Devices tab approves a machine by its code (showing its name, agent and
-  key fingerprint first), lists and revokes devices, and makes and revokes
-  authkeys, so an owner with only a phone can do everything
-  `RECALL_TOKEN` could. The page signs in with a passkey; the token still
-  works on it as before.
-- **New setting: `RECALL_PUBLIC_URL`**, such as
-  `https://recall.example.com`. Passkeys are bound to that address. Unset,
-  passkey sign-in is off and the page says why; nothing else changes. Both
-  compose files pass it through from `deploy/.env`.
-- **The first passkey is registered with `RECALL_TOKEN`, once.** After
-  that the token cannot register another, whatever token is shown;
-  further passkeys are added from a signed-in session. Lost every passkey?
-  `recall-server reset-passkeys`, run on the server, clears them. See
-  step 6 of `deploy/README.md`.
-- **New routes** under `/admin`: `GET /admin/session`,
-  `POST /admin/bootstrap/register` and `…/finish`, `POST /admin/login/start`
-  and `…/finish`, `POST /admin/logout`, `GET /admin/passkeys`,
-  `POST /admin/passkeys/register` and `…/finish`, and
-  `POST /admin/passkeys/{id}/remove`. The device routes that took
-  `RECALL_TOKEN` or an admin device also take the page's session (with its
-  `X-Recall-CSRF` header on a `POST`); `/sync` never does.
-- **`GET /admin` is served with a stricter CSP**: the page's inline script
-  and stylesheet are allowed by hash rather than `'unsafe-inline'`, plus
-  `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`.
-- **Two more tables**, `admin_credentials` and `admin_sessions`, created on
-  start. An older server ignores them.
-- **The server binary is about 5 MiB larger** (3.0 MB to 8.3 MB, static
-  x86_64 musl): it now carries OpenSSL, built in, and webauthn-rs, which
-  the passkey verification needs. The client does not.
-  Building the server from source needs perl and make as well as a C
-  compiler, and Rust 1.88.
 - **`recall-server admin`: rename, remove or restore a project from the
   server's host.** `list` shows every project key with its files, tombstones
   and last update (or one key's files, or what a backup holds, with
@@ -125,8 +288,21 @@ break will be described here in full rather than smoothed over.
   among the good ones.
   Nothing else about the server changed, and `recall-server` with no
   arguments still serves.
+- **`recall-server` can terminate TLS itself now**, for a machine with no
+  ingress in front of it: `RECALL_TLS_CERT`/`RECALL_TLS_KEY` for a
+  certificate already on disk, or `RECALL_TLS_ACME_DOMAINS`/
+  `RECALL_TLS_ACME_EMAIL` for one it gets and renews on its own from Let's
+  Encrypt. Off by default; the two existing ingress-based deployments are
+  unaffected. See `deploy/README.md` and `deploy/docker-compose.direct.yml`.
+  With TLS on, the server hardens its own connections the way an ingress
+  otherwise would: a cap on open connections (`RECALL_TLS_MAX_CONNECTIONS`,
+  default 512), and deadlines for the TLS handshake, request headers and
+  idle connections. `RECALL_TLS_REQUIRED=true`, which the direct compose
+  file sets, refuses to start without TLS rather than falling back to plain
+  HTTP. A certificate from files is reloaded on `SIGHUP` and every 12
+  hours.
 
-## 0.4.0 — 2026-09-23
+## 0.4.0 — 2026-09-23 (tagged, never published; shipped in 0.4.1)
 
 - **Breaking: the server is its own binary, `recall-server`.** `recall serve`
   is gone from the client; typing it now says where the server went and

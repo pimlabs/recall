@@ -9,6 +9,11 @@ description = "What `recall push` and `recall pull` actually do, plus the settin
 
 [dependencies]
 recall-wire.workspace = true
+# This machine's device key on disk, base64url like every key on the wire.
+base64.workspace = true
+# The device key's seed and each signature's nonce: the OS's randomness,
+# the same crate the server draws its ids from.
+getrandom.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -16,6 +21,10 @@ serde_json.workspace = true
 # destination directory, removed on drop if the rename never happens.
 tempfile.workspace = true
 thiserror.workspace = true
+# One sleep: a signed request the server refused in the seconds after it
+# started is signed again a moment later. Already in the tree through
+# reqwest and the binary.
+tokio = { workspace = true, features = ["time"] }
 # ~/.recall/config.toml and credentials.toml.
 toml.workspace = true
 

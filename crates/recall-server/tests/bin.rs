@@ -121,3 +121,111 @@ fn reset_passkeys_empties_the_passkeys_and_prints_a_bootstrap_code() {
         recall_server::store::BootstrapCode::Valid
     );
 }
+
+/// Half a TLS pair, either kind, refuses to start rather than falling back
+/// to plain HTTP: silently ignoring `RECALL_TLS_KEY` without a
+/// `RECALL_TLS_CERT` (or vice versa) would run without any TLS at all,
+/// which is not what setting one of the two variables meant.
+#[test]
+fn half_a_tls_pair_refuses_to_start() {
+    for (env, want) in [
+        (
+            vec![("RECALL_TOKEN", "t"), ("RECALL_TLS_CERT", "/x/cert.pem")],
+            "RECALL_TLS_CERT and RECALL_TLS_KEY",
+        ),
+        (
+            vec![
+                ("RECALL_TOKEN", "t"),
+                ("RECALL_TLS_ACME_EMAIL", "me@example.com"),
+            ],
+            "RECALL_TLS_ACME_DOMAINS and RECALL_TLS_ACME_EMAIL",
+        ),
+    ] {
+        let out = run(&[], &env);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+        assert!(stderr.contains(want), "stderr: {stderr}");
+    }
+}
+
+/// Configuring both TLS modes at once refuses to start: each names its own
+/// certificate source, and nothing picks a winner between them.
+#[test]
+fn both_tls_modes_at_once_refuses_to_start() {
+    let out = run(
+        &[],
+        &[
+            ("RECALL_TOKEN", "t"),
+            ("RECALL_TLS_CERT", "/x/cert.pem"),
+            ("RECALL_TLS_KEY", "/x/key.pem"),
+            ("RECALL_TLS_ACME_DOMAINS", "example.com"),
+            ("RECALL_TLS_ACME_EMAIL", "me@example.com"),
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains("two different TLS modes"),
+        "stderr: {stderr}"
+    );
+}
+
+/// The mandatory security rule, proved against the real binary rather than
+/// just `Config::from_lookup`: with direct TLS there is no ingress to set
+/// `RECALL_TRUSTED_IP_HEADER`, so a deployment that sets it anyway is
+/// refused rather than quietly trusting a header any direct client could
+/// forge to buy itself unlimited token guesses. `scripts/trusted-ip-check.sh`
+/// proves the same rule against a live socket.
+#[test]
+fn trusted_ip_header_with_tls_refuses_to_start() {
+    for tls_env in [
+        vec![
+            ("RECALL_TLS_CERT", "/x/cert.pem"),
+            ("RECALL_TLS_KEY", "/x/key.pem"),
+        ],
+        vec![
+            ("RECALL_TLS_ACME_DOMAINS", "example.com"),
+            ("RECALL_TLS_ACME_EMAIL", "me@example.com"),
+        ],
+    ] {
+        let mut env = vec![
+            ("RECALL_TOKEN", "t"),
+            ("RECALL_TRUSTED_IP_HEADER", "x-real-ip"),
+        ];
+        env.extend(tls_env);
+        let out = run(&[], &env);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+        assert!(
+            stderr.contains("RECALL_TRUSTED_IP_HEADER"),
+            "stderr: {stderr}"
+        );
+    }
+}
+
+/// `docker-compose.direct.yml` sets `RECALL_TLS_REQUIRED=true` and publishes
+/// its port to the internet, so if its certificate variables ever arrive
+/// empty the process must exit rather than serve the bearer token over
+/// plain HTTP. Proved against the real binary: the refusal happens before
+/// anything binds a port.
+#[test]
+fn tls_required_without_tls_refuses_to_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("x.db");
+    let db = db.to_string_lossy();
+    let out = run(
+        &[],
+        &[
+            ("RECALL_TOKEN", "t"),
+            ("RECALL_DB_PATH", &db),
+            ("RECALL_TLS_REQUIRED", "true"),
+            ("RECALL_TLS_ACME_DOMAINS", ""),
+            ("RECALL_TLS_ACME_EMAIL", ""),
+            ("RECALL_TRUSTED_IP_HEADER", ""),
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+    assert!(stderr.contains("RECALL_TLS_REQUIRED"), "stderr: {stderr}");
+    assert!(!stderr.contains("listening"), "stderr: {stderr}");
+}

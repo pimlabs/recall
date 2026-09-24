@@ -29,7 +29,8 @@ REPO="pimlabs/recall"
 # The shared Homebrew tap. Being named homebrew-* is what lets Homebrew
 # resolve `pimlabs/tap/recall` with no URL and no separate `brew tap` step.
 TAP="pimlabs/homebrew-tap"
-CRATES=(recall-wire recall-hooks recall-server recall)
+# Bottom-up: recall-worker before recall-server, which uses its merge code.
+CRATES=(recall-wire recall-hooks recall-worker recall-server recall)
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
@@ -194,7 +195,7 @@ run "cargo build --release"            cargo build --release --locked
 # The two that talk to a real server rather than a stand-in. Both have caught
 # bugs every unit test in the repo missed.
 run "compat-check.sh (19 checks)"      ./scripts/compat-check.sh target/release/recall-server
-run "api-doc-check.sh (95 checks)"     ./scripts/api-doc-check.sh target/release/recall-server
+run "api-doc-check.sh (115 checks)"    ./scripts/api-doc-check.sh target/release/recall-server
 run "trusted-ip-check.sh (9 checks)"   ./scripts/trusted-ip-check.sh target/release/recall-server
 
 built=$(./target/release/recall version)
@@ -214,6 +215,12 @@ if printf '%s\n' "$built" | grep -Eq '^features:( [a-z-]+)* passkeys( |$)'; then
 else
   die "server binary was built without the passkeys feature"
 fi
+built=$(./target/release/recall-worker version)
+printf '    built: %s\n' "$built"
+case "$built" in
+  "recall-worker $VERSION"*) ok "worker binary reports $VERSION" ;;
+  *) die "worker binary reports '$built', expected recall-worker $VERSION" ;;
+esac
 
 # --------------------------------------------------------------------------
 step "4/9  crates.io names"
@@ -277,7 +284,8 @@ if ! curl -sfI "$release_url/checksums.txt" >/dev/null 2>&1; then
 fi
 
 for asset in recall_darwin_amd64 recall_darwin_arm64 recall_linux_amd64 recall_linux_arm64 \
-             recall-server_linux_amd64 recall-server_linux_arm64; do
+             recall-server_linux_amd64 recall-server_linux_arm64 \
+             recall-worker_linux_amd64 recall-worker_linux_arm64; do
   if curl -sfI "$release_url/$asset.tar.gz" >/dev/null 2>&1; then
     ok "$asset.tar.gz"
   else

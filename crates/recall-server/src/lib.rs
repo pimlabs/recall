@@ -15,7 +15,7 @@ pub mod merge;
 pub mod server;
 pub mod store;
 
-pub use config::{Config, ConfigError};
+pub use config::{Config, ConfigError, TlsMode};
 pub use merge::Merger;
 pub use server::Server;
 pub use store::Store;

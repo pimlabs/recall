@@ -79,6 +79,15 @@ pub struct PushResponse {
     pub merged: bool,
     /// When the row was written, in the crate's frozen timestamp format.
     pub updated_at: String,
+    /// The merge job this push queued, on a server with a worker: the push
+    /// was stored as sent (`merged: false`), and the merged file arrives
+    /// with a later pull.
+    ///
+    /// Omitted rather than `null` when no job was queued, so a server
+    /// without a worker answers byte for byte as it did before the queue
+    /// existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_job: Option<String>,
 }
 
 /// One memory file as returned by `GET /sync`.

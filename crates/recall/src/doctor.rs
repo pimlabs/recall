@@ -105,11 +105,22 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
 
     if rep.token_set {
         out.push(ok("RECALL_TOKEN", source_detail(rep, rep.token_source)));
+    } else if rep.device.is_some() {
+        out.push(ok(
+            "RECALL_TOKEN",
+            "not needed, this machine signs its requests with its device key",
+        ));
+    } else if rep.authkey_set {
+        out.push(ok(
+            "RECALL_TOKEN",
+            "not needed, RECALL_AUTHKEY enrols this session as a device",
+        ));
     } else {
         out.push(fail("RECALL_TOKEN", "not set anywhere", WHERE_TO_SET));
     }
 
     credentials_findings(rep, &mut out);
+    device_findings(rep, &mut out);
 
     // Only asked once there is somewhere to ask. Reporting "unreachable"
     // when no URL is set would be true and useless.
@@ -139,13 +150,37 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
         version_findings(rep, &mut out);
     }
 
-    if rep.server_ok && !rep.merge_ready {
+    let quiet = worker_quiet(rep).filter(|_| rep.server_ok);
+    if let Some(quiet) = quiet {
+        // Before the CLI: what the worker last said about it is only as
+        // current as the worker.
+        out.push(warn(
+            "merge",
+            format!(
+                "the merge worker has not asked for work in {} minutes, so conflicting \
+                 edits wait in its queue unmerged, unless the server's own Claude CLI \
+                 can merge them",
+                quiet.whole_minutes()
+            ),
+            "on the server: docker compose logs recall-worker, and check it is running",
+        ));
+    } else if rep.server_ok && !rep.merge_ready && rep.merge_worker {
+        out.push(warn(
+            "merge",
+            "the merge worker's Claude CLI is not logged in, so conflicting edits wait \
+             in its queue unmerged",
+            "on the server: docker compose exec -it -u node recall-worker claude setup-token",
+        ));
+    } else if rep.server_ok && !rep.merge_ready {
         out.push(warn(
             "merge",
             "the server's Claude CLI is not logged in, so conflicting edits use \
              last-write-wins",
             "on the server: docker compose exec -it -u node recall-server claude setup-token",
         ));
+    }
+    if rep.server_ok {
+        queue_finding(rep, &mut out);
     }
 
     // ---- can Claude Code see the memory at all
@@ -243,6 +278,167 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
     }
 
     out
+}
+
+/// Whether this machine is an enrolled device, and whether it should be.
+///
+/// Two warnings carry the move off the shared token (Part 2 of
+/// `docs/design/handshake.md`): one while a machine that could enrol has
+/// not, and one while a machine that has still holds the token it no longer
+/// sends. Neither fails the command: the token still works.
+fn device_findings(rep: &Report, out: &mut Vec<Finding>) {
+    let key_file = rep.device_file.as_deref().unwrap_or("~/.recall/device.key");
+    // A failure rather than a warning: the hooks send nothing at all while
+    // it lasts, not even `RECALL_TOKEN` in the key's place.
+    if let Some(err) = &rep.device_error {
+        out.push(fail(
+            "device key",
+            format!("{err}, so this machine sends nothing to the server"),
+            "move it aside and run recall connect to enrol again",
+        ));
+    }
+    if rep.device_file_exposed {
+        out.push(warn(
+            "device key",
+            format!("{key_file} is readable by other users"),
+            format!("chmod 600 {key_file}"),
+        ));
+    }
+
+    let Some(d) = &rep.device else {
+        match (rep.server_devices, rep.remote_session) {
+            (Some(true), true) if rep.authkey_set => out.push(warn(
+                "device",
+                "RECALL_AUTHKEY is set, but this session has not enrolled yet",
+                "recall pull enrols it, and says why when it cannot",
+            )),
+            (Some(true), true) if rep.token_set => out.push(warn(
+                "device",
+                "this session uses the shared RECALL_TOKEN",
+                "on an admin device: recall authkey create --tag cloud --expires 90d, \
+                 then set RECALL_AUTHKEY on the cloud environment and remove RECALL_TOKEN",
+            )),
+            (Some(true), false) if rep.token_set => out.push(warn(
+                "device",
+                "not enrolled, so this machine still uses the shared RECALL_TOKEN",
+                "recall connect",
+            )),
+            (Some(false), _) => out.push(ok(
+                "device",
+                "not available, the server does not enrol devices",
+            )),
+            _ => {}
+        }
+        return;
+    };
+
+    let what = format!(
+        "{} ({}{})",
+        d.name,
+        d.scope,
+        if d.ephemeral { ", ephemeral" } else { "" }
+    );
+    let reenroll = if rep.remote_session && rep.authkey_set {
+        "the next session start enrols again with RECALL_AUTHKEY"
+    } else {
+        "recall connect"
+    };
+    match d.confirmed {
+        Some(true) => out.push(ok(
+            "device",
+            format!(
+                "enrolled as {what}, key in {} ({})",
+                d.key_file,
+                key_protection(&d.key_file)
+            ),
+        )),
+        Some(false) if d.gone => out.push(fail(
+            "device",
+            format!(
+                "the server no longer accepts this machine's device {}: {}",
+                d.name,
+                d.check_error.as_deref().unwrap_or("unknown device")
+            ),
+            reenroll,
+        )),
+        Some(false) if rep.server_devices == Some(false) => out.push(fail(
+            "device",
+            format!(
+                "this machine signs its requests as {}, and the server does not accept \
+                 device signatures",
+                d.name
+            ),
+            "upgrade the server to 0.4.1 or later",
+        )),
+        Some(false) => out.push(warn(
+            "device",
+            format!(
+                "{what}: the server did not confirm it: {}",
+                d.check_error.as_deref().unwrap_or("no answer")
+            ),
+            "run recall doctor again; if it persists, recall connect",
+        )),
+        None => out.push(ok(
+            "device",
+            format!("enrolled as {what}, key in {} (not checked)", d.key_file),
+        )),
+    }
+
+    // The token is never sent while there is a device key, so a copy of it
+    // left on the machine protects nothing and can still leak.
+    if rep.token_set {
+        let (detail, fix) = match rep.token_source {
+            Source::CredentialsFile => (
+                format!(
+                    "RECALL_TOKEN is still saved in {}, though this machine never sends it",
+                    rep.credentials_file
+                        .as_deref()
+                        .unwrap_or("the credentials file")
+                ),
+                "recall connect removes it".to_string(),
+            ),
+            _ => {
+                let from = rep
+                    .declared_env
+                    .iter()
+                    .find(|d| d.name == "RECALL_TOKEN")
+                    .map(|d| d.file.clone())
+                    .unwrap_or_else(|| {
+                        if rep.remote_session {
+                            "the cloud environment's variables".to_string()
+                        } else {
+                            "your shell profile".to_string()
+                        }
+                    });
+                (
+                    "RECALL_TOKEN is still set, though this machine never sends it".to_string(),
+                    format!("remove RECALL_TOKEN from {from}"),
+                )
+            }
+        };
+        out.push(warn("shared token", detail, fix));
+    }
+}
+
+/// How the device key file is protected, said plainly: a file, and what
+/// keeps others out of it on this platform. Not the OS keychain, and the
+/// report does not pretend otherwise; `recall_hooks::home` says why.
+#[cfg(unix)]
+fn key_protection(_key_file: &str) -> &'static str {
+    "a file readable by you only"
+}
+
+/// On Windows, what keeps others out is the user profile's access list,
+/// which covers only what is inside the profile: a `RECALL_HOME` elsewhere
+/// gets whatever that directory allows, which nothing here reads.
+#[cfg(not(unix))]
+fn key_protection(key_file: &str) -> &'static str {
+    let profile = std::env::var("USERPROFILE").unwrap_or_default();
+    if recall_hooks::home::inside_profile(std::path::Path::new(key_file), &profile) {
+        "a file in your user profile, which only you and administrators can read"
+    } else {
+        "a file outside your user profile, so who else can read it is up to that directory"
+    }
 }
 
 /// Whether this client and the server can talk at all, from the server's
@@ -367,7 +563,9 @@ fn source_detail(rep: &Report, source: Source) -> String {
 /// line sits in shell history. The same `CLAUDE_CODE_REMOTE` signal decides
 /// the memory-dir check below.
 fn credentials_findings(rep: &Report, out: &mut Vec<Finding>) {
-    if rep.token_source == Source::Environment && !rep.remote_session {
+    // With a device key the token is never sent, and `device_findings`
+    // says so instead.
+    if rep.token_source == Source::Environment && !rep.remote_session && rep.device.is_none() {
         // A settings file can be named because it was read. The shell
         // cannot: by the time a process sees a variable, which profile
         // exported it is gone, and naming a guess would send someone to
@@ -501,11 +699,77 @@ fn offbox_finding(rep: &Report, out: &mut Vec<Finding>) {
     }
 }
 
+/// How long the oldest merge may wait before it is worth saying so. A
+/// worker drains a job within seconds of the push; an hour means it is not
+/// running, or cannot merge.
+const QUEUE_STALE_AFTER: time::Duration = time::Duration::hours(1);
+
+/// How long a merge worker may go without asking for work before it is
+/// worth saying so. A running one asks at least every half minute.
+const WORKER_QUIET_AFTER: time::Duration = time::Duration::minutes(2);
+
+/// How long the merge worker has gone without asking for work, when that is
+/// long enough to say so: [`None`] without a worker, or with one that asks.
+pub(crate) fn worker_quiet(rep: &Report) -> Option<time::Duration> {
+    if !rep.merge_worker {
+        return None;
+    }
+    rep.merge_worker_seen_at
+        .as_deref()
+        .and_then(age_of)
+        .filter(|quiet| *quiet >= WORKER_QUIET_AFTER)
+}
+
+/// The merge worker's queue, when there is a worker: silent while it
+/// drains, loud once the oldest job has waited an hour, the way a merge
+/// that degrades to last-write-wins is made visible rather than silent.
+fn queue_finding(rep: &Report, out: &mut Vec<Finding>) {
+    let Some(q) = &rep.merge_queue else {
+        return;
+    };
+    let waited = q.oldest_queued_at.as_deref().and_then(age_of);
+    match waited {
+        Some(age) if age >= QUEUE_STALE_AFTER => out.push(warn(
+            "merge queue",
+            format!(
+                "{} merge{} waiting, the oldest for {} minutes; pushes still land, \
+                 unmerged, until the worker takes them",
+                q.queued,
+                if q.queued == 1 { "" } else { "s" },
+                age.whole_minutes()
+            ),
+            "on the server: docker compose logs recall-worker, and check it is running",
+        )),
+        _ => out.push(ok(
+            "merge queue",
+            match q.queued {
+                0 => "nothing waiting".to_string(),
+                n => format!("{n} waiting"),
+            },
+        )),
+    }
+    // A failed merge left the newest push standing and kept the merge in
+    // its job, where nothing retries it by itself.
+    if q.failed > 0 {
+        out.push(warn(
+            "failed merges",
+            format!(
+                "{} merge{} failed; for each, the newest push stands and the merge is kept \
+                 in its job",
+                q.failed,
+                if q.failed == 1 { "" } else { "s" },
+            ),
+            "list them with GET /v1/jobs?state=failed and retry one with \
+             POST /v1/jobs/{id}/retry, both with the operator token",
+        ));
+    }
+}
+
 /// How long ago a timestamp in the API's format was.
 ///
 /// [`None`] rather than a guess when it cannot be parsed — a report that
 /// invents an age is worse than one that admits it cannot read the value.
-fn age_of(stamp: &str) -> Option<time::Duration> {
+pub(crate) fn age_of(stamp: &str) -> Option<time::Duration> {
     let fmt = time::macros::format_description!(
         "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
     );
@@ -602,8 +866,13 @@ const SECTIONS: &[(&str, &[&str])] = &[
             "server",
             "version",
             "merge",
+            "merge queue",
+            "failed merges",
             "token storage",
             "credentials file",
+            "device",
+            "device key",
+            "shared token",
             "config file",
             "config overridden",
         ],
@@ -645,6 +914,7 @@ fn tone_of(f: &Finding) -> ui::Tone {
         Level::Ok
             if f.detail == "off"
                 || f.detail.starts_with("not needed")
+                || f.detail.starts_with("not available")
                 || f.detail.starts_with("not in a git repository") =>
         {
             ui::Tone::Quiet
@@ -755,6 +1025,14 @@ mod tests {
             credentials_file: Some("/h/.recall/credentials.json".into()),
             credentials_error: None,
             credentials_exposed: false,
+            auth: "bearer",
+            device: None,
+            device_file: Some("/h/.recall/device.key".into()),
+            device_error: None,
+            device_file_exposed: false,
+            authkey_set: false,
+            // A server too old to say: the case that must raise nothing.
+            server_devices: None,
             config_file: Some("/h/.recall/config.toml".into()),
             machine_source: Source::Unset,
             config_problems: Vec::new(),
@@ -768,6 +1046,9 @@ mod tests {
             min_client: Some("0.1.0".into()),
             client_version: "0.3.3".into(),
             merge_ready: true,
+            merge_worker: false,
+            merge_queue: None,
+            merge_worker_seen_at: None,
             synced_files: 4,
             last_synced_at: None,
             // No stamp: the ordinary case for a deployment with no off-box
@@ -1172,6 +1453,113 @@ mod tests {
         assert_eq!(f.level, Level::Fail);
         assert_eq!(f.fix.as_deref(), Some("recall init"));
         assert_eq!(verdict(&found), exit::CONFIG);
+    }
+
+    // ----------------------------------------------------------- merge queue
+
+    fn with_worker(oldest: Option<String>, queued: u64) -> Report {
+        let mut rep = healthy();
+        rep.merge_worker = true;
+        rep.merge_queue = Some(recall_wire::QueueStatus {
+            queued,
+            leased: 0,
+            failed: 0,
+            oldest_queued_at: oldest,
+        });
+        rep
+    }
+
+    fn stamp_minutes_ago(minutes: i64) -> String {
+        let fmt = time::macros::format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+        );
+        (time::OffsetDateTime::now_utc() - time::Duration::minutes(minutes))
+            .format(&fmt)
+            .unwrap()
+    }
+
+    #[test]
+    fn no_worker_no_queue_finding() {
+        assert!(find(&findings(&healthy()), "merge queue").is_none());
+    }
+
+    #[test]
+    fn a_queue_that_drains_is_fine() {
+        let found = findings(&with_worker(Some(stamp_minutes_ago(2)), 1));
+        assert_eq!(find(&found, "merge queue").unwrap().level, Level::Ok);
+        let found = findings(&with_worker(None, 0));
+        assert_eq!(
+            find(&found, "merge queue").unwrap().detail,
+            "nothing waiting"
+        );
+    }
+
+    /// The worker stopped: pushes keep landing, and the only sign is a job
+    /// that keeps getting older.
+    #[test]
+    fn a_job_waiting_an_hour_is_a_warning() {
+        let found = findings(&with_worker(Some(stamp_minutes_ago(61)), 3));
+        let f = find(&found, "merge queue").unwrap();
+        assert_eq!(f.level, Level::Warn);
+        assert!(f.detail.starts_with("3 merges waiting"), "{}", f.detail);
+        assert!(f.fix.as_deref().unwrap().contains("recall-worker"));
+        assert_eq!(
+            verdict(&found),
+            exit::OK,
+            "a warning never fails the command"
+        );
+    }
+
+    /// A worker that stopped asking for work is not ready, whatever its
+    /// last report of its CLI said.
+    #[test]
+    fn a_worker_that_stopped_asking_is_a_warning() {
+        let mut rep = with_worker(None, 0);
+        rep.merge_ready = true;
+        rep.merge_worker_seen_at = Some(stamp_minutes_ago(1));
+        assert!(worker_quiet(&rep).is_none());
+        assert!(find(&findings(&rep), "merge").is_none());
+
+        rep.merge_worker_seen_at = Some(stamp_minutes_ago(3));
+        assert!(worker_quiet(&rep).is_some());
+        let found = findings(&rep);
+        let f = find(&found, "merge").unwrap();
+        assert_eq!(f.level, Level::Warn);
+        assert!(f.detail.contains("has not asked for work"), "{}", f.detail);
+        assert!(f.fix.as_deref().unwrap().contains("logs recall-worker"));
+
+        // Without a worker there is nothing to go quiet.
+        rep.merge_worker = false;
+        assert!(worker_quiet(&rep).is_none());
+    }
+
+    /// A failed merge is a warning however new: nothing retries it.
+    #[test]
+    fn a_failed_merge_is_a_warning() {
+        let mut rep = with_worker(None, 0);
+        assert!(find(&findings(&rep), "failed merges").is_none());
+        rep.merge_queue.as_mut().unwrap().failed = 2;
+        let found = findings(&rep);
+        let f = find(&found, "failed merges").unwrap();
+        assert_eq!(f.level, Level::Warn);
+        assert!(f.detail.starts_with("2 merges failed"), "{}", f.detail);
+        assert!(f.fix.as_deref().unwrap().contains("/v1/jobs"));
+        // Also with no worker: a revoked worker's queue, failed here.
+        rep.merge_worker = false;
+        assert!(find(&findings(&rep), "failed merges").is_some());
+    }
+
+    #[test]
+    fn a_worker_that_cannot_merge_names_the_worker() {
+        let mut rep = with_worker(None, 0);
+        rep.merge_ready = false;
+        let found = findings(&rep);
+        assert!(find(&found, "merge")
+            .unwrap()
+            .fix
+            .as_deref()
+            .unwrap()
+            .contains("recall-worker claude setup-token"));
     }
 
     // ---------------------------------------------------------------- off-box

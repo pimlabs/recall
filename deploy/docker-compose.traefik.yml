@@ -67,6 +67,7 @@ services:
       - "8787"
     networks:
       - traefik
+      - backend
     labels:
       traefik.enable: "true"
       traefik.docker.network: traefik
@@ -76,6 +77,43 @@ services:
       traefik.http.routers.recall.tls: "true"
       traefik.http.routers.recall.tls.certresolver: letsencrypt
       traefik.http.services.recall.loadbalancer.server.port: "8787"
+
+  # The merge worker: an enrolled device that takes conflicting pushes off
+  # the server's queue and merges them with the `claude` CLI, so the login
+  # that CLI holds is not in the container the internet reaches. It opens
+  # no port: no `ports`, no `expose`, no labels, and no ingress network. It
+  # reaches the server directly on `backend` and signs every request with
+  # its own key, kept on its own volume, never the server's.
+  #
+  # Off unless asked for: it starts only with COMPOSE_PROFILES=worker in
+  # deploy/.env. On first start it prints a code to approve with the `worker`
+  # scope; see "The merge worker" in deploy/README.md. Until one is approved
+  # the server merges inline, exactly as before.
+  recall-worker:
+    profiles: ["worker"]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: worker
+      args:
+        RECALL_SOURCE: ${RECALL_SOURCE:-release}
+        RECALL_VERSION: ${RECALL_VERSION:-}
+        GIT_COMMIT: ${GIT_COMMIT:-}
+    container_name: recall-worker
+    restart: unless-stopped
+    # A small init as PID 1, so the `claude` processes a merge starts are
+    # reaped rather than left as zombies.
+    init: true
+    environment:
+      # Its own variable, never RECALL_URL: that one is the client's, and a
+      # machine with Recall set up has it pointing at the public server.
+      RECALL_WORKER_SERVER: http://recall-server:8787
+    volumes:
+      - recall-worker-data:/data
+    depends_on:
+      - recall-server
+    networks:
+      - backend
 
   # Read-only database browser, for the owner's own use. It has no auth of
   # its own, so it is deliberately *not* on the Traefik network and is bound
@@ -96,9 +134,15 @@ services:
 
 volumes:
   recall-data:
+  # The worker's key and its CLI's login. Never mounted into the server.
+  recall-worker-data:
 
 networks:
   # Created and owned by Traefik, not by this file.
   traefik:
     external: true
   db-tools:
+  # Shared by recall-server and recall-worker only, so the worker can reach
+  # the server without going through the ingress. Not `internal`: the
+  # worker's `claude` CLI has to reach Anthropic.
+  backend:

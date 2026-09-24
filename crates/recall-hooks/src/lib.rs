@@ -51,6 +51,7 @@
 //! | Module | What it holds |
 //! |---|---|
 //! | [`client`] | the HTTP client for the Recall API |
+//! | [`device`] | this machine as an enrolled device: its key, and signing with it |
 //! | [`payload`] | what Claude Code sends a hook on stdin |
 //! | [`exit`] | how a hook is allowed to fail |
 //! | [`path`] | whether a path is a memory file — the security boundary. Singular: it judges *one* path, where [`claude`] and [`project`] derive where paths come from |
@@ -98,6 +99,7 @@ pub mod claude;
 pub mod client;
 pub mod config;
 pub mod declared_env;
+pub mod device;
 pub mod exit;
 pub mod home;
 pub mod path;

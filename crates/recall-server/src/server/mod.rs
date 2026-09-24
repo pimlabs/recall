@@ -7,9 +7,11 @@
 //! | `GET /health` | none — uptime tooling holds no secret |
 //! | `GET /admin` | none — static markup, no data |
 //! | `GET /.well-known/recall` | none — a client asks before it can authenticate |
-//! | `POST /sync`, `GET /sync`, `GET /v1/devices/me` | bearer token, or any device's signature |
+//! | `POST /sync`, `GET /sync`, `GET /v1/devices/me` | bearer token, or the signature of any device but a worker |
 //! | `POST /v1/devices/enroll`, `POST /v1/devices/enroll/poll` | none, but rate limited, and small bodies only |
 //! | `GET /admin/stats`, the rest of `/v1/devices`, and `/v1/authkeys` | bearer token, an admin device's signature, or the admin page's passkey session (with its CSRF header on a POST) |
+//! | `GET /v1/jobs`, `POST /v1/jobs/{id}/retry` | bearer token, or an admin device's signature |
+//! | `POST /v1/jobs/claim`, `POST /v1/jobs/{id}/result` | a worker device's signature, and nothing else |
 //! | `GET /admin/session`, `POST /admin/login/start`, `POST /admin/login/finish` | none, but rate limited |
 //! | `POST /admin/bootstrap/register` and `…/finish` | bearer token only, with the one-time bootstrap code, and only while no passkey exists |
 //! | `GET /admin/passkeys`, `POST /admin/passkeys/…`, `POST /admin/logout`, `POST /admin/logout/others` | the passkey session only, with its CSRF header on a POST; adding or removing a passkey and signing out the others also need a sign-in in the last five minutes |
@@ -20,16 +22,20 @@
 //! own tests: `middleware.rs` (rate limiting, then the protocol check, then
 //! auth), `auth.rs` (device signatures and the replay cache),
 //! `handlers.rs` (one function per route), `devices.rs` (the device
-//! routes), `admin.rs` (the admin page and its session), `passkeys.rs`
-//! (the WebAuthn ceremonies that start a session), `respond.rs` (the JSON
-//! shape of every reply, errors included) and `limit.rs` (the per-IP window
-//! the middleware consults).
+//! routes), `jobs.rs` (the merge queue's routes and its drain), `admin.rs`
+//! (the admin page and its session), `passkeys.rs` (the WebAuthn ceremonies
+//! that start a session), `respond.rs` (the JSON shape of every reply,
+//! errors included), `limit.rs` (the per-IP window the middleware consults)
+//! and `tls.rs` (the direct-TLS accept loop, used only when `Config::tls`
+//! is on; plain HTTP, the default, never touches it). Both transports serve
+//! the one router [`Server::router`] builds, every route group and layer
+//! included.
 
 use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use axum::extract::DefaultBodyLimit;
@@ -39,10 +45,12 @@ use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
 use axum::Router;
 use recall_wire::devices as paths;
-use recall_wire::MergeError;
+use recall_wire::{ClaudeCliStatus, MergeError};
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
+use crate::config::TlsMode;
 use crate::merge::{Merger, Status};
 use crate::{format_timestamp, now, Config, Store};
 
@@ -53,11 +61,13 @@ mod admin;
 mod auth;
 mod devices;
 mod handlers;
+mod jobs;
 mod limit;
 mod middleware;
 #[cfg(feature = "passkeys")]
 mod passkeys;
 mod respond;
+mod tls;
 
 #[cfg(feature = "passkeys")]
 use passkeys::Passkeys;
@@ -99,7 +109,7 @@ use handlers::{
     handle_admin_stats, handle_discovery, handle_health, handle_pull, handle_push, not_found,
 };
 use limit::RateLimiter;
-use middleware::{admin_guard, admin_only, guard, limited, limited_sign_in};
+use middleware::{admin_guard, admin_only, guard, limited, limited_sign_in, not_worker};
 
 /// How often idle ephemeral devices and long-expired enrolments are swept
 /// away. Removal is at most this late, which against a TTL counted in
@@ -125,6 +135,16 @@ struct Runtime {
     last_merge_at: String,
     last_merge_error: Option<MergeError>,
     claude_status: Status,
+    /// When a worker last claimed, since this process started.
+    worker_last_claim_at: Option<String>,
+    /// The same, as an instant, or when this process started if no worker
+    /// has claimed since: what says whether a worker's claims have stopped.
+    worker_last_claim: Instant,
+    /// The `User-Agent` of that claim.
+    worker_agent: String,
+    /// The CLI check that claim carried: what `/health` reports as
+    /// `claude_cli` while a worker is enrolled.
+    worker_cli: Option<ClaudeCliStatus>,
 }
 
 struct AppState {
@@ -144,6 +164,14 @@ struct AppState {
     replay: ReplayCache,
     /// Passkey sign-in for the admin page, and the ceremonies it finished.
     passkeys: Passkeys,
+    /// Wakes waiting claims when a job is queued.
+    jobs_ready: Notify,
+    /// Set once shutdown begins, so waiting claims answer at once rather
+    /// than holding the graceful shutdown for their whole wait.
+    closing: AtomicBool,
+    /// Set while the queue is being drained here, so two drains never run
+    /// at once.
+    draining: AtomicBool,
 }
 
 impl AppState {
@@ -213,10 +241,17 @@ impl Server {
                     last_merge_at: String::new(),
                     last_merge_error: None,
                     claude_status: Status::default(),
+                    worker_last_claim_at: None,
+                    worker_last_claim: Instant::now(),
+                    worker_agent: String::new(),
+                    worker_cli: None,
                 }),
                 limiter,
                 replay,
                 passkeys,
+                jobs_ready: Notify::new(),
+                closing: AtomicBool::new(false),
+                draining: AtomicBool::new(false),
             }),
         }
     }
@@ -289,13 +324,17 @@ impl Server {
                 get(handle_pull).post(handle_push).fallback(not_found),
             )
             .route(paths::DEVICES_ME_PATH, get(handle_me).fallback(not_found))
-            // Registered before the layer, so only these routes are rate
-            // limited and authenticated here.
+            // Registered before the layers, so only these routes are rate
+            // limited and authenticated here. The last layer added runs
+            // first: `guard` puts the caller in place, then `not_worker`
+            // keeps a worker device out of memory.
+            .route_layer(from_fn(not_worker))
             .route_layer(from_fn_with_state(state.clone(), guard))
             .merge(admin)
             .merge(enrolment)
             .merge(page)
             .merge(sign_in_routes(&state))
+            .merge(jobs::routes(state.clone()))
             .route("/health", get(handle_health).fallback(not_found))
             .route(
                 recall_wire::DISCOVERY_PATH,
@@ -345,6 +384,29 @@ impl Server {
             .fetch_sub(seconds, Ordering::Relaxed);
     }
 
+    /// Makes the last claim by a worker, or this server's start if there
+    /// has been none, `seconds` older than it is.
+    ///
+    /// Exposed so tests can reach a worker whose claims have stopped
+    /// without waiting minutes for it.
+    pub fn backdate_last_claim(&self, seconds: u64) {
+        let mut rt = self.state.write();
+        if let Some(earlier) = rt
+            .worker_last_claim
+            .checked_sub(std::time::Duration::from_secs(seconds))
+        {
+            rt.worker_last_claim = earlier;
+        }
+    }
+
+    /// Merges the jobs left in the queue here, or marks them failed when
+    /// this server cannot merge, if no worker is enrolled; otherwise does
+    /// nothing. Run by itself when the last worker is revoked and on every
+    /// sweep; exposed so tests can wait for it.
+    pub async fn drain_jobs(&self) -> Result<()> {
+        jobs::drain_without_worker(&self.state).await
+    }
+
     /// Writes a backup now. Failure is logged, never propagated: it becomes
     /// visible through `/health`'s `last_backup_at` going stale.
     pub fn run_backup(&self) {
@@ -375,8 +437,9 @@ impl Server {
     }
 
     /// Starts background work: the first Claude CLI status check, its
-    /// refresh loop, backups, and the device sweep. All of it is
-    /// best-effort — none of it may take the sync API down.
+    /// refresh loop, backups, the device sweep, and draining a queue no
+    /// worker is left to take. All of it is best-effort — none of it may
+    /// take the sync API down.
     pub fn start_background(&self) -> Vec<JoinHandle<()>> {
         let mut tasks = Vec::new();
         {
@@ -392,6 +455,19 @@ impl Server {
                         Ok(Err(e)) => eprintln!("device sweep failed: {e:#}"),
                         Err(_) => {}
                     }
+                    let s = state.clone();
+                    match tokio::task::spawn_blocking(move || jobs::prune(&s)).await {
+                        Ok(Ok(0)) | Err(_) => {}
+                        Ok(Ok(n)) => eprintln!("removed {n} finished merge jobs"),
+                        Ok(Err(e)) => eprintln!("job prune failed: {e:#}"),
+                    }
+                    // Jobs no worker is left to take: merged here, or
+                    // marked failed. The first sweep usually comes before
+                    // the first check of the CLI has finished, and leaves
+                    // them to the drain that check starts.
+                    if let Err(e) = jobs::drain_without_worker(&state).await {
+                        eprintln!("draining the merge queue failed: {e:#}");
+                    }
                     tokio::time::sleep(SWEEP_EVERY).await;
                 }
             }));
@@ -400,9 +476,18 @@ impl Server {
             let state = self.state.clone();
             tasks.push(tokio::spawn(async move {
                 let every = state.cfg.claude_status_interval;
+                let mut first = true;
                 loop {
                     let status = state.merger.check_status().await;
                     state.write().claude_status = status;
+                    // Now that it is known whether this server can merge,
+                    // jobs a worker left before the last restart need not
+                    // wait for the next sweep.
+                    if std::mem::take(&mut first) {
+                        if let Err(e) = jobs::drain_without_worker(&state).await {
+                            eprintln!("draining the merge queue failed: {e:#}");
+                        }
+                    }
                     tokio::time::sleep(every).await;
                 }
             }));
@@ -430,30 +515,67 @@ impl Server {
         let listener = TcpListener::bind(&self.state.cfg.addr)
             .await
             .with_context(|| format!("binding {}", self.state.cfg.addr))?;
-        eprintln!(
-            "recall server listening on {} (db: {})",
-            self.state.cfg.addr, self.state.cfg.db_path
-        );
         self.serve_with_shutdown(listener, shutdown_signal()).await
     }
 
-    /// Serves on an already-bound listener until `shutdown` resolves.
+    /// Serves on an already-bound listener until `shutdown` resolves, in
+    /// whichever transport `cfg.tls` names (see `server/tls.rs`; plain HTTP,
+    /// the default, still goes through `axum::serve` directly, unchanged).
     pub async fn serve_with_shutdown<F>(&self, listener: TcpListener, shutdown: F) -> Result<()>
     where
         F: Future<Output = ()> + Send + 'static,
     {
+        // The certificate is loaded (or the ACME state built) before
+        // anything claims the server is up, so a bad path or an unreadable
+        // key is the last line in the log rather than one after
+        // "listening".
+        let transport = match &self.state.cfg.tls {
+            TlsMode::Off => None,
+            mode => Some(tls::prepare(mode).await?),
+        };
+        eprintln!(
+            "recall server listening on {} ({}, db: {})",
+            listener
+                .local_addr()
+                .map_or_else(|_| self.state.cfg.addr.clone(), |a| a.to_string()),
+            transport
+                .as_ref()
+                .map_or("plain http", tls::Prepared::description),
+            self.state.cfg.db_path
+        );
         let tasks = self.start_background();
-        let result = axum::serve(
-            listener,
-            self.router()
-                .into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(shutdown)
-        .await;
+        let state = self.state.clone();
+        let shutdown = async move {
+            shutdown.await;
+            // A claim waiting for a job would otherwise hold the shutdown
+            // for up to its whole wait.
+            state.closing.store(true, Ordering::Relaxed);
+            state.jobs_ready.notify_waiters();
+        };
+        let result = match transport {
+            None => axum::serve(
+                listener,
+                self.router()
+                    .into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown)
+            .await
+            .map_err(Into::into),
+            Some(prepared) => {
+                // axum-server runs its own accept loop rather than
+                // axum::serve's, so the listener crosses over to std here.
+                // It is already non-blocking (tokio bound it), which is
+                // exactly what tokio::net::TcpListener::from_std, which
+                // axum-server calls internally, requires.
+                let listener = listener.into_std().context("preparing the TLS listener")?;
+                let limits = tls::Limits::from_config(&self.state.cfg);
+                tls::serve(self.router(), listener, prepared, limits, shutdown).await
+            }
+        };
         for task in tasks {
             task.abort();
         }
-        result.map_err(Into::into)
+        result
     }
 }
 

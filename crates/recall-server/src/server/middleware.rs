@@ -149,6 +149,34 @@ pub(super) async fn admin_only(req: Request, next: Next) -> Response {
     }
 }
 
+/// After [`guard`], on the routes that read and write memory: anyone
+/// authenticated except a worker device. A worker may claim jobs and post
+/// their results and nothing else, so the key on its volume cannot be used
+/// to read every file, or to write one outright rather than through the
+/// compare-and-swap a merge result goes through.
+pub(super) async fn not_worker(req: Request, next: Next) -> Response {
+    match req.extensions().get::<Caller>() {
+        Some(caller) if caller.is_worker() => error(
+            StatusCode::FORBIDDEN,
+            "forbidden: a worker device may only claim jobs and post their results",
+        ),
+        _ => next.run(req).await,
+    }
+}
+
+/// After [`guard`], on the routes a worker drains the queue with: a worker
+/// device, and nobody else. The operator's token and the other scopes have
+/// proved who they are, so this is a 403, not a 401.
+pub(super) async fn worker_only(req: Request, next: Next) -> Response {
+    match req.extensions().get::<Caller>() {
+        Some(caller) if caller.is_worker() => next.run(req).await,
+        _ => error(
+            StatusCode::FORBIDDEN,
+            "forbidden: this needs a device with the worker scope",
+        ),
+    }
+}
+
 /// The rate limit, then the protocol check. [`None`] when the request may
 /// go on.
 pub(super) fn limit(state: &AppState, req: &Request) -> Option<Response> {

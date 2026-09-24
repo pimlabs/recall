@@ -159,10 +159,11 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
 
-  # The server, since 0.4.0 a binary of its own. Linux only, because that is
-  # where servers run, and static against musl, so the one file runs in the
-  # Alpine image deploy/Dockerfile assembles and on any other Linux too. The
-  # client's archives above no longer contain it.
+  # The server, since 0.4.0 a binary of its own, and the merge worker that
+  # runs beside it. Linux only, because that is where servers run, and
+  # static against musl, so each file runs in the Alpine image
+  # deploy/Dockerfile assembles and on any other Linux too. The client's
+  # archives above contain neither.
   build-server:
     needs: versions
     strategy:
@@ -171,10 +172,10 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            asset: recall-server_linux_amd64
+            arch: amd64
           - target: aarch64-unknown-linux-musl
             os: ubuntu-24.04-arm
-            asset: recall-server_linux_arm64
+            arch: arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -206,10 +207,16 @@ jobs:
           echo "RECALL_BUILD_CHANNEL=release" >> "$GITHUB_ENV"
           echo "RECALL_BUILD_CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
 
+      # One package at a time rather than both in one command: built
+      # together, cargo would unify their features, and recall-server would
+      # be compiled against the worker's HTTP client, which it must not
+      # carry.
       - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }} -p recall-server
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }} -p recall-server
+          cargo build --release --locked --target ${{ matrix.target }} -p recall-worker
 
-      # A static binary is the promise the image relies on; a dynamic one
+      # A static binary is the promise the images rely on; a dynamic one
       # would build here and fail to start in Alpine.
       #
       # So is passkey sign-in on /admin: a server built without the
@@ -226,24 +233,28 @@ jobs:
         run: |
           set -euo pipefail
           bin="target/${{ matrix.target }}/release/recall-server"
-          file "$bin"
-          if readelf -lW "$bin" | grep -q 'INTERP' || readelf -dW "$bin" | grep -q '(NEEDED)'; then
-            echo "::error::$bin is dynamically linked; the image needs a static one"
-            exit 1
-          fi
-          "$bin" version
           if ! "$bin" version | grep -Eq '^features:( [a-z-]+)* passkeys( |$)'; then
             echo "::error::$bin was built without passkey sign-in (the passkeys feature)"
             exit 1
           fi
           mkdir -p dist
-          cp "$bin" "dist/${{ matrix.asset }}"
-          tar -czf "dist/${{ matrix.asset }}.tar.gz" -C dist "${{ matrix.asset }}"
-          rm "dist/${{ matrix.asset }}"
+          for name in recall-server recall-worker; do
+            bin="target/${{ matrix.target }}/release/$name"
+            asset="${name}_linux_${{ matrix.arch }}"
+            file "$bin"
+            if readelf -lW "$bin" | grep -q 'INTERP' || readelf -dW "$bin" | grep -q '(NEEDED)'; then
+              echo "::error::$bin is dynamically linked; the image needs a static one"
+              exit 1
+            fi
+            "$bin" version
+            cp "$bin" "dist/$asset"
+            tar -czf "dist/$asset.tar.gz" -C dist "$asset"
+            rm "dist/$asset"
+          done
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset }}
+          name: recall-server-and-worker_linux_${{ matrix.arch }}
           path: dist/*.tar.gz
 
   publish:
@@ -331,7 +342,8 @@ jobs:
           v="${TAG#v}"
           # Bottom-up: each crate must be on the index before anything that
           # depends on it can be packaged. Same order as scripts/release.sh.
-          crates=(recall-wire recall-hooks recall-server recall)
+          # recall-worker before recall-server, which uses its merge code.
+          crates=(recall-wire recall-hooks recall-worker recall-server recall)
           for i in "${!crates[@]}"; do
             n="${crates[$i]}"
             if curl -sf "https://index.crates.io/${n:0:2}/${n:2:2}/$n" | grep -q "\"vers\":\"$v\""; then

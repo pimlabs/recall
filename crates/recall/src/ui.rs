@@ -129,7 +129,7 @@ pub fn field_line(line: &str) {
 /// How bad a status value sounds. Status writes its problems in capitals
 /// precisely so they stand out in plain text; this only makes them louder.
 fn value_tone(value: &str) -> Option<Tone> {
-    if value.contains("UNREACHABLE") || value.contains("UNREADABLE") {
+    if value.contains("UNREACHABLE") || value.contains("UNREADABLE") || value.contains("REFUSED") {
         Some(Tone::Bad)
     } else if value.starts_with("NO")
         || value.contains("NOT ")

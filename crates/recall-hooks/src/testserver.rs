@@ -48,6 +48,11 @@ struct Inner {
     /// the one place the fake enforces auth, because `recall connect` has
     /// to be able to tell a server that is up from a token that is right.
     required_token: Option<String>,
+    /// Every request that arrived, on any path, answered or not.
+    requests: usize,
+    /// When set, every request is answered with this redirect: a status
+    /// and a `Location`.
+    redirect: Option<(u16, String)>,
 }
 
 pub struct FakeServer {
@@ -63,6 +68,7 @@ impl FakeServer {
             .route("/sync", get(pull).post(push))
             .route("/health", get(health))
             .route("/admin/stats", get(admin_stats))
+            .fallback(elsewhere)
             .with_state(inner.clone());
 
         // Port 0: the OS picks a free port, so tests can run in parallel.
@@ -123,6 +129,16 @@ impl FakeServer {
         self.inner.lock().expect("test lock").push_attempts
     }
 
+    /// How many requests arrived, on any path.
+    pub fn requests(&self) -> usize {
+        self.inner.lock().expect("test lock").requests
+    }
+
+    /// Answer every subsequent request with a redirect to `location`.
+    pub fn redirect_to(&self, code: u16, location: &str) {
+        self.inner.lock().expect("test lock").redirect = Some((code, location.to_string()));
+    }
+
     /// Make every subsequent `POST /sync` fail, leaving `GET /sync` working.
     pub fn fail_pushes_with(&self, code: u16, body: &str) {
         self.inner.lock().expect("test lock").fail_pushes_with = Some((code, body.to_string()));
@@ -162,6 +178,7 @@ impl FakeServer {
 /// the credentials that arrived.
 fn intercept(state: &Shared, headers: &HeaderMap) -> Option<Response> {
     let mut inner = state.lock().expect("test lock");
+    inner.requests += 1;
     inner.last_authorization = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -174,6 +191,15 @@ fn intercept(state: &Shared, headers: &HeaderMap) -> Option<Response> {
         .get(recall_wire::PROTOCOL_HEADER)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
+    if let Some((code, location)) = inner.redirect.clone() {
+        return Some(
+            (
+                StatusCode::from_u16(code).expect("a valid test status"),
+                [(axum::http::header::LOCATION, location)],
+            )
+                .into_response(),
+        );
+    }
     inner.fail_with.clone().map(|(code, body)| {
         (
             StatusCode::from_u16(code).expect("a valid test status"),
@@ -251,6 +277,7 @@ async fn push(
         deleted: req.deleted,
         merged: false,
         updated_at: "2026-01-01T00:00:00.000Z".into(),
+        merge_job: None,
     };
     state.lock().expect("test lock").pushes.push(req);
     Json(response).into_response()
@@ -278,4 +305,12 @@ async fn health(State(state): State<Shared>, headers: HeaderMap) -> Response {
         ..Default::default()
     })
     .into_response()
+}
+
+/// Any other path: counted, and answered as configured, or with a 404.
+async fn elsewhere(State(state): State<Shared>, headers: HeaderMap) -> Response {
+    if let Some(failure) = intercept(&state, &headers) {
+        return failure;
+    }
+    (StatusCode::NOT_FOUND, r#"{"error":"not found"}"#).into_response()
 }

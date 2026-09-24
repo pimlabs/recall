@@ -44,6 +44,9 @@ recall            the binary: one module per command
    ▼              ▼
 recall-hooks   recall-server      the two halves
    │              │
+   │              ▼
+   │          recall-worker       the merge, and (its own binary) the
+   │              │               worker that runs it beside the server
    └──────┬───────┘
           ▼
      recall-wire
@@ -52,8 +55,9 @@ recall-hooks   recall-server      the two halves
 
 A crate here is a boundary that the compiler enforces, not a folder. The
 arrow that matters is the one that is *absent*: `recall-server` lists
-`recall-wire` and nothing else, so the half that faces the internet cannot
-reach the half that reads `~/.claude` — writing `use recall_hooks::…` inside
+`recall-wire`, and `recall-worker` built without its `client` feature for
+the merge code alone, so the half that faces the internet cannot reach the
+half that reads `~/.claude` — writing `use recall_hooks::…` inside
 `recall-server` is `error[E0433]`, not a review comment.
 
 That is also why there is no fifth crate. `recall-paths` used to sit beside
@@ -68,7 +72,8 @@ before the name could acquire dependents.
 |---|---|---|
 | `recall-wire` | Request/response shapes and the validation both sides apply | These rules were once written twice — JavaScript and bash — and drifted. One definition is the whole point. |
 | `recall-hooks` | `push`, `pull`, `backfill`, the baseline, the HTTP client, the settings merge — and the derivations they run on: Claude Code's memory paths, `project_key`, scopes, client config | The whole client half. The derivations track *someone else's* implementation, so when the CLI changes there is one place to fix; they live here rather than in their own crate because nothing outside this crate and the binary ever reads them. |
-| `recall-server` | SQLite store, `claude -p` merge, the axum API, and the `admin` subcommands the API cannot reach | Everything that runs on the host. Never depends on `recall-hooks`. |
+| `recall-worker` | The `claude -p` merge, and the `recall-worker` binary: an enrolled device with no port that takes merge jobs from the server's queue | Moves the `claude` login out of the process the internet reaches. The server uses its merge code, without the HTTP client, while no worker is enrolled. |
+| `recall-server` | SQLite store, the merge queue, the axum API, and the `admin` subcommands the API cannot reach | Everything that runs on the host. Never depends on `recall-hooks`. |
 | `recall` | Argument parsing and one module per command — `serve` among them, so this is where the server process starts too | Thin. Each command's *failure policy* is documented beside the command it governs. Shipped as `recall-sync` through v0.1.0, because `recall-cli` and `recall` were both taken on crates.io when that preflight ran. |
 
 The generated API docs (`cargo doc --workspace --open`) are the reference;
