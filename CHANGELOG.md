@@ -31,14 +31,20 @@ break will be described here in full rather than smoothed over.
   object.
 - **Checkpoints waiting to be checked are kept, all of them**, up to
   4096; past that the ones dropped are counted and `doctor` fails until a
-  reset. Each is written down as proven the moment its proof verifies, so
-  a check the server's rate limit or a deadline cuts short carries on
+  reset. A check proves the newest checkpoint already proven first and
+  keeps nothing until that proof holds, so a server showing one history
+  to one check and another to the next cannot get both marked proven;
+  after it, each is written down as proven the moment its proof verifies,
+  so a check the server's rate limit or a deadline cuts short carries on
   next time. The pull says so once more than 16 wait. `doctor` also fails
   when `audit.json` cannot be read, when the server answers with anything
-  but a proof, and once checks have gone unanswered for a week or ten in a
-  row; a check the server did not answer this once only warns. `status`
-  and `doctor` stop waiting on a slow server after 90 seconds in all, 20
-  of them for the audit check.
+  but a proof, and, while anything is saved, once no check has finished
+  in a week, the oldest waiting is a week old, or ten checks in a row
+  went unanswered; a check the server did not answer this once only
+  warns, and so does one it refused this machine's credential for (401,
+  403), with what to do about the credential. `status` and `doctor` stop
+  waiting on a slow server after 90 seconds, and give the audit check 20
+  more of its own, so a slow server cannot keep it from being asked.
 - **`recall audit`**, with three commands. `export` writes the server's
   whole log (admin device or `RECALL_TOKEN`) in the format
   `scripts/audit-verify.py` reads, and checks the saved checkpoints
@@ -46,7 +52,9 @@ break will be described here in full rather than smoothed over.
   checks, in Rust, against every checkpoint saved here; with no file it
   asks the server for the proofs, as `doctor` does. `reset` forgets what
   was saved for the server. Exit codes are the script's: 0, 1 when
-  something does not check out, 2 when it could not be checked.
+  something does not check out (a server that no longer keeps a log this
+  machine saw it keep included, for `export` too), 2 when it could not be
+  checked (`reset` included, when `audit.json` cannot be read).
 
 ## 0.4.2 — 2026-09-24
 

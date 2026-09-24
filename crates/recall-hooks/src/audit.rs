@@ -23,7 +23,9 @@
 //! { "version": 1, "servers": { "https://recall.example.com": {
 //!     "checkpoints": ["recall.example.com\n1042\nCsUY…=\n"],
 //!     "unchecked":   ["recall.example.com\n1050\nt8Qm…=\n"],
-//!     "unchecked_since": "2026-10-02T09:14:05.402Z" } } }
+//!     "unchecked_at": { "1050": "2026-10-02T09:14:05.402Z" },
+//!     "unchecked_since": "2026-10-02T09:14:05.402Z",
+//!     "last_proven_at": "2026-10-01T18:40:11.090Z" } } }
 //! ```
 //!
 //! `checkpoints` are the ones a proof has shown the log extends, the newest
@@ -38,12 +40,24 @@
 //! machine that never runs a check, and past that the ones dropped are
 //! counted in `dropped`, which `recall doctor` fails on until
 //! `recall audit reset`: a gap in the witnessing is said out loud, never
-//! left to look like a clean record. `unchecked_since` is when the oldest
-//! still unchecked was saved, and `unanswered` how many checks in a row the
-//! server did not answer; `recall doctor` fails once the first is
-//! [`STALE_DAYS`] old or the second reaches [`UNANSWERED_LIMIT`], so a
-//! server that keeps not answering cannot keep a check pending for ever.
-//! Fields this build does not know are kept as they are.
+//! left to look like a clean record.
+//!
+//! `unchecked_at` is when each of those was saved, and `unchecked_since`
+//! the oldest of them, which moves on as the oldest are proven.
+//! `last_proven_at` is when a check last finished, and `unanswered` how
+//! many checks in a row the server did not answer, counted only while
+//! something is saved to be checked. While anything is saved, `recall
+//! doctor` fails once either time is [`STALE_DAYS`] old or the count
+//! reaches [`UNANSWERED_LIMIT`], so a server that keeps not answering, or
+//! is too slow for the check ever to be asked, cannot keep one pending for
+//! ever.
+//!
+//! Fields this build does not know are kept as they are, in the file, in an
+//! entry and in a finding. One limit: a number in one of them beyond 64
+//! bits comes back as the nearest `f64`, since `serde_json` reads it so
+//! without its `arbitrary_precision` feature, and that feature would change
+//! how every JSON number in the build is read, the offline verifier's
+//! included. No field this format has holds one.
 //!
 //! # When it is checked
 //!
@@ -54,12 +68,16 @@
 //! [`Witness::check`] runs there and in `recall status`, which share one
 //! collection, and in `recall audit verify` with no file: it asks the server
 //! for its checkpoint now and for an RFC 9162 consistency proof from each
-//! saved one to it, smallest first, and verifies each with
-//! [`recall_wire::audit::merkle::verify_consistency`]. Each is written down
-//! as checked the moment its proof verifies, so a check cut short by the
-//! server's rate limit, a deadline or a lost connection keeps what it
-//! proved, and the next one carries on from there. `recall audit export`
-//! checks them too, without proofs, against the leaves it fetched.
+//! saved one to it, and verifies each with
+//! [`recall_wire::audit::merkle::verify_consistency`]. The newest checked
+//! one goes first and nothing is written down until it verifies, since a
+//! server showing two forks shows each check one of them (see
+//! [`Witness::check`]); after it the unchecked ones go smallest first, and
+//! each is written down as checked the moment its proof verifies, so a
+//! check cut short by the server's rate limit, a deadline or a lost
+//! connection keeps what it proved, and the next one carries on from there.
+//! `recall audit export` checks them too, without proofs, against the
+//! leaves it fetched.
 //!
 //! What waiting costs is time: a rewrite is found at the next of those,
 //! not at the pull after it. While more than [`NUDGE_AFTER`] wait, every
@@ -118,8 +136,9 @@ const KEEP_UNCHECKED: usize = 4096;
 /// How many may wait to be checked before every pull says so.
 pub const NUDGE_AFTER: usize = 16;
 
-/// How old, in days, the oldest unchecked checkpoint may grow before
-/// `recall doctor` fails on it rather than warn.
+/// How old, in days, the oldest unchecked checkpoint may grow, and the last
+/// check that finished, before `recall doctor` fails on it rather than
+/// warn.
 pub const STALE_DAYS: i64 = 7;
 
 /// How many checks in a row the server may leave unanswered (rate limited,
@@ -261,14 +280,22 @@ struct Entry {
     checkpoints: Vec<String>,
     #[serde(default)]
     unchecked: Vec<String>,
+    /// When each unchecked checkpoint was saved, by its size: sizes are
+    /// unique among them, since a second root for one is a finding.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    unchecked_at: BTreeMap<u64, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     unchecked_since: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_proven_at: Option<String>,
     #[serde(default, skip_serializing_if = "is_zero")]
     dropped: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     unanswered: u64,
+    /// Kept as it was read, so that what a newer build wrote into a
+    /// finding survives this one's writes like any other field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    inconsistent: Option<Inconsistency>,
+    inconsistent: Option<Value>,
     #[serde(flatten)]
     other: BTreeMap<String, Value>,
 }
@@ -285,15 +312,26 @@ pub struct Saved {
     /// Checkpoints seen and not yet proven, smallest first.
     pub unchecked: Vec<Checkpoint>,
     /// When the oldest of [`Saved::unchecked`] was saved, in the API's
-    /// timestamp format; [`None`] while none waits.
+    /// timestamp format; [`None`] while none waits. It moves on as the
+    /// oldest are proven.
     pub unchecked_since: Option<String>,
+    /// When a check last finished, proving the log extends every
+    /// checkpoint saved then; before the first, when the first checkpoint
+    /// was proven. [`None`] while none has been.
+    pub last_proven_at: Option<String>,
     /// How many unchecked checkpoints were dropped to keep within the
     /// bound, since the last reset: a gap in the witnessing.
     pub dropped: u64,
-    /// How many checks in a row the server left unanswered.
+    /// How many checks in a row the server left unanswered, counted only
+    /// while something is saved to be checked.
     pub unanswered: u64,
     /// What checking found, once it found the log does not extend one.
     pub inconsistent: Option<Inconsistency>,
+    /// When each of [`Saved::unchecked`] was saved, by size.
+    unchecked_at: BTreeMap<u64, String>,
+    /// [`Saved::inconsistent`] as it was read, fields this build does not
+    /// know included.
+    inconsistent_as_read: Option<Value>,
     other: BTreeMap<String, Value>,
 }
 
@@ -303,12 +341,13 @@ impl Saved {
         self.checkpoints.last().copied()
     }
 
-    /// Whether nothing is held at all.
+    /// Whether nothing is held at all: nothing a reset would forget.
     pub fn is_empty(&self) -> bool {
         self.checkpoints.is_empty()
             && self.unchecked.is_empty()
             && self.inconsistent.is_none()
             && self.dropped == 0
+            && self.unanswered == 0
     }
 
     /// Every checkpoint held, checked or not, smallest first: what an
@@ -325,17 +364,21 @@ impl Saved {
         all
     }
 
-    /// What a check has to prove, smallest first: the newest checked
-    /// checkpoint, which stands for every older one, and each unchecked one.
+    /// What a check has to prove, in the order it proves them: the newest
+    /// checked checkpoint first, which stands for every older one, then
+    /// each unchecked one, smallest first. See [`Witness::check`] for why
+    /// that one goes first.
     fn to_prove(&self) -> Vec<Checkpoint> {
-        let mut out: Vec<Checkpoint> = self
-            .newest()
+        let anchor = self.newest();
+        anchor
             .into_iter()
-            .chain(self.unchecked.clone())
-            .collect();
-        out.sort();
-        out.dedup();
-        out
+            .chain(
+                self.unchecked
+                    .iter()
+                    .copied()
+                    .filter(|c| Some(*c) != anchor),
+            )
+            .collect()
     }
 
     fn read(entry: &Entry, origin: &str, path: &Path) -> Result<Self, Error> {
@@ -353,13 +396,25 @@ impl Saved {
             out.dedup();
             Ok(out)
         };
+        let inconsistent = match &entry.inconsistent {
+            Some(raw) => Some(
+                serde_json::from_value::<Inconsistency>(raw.clone()).map_err(|e| Error::Parse {
+                    path: path.display().to_string(),
+                    reason: format!("its finding for {origin} is not one: {e}"),
+                })?,
+            ),
+            None => None,
+        };
         Ok(Self {
             checkpoints: parse(&entry.checkpoints)?,
             unchecked: parse(&entry.unchecked)?,
             unchecked_since: entry.unchecked_since.clone(),
+            last_proven_at: entry.last_proven_at.clone(),
             dropped: entry.dropped,
             unanswered: entry.unanswered,
-            inconsistent: entry.inconsistent.clone(),
+            inconsistent,
+            unchecked_at: entry.unchecked_at.clone(),
+            inconsistent_as_read: entry.inconsistent.clone(),
             other: entry.other.clone(),
         })
     }
@@ -385,18 +440,66 @@ impl Saved {
             unchecked.drain(1..1 + over);
             dropped += over as u64;
         }
-        let unchecked_since = match unchecked.is_empty() {
-            true => None,
-            false => self.unchecked_since.clone().or_else(|| Some(now())),
+        // Each still waiting keeps when it was saved. One without a time
+        // was saved by a build that kept none, and gets the oldest time
+        // known: never younger than it is.
+        let unchecked_at: BTreeMap<u64, String> = unchecked
+            .iter()
+            .map(|c| {
+                let at = self
+                    .unchecked_at
+                    .get(&c.size)
+                    .or(self.unchecked_since.as_ref())
+                    .cloned()
+                    .unwrap_or_else(now);
+                (c.size, at)
+            })
+            .collect();
+        // The oldest of those, so that proving the oldest moves it on: one
+        // saved a week ago and proven since no longer counts as waiting.
+        let unchecked_since = unchecked_at.values().min().cloned();
+        // Checked checkpoints with no time yet (a file from before it was
+        // kept, or the first proven by a check still running) start the
+        // clock now: see `recall doctor`, which fails once it is a week
+        // old.
+        let last_proven_at = match checkpoints.is_empty() {
+            true => self.last_proven_at.clone(),
+            false => self.last_proven_at.clone().or_else(|| Some(now())),
         };
         Entry {
             checkpoints: checkpoints.iter().map(|c| c.note(origin)).collect(),
             unchecked: unchecked.iter().map(|c| c.note(origin)).collect(),
+            unchecked_at,
             unchecked_since,
+            last_proven_at,
             dropped,
             unanswered: self.unanswered,
-            inconsistent: self.inconsistent.clone(),
+            inconsistent: self
+                .inconsistent
+                .as_ref()
+                .map(|found| self.finding_as_stored(found)),
             other: self.other.clone(),
+        }
+    }
+
+    /// A finding as it is stored: as it was read while it is the same
+    /// finding, so that fields this build does not know are kept.
+    fn finding_as_stored(&self, found: &Inconsistency) -> Value {
+        match &self.inconsistent_as_read {
+            Some(raw)
+                if serde_json::from_value::<Inconsistency>(raw.clone())
+                    .ok()
+                    .as_ref()
+                    == Some(found) =>
+            {
+                raw.clone()
+            }
+            _ => serde_json::json!({
+                "found_at": found.found_at,
+                "saved": found.saved,
+                "seen": found.seen,
+                "detail": found.detail,
+            }),
         }
     }
 }
@@ -440,17 +543,28 @@ pub enum CheckError {
     /// then is kept.
     #[error("the server did not answer within {} seconds", .0.as_secs())]
     Deadline(Duration),
+    /// Another check moved the newest checked checkpoint on while this one
+    /// ran, having proven it against the log it was shown: what this one
+    /// proved against its own does not follow from that, so it was not
+    /// written down. Nothing about the log follows from this either.
+    #[error("another check of the audit log finished while this one ran; run it again")]
+    Moved,
 }
 
 impl CheckError {
     /// Whether the server did not answer at all: it could not be reached,
     /// asked to wait, or took longer than the deadline; or the request was
-    /// never sent. Nothing about its log follows from any of those, which is
-    /// why they warn rather than fail, until [`UNANSWERED_LIMIT`] of them in
-    /// a row. Anything else the server sent in place of a proof (another
-    /// status, a body that is not one, a redirect) is an answer, and not a
-    /// proof: `recall doctor` fails on it.
+    /// never sent; or it refused this machine's credential
+    /// ([`CheckError::refused`]). Nothing about its log follows from any
+    /// of those, which is why they warn rather than fail, until
+    /// [`UNANSWERED_LIMIT`] of them in a row. Anything else the server sent
+    /// in place of a proof (another status, a body that is not one, a
+    /// redirect) is an answer, and not a proof: `recall doctor` fails on
+    /// it.
     pub fn unanswered(&self) -> bool {
+        if self.refused() {
+            return true;
+        }
         match self {
             CheckError::Server(client::Error::Status { code, .. }) => *code == 429,
             CheckError::Server(
@@ -462,6 +576,21 @@ impl CheckError {
             CheckError::Deadline(_) => true,
             _ => false,
         }
+    }
+
+    /// Whether the server refused this machine's credential (401 or 403): a
+    /// device revoked or swept, or one the audit routes are not open to.
+    /// That says something about the credential and nothing about the log,
+    /// so it counts as unanswered, and is reported with what to do about
+    /// the credential rather than as a server that would not prove.
+    pub fn refused(&self) -> bool {
+        matches!(
+            self,
+            CheckError::Server(client::Error::Status {
+                code: 401 | 403,
+                ..
+            })
+        )
     }
 
     /// Whether the server keeps no audit log at all: one older than 0.4.2,
@@ -566,6 +695,7 @@ impl Witness {
                 }
                 None => {
                     saved.unchecked.push(seen);
+                    saved.unchecked_at.insert(seen.size, now());
                     true
                 }
             }
@@ -575,19 +705,34 @@ impl Witness {
 
     /// Asks the server whether its log still extends every checkpoint saved
     /// here: its checkpoint now, and a consistency proof from each saved one
-    /// that needs one, smallest first. Each saved checkpoint moves to the
-    /// checked ones as soon as its proof verifies, and the server's
-    /// checkpoint now becomes the newest once all have; on an
-    /// inconsistency, that is written down and nothing else changes. A
-    /// request the server's rate limit refuses is asked again after a
-    /// pause, and the whole check stops at `deadline`, keeping what it
-    /// proved.
+    /// that needs one. On an inconsistency, that is written down and nothing
+    /// else changes. A request the server's rate limit refuses is asked
+    /// again after a pause, and the whole check stops at `deadline`,
+    /// keeping what it proved.
+    ///
+    /// The newest checked checkpoint is proven first, and nothing is
+    /// written down until it is. It stands for every older one, but only
+    /// for the log it was proven against: a server showing this machine
+    /// two forks shows each check one of them, and a checkpoint proven
+    /// against this check's fork says nothing about the fork the newest
+    /// checked one came from. Marked checked before that one is proven
+    /// against the same log, it would join the two histories into one
+    /// record that every later check passes. Once it is, each unchecked
+    /// checkpoint, smallest first, moves to the checked ones as soon as its
+    /// proof verifies, so a check cut short keeps what it proved; and the
+    /// server's checkpoint now becomes the newest once all have.
+    ///
+    /// Each of those writes happens only while the newest checked
+    /// checkpoint in the file is still one this check proved: another check
+    /// finishing meanwhile proved its own against the log it was shown, and
+    /// then nothing is written and the answer is [`CheckError::Moved`].
     ///
     /// With nothing saved yet, the server's checkpoint now is saved as the
     /// first, taken on trust: every log has to be first seen some time.
     ///
-    /// How many checks in a row went unanswered is kept, and reset by any
-    /// answer: see [`UNANSWERED_LIMIT`].
+    /// How many checks in a row went unanswered is kept while anything is
+    /// saved to be checked, and reset by any answer: see
+    /// [`UNANSWERED_LIMIT`].
     pub async fn check(
         &self,
         client: &Client,
@@ -599,7 +744,7 @@ impl Witness {
         };
         let unanswered = match &outcome {
             Err(e) if e.unanswered() => Some(true),
-            Err(CheckError::File(_)) => None,
+            Err(CheckError::File(_) | CheckError::Moved) => None,
             _ => Some(false),
         };
         if let Some(unanswered) = unanswered {
@@ -607,7 +752,12 @@ impl Witness {
             // count could be written.
             let _ = self.update(self.wait, |held| {
                 let before = held.unanswered;
-                held.unanswered = if unanswered { before + 1 } else { 0 };
+                // A check with nothing to check left nothing pending.
+                let pending = !held.all().is_empty();
+                held.unanswered = match unanswered && pending {
+                    true => before + 1,
+                    false => 0,
+                };
                 held.unanswered != before
             });
         }
@@ -629,7 +779,10 @@ impl Witness {
                 answer.to_header_value()
             ))
         })?;
-        let mut proved = 0;
+        let anchor = saved.newest();
+        // Every checkpoint shown to be a prefix of `current`, which is one
+        // of itself: any two of them are prefixes of one log.
+        let mut proven = vec![current];
         for held in saved.to_prove() {
             let holds = match compare(held, current) {
                 Compared::Holds => Ok(()),
@@ -640,24 +793,35 @@ impl Witness {
                     prove(held, current, &proof)?
                 }
             };
-            match holds {
-                Ok(()) => {
-                    // Kept now, not at the end: a check cut short keeps it.
-                    self.commit(&[held], None)?;
-                    proved += 1;
-                }
-                Err(detail) => return Ok(self.found(held, current, detail)),
+            if let Err(detail) = holds {
+                return Ok(self.found(held, current, detail));
+            }
+            proven.push(held);
+            // Kept now, not at the end, so a check cut short keeps it; the
+            // anchor itself is checked already.
+            if Some(held) != anchor && !self.commit(&proven, &[held], None)? {
+                return self.not_committed();
             }
         }
-        self.commit(&[], Some(current))?;
-        // Another process may have found something meanwhile; it stands.
-        if let Some(finding) = self.load()?.inconsistent {
-            return Ok(Witnessed::Inconsistent {
+        if !self.commit(&proven, &[], Some(current))? {
+            return self.not_committed();
+        }
+        Ok(Witnessed::Extends {
+            current,
+            proved: proven.len() - 1,
+        })
+    }
+
+    /// Why a commit wrote nothing: a finding written meanwhile, which
+    /// stands, or another check moving the newest checked checkpoint on.
+    fn not_committed(&self) -> Result<Witnessed, CheckError> {
+        match self.load()?.inconsistent {
+            Some(finding) => Ok(Witnessed::Inconsistent {
                 finding,
                 unsaved: None,
-            });
+            }),
+            None => Err(CheckError::Moved),
         }
-        Ok(Witnessed::Extends { current, proved })
     }
 
     /// [`Witness::check`] for `recall audit export`, which holds every leaf
@@ -672,28 +836,45 @@ impl Witness {
                 unsaved: None,
             });
         }
-        let mut proved = Vec::new();
-        for held in saved.all() {
-            if held.size > tree.size() {
-                return Ok(self.found(held, current, shorter(held, current)));
-            }
-            if tree.root_at(held.size) != held.root {
-                let detail = format!(
-                    "the root over the log's first {} leaves is {}, not the {} saved here: \
-                     history before it was rewritten",
-                    held.size,
-                    STANDARD.encode(tree.root_at(held.size)),
-                    STANDARD.encode(held.root)
-                );
-                return Ok(self.found(held, current, detail));
-            }
-            proved.push(held);
+        // Checked before the lock is taken, so that a finding is the answer
+        // even when the lock cannot be had.
+        if let Some((held, detail)) = off_tree(&saved, tree, current) {
+            return Ok(self.found(held, current, detail));
         }
-        self.commit(&proved, Some(current))?;
-        Ok(Witnessed::Extends {
-            current,
-            proved: proved.len(),
-        })
+        // And again under the lock, over what the file holds by then, which
+        // is what is promoted: a checkpoint another check promoted
+        // meanwhile is on this tree too, or it is a finding, never taken on
+        // trust.
+        let mut late = None;
+        let mut proved = 0;
+        self.update(self.wait, |held| {
+            if held.inconsistent.is_some() {
+                return false;
+            }
+            if let Some(off) = off_tree(held, tree, current) {
+                late = Some(off);
+                return false;
+            }
+            let all = held.all();
+            proved = all.len();
+            held.unchecked.clear();
+            held.checkpoints = all;
+            if current.size > 0 {
+                held.checkpoints.push(current);
+                held.last_proven_at = Some(now());
+            }
+            true
+        })?;
+        if let Some((held, detail)) = late {
+            return Ok(self.found(held, current, detail));
+        }
+        if let Some(finding) = self.load()?.inconsistent {
+            return Ok(Witnessed::Inconsistent {
+                finding,
+                unsaved: None,
+            });
+        }
+        Ok(Witnessed::Extends { current, proved })
     }
 
     /// Forgets everything held for this server: its checkpoints, the count
@@ -736,24 +917,46 @@ impl Witness {
         }
     }
 
-    /// `proved` are prefixes of the log the server showed: they move to the
-    /// checked ones, and `current`, when given, joins them as the newest.
-    /// Read afresh under the lock, so a checkpoint a hook saved meanwhile
-    /// stays unchecked rather than being lost, and an inconsistency found
-    /// meanwhile stays found: nothing is marked checked beside it.
-    fn commit(&self, proved: &[Checkpoint], current: Option<Checkpoint>) -> Result<(), Error> {
+    /// Moves `promote` to the checked checkpoints, and `current`, when
+    /// given, joins them as the newest, the check having finished. All of
+    /// them are among `proven`: prefixes of the one log this check was
+    /// shown, and so of each other.
+    ///
+    /// Read afresh under the lock, and written only while the newest
+    /// checked checkpoint there is one of `proven` too (or there is none),
+    /// so that every checked checkpoint stays a prefix of the newest: one
+    /// another check promoted meanwhile was proven against the log that
+    /// check was shown, which may be another fork. A checkpoint a hook
+    /// saved meanwhile stays unchecked rather than being lost, and an
+    /// inconsistency found meanwhile stays found: nothing is marked checked
+    /// beside it. Answers whether it wrote.
+    fn commit(
+        &self,
+        proven: &[Checkpoint],
+        promote: &[Checkpoint],
+        current: Option<Checkpoint>,
+    ) -> Result<bool, Error> {
+        let mut committed = false;
         self.update(self.wait, |held| {
             if held.inconsistent.is_some() {
                 return false;
             }
-            held.unchecked.retain(|c| !proved.contains(c));
-            held.checkpoints.extend_from_slice(proved);
+            if held
+                .newest()
+                .is_some_and(|newest| !proven.contains(&newest))
+            {
+                return false;
+            }
+            held.unchecked.retain(|c| !promote.contains(c));
+            held.checkpoints.extend_from_slice(promote);
             if let Some(current) = current.filter(|c| c.size > 0) {
                 held.checkpoints.push(current);
+                held.last_proven_at = Some(now());
             }
+            committed = true;
             true
-        })
-        .map(|_| ())
+        })?;
+        Ok(committed)
     }
 
     fn inconsistency(&self, saved: Checkpoint, seen: Checkpoint, detail: String) -> Inconsistency {
@@ -878,6 +1081,27 @@ fn compare(held: Checkpoint, current: Checkpoint) -> Compared {
         };
     }
     Compared::NeedsProof
+}
+
+/// The first checkpoint `saved` holds that is not a prefix of `tree`, the
+/// log at `current`, and why; [`None`] when every one is.
+fn off_tree(saved: &Saved, tree: &Tree, current: Checkpoint) -> Option<(Checkpoint, String)> {
+    saved.all().into_iter().find_map(|held| {
+        if held.size > tree.size() {
+            return Some((held, shorter(held, current)));
+        }
+        let root = tree.root_at(held.size);
+        (root != held.root).then(|| {
+            let detail = format!(
+                "the root over the log's first {} leaves is {}, not the {} saved here: history \
+                 before it was rewritten",
+                held.size,
+                STANDARD.encode(root),
+                STANDARD.encode(held.root)
+            );
+            (held, detail)
+        })
+    })
 }
 
 fn shorter(held: Checkpoint, current: Checkpoint) -> String {

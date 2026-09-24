@@ -298,10 +298,173 @@ async fn a_check_cut_short_keeps_what_it_proved() {
         "smallest first"
     );
 
+    // With a checked one now, it is proven first, and the progress after
+    // it is kept the same way: two more proofs, the anchor's and one.
+    s.server.limit_proofs_after(Some(2));
+    s.witness
+        .check(&s.client, Duration::from_millis(500))
+        .await
+        .unwrap_err();
+    let saved = s.witness.load().unwrap();
+    assert_eq!(saved.checkpoints.len(), 3, "{saved:?}");
+    assert_eq!(saved.unchecked.len(), 2);
+
     s.server.limit_proofs_after(None);
     let found = s.witness.check(&s.client, LONG).await.unwrap();
     assert!(matches!(found, Witnessed::Extends { .. }), "{found:?}");
     assert!(s.witness.load().unwrap().unchecked.is_empty());
+}
+
+/// Two forks of one log, `leaf 10` rewritten in the second.
+fn fork(rewritten: bool, leaves: usize) -> Vec<Vec<u8>> {
+    (0..leaves)
+        .map(|i| match (rewritten, i) {
+            (true, 10) => b"rewritten 10".to_vec(),
+            _ => format!("leaf {i}").into_bytes(),
+        })
+        .collect()
+}
+
+/// N1, the review's split view. Fork B's checkpoint at 50 is checked; a
+/// pull is shown fork A at 30; a check is shown fork A, proves 30 against
+/// it, and is refused the proof from 50 until its deadline; the next check
+/// is shown fork B, which extends 50. Proving 30 before 50 and writing it
+/// down at once joined the forks into one record every later check
+/// passed. The checked one goes first, and nothing is written before it
+/// verifies, so 30 is still unchecked when fork B is shown, and fails.
+/// Mutation: prove smallest first and write each proof down at once, as
+/// before.
+#[tokio::test]
+async fn a_split_view_is_not_laundered_by_a_check_cut_short() {
+    let s = setup(0).await;
+    s.server.set_audit_log(fork(true, 50));
+    s.witness.check(&s.client, LONG).await.unwrap();
+    let b50 = Checkpoint::from_wire(&s.server.audit_checkpoint()).unwrap();
+    assert_eq!(s.witness.load().unwrap().checkpoints, vec![b50]);
+
+    s.server.set_audit_log(fork(false, 30));
+    let a30 = Checkpoint::from_wire(&s.server.audit_checkpoint()).unwrap();
+    s.witness.record(&a30.header()).unwrap();
+
+    s.server.set_audit_log(fork(false, 60));
+    s.server.refuse_proofs_from(Some(50));
+    let err = s
+        .witness
+        .check(&s.client, Duration::from_millis(500))
+        .await
+        .unwrap_err();
+    assert!(err.unanswered(), "{err:?}");
+    assert_eq!(
+        s.witness.load().unwrap().unchecked,
+        vec![a30],
+        "nothing written before the checked one was proven"
+    );
+
+    s.server.set_audit_log(fork(true, 60));
+    s.server.refuse_proofs_from(None);
+    let found = s.witness.check(&s.client, LONG).await.unwrap();
+    assert_eq!(finding_of(&found).saved, a30.note(s.witness.origin()));
+    let saved = s.witness.load().unwrap();
+    assert_eq!(saved.checkpoints, vec![b50], "fork A never checked");
+}
+
+/// N1 under the lock: a check writes only while the newest checked
+/// checkpoint is one it proved. Another check that moved it on meanwhile
+/// proved that one against the log it was shown, maybe another fork, and
+/// what this one proved does not follow from it: it stays unchecked, for
+/// the next check. The same closes two checks racing. Mutation: promote
+/// whatever the file holds by then.
+#[tokio::test]
+async fn nothing_is_promoted_past_a_checkpoint_this_check_did_not_prove() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = Witness::new(dir.path().join(AUDIT_FILE), "https://r.example");
+    w.record(&cp(3, 3).header()).unwrap();
+    // Another check promotes 5, proven against the log it was shown.
+    assert!(w.commit(&[cp(5, 5)], &[cp(5, 5)], None).unwrap());
+    // This one proved 3 against its own log at 9, and not 5.
+    assert!(!w.commit(&[cp(9, 9), cp(3, 3)], &[cp(3, 3)], None).unwrap());
+    assert!(!w
+        .commit(&[cp(9, 9), cp(3, 3)], &[], Some(cp(9, 9)))
+        .unwrap());
+    let saved = w.load().unwrap();
+    assert_eq!(saved.checkpoints, vec![cp(5, 5)]);
+    assert_eq!(saved.unchecked, vec![cp(3, 3)]);
+    // One that proved 5 as well writes what it proved.
+    let proven = [cp(9, 9), cp(5, 5), cp(3, 3)];
+    assert!(w.commit(&proven, &[cp(3, 3)], Some(cp(9, 9))).unwrap());
+    assert_eq!(
+        w.load().unwrap().checkpoints,
+        vec![cp(3, 3), cp(5, 5), cp(9, 9)]
+    );
+
+    // And a whole check that lost the race says so, writing nothing:
+    // run against a real log, with another check's promotion slipped in
+    // between its load and its first write.
+    let s = setup(4).await;
+    s.client.pull("acme/app").await.unwrap();
+    s.server.grow_audit_log(2);
+    s.witness.check(&s.client, LONG).await.unwrap();
+    s.client.pull("acme/app").await.unwrap();
+    s.server.grow_audit_log(2);
+    s.server.limit_proofs_after(Some(0));
+    let check = s.witness.check(&s.client, LONG);
+    let meanwhile = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let newest = s.witness.load().unwrap().newest().unwrap();
+        let other = cp(9, 1);
+        assert!(s.witness.commit(&[newest, other], &[other], None).unwrap());
+        s.server.limit_proofs_after(None);
+    };
+    let (found, ()) = tokio::join!(check, meanwhile);
+    assert!(matches!(found, Err(CheckError::Moved)), "{found:?}");
+    let saved = s.witness.load().unwrap();
+    assert_eq!(saved.unchecked.len(), 1, "left for the next check");
+    assert_eq!(saved.unanswered, 0, "and not counted as unanswered");
+}
+
+/// A check that finishes says when; one cut short does not, and `recall
+/// doctor` fails once that is a week old, however the checks were cut
+/// short. Mutation: never write it.
+#[tokio::test]
+async fn when_a_check_last_finished_is_kept() {
+    let s = setup(3).await;
+    s.client.pull("acme/app").await.unwrap();
+    s.server.grow_audit_log(2);
+    assert_eq!(s.witness.load().unwrap().last_proven_at, None);
+    s.witness.check(&s.client, LONG).await.unwrap();
+    let first = s.witness.load().unwrap().last_proven_at.expect("kept");
+    std::thread::sleep(Duration::from_millis(5));
+    s.client.pull("acme/app").await.unwrap();
+    s.witness.check(&s.client, LONG).await.unwrap();
+    let second = s.witness.load().unwrap().last_proven_at.unwrap();
+    assert!(second > first, "{second} after {first}");
+    std::thread::sleep(Duration::from_millis(5));
+
+    s.client.pull("acme/app").await.unwrap();
+    s.server.hang_proofs();
+    s.witness
+        .check(&s.client, Duration::from_millis(200))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        s.witness.load().unwrap().last_proven_at,
+        Some(second.clone()),
+        "not moved on by a check cut short"
+    );
+
+    // An export finishes one as well.
+    let leaves: Vec<Vec<u8>> = (0..3)
+        .map(|i| format!("leaf {i}").into_bytes())
+        .chain(["pull 3".into(), "leaf 4".into(), "leaf 5".into()])
+        .chain(["pull 6".into(), "pull 7".into()])
+        .collect();
+    let tree = Tree::rebuild(leaves.iter().map(|l| merkle::hash_leaf(l)));
+    let current = Checkpoint::from_wire(&s.server.audit_checkpoint()).unwrap();
+    assert_eq!((tree.size(), tree.root()), (current.size, current.root));
+    let found = s.witness.witness_export(&tree, current).unwrap();
+    assert!(matches!(found, Witnessed::Extends { .. }), "{found:?}");
+    let last = s.witness.load().unwrap().last_proven_at.unwrap();
+    assert!(last > second, "{last} after {second}");
 }
 
 /// A request the rate limit refuses is asked again, and one that frees up
@@ -445,7 +608,8 @@ fn nothing_is_marked_checked_beside_a_finding_written_meanwhile() {
     w.record(&cp(3, 4).header()).unwrap();
     let before = w.load().unwrap();
     assert!(before.inconsistent.is_some());
-    w.commit(&[cp(3, 3)], Some(cp(9, 9))).unwrap();
+    let proven = [cp(9, 9), cp(3, 3)];
+    assert!(!w.commit(&proven, &[cp(3, 3)], Some(cp(9, 9))).unwrap());
     let after = w.load().unwrap();
     assert_eq!(after, before, "nothing changed beside the finding");
 }
@@ -479,23 +643,105 @@ fn the_same_checkpoint_twice_is_one() {
 }
 
 /// When the oldest waiting checkpoint was saved is kept while any waits,
-/// through partial progress, and only cleared once none does.
+/// moves on to the next oldest as the oldest are proven, and is cleared
+/// once none waits: one saved long ago and proven since no longer counts
+/// against the log. Mutation: keep the first time through partial progress,
+/// as before.
 #[test]
-fn how_long_they_have_waited_is_kept() {
+fn how_long_they_have_waited_moves_on_as_they_are_proven() {
     let dir = tempfile::tempdir().unwrap();
     let w = Witness::new(dir.path().join(AUDIT_FILE), "https://r.example");
     w.record(&cp(3, 3).header()).unwrap();
-    let since = w.load().unwrap().unchecked_since.unwrap();
+    let first = w.load().unwrap().unchecked_since.unwrap();
     std::thread::sleep(Duration::from_millis(5));
     w.record(&cp(4, 4).header()).unwrap();
-    w.commit(&[cp(3, 3)], None).unwrap();
-    assert_eq!(
-        w.load().unwrap().unchecked_since,
-        Some(since),
-        "still waiting"
-    );
-    w.commit(&[cp(4, 4)], None).unwrap();
+    assert_eq!(w.load().unwrap().unchecked_since, Some(first.clone()));
+    std::thread::sleep(Duration::from_millis(5));
+    w.record(&cp(5, 5).header()).unwrap();
+
+    assert!(w.commit(&[cp(3, 3)], &[cp(3, 3)], None).unwrap());
+    let next = w.load().unwrap().unchecked_since.unwrap();
+    assert!(next > first, "{next} after {first}");
+    // Proven by the same check, against the same log.
+    let proven = [cp(3, 3), cp(4, 4), cp(5, 5)];
+    assert!(w.commit(&proven, &[cp(4, 4)], None).unwrap());
+    let last = w.load().unwrap().unchecked_since.unwrap();
+    assert!(last > next, "{last} after {next}");
+    assert!(w.commit(&proven, &[cp(5, 5)], None).unwrap());
     assert_eq!(w.load().unwrap().unchecked_since, None);
+}
+
+/// A file from before each checkpoint's time was kept gives each waiting
+/// one the time it has for the oldest: never younger than it is.
+#[test]
+fn a_waiting_checkpoint_without_a_time_is_as_old_as_the_oldest() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join(AUDIT_FILE);
+    let url = "https://r.example";
+    let o = origin(url);
+    let long_ago = "2020-01-01T00:00:00.000Z";
+    std::fs::write(
+        &file,
+        serde_json::json!({
+            "version": 1,
+            "servers": { url: {
+                "unchecked": [cp(3, 3).note(&o), cp(4, 4).note(&o)],
+                "unchecked_since": long_ago,
+            } },
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let w = Witness::new(&file, url);
+    assert!(w.commit(&[cp(3, 3)], &[cp(3, 3)], None).unwrap());
+    assert_eq!(w.load().unwrap().unchecked_since.as_deref(), Some(long_ago));
+}
+
+/// Unanswered checks are counted only while something is saved to be
+/// checked: a server never witnessed, down, is not a pending check. And a
+/// count is something a reset forgets. Mutation: count with nothing saved,
+/// or leave the count out of what is held.
+#[tokio::test]
+async fn unanswered_checks_count_only_while_something_is_saved() {
+    let s = setup(3).await;
+    s.server.fail_with(429, r#"{"error":"too many requests"}"#);
+    s.witness
+        .check(&s.client, Duration::from_millis(50))
+        .await
+        .unwrap_err();
+    let saved = s.witness.load().unwrap();
+    assert_eq!(saved.unanswered, 0);
+    assert!(saved.is_empty());
+
+    // A count left in the file with nothing else is still held, and reset
+    // forgets it.
+    let url = home::normalize_url(&s.server.url);
+    std::fs::write(
+        s.witness.file(),
+        serde_json::json!({ "version": 1, "servers": { url: { "unanswered": 4 } } }).to_string(),
+    )
+    .unwrap();
+    assert!(!s.witness.load().unwrap().is_empty());
+    s.witness.reset().unwrap();
+    assert_eq!(s.witness.load().unwrap().unanswered, 0);
+}
+
+/// A credential the server refuses (401, 403) says nothing about its log:
+/// unanswered, so counted toward the limit, and reported as a credential
+/// problem. Mutation: count it as an answer.
+#[tokio::test]
+async fn a_refused_credential_is_unanswered() {
+    let s = setup(3).await;
+    s.client.pull("acme/app").await.unwrap();
+    for code in [401, 403] {
+        s.server.fail_with(code, r#"{"error":"unauthorized"}"#);
+        let err = s.witness.check(&s.client, LONG).await.unwrap_err();
+        assert!(err.refused() && err.unanswered(), "{code}: {err:?}");
+    }
+    assert_eq!(s.witness.load().unwrap().unanswered, 2);
+    s.server.fail_with(500, r#"{"error":"boom"}"#);
+    let err = s.witness.check(&s.client, LONG).await.unwrap_err();
+    assert!(!err.refused(), "{err:?}");
 }
 
 /// Each server has its own record, and resetting one leaves the others.
@@ -539,6 +785,37 @@ fn fields_this_build_does_not_know_are_kept() {
     assert_eq!(text["cosigners"], serde_json::json!(["later"]));
     assert_eq!(text["servers"][url]["witnessed_by"], "later");
     assert_eq!(w.load().unwrap().unchecked, vec![cp(5, 5)]);
+}
+
+/// So does a field inside a finding: a newer build's evidence is not cut
+/// out of it by an older build's pull. Mutation: write the finding back as
+/// this build knows it.
+#[test]
+fn a_finding_keeps_fields_this_build_does_not_know() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join(AUDIT_FILE);
+    let url = "https://r.example";
+    let finding = serde_json::json!({
+        "found_at": "2026-10-02T09:14:05.402Z",
+        "saved": cp(5, 1).note(&origin(url)),
+        "seen": cp(5, 2).note(&origin(url)),
+        "detail": "a second root",
+        "evidence": { "leaf": 3 },
+    });
+    std::fs::write(
+        &file,
+        serde_json::json!({ "version": 1, "servers": { url: { "inconsistent": finding } } })
+            .to_string(),
+    )
+    .unwrap();
+    let w = Witness::new(&file, url);
+    w.record(&cp(9, 9).header()).unwrap();
+    let text: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(text["servers"][url]["inconsistent"], finding);
+    let saved = w.load().unwrap();
+    assert_eq!(saved.unchecked, vec![cp(9, 9)], "the write happened");
+    assert_eq!(saved.inconsistent.unwrap().detail, "a second root");
 }
 
 /// A file that cannot be read may hold the only record of a rewrite, so it
@@ -713,6 +990,64 @@ async fn an_export_checks_the_saved_checkpoints_against_its_leaves() {
     assert!(
         finding_of(&found).detail.contains("first 5 leaves"),
         "{found:?}"
+    );
+}
+
+/// An export promotes what the file holds under its lock, and checks that
+/// against its leaves too: a checkpoint another check promoted between the
+/// export's first look and its write is on this tree, or it is a finding,
+/// never taken on trust. Mutation: promote everything under the lock
+/// unchecked.
+#[test]
+fn an_export_holds_what_was_saved_meanwhile_to_its_leaves() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join(AUDIT_FILE);
+    let url = "https://r.example";
+    let mut w = Witness::new(&file, url);
+    w.wait = Duration::from_secs(10);
+    let leaves: Vec<Vec<u8>> = (0..6).map(|i| format!("leaf {i}").into_bytes()).collect();
+    let tree = Tree::rebuild(leaves.iter().map(|l| merkle::hash_leaf(l)));
+    let current = Checkpoint {
+        size: tree.size(),
+        root: tree.root(),
+    };
+    let on_tree = Checkpoint {
+        size: 3,
+        root: tree.root_at(3),
+    };
+    w.record(&on_tree.header()).unwrap();
+
+    // Another process holds the lock while the export looks, and writes a
+    // checkpoint of another log in as checked before it lets go.
+    let lock = dir.path().join(LOCK_FILE);
+    std::fs::write(&lock, "someone else").unwrap();
+    let export = {
+        let w = w.clone();
+        let tree = tree.clone();
+        std::thread::spawn(move || w.witness_export(&tree, current))
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    let o = origin(url);
+    std::fs::write(
+        &file,
+        serde_json::json!({
+            "version": 1,
+            "servers": { home::normalize_url(url): {
+                "checkpoints": [cp(4, 4).note(&o)],
+                "unchecked": [on_tree.note(&o)],
+            } },
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::remove_file(&lock).unwrap();
+
+    let found = export.join().unwrap().unwrap();
+    assert_eq!(finding_of(&found).saved, cp(4, 4).note(&o), "{found:?}");
+    assert_eq!(
+        w.load().unwrap().unchecked,
+        vec![on_tree],
+        "nothing promoted"
     );
 }
 

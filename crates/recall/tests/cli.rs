@@ -4063,6 +4063,76 @@ fn a_log_that_went_away_fails_verify_and_one_never_kept_cannot_be_checked() {
     assert!(r.stderr.contains("keeps no audit log"), "{}", r.stderr);
 }
 
+/// An export says the same: a log never kept cannot be exported (2), and
+/// one this machine saw kept and the server no longer keeps is a history
+/// lost (1). Mutation: 2 whatever was saved, as before.
+#[test]
+fn an_export_of_a_log_that_went_away_fails() {
+    let server = fake_server(|_| (404, serde_json::json!({ "error": "not found" })));
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [
+        ("RECALL_HOME", home_str.as_str()),
+        ("RECALL_URL", server.url.as_str()),
+        ("RECALL_TOKEN", "right"),
+    ];
+    let r = run(&["audit", "export"], repo.path(), &env, None);
+    assert_eq!(r.code, 2, "never kept: {}", r.stderr);
+    saw_checkpoints(home.path(), &server.url, 5..=5);
+    let r = run(&["audit", "export"], repo.path(), &env, None);
+    assert_eq!(r.code, 1, "went away: {}", r.stderr);
+    assert!(r.stderr.contains("keeps no audit log"), "{}", r.stderr);
+}
+
+/// A credential the server refuses for the audit routes is "could not be
+/// checked" (2), said with what to do about the credential, not as a
+/// server that would not prove. Mutation: report it as any unanswered
+/// check.
+#[test]
+fn a_refused_credential_says_what_to_do_about_it() {
+    let server = fake_server(|seen| match seen.path.as_str() {
+        "/v1/audit/checkpoint" => (403, serde_json::json!({ "error": "forbidden" })),
+        _ => (404, serde_json::json!({ "error": "not found" })),
+    });
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [
+        ("RECALL_HOME", home_str.as_str()),
+        ("RECALL_URL", server.url.as_str()),
+        ("RECALL_TOKEN", "right"),
+    ];
+    saw_checkpoints(home.path(), &server.url, 5..=5);
+    let r = run(&["audit", "verify"], repo.path(), &env, None);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert!(
+        r.stderr.contains("refused this machine's credential"),
+        "{}",
+        r.stderr
+    );
+    assert!(r.stderr.contains("recall connect"), "{}", r.stderr);
+}
+
+/// `reset` never forgets what it cannot read: an `audit.json` that cannot
+/// be read is "could not" (2), as install.md says, and is left as it was.
+/// Mutation: answer 1, as for a reset declined.
+#[test]
+fn reset_cannot_forget_what_it_cannot_read() {
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+    let file = home.path().join("audit.json");
+    std::fs::write(&file, "{ not json").unwrap();
+    let env = [
+        ("RECALL_HOME", home_str.as_str()),
+        ("RECALL_URL", DEAD_SERVER),
+    ];
+    let r = run(&["audit", "reset", "--yes"], repo.path(), &env, None);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert_eq!(std::fs::read(&file).unwrap(), b"{ not json");
+}
+
 /// Not set up to ask is "could not be checked", 2, as install.md says: no
 /// server, and no credential. Mutation: 1, as before.
 #[test]

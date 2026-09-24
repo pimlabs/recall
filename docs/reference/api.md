@@ -1286,21 +1286,31 @@ root, and no signature, since the owner's devices fetch it over TLS from
 the server they are checking. The hooks only save: a pull that cannot save
 its checkpoint still succeeds, and the check costs no request at session
 start. Fields the file holds that this client does not know are kept as
-they are.
+they are, inside a finding too; a number beyond 64 bits in one comes back
+as the nearest double.
 
 `recall doctor`, `recall status` and `recall audit verify` with no file
 then ask for `GET /v1/audit/checkpoint` and, for the newest checkpoint
-proven so far and each one saved since, smallest first,
+proven so far and then each one saved since, smallest first,
 `GET /v1/audit/consistency` from it to the log now, and verify each proof
-by rebuilding both roots (RFC 9162 §2.1.4). Each checkpoint is written down
-as proven the moment its proof verifies, so a check the server's rate
+by rebuilding both roots (RFC 9162 §2.1.4). Nothing is written down until
+the newest proven one's proof verifies: it stands for the older ones only
+against the log it was proven on, and a server showing this machine two
+forks shows each check one of them, so a checkpoint proven against one
+fork and marked proven beside one from the other would join the two into
+a record every later check passes. After it, each checkpoint is written
+down as proven the moment its proof verifies, so a check the server's rate
 limit refuses (asked again after five seconds), or that meets its deadline
-(20 seconds in `doctor` and `status`, 90 in `audit verify`), keeps what it
-proved, and the next one carries on. Once all are proven the log now
-becomes the newest; the newest 32 proven are kept, the newest standing for
-all the older ones. The first time, with nothing saved, the log is taken
-as it is. `recall audit export` checks the saved checkpoints against the
-leaves it fetched instead, with no proof to ask for.
+(20 seconds in `doctor` and `status`, on top of their 90 for everything
+else, and 90 in `audit verify`), keeps what it proved, and the next one
+carries on. Each write happens only while the newest proven checkpoint in
+the file is still one this check proved; another check finishing
+meanwhile leaves this one's proofs unwritten, reported as a check to run
+again. Once all are proven the log now becomes the newest; the newest 32
+proven are kept, the newest standing for all the older ones. The first
+time, with nothing saved, the log is taken as it is. `recall audit export`
+checks the saved checkpoints against the leaves it fetched instead, with
+no proof to ask for.
 
 Checkpoints not yet proven are evidence, and are not thinned: whichever
 was saved just before a rewrite is the one that shows it. Up to 4096 wait
@@ -1308,11 +1318,13 @@ was saved just before a rewrite is the one that shows it. Up to 4096 wait
 dropped are counted, and `recall doctor` fails on the count until `recall
 audit reset`, so a gap is never left looking like a clean record. Once
 more than 16 wait, every session's pull says so. A check the server does
-not answer (rate limited, unreachable, past the deadline) only warns,
-until the oldest checkpoint waiting is seven days old or ten checks in a
-row went unanswered, when `recall doctor` fails: a server that never
-answers is not proving its log. A server that answers with anything but a
-proof (an error, a body that is not one, a redirect) fails at once.
+not answer (rate limited, unreachable, past the deadline, or refusing this
+machine's credential with 401 or 403) only warns, until, with anything
+saved, the oldest checkpoint waiting is seven days old, no check has
+finished in seven days, or ten checks in a row went unanswered, when
+`recall doctor` fails: a server that never answers is not proving its log.
+A server that answers with anything but a proof (an error, a body that is
+not one, a redirect) fails at once.
 
 A log that does not extend one (a proof that does not verify, a log
 shorter than a saved checkpoint, a second root for a size already saved) is

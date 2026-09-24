@@ -136,6 +136,13 @@ pub struct AuditReport {
     /// When the oldest checkpoint still unchecked was saved.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unchecked_since: Option<String>,
+    /// When a check last finished, proving every checkpoint saved then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_proven_at: Option<String>,
+    /// Whether the server refused this machine's credential for the audit
+    /// routes (401, 403): [`AuditReport::error`] says what it answered.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub refused: bool,
     /// How many unchecked checkpoints were dropped past the bound since the
     /// last reset: a gap in the witnessing.
     #[serde(skip_serializing_if = "is_zero")]
@@ -173,6 +180,7 @@ impl AuditReport {
                 self.unchecked = saved.unchecked.len();
                 self.newest = saved.newest().map(|c| c.header());
                 self.unchecked_since = saved.unchecked_since;
+                self.last_proven_at = saved.last_proven_at;
                 self.dropped = saved.dropped;
                 self.unanswered = saved.unanswered;
                 if saved.inconsistent.is_some() {
@@ -184,15 +192,27 @@ impl AuditReport {
     }
 }
 
-/// How long `recall status` and `recall doctor` wait on the server in all:
-/// every request has a timeout of its own, and a slow server answering each
-/// just inside it would otherwise hold the command for minutes.
-const SERVER_DEADLINE: std::time::Duration = std::time::Duration::from_secs(90);
+/// How long `recall status` and `recall doctor` wait on the server.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Deadlines {
+    /// For everything but the audit check, in all: every request has a
+    /// timeout of its own, and a slow server answering each just inside it
+    /// would otherwise hold the command for minutes.
+    pub server: std::time::Duration,
+    /// For the audit check, its rate-limited retries included, on top of
+    /// that. A budget of its own, so that a server slow at everything else
+    /// cannot keep the check from ever being asked, and pending for ever:
+    /// what the check proves before its deadline is kept, what it does not
+    /// is counted as unanswered, and `recall doctor` fails on either kind
+    /// of stall in the end.
+    pub audit: std::time::Duration,
+}
 
-/// How long of that the audit check may take, its rate-limited retries
-/// included. What it proves before then is kept, and the next run carries
-/// on.
-const AUDIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+/// The deadlines both commands run with.
+const DEADLINES: Deadlines = Deadlines {
+    server: std::time::Duration::from_secs(90),
+    audit: std::time::Duration::from_secs(20),
+};
 
 /// The `--json` shape. Stable enough to script against; that is the point of
 /// having it at all.
@@ -417,6 +437,15 @@ pub async fn run(as_json: bool) -> anyhow::Result<i32> {
 /// cannot be silently missing from doctor, which is the shape of bug this
 /// crate has now shipped twice.
 pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report {
+    collect_within(here, cfg, DEADLINES).await
+}
+
+/// [`collect`], waiting on the server as long as `deadlines` says.
+pub(crate) async fn collect_within(
+    here: &proj::Resolved,
+    cfg: &ClientConfig,
+    deadlines: Deadlines,
+) -> Report {
     let root = &here.root;
     let root_str = root.to_string_lossy().to_string();
     let remote = proj::remote();
@@ -577,20 +606,28 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
     };
     match client {
         Ok(client) => {
-            let asked = ask_server(&mut rep, &client, usable, witness.as_ref());
-            if tokio::time::timeout(SERVER_DEADLINE, asked).await.is_err() {
-                let late = format!(
+            let asked = ask_server(&mut rep, &client, usable);
+            let finished = tokio::time::timeout(deadlines.server, asked).await.is_ok();
+            if !finished && !rep.server_ok {
+                rep.server_error.get_or_insert(format!(
                     "no answer within {} seconds in all",
-                    SERVER_DEADLINE.as_secs()
-                );
-                if !rep.server_ok {
-                    rep.server_error.get_or_insert(late.clone());
-                }
-                if let (Some(witness), Some(audit)) = (&witness, rep.audit.as_mut()) {
-                    audit.read(witness);
-                    if audit.extends.is_none() && audit.unproven.is_none() {
-                        audit.error.get_or_insert(late);
-                    }
+                    deadlines.server.as_secs()
+                ));
+            }
+            // After the pull, which saved the checkpoint it carried: the
+            // check proves that one too. What `recall doctor` is for, per
+            // docs/design/part5-plan.md's "Who witnesses". Outside the
+            // deadline above, on one of its own, and asked however the
+            // rest went: a server slow at everything else would otherwise
+            // never be asked at all. Asked of any server not known to keep
+            // no log: discovery failing is no reason to leave saved
+            // checkpoints unproven, and the audit routes answer for
+            // themselves (404 is no log).
+            let credential = usable && (rep.token_set || rep.device.is_some());
+            if let (Some(witness), Some(audit)) = (&witness, rep.audit.as_mut()) {
+                audit.read(witness);
+                if credential && audit.server_log != Some(false) && audit.file_error.is_none() {
+                    witness_check(witness, &client, audit, deadlines.audit).await;
                 }
             }
         }
@@ -599,15 +636,10 @@ pub(crate) async fn collect(here: &proj::Resolved, cfg: &ClientConfig) -> Report
     rep
 }
 
-/// Everything `collect` asks the server, in order, filling in `rep`: what
-/// is filled in before [`SERVER_DEADLINE`] passes stays, whatever is not
-/// reached.
-async fn ask_server(
-    rep: &mut Report,
-    client: &recall_hooks::client::Client,
-    usable: bool,
-    witness: Option<&recall_hooks::audit::Witness>,
-) {
+/// Everything `collect` asks the server but the audit check, in order,
+/// filling in `rep`: what is filled in before the server's deadline passes
+/// stays, whatever is not reached.
+async fn ask_server(rep: &mut Report, client: &recall_hooks::client::Client, usable: bool) {
     match client.health().await {
         Ok(health) => {
             rep.server_ok = true;
@@ -675,30 +707,20 @@ async fn ask_server(
         if let Ok(resp) = client.pull(&rep.project_key).await {
             rep.synced_files = resp.files.iter().filter(|f| !f.deleted).count();
         }
-        // After the pull, which saved the checkpoint it carried: the
-        // check proves that one too. What `recall doctor` is for, per
-        // docs/design/part5-plan.md's "Who witnesses". Asked of any
-        // server not known to keep no log: discovery failing is no
-        // reason to leave saved checkpoints unproven, and the audit
-        // routes answer for themselves (404 is no log).
-        if let (Some(witness), Some(audit)) = (witness, rep.audit.as_mut()) {
-            if audit.server_log != Some(false) && audit.file_error.is_none() {
-                witness_check(witness, client, audit).await;
-            }
-        }
     }
 }
 
 /// Asks the server to prove its log extends every checkpoint saved here,
-/// and reads what that found into `audit`.
+/// within `deadline`, and reads what that found into `audit`.
 async fn witness_check(
     witness: &recall_hooks::audit::Witness,
     client: &recall_hooks::client::Client,
     audit: &mut AuditReport,
+    deadline: std::time::Duration,
 ) {
     use recall_hooks::audit::{CheckError, Witnessed};
     let mut found = None;
-    match witness.check(client, AUDIT_DEADLINE).await {
+    match witness.check(client, deadline).await {
         Ok(Witnessed::Extends { .. }) => audit.extends = Some(true),
         Ok(Witnessed::Inconsistent { finding, unsaved }) => {
             audit.extends = Some(false);
@@ -707,7 +729,11 @@ async fn witness_check(
         }
         Err(e) if e.unreadable() => audit.file_error = Some(e.to_string()),
         Err(e) if e.no_log() => audit.server_log = Some(false),
-        Err(e @ (CheckError::File(_) | CheckError::Deadline(_))) => {
+        Err(e) if e.refused() => {
+            audit.refused = true;
+            audit.error = Some(e.to_string());
+        }
+        Err(e @ (CheckError::File(_) | CheckError::Deadline(_) | CheckError::Moved)) => {
             audit.error = Some(e.to_string())
         }
         Err(e) if e.unanswered() => audit.error = Some(e.to_string()),
@@ -883,8 +909,12 @@ fn print_audit(audit: &AuditReport) {
         );
     } else if let Some(err) = &audit.error {
         field!(
-            "audit log    : not checked ({err}), {} checkpoint(s) saved",
-            audit.saved()
+            "audit log    : not checked ({err}), {} checkpoint(s) saved{}",
+            audit.saved(),
+            match audit.refused {
+                true => "; the server refused this machine's credential, see recall doctor",
+                false => "",
+            }
         );
     } else if audit.server_log == Some(false) && audit.saved() == 0 {
         field!("audit log    : not kept by this server (older than 0.4.2)");
@@ -1158,4 +1188,88 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
         }
     }
     field!("synced files : {} on server", rep.synced_files);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// N2: a server slow at everything else is still asked for the audit
+    /// check, on a budget of its own. Inside the server's budget, a slow
+    /// `/health` kept the check from ever being asked, or counted as
+    /// unanswered, so a stall like that never reached `recall doctor`'s
+    /// rules. Mutation: ask it only when the rest finished in time.
+    #[tokio::test]
+    async fn the_audit_check_has_a_budget_of_its_own() {
+        let root = recall_wire::audit::merkle::hash_leaf(b"x");
+        let header = recall_hooks::audit::Checkpoint { size: 1, root }.header();
+        let answer = recall_wire::AuditCheckpoint::parse_header_value(&header).unwrap();
+        let app = axum::Router::new()
+            .route(
+                "/health",
+                axum::routing::get(|| async {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    "late"
+                }),
+            )
+            .route(
+                recall_wire::audit::CHECKPOINT_PATH,
+                axum::routing::get(move || {
+                    let answer = answer.clone();
+                    async move { axum::Json(answer) }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let rep = collect_from(url).await;
+        assert!(!rep.server_ok, "the rest ran out of time");
+        let audit = rep.audit.unwrap();
+        assert_eq!(audit.extends, Some(true), "{audit:?}");
+        assert_eq!(audit.checkpoints, 1);
+    }
+
+    /// The report for a server at `url`, with a home of its own, a token,
+    /// and short deadlines.
+    async fn collect_from(url: String) -> Report {
+        let dir = tempfile::tempdir().unwrap();
+        let here = proj::resolve_at(dir.path().to_path_buf());
+        let cfg = ClientConfig {
+            url,
+            token: "t".into(),
+            audit_file: Some(dir.path().join("audit.json")),
+            ..Default::default()
+        };
+        let deadlines = Deadlines {
+            server: Duration::from_millis(300),
+            audit: Duration::from_secs(10),
+        };
+        collect_within(&here, &cfg, deadlines).await
+    }
+
+    /// A credential the audit routes refuse is reported as that, for
+    /// `recall doctor` to say what to do about it. Mutation: report it as
+    /// any other error.
+    #[tokio::test]
+    async fn a_refused_credential_is_flagged() {
+        let app = axum::Router::new().route(
+            recall_wire::audit::CHECKPOINT_PATH,
+            axum::routing::get(|| async {
+                (
+                    axum::http::StatusCode::FORBIDDEN,
+                    r#"{"error":"forbidden"}"#,
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let audit = collect_from(url).await.audit.unwrap();
+        assert!(audit.refused, "{audit:?}");
+        assert!(
+            audit.error.is_some() && audit.unproven.is_none(),
+            "{audit:?}"
+        );
+    }
 }

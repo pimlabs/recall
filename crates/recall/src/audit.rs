@@ -146,10 +146,11 @@ async fn export(cfg: &ClientConfig, output: Option<&Path>) -> i32 {
         Err(e) => return server_error(&e),
     };
     let Some(capability) = capability else {
-        return no_log();
+        return no_log_to_export(&witness);
     };
     let answer = match client.audit_checkpoint().await {
         Ok(answer) => answer,
+        Err(client::Error::Status { code: 404, .. }) => return no_log_to_export(&witness),
         Err(e) => return server_error(&e),
     };
     let Some(current) = Checkpoint::from_wire(&answer) else {
@@ -564,21 +565,24 @@ async fn check(cfg: &ClientConfig) -> i32 {
         }
         // A log this machine witnessed and the server no longer keeps is a
         // history lost, as `recall doctor` says; one never kept is not.
-        Err(e) if e.no_log() && saved > 0 => {
-            eprintln!(
-                "FAIL: the server keeps no audit log, and this machine saved {saved} \
-                 checkpoint(s) of one: a server that went back to before 0.4.2 lost it"
-            );
-            eprintln!("  {AFTER_A_REWRITE}");
-            FAILED
-        }
+        Err(e) if e.no_log() && saved > 0 => lost_log(saved),
         Err(e) if e.no_log() => no_log(),
         Err(e) if e.unreadable() => unreadable(&e.to_string()),
+        // Before `unanswered`, which it is part of: what to do is about
+        // the credential, not the server.
+        Err(e) if e.refused() => {
+            eprintln!("recall audit: the server refused this machine's credential: {e}");
+            eprintln!(
+                "  The device may have been revoked, or not be allowed the audit routes: \
+                 recall status says which, and recall connect enrols it again."
+            );
+            UNUSABLE
+        }
         Err(e) if e.unanswered() => {
             eprintln!("recall audit: {e}; what was proven before then is kept");
             UNUSABLE
         }
-        Err(e @ CheckError::File(_)) => {
+        Err(e @ (CheckError::File(_) | CheckError::Moved)) => {
             eprintln!("recall audit: {e}");
             UNUSABLE
         }
@@ -709,6 +713,28 @@ fn refuse(what: &str, then: &str) -> i32 {
 fn no_log() -> i32 {
     eprintln!("recall audit: the server keeps no audit log: it is older than 0.4.2.");
     UNUSABLE
+}
+
+/// The server keeps no audit log to export: nothing to check when this
+/// machine never saw it keep one (2), and a history lost when it did (1),
+/// as `verify` and `recall doctor` say.
+fn no_log_to_export(witness: &Witness) -> i32 {
+    match witness.load() {
+        Ok(saved) if !saved.all().is_empty() => lost_log(saved.all().len()),
+        Ok(_) => no_log(),
+        Err(e) => unreadable(&e.to_string()),
+    }
+}
+
+/// A log this machine saved `saved` checkpoints of, which the server no
+/// longer keeps: 1.
+fn lost_log(saved: usize) -> i32 {
+    eprintln!(
+        "FAIL: the server keeps no audit log, and this machine saved {saved} checkpoint(s) of \
+         one: a server that went back to before 0.4.2 lost it"
+    );
+    eprintln!("  {AFTER_A_REWRITE}");
+    FAILED
 }
 
 fn server_error(e: &client::Error) -> i32 {

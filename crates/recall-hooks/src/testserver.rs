@@ -65,6 +65,9 @@ struct Inner {
     /// Whether a consistency proof is never answered at all, as by a
     /// server too slow to wait for.
     hang_proofs: bool,
+    /// A size whose consistency proofs the fake's rate limit refuses,
+    /// every one, while others are answered.
+    refuse_proofs_from: Option<u64>,
 }
 
 pub struct FakeServer {
@@ -215,6 +218,18 @@ impl FakeServer {
     /// rate limit would; [`None`] lifts the limit.
     pub fn limit_proofs_after(&self, n: Option<usize>) {
         self.inner.lock().expect("test lock").proofs_before_limit = n;
+    }
+
+    /// Serves `log` as the audit log from now on: another fork of it, to
+    /// show one machine two histories.
+    pub fn set_audit_log(&self, log: Vec<Vec<u8>>) {
+        self.inner.lock().expect("test lock").audit = Some(log);
+    }
+
+    /// Refuses every consistency proof from a checkpoint of `size`, as the
+    /// rate limit would, until called with [`None`].
+    pub fn refuse_proofs_from(&self, size: Option<u64>) {
+        self.inner.lock().expect("test lock").refuse_proofs_from = size;
     }
 
     /// Never answers a consistency proof from now on.
@@ -373,6 +388,13 @@ async fn audit_consistency(
         tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
     }
     let mut inner = state.lock().expect("test lock");
+    if inner.refuse_proofs_from == Some(q.first) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            r#"{"error":"too many requests"}"#,
+        )
+            .into_response();
+    }
     if let Some(left) = inner.proofs_before_limit.as_mut() {
         if *left == 0 {
             return (

@@ -708,12 +708,13 @@ fn offbox_finding(rep: &Report, out: &mut Vec<Finding>) {
 /// reset`; on an `audit.json` it cannot read, which may hold the only
 /// record of one; on a server that answered without a proof, or no longer
 /// keeps the log it was witnessed keeping; on checkpoints dropped unchecked;
-/// and on checks that have gone unanswered for too long (the oldest
-/// waiting [`recall_hooks::audit::STALE_DAYS`] days, or
+/// and, while anything is saved, on checks that have gone unanswered for
+/// too long (the oldest waiting [`recall_hooks::audit::STALE_DAYS`] days,
+/// no check finished in as many, or
 /// [`recall_hooks::audit::UNANSWERED_LIMIT`] checks in a row). A server
-/// that did not answer this once only warns, and so do checkpoints that
-/// were not checked this time: nothing about the log follows from either,
-/// yet.
+/// that did not answer this once only warns, and so does one that refused
+/// this machine's credential, and checkpoints that were not checked this
+/// time: nothing about the log follows from any of those, yet.
 fn audit_finding(rep: &Report, out: &mut Vec<Finding>) {
     use recall_hooks::audit::{STALE_DAYS, UNANSWERED_LIMIT};
     const CHECK: &str = "audit log";
@@ -789,12 +790,11 @@ fn audit_finding(rep: &Report, out: &mut Vec<Finding>) {
         }
         _ => {}
     }
-    let waited = audit
-        .unchecked_since
-        .as_deref()
-        .and_then(age_of)
-        .filter(|age| *age >= time::Duration::days(STALE_DAYS));
-    if let Some(waited) = waited {
+    let stale = |at: Option<&str>| {
+        at.and_then(age_of)
+            .filter(|age| *age >= time::Duration::days(STALE_DAYS))
+    };
+    if let Some(waited) = stale(audit.unchecked_since.as_deref()) {
         out.push(fail(
             CHECK,
             format!(
@@ -809,7 +809,26 @@ fn audit_finding(rep: &Report, out: &mut Vec<Finding>) {
         ));
         return;
     }
-    if audit.unanswered >= UNANSWERED_LIMIT {
+    // However the checks were cut short (unanswered, refused, preempted,
+    // or never run for want of a credential), a week without one finishing
+    // is a log not proven for a week.
+    let unproven_for = stale(audit.last_proven_at.as_deref());
+    if let Some(age) = unproven_for.filter(|_| audit.saved() > 0) {
+        out.push(fail(
+            CHECK,
+            format!(
+                "no check of the server's log has finished in {} days, the last on {}; {} \
+                 checkpoint(s) are saved here",
+                age.whole_days(),
+                audit.last_proven_at.as_deref().unwrap_or_default(),
+                audit.saved()
+            ),
+            "recall audit verify; a server that never answers the proofs is not proving its \
+             log",
+        ));
+        return;
+    }
+    if audit.saved() > 0 && audit.unanswered >= UNANSWERED_LIMIT {
         out.push(fail(
             CHECK,
             format!(
@@ -821,7 +840,19 @@ fn audit_finding(rep: &Report, out: &mut Vec<Finding>) {
         ));
         return;
     }
-    if let Some(err) = &audit.error {
+    if let (Some(err), true) = (&audit.error, audit.refused) {
+        out.push(warn(
+            CHECK,
+            format!(
+                "the server refused this machine's credential for its audit log ({err}): the \
+                 device may have been revoked, or not be allowed the audit routes; {} \
+                 checkpoint(s) saved here were not checked",
+                audit.saved()
+            ),
+            "recall status says whether this device is still enrolled; recall connect enrols \
+             it again",
+        ));
+    } else if let Some(err) = &audit.error {
         out.push(warn(
             CHECK,
             format!(
@@ -1993,6 +2024,86 @@ mod tests {
         );
     }
 
+    /// A time as `status` reports one, `days` ago.
+    fn days_ago(days: i64) -> String {
+        let fmt = time::macros::format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+        );
+        (time::OffsetDateTime::now_utc() - time::Duration::days(days))
+            .format(&fmt)
+            .unwrap()
+    }
+
+    /// N2: however the checks were cut short, a week with none finished
+    /// fails while anything is saved, and not before. The case the rules
+    /// above miss: checks never asked at all (a server slow at everything
+    /// else, no credential), which count nothing, with nothing unchecked.
+    /// Mutation: no such rule.
+    #[test]
+    fn a_week_without_a_finished_check_fails() {
+        let since = |days: i64, saved: usize| {
+            audit(|a| {
+                a.extends = None;
+                a.checkpoints = saved;
+                a.last_proven_at = Some(days_ago(days));
+            })
+        };
+        assert_eq!(audit_level(&since(6, 3)), Level::Warn);
+        let rep = since(8, 3);
+        let found = findings(&rep);
+        let f = find(&found, "audit log").unwrap();
+        assert_eq!(f.level, Level::Fail);
+        assert!(
+            f.detail.starts_with("no check of the server's log"),
+            "{}",
+            f.detail
+        );
+        let found = findings(&since(8, 0));
+        let level = find(&found, "audit log").map(|f| f.level);
+        assert_ne!(level, Some(Level::Fail), "nothing saved");
+    }
+
+    /// Unanswered checks with nothing saved are no pending check. Mutation:
+    /// fail on the count alone.
+    #[test]
+    fn unanswered_checks_with_nothing_saved_do_not_fail() {
+        let rep = audit(|a| {
+            *a = crate::status::AuditReport {
+                unanswered: recall_hooks::audit::UNANSWERED_LIMIT,
+                error: Some("could not reach the server".into()),
+                ..Default::default()
+            }
+        });
+        assert_ne!(audit_level(&rep), Level::Fail);
+    }
+
+    /// A credential the server refused warns with what to do about the
+    /// credential, not "the server did not prove"; and it does not keep the
+    /// week's rule from failing. Mutation: report it as any other error.
+    #[test]
+    fn a_refused_credential_warns_about_the_credential() {
+        let refused = |days: i64| {
+            audit(|a| {
+                a.extends = None;
+                a.refused = true;
+                a.error = Some("server returned 403: forbidden".into());
+                a.last_proven_at = Some(days_ago(days));
+            })
+        };
+        let rep = refused(1);
+        let found = findings(&rep);
+        let f = find(&found, "audit log").unwrap();
+        assert_eq!(f.level, Level::Warn);
+        assert!(
+            f.detail.contains("refused this machine's credential"),
+            "{}",
+            f.detail
+        );
+        let fix = f.fix.as_deref().unwrap_or_default();
+        assert!(fix.contains("recall connect"), "{fix}");
+        assert_eq!(audit_level(&refused(8)), Level::Fail);
+    }
+
     /// Every audit finding reads as one sentence: no run of spaces left by
     /// a line continuation that lost its backslash. Mutation: drop one.
     /// One change to a healthy report's audit section.
@@ -2027,6 +2138,15 @@ mod tests {
             Box::new(|a| {
                 a.extends = None;
                 a.unanswered = 99;
+            }),
+            Box::new(|a| {
+                a.extends = None;
+                a.last_proven_at = Some("2000-01-01T00:00:00.000Z".into());
+            }),
+            Box::new(|a| {
+                a.extends = None;
+                a.refused = true;
+                a.error = Some("server returned 401".into());
             }),
             Box::new(|a| {
                 a.extends = None;
