@@ -30,8 +30,19 @@ ARG RECALL_SOURCE=release
 # (`--max-turns` is a hidden option there, so search the CLI for it).
 ARG CLAUDE_CODE_VERSION=2.1.280
 
-# ---- source: build the binary from this checkout.
-FROM rust:1-alpine AS source
+# cargo-chef, pinned for the same reason as CLAUDE_CODE_VERSION above: a
+# rebuild has to install the tool version the recipe/cook flags below were
+# actually checked against, not whatever crates.io serves that day, so move
+# this pin deliberately (check https://crates.io/api/v1/crates/cargo-chef
+# for the current version, and re-check `cargo chef cook --help` for the
+# new one before relying on any flag used below).
+ARG CARGO_CHEF_VERSION=0.1.78
+
+# ---- chef: rust-alpine plus cargo-chef, the base both `planner` and
+# `source` build from. Its own layers (the apk packages, the cargo install)
+# only change when this Dockerfile does, so they are cache hits on nearly
+# every CI run regardless of what a PR touches.
+FROM rust:1-alpine AS chef
 
 # rusqlite's `bundled` feature compiles the SQLite amalgamation from C, so
 # the build stage needs a C toolchain even though nothing here is C. musl
@@ -46,6 +57,40 @@ FROM rust:1-alpine AS source
 RUN apk add --no-cache musl-dev perl make linux-headers
 
 WORKDIR /src
+ARG CARGO_CHEF_VERSION
+RUN cargo install cargo-chef --locked --version "${CARGO_CHEF_VERSION}"
+
+# ---- planner: cargo-chef looks at the manifests alone (Cargo.toml,
+# Cargo.lock, and each crate directory's shape) and writes recipe.json, the
+# minimum needed to compile just the dependencies. Editing a .rs file
+# without touching a manifest or adding/removing a crate does not change
+# recipe.json, which is what lets `source` below cache the dependency
+# compile across an ordinary source change.
+FROM chef AS planner
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ---- source: build the binary from this checkout.
+FROM chef AS source
+COPY --from=planner /src/recipe.json recipe.json
+# Cooks recall-server's dependency tree, then recall-worker's, into one
+# layer keyed only on recipe.json, so source-worker below reuses it instead
+# of compiling its own copy of the deps they share. This has to mirror the
+# real `cargo build` calls below flag for flag and package for package:
+# cargo fingerprints a dependency by its exact feature set, and a `cook`
+# that asks for a different one leaves the cache with nothing the real
+# build can reuse. Two `cook` calls rather than one `-p recall-server -p
+# recall-worker`, because recall-worker's default `client` feature is off
+# when recall-server merely depends on it (its own Cargo.toml turns that
+# off) but on when recall-worker is cooked as its own package; asking for
+# both in a single cargo invocation would unify the two into one feature
+# set, which is wrong for whichever side wanted it off. `--release
+# --locked` match the real builds below; checked against cargo-chef
+# v0.1.78's own `cook` flags (`-p`/`--package` takes a pkgid and can repeat).
+RUN cargo chef cook --release --locked -p recall-server --recipe-path recipe.json \
+ && cargo chef cook --release --locked -p recall-worker --recipe-path recipe.json
+
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 # Not a release, and the discovery document says so. The context has no
@@ -56,7 +101,9 @@ RUN cargo build --release --locked -p recall-server \
  && mkdir -p /out && cp target/release/recall-server /out/recall-server
 
 # ---- source, for the worker: the same build directory, one more binary.
-# A stage of its own so the server's image does not wait for it.
+# A stage of its own so the server's image does not wait for it: this only
+# compiles recall-worker itself, since its dependency tree was already
+# cooked into the layer above, alongside recall-server's.
 FROM source AS source-worker
 RUN cargo build --release --locked -p recall-worker \
  && cp target/release/recall-worker /out/recall-worker
