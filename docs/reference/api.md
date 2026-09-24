@@ -1050,10 +1050,11 @@ a key revoked earlier on its own revokes them as well. `404` with
 
 Since 0.4.2. Every authenticated push, pull and delete, every change to a
 device or authkey — an authkey enrolling a device included — every merge
-job leased, settled or retried, the server's own included, and every
+job leased, settled or retried, the server's own included, every
 change to the admin page's passkeys and sessions but a sign-in or a
-sign-out, `recall-server reset-passkeys` included, appends one **leaf** to
-an append-only Merkle tree: RFC 9162 §2.1 exactly, SHA-256,
+sign-out, `recall-server reset-passkeys` included, and every rename,
+remove and restore the host makes with `recall-server admin`, appends one
+**leaf** to an append-only Merkle tree: RFC 9162 §2.1 exactly, SHA-256,
 the same tree Certificate Transparency and Sigstore Rekor use. A leaf
 hashes as `SHA-256(0x00 || leaf)`, an inner node as `SHA-256(0x01 || left
 || right)`, and the tree splits at the largest power of two below its
@@ -1063,9 +1064,8 @@ server made. Unauthenticated routes, refused requests, and the audit
 routes themselves append nothing — reading the log does not grow it —
 and neither do:
 
-- the host's own `recall-server admin` commands, which change the database
-  file beside the server rather than through it (see
-  [`deploy/README.md`](../../deploy/README.md#renaming-removing-or-restoring-a-project));
+- `recall-server admin list`, a dry run, and a change refused, abandoned or
+  rolled back, since nothing changed;
 - signing in to the admin page and signing out of it, which start and end
   a session without changing what it may do (what a session then changes
   is in the log, credited to its passkey);
@@ -1073,10 +1073,15 @@ and neither do:
   outcome: a revoked worker's leases released for the server's claim that
   follows, and finished jobs pruned after 30 days.
 
-`reset-passkeys` also runs on the host, in a process of its own, and does
-append its leaf: the next `seq` in the table. A running server reads any
-leaf it did not write into its tree before its own next append, so the
-two never fork; its checkpoint catches up at that append.
+`reset-passkeys` and `admin` run on the host, each in a process of its
+own, and append their leaves all the same: the next `seq` in the table,
+in the transaction that makes the change. A running server reads any leaf
+it did not write into its tree before its own next append, so the two
+never fork; its checkpoint catches up at that append. That the host's
+changes are in the log does not make them the server's word checked: the
+host holds the database file, and what its leaf says it did is its own
+account, as it is for everything else in the file (see "What it protects,
+and what it does not" below).
 
 **What it protects, and what it does not.** A checkpoint — the tree's size
 and root — saved somewhere the server cannot reach lets
@@ -1113,9 +1118,9 @@ a re-serialization:
 | `v` | The leaf format, `1`. |
 | `seq` | Its index in the tree, from 0. |
 | `at` | When it was appended, taken under the lock the append holds, so it never goes back along `seq`. A push's or delete's `updated_at` is the same moment. |
-| `action` | `push`, `delete`, `pull`, `approve`, `enroll`, `deny`, `revoke`, `sweep`, `authkey_create`, `authkey_revoke`, `start`, `job_claim`, `job_result`, `job_retry`, `passkey_add`, `passkey_remove`, `sessions_end`, `bootstrap_code`, or `passkey_reset`. |
-| `actor` | Who did it, by `kind`: `device`, with its `id`, `name` and `agent`, for a signed request; `operator` for `RECALL_TOKEN`; `session`, with the `credential_id` of the passkey it signed in with (never its cookie), for the admin page; `authkey`, with its `id` and `tag` (never the key), for the device it enrols; `server` for a sweep, for `start`, which the server appends once it is serving, naming the version it started as, for a bootstrap code it issues, and for a job it claims or settles itself: a merge it does with no worker left, a lease that ran out (`job_result` with the job `queued` again or `failed`), a job it fails for want of anything to merge it; `host` for `recall-server reset-passkeys`. |
-| `subject` | What changed, and the hash of what is now stored — never the content. By `action`: for `push` and `delete`, the file's `project_key`, `file_path`, `deleted`, `stored_sha256`, `base_sha256` (lowercase), `merged` (the server merged the push with what it held, so `stored_sha256` is not the hash of what was sent) and `merge_job` (the job queued to merge it with the version it displaced, or `null`); `project_key` for `pull`; for `job_claim`, the `job_id`, `kind`, `attempt`, `lease_expires_at`, and, for a merge, its `project_key` and `file_path` (never the lease id); for `job_result`, the `job_id`, `project_key`, `file_path`, the `state` it is in now (`done`, `queued` for another attempt, or `failed`), `stored_sha256` (what the file became, when this result wrote the merge to it, `null` otherwise) and `follow_up` (the job that merges it again with a newer version, or `null`); for `job_retry`, the `job_id`, `kind`, `project_key` and `file_path`; for `approve` and `enroll`, the device's `device_id`, `name`, `scope`, `public_key`, `fingerprint`, `ephemeral`, `authkey_id` (the key an `enroll` came by) and `user_code` (the code an `approve` decided) — the key a signature it makes is checked with, after the device row is gone too; `device_id`/`name` for `revoke` and `sweep`; `user_code`/`name` for `deny`; `authkey_id`/`tag`/`ephemeral`/`max_devices` for `authkey_create`; `authkey_id`/`revoke_devices`/`revoked_devices` (the ids this revoked) for `authkey_revoke`; `version` for `start`; `credential_id`/`name`/`first` (the first passkey, which the token and the bootstrap code register) for `passkey_add`, and `credential_id`/`name` for `passkey_remove`, never the key; `ended`, how many other sessions, for `sessions_end`; `expires_at` for `bootstrap_code`, and `passkeys_removed`/`expires_at` for `passkey_reset`, never the code nor its hash. |
+| `action` | `push`, `delete`, `pull`, `approve`, `enroll`, `deny`, `revoke`, `sweep`, `authkey_create`, `authkey_revoke`, `start`, `job_claim`, `job_result`, `job_retry`, `passkey_add`, `passkey_remove`, `sessions_end`, `bootstrap_code`, `passkey_reset`, `admin_rename`, `admin_remove`, or `admin_restore`. |
+| `actor` | Who did it, by `kind`: `device`, with its `id`, `name` and `agent`, for a signed request; `operator` for `RECALL_TOKEN`; `session`, with the `credential_id` of the passkey it signed in with (never its cookie), for the admin page; `authkey`, with its `id` and `tag` (never the key), for the device it enrols; `server` for a sweep, for `start`, which the server appends once it is serving, naming the version it started as, for a bootstrap code it issues, and for a job it claims or settles itself: a merge it does with no worker left, a lease that ran out (`job_result` with the job `queued` again or `failed`), a job it fails for want of anything to merge it; `host` for `recall-server reset-passkeys`, and for `recall-server admin`'s renames, removes and restores. |
+| `subject` | What changed, and the hash of what is now stored — never the content. By `action`: for `push` and `delete`, the file's `project_key`, `file_path`, `deleted`, `stored_sha256`, `base_sha256` (lowercase), `merged` (the server merged the push with what it held, so `stored_sha256` is not the hash of what was sent) and `merge_job` (the job queued to merge it with the version it displaced, or `null`); `project_key` for `pull`; for `job_claim`, the `job_id`, `kind`, `attempt`, `lease_expires_at`, and, for a merge, its `project_key` and `file_path` (never the lease id); for `job_result`, the `job_id`, `project_key`, `file_path`, the `state` it is in now (`done`, `queued` for another attempt, or `failed`), `stored_sha256` (what the file became, when this result wrote the merge to it, `null` otherwise) and `follow_up` (the job that merges it again with a newer version, or `null`); for `job_retry`, the `job_id`, `kind`, `project_key` and `file_path`; for `approve` and `enroll`, the device's `device_id`, `name`, `scope`, `public_key`, `fingerprint`, `ephemeral`, `authkey_id` (the key an `enroll` came by) and `user_code` (the code an `approve` decided) — the key a signature it makes is checked with, after the device row is gone too; `device_id`/`name` for `revoke` and `sweep`; `user_code`/`name` for `deny`; `authkey_id`/`tag`/`ephemeral`/`max_devices` for `authkey_create`; `authkey_id`/`revoke_devices`/`revoked_devices` (the ids this revoked) for `authkey_revoke`; `version` for `start`; `credential_id`/`name`/`first` (the first passkey, which the token and the bootstrap code register) for `passkey_add`, and `credential_id`/`name` for `passkey_remove`, never the key; `ended`, how many other sessions, for `sessions_end`; `expires_at` for `bootstrap_code`, and `passkeys_removed`/`expires_at` for `passkey_reset`, never the code nor its hash; for `admin_rename`, `from`, `to` and `rows` (how many moved, tombstones included), for `admin_remove`, `project_key` and `rows`, and for `admin_restore`, `project_key`, `source` (the file name of the backup it restored from), `added`, `overwritten` and `deleted` (live files it turned into tombstones), each then with `jobs_closed` (the ids of the merge jobs it closed, which were open for the rows it touched) and `backup` (the file name of the backup it took first, never where it is or what it holds). No path and no content: the backup holds those. |
 | `request` | For a device's signed request: the SHA-256 of its body as `Content-Digest` carried it, standard base64; the exact RFC 9421 §2.5 signature base the device's signature verified against; the signature, standard base64; and `body`, the request body itself for `approve`, `deny`, `revoke`, `authkey_create` and `authkey_revoke`, whose bodies are a few bytes with no secret in them, `null` for the rest, a job result's merged file among them. `null` for everyone but a device: the operator, a session, an authkey, the server and the host sign nothing. |
 
 **What a signature proves.** That the device sent a request with this
@@ -1284,7 +1289,10 @@ as an error, and is retried.
 queued or held for it `done`, unapplied, in the same transaction as the
 delete, so nothing merges the deleted notes into a file pushed after it. A
 result the holder posts afterwards is answered as one already recorded, and
-changes nothing.
+changes nothing. The host's `recall-server admin` closes jobs the same
+way, in the transaction of the change: a rename or a remove every job
+under the key, a restore every job for a file it writes; its `error` says
+which (`renamed by admin`, `removed by admin`, `restored by admin`).
 
 **Retries.** A result carrying an `error` (kept to 500 bytes), or a lease
 that runs out, puts the job back in the queue after 1, then 5, then 30
