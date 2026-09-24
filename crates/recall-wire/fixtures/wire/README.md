@@ -32,29 +32,26 @@ scratch database the capture ran against, which no longer exists.
 `openssl` and that key's published private half, so it also shows a
 signature Recall's own code did not make being accepted.
 
-`0.4.0/` was captured from a development build before 0.4.0 was released,
-so its values say `-dev` and its version is not a release. Its shape is the
-one 0.4.0 ships (there was no 0.3.3; the discovery document went out with
-0.4.0). Replace it with a capture from the release archive once 0.4.0 is
-out; that is the one time a file here is rewritten.
+`0.4.0/` was captured from a development build, so its values say `-dev`.
+Its shape is the one 0.4.0 was built with (there was no 0.3.3; the
+discovery document went out with 0.4.0). `v0.4.0` was tagged but its
+release run failed before publishing, so there is no 0.4.0 archive to
+capture again from, and this directory stays as it is.
 
-`0.4.1/` is the same: captured from a development build with
-`./scripts/capture-wire-fixtures.sh 0.4.1 target/release/recall-server`,
-holding only what 0.4.1 adds or changes (the device kinds, and `discovery`,
-which gained `device-sig-v1` and the `devices` capability). Being
-unreleased, it was captured again as the device shapes changed during
-review; replace it once more from the release archive when 0.4.1 is out.
+`0.4.1/` holds only what 0.4.1 adds or changes (the device kinds, and
+`discovery`, which gained `device-sig-v1` and the `devices` capability). It
+was first captured from a development build and captured again from the
+v0.4.1 release archive once 0.4.1 was out, so `discovery` also carries the
+`created` stamp a release build reports.
 
 `0.4.2/` holds what the merge queue and the audit log add or change: the
 job kinds, `push_response_queued` (a push answered with the `merge_job` it
 queued), `health` (with the `worker` and `queue` members a server with a
 worker reports), `device_approve_request_worker`, the audit kinds, and
-`discovery` (with `merge_queue` and `audit`). It was captured from a
-development build with `./scripts/capture-wire-fixtures.sh 0.4.2
-target/release/recall-server`, so its versions say `-dev`; replace it from
-the release archive of the release that ships them. Its worker, and the
-push in the audit kinds, sign with the same published test key the device
-kinds use, with `openssl`.
+`discovery` (with `merge_queue` and `audit`). It was first captured from a
+development build and captured again from the v0.4.2 release archive once
+0.4.2 was out. Its worker, and the push in the audit kinds, sign with the
+same published test key the device kinds use, with `openssl`.
 
 ## Rules
 
