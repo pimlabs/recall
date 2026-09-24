@@ -439,9 +439,11 @@ for _ in $(seq 1 40); do curl -sf "$JQ/health" >/dev/null 2>&1 && break; sleep 0
 merge_keys() {
   curl -s "$JQ/health" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["merge"].keys()))'
 }
-jq_push() { # content, base
+jq_push() { # content, base (none when empty: a base is a SHA-256 or absent)
+  local base=""
+  [ -n "$2" ] && base=",\"base_sha256\":\"$2\""
   curl -s -X POST "${auth[@]}" "${json[@]}" \
-    -d "{\"project_key\":\"acme/app\",\"file_path\":\"topics/auth.md\",\"content\":\"$1\",\"source_env\":\"laptop\",\"base_sha256\":\"$2\"}" \
+    -d "{\"project_key\":\"acme/app\",\"file_path\":\"topics/auth.md\",\"content\":\"$1\",\"source_env\":\"laptop\"$base}" \
     "$JQ/sync"
 }
 OLDER=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
@@ -490,10 +492,10 @@ check "health names the failed job, and no project or file" 'True False' \
   "$(curl -s "$JQ/health" | python3 -c '
 import json,sys; m=json.load(sys.stdin)["merge"]["last_merge_error"]["message"]
 print("see GET /v1/jobs?state=failed" in m, "acme" in m or "topics" in m)')"
-check "the drain is in the audit log: the server claimed the job and failed it" \
-  'revoke job_claim:server job_result:server:failed' \
+check "the worker revoked, the server fails its waiting job in the audit log" \
+  'revoke job_result:server:failed' \
   "$(size=$(curl -s "${auth[@]}" "$JQ/v1/audit/checkpoint" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tree_size"])')
-     curl -s "${auth[@]}" "$JQ/v1/audit/entries?start=$((size - 3))&end=$size" | python3 -c '
+     curl -s "${auth[@]}" "$JQ/v1/audit/entries?start=$((size - 2))&end=$size" | python3 -c '
 import json,sys
 out=[]
 for e in json.load(sys.stdin)["entries"]:

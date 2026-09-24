@@ -17,6 +17,7 @@ use recall_server::audit::merkle;
 use recall_server::merge::Status;
 use recall_server::{now, Config, Server, Store};
 use recall_wire::devices::{self, revoke_authkey_path, revoke_device_path};
+use recall_wire::jobs as wire_jobs;
 use recall_wire::signature::{self, encode_public_key, SigningKey, Target};
 use recall_wire::{
     AuditCheckpoint, AuditConsistencyResponse, AuditEntriesResponse, AuthkeyCreated, Device,
@@ -1512,4 +1513,285 @@ async fn the_verifier_never_skips_signatures_quietly() {
 
     let (code, out) = verify("", &["--self-test"]);
     assert_eq!(code, 0, "RFC 8032's vectors: {out}");
+}
+
+// ---------------------------------------------------------------------------
+// the merge queue
+// ---------------------------------------------------------------------------
+
+/// A log with every job action in it, each the way it happens: a stale push
+/// queued for a worker; the worker's claim, its lease running out, and the
+/// server's `job_result` saying so; the worker's second claim and its merge;
+/// another push queued, the worker revoked, and the server failing that job
+/// with nothing left to merge it; an admin device's retry. Answers the job
+/// ids beside the leaves.
+async fn a_queue_log() -> (Harness, Vec<String>, String, String) {
+    let h = harness_with(|cfg| cfg.merge_enabled = true);
+    // Checked, and not logged in: nothing is merged inline, and a queue left
+    // with no worker is failed rather than merged here.
+    h.server.set_claude_status(Status {
+        checked_at: "2026-10-02T09:13:40.002Z".into(),
+        available: true,
+        logged_in: false,
+        error: String::new(),
+    });
+    let mut worker = Machine::new(21);
+    h.enrol(&mut worker, "worker", "worker").await;
+    let mut laptop = Machine::new(22);
+    h.enrol(&mut laptop, "laptop", "admin").await;
+    let older = recall_wire::content_sha256("an older version");
+    let push = |content: &str| {
+        json!({"project_key": "acme/app", "file_path": "topics/auth.md", "content": content,
+               "source_env": "laptop", "base_sha256": older})
+    };
+    assert_eq!(
+        h.call("POST", "/sync", Some(TOKEN), Some(push("A")))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let queued: Value = ok(h.signed(&laptop, "POST", "/sync", Some(push("B"))).await);
+    let first = queued["merge_job"].as_str().unwrap().to_string();
+
+    let claim = json!({"kinds": ["merge"], "wait_seconds": 0, "lease_seconds": 60});
+    let claimed: Value = ok(h
+        .signed(&worker, "POST", wire_jobs::CLAIM_PATH, Some(claim.clone()))
+        .await);
+    assert_eq!(claimed["job"]["id"], json!(first));
+    // Its lease runs out, as if a minute had passed.
+    let conn = rusqlite::Connection::open(h.dir.path().join("recall.db")).unwrap();
+    conn.execute(
+        "UPDATE jobs SET lease_expires_at = '2000-01-01T00:00:00.000Z' WHERE id = ?1",
+        [&first],
+    )
+    .unwrap();
+    // The next claim finds it run out, and puts the job back to wait out
+    // its retry delay, which the next update waits out too.
+    let claimed: Value = ok(h
+        .signed(&worker, "POST", wire_jobs::CLAIM_PATH, Some(claim.clone()))
+        .await);
+    assert_eq!(claimed["job"], Value::Null);
+    conn.execute(
+        "UPDATE jobs SET not_before = '2000-01-01T00:00:00.000Z' WHERE id = ?1",
+        [&first],
+    )
+    .unwrap();
+    let claimed: Value = ok(h
+        .signed(&worker, "POST", wire_jobs::CLAIM_PATH, Some(claim))
+        .await);
+    assert_eq!(claimed["job"]["attempt"], json!(2));
+    let lease = claimed["job"]["lease_id"].as_str().unwrap();
+    let settled: Value = ok(h
+        .signed(
+            &worker,
+            "POST",
+            &wire_jobs::result_path(&first),
+            Some(json!({"lease_id": lease, "merge": {"content": "A and B"}})),
+        )
+        .await);
+    assert_eq!(settled["state"], json!("done"));
+
+    let queued: Value = ok(h.signed(&laptop, "POST", "/sync", Some(push("C"))).await);
+    let second = queued["merge_job"].as_str().unwrap().to_string();
+    assert_eq!(
+        h.signed(&laptop, "POST", &revoke_device_path(&worker.id), None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    // The revocation starts a drain in the background.
+    for _ in 0..200 {
+        if !h.store.jobs(Some("failed"), 10).unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        h.signed(&laptop, "POST", &wire_jobs::retry_path(&second), None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let leaves = h.leaf_strings().await;
+    (h, leaves, first, second)
+}
+
+/// Every job action appends its leaf: who acted, which job, what it came
+/// to; and a push queued for the worker names its job.
+#[tokio::test]
+async fn every_job_action_appends_its_leaf() {
+    let (_h, leaves, first, second) = a_queue_log().await;
+    let parsed: Vec<Value> = leaves
+        .iter()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let jobs: Vec<String> = parsed
+        .iter()
+        .filter(|l| {
+            l["action"].as_str().unwrap().starts_with("job_")
+                || l["subject"]["merge_job"].is_string()
+        })
+        .map(|l| {
+            let job = l["subject"]["job_id"]
+                .as_str()
+                .or(l["subject"]["merge_job"].as_str())
+                .unwrap();
+            let job = if job == first {
+                "first"
+            } else if job == second {
+                "second"
+            } else {
+                job
+            };
+            format!(
+                "{} {} {job}",
+                l["action"].as_str().unwrap(),
+                l["actor"]["kind"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(
+        jobs,
+        [
+            "push device first",
+            "job_claim device first",
+            "job_result server first",
+            "job_claim device first",
+            "job_result device first",
+            "push device second",
+            "job_result server second",
+            "job_retry device second",
+        ],
+        "{parsed:#?}"
+    );
+    let of = |action: &str, kind: &str, job: &str| -> &Value {
+        parsed
+            .iter()
+            .find(|l| {
+                l["action"] == action && l["actor"]["kind"] == kind && l["subject"]["job_id"] == job
+            })
+            .unwrap()
+    };
+    let claim = of("job_claim", "device", &first);
+    assert_eq!(claim["subject"]["attempt"], json!(1));
+    assert_eq!(claim["subject"]["file_path"], json!("topics/auth.md"));
+    assert!(claim["request"]["signature_base"]
+        .as_str()
+        .unwrap()
+        .contains("/v1/jobs/claim"));
+    assert!(
+        !leaves.iter().any(|l| l.contains("lse_")),
+        "a lease id is in the log"
+    );
+    let expired = of("job_result", "server", &first);
+    assert_eq!(expired["subject"]["state"], json!("queued"));
+    assert_eq!(expired["request"], Value::Null);
+    let merged = of("job_result", "device", &first);
+    assert_eq!(merged["subject"]["state"], json!("done"));
+    assert_eq!(
+        merged["subject"]["stored_sha256"],
+        json!(recall_wire::content_sha256("A and B"))
+    );
+    assert_eq!(
+        merged["request"]["body"],
+        Value::Null,
+        "the merged file is not kept"
+    );
+    let failed = of("job_result", "server", &second);
+    assert_eq!(failed["subject"]["state"], json!("failed"));
+    assert_eq!(failed["subject"]["stored_sha256"], Value::Null);
+}
+
+/// A log with the queue in it verifies offline, and each way a server could
+/// misstate a job is refused.
+#[tokio::test]
+async fn a_queue_log_verifies_offline_and_forged_job_leaves_are_refused() {
+    let (h, honest, first, _) = a_queue_log().await;
+    let (code, out) = verify(&h.export().await, &[]);
+    assert_eq!(code, 0, "{out}");
+
+    let parsed: Vec<Value> = honest
+        .iter()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let position = |action: &str, kind: &str, n: usize| -> usize {
+        parsed
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l["action"] == action && l["actor"]["kind"] == kind)
+            .nth(n)
+            .unwrap_or_else(|| panic!("no {action} by a {kind}"))
+            .0
+    };
+    // `honest` with the leaf at `at` changed by `edit`, or, given no edit,
+    // removed and the rest renumbered; the root recomputed.
+    let forged = |at: usize, edit: Option<&dyn Fn(&mut Value)>| -> String {
+        let mut leaves: Vec<Value> = parsed.clone();
+        match edit {
+            Some(edit) => edit(&mut leaves[at]),
+            None => {
+                leaves.remove(at);
+            }
+        }
+        let leaves: Vec<String> = leaves
+            .into_iter()
+            .enumerate()
+            .map(|(seq, mut l)| {
+                l["seq"] = json!(seq);
+                serde_json::to_string(&l).unwrap()
+            })
+            .collect();
+        export_of(&leaves)
+    };
+    let refused = |name: &str, export: String, want: &str| {
+        let (code, out) = verify(&export, &[]);
+        assert_eq!(code, 1, "{name} was accepted: {out}");
+        assert!(out.contains(want), "{name}: wanted {want:?} in {out}");
+    };
+
+    refused(
+        "the lease that ran out, left out",
+        forged(position("job_result", "server", 0), None),
+        &format!("{first} was claimed while dev_"),
+    );
+    refused(
+        "an attempt miscounted",
+        forged(
+            position("job_claim", "device", 1),
+            Some(&|l: &mut Value| l["subject"]["attempt"] = json!(1)),
+        ),
+        "at attempt 1, not 2",
+    );
+    refused(
+        "a worker's result moved onto another job",
+        forged(
+            position("job_result", "device", 0),
+            Some(&|l: &mut Value| l["subject"]["job_id"] = json!("job_other")),
+        ),
+        "not a job_result",
+    );
+    refused(
+        "a retry of a job that had not failed",
+        forged(
+            position("job_result", "server", 1),
+            Some(&|l: &mut Value| l["subject"]["state"] = json!("queued")),
+        ),
+        "was retried while queued",
+    );
+    refused(
+        "a merged push that queued a job too",
+        forged(
+            position("push", "device", 0),
+            Some(&|l: &mut Value| l["subject"]["merged"] = json!(true)),
+        ),
+        "a merged push queued a merge job",
+    );
+    refused(
+        "a job no push queued",
+        forged(
+            position("push", "device", 0),
+            Some(&|l: &mut Value| l["subject"]["merge_job"] = Value::Null),
+        ),
+        "which no push or result queued",
+    );
 }

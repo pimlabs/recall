@@ -31,7 +31,7 @@ is far less likely than a bug in one. It checks:
    - the base's `keyid` is the actor, no (keyid, nonce) appears twice, and
      its `content-digest` line is `body_sha256`;
    - its method, path and query are the action's route: a pull's
-     `project_key` is the query's, a revoke's id the path's;
+     `project_key` is the query's, a revoke's or a job's id the path's;
    - where the leaf keeps the body (the device-management actions), the
      body hashes to `body_sha256` and says what `subject` says.
    A leaf nobody signed (the operator's, an authkey's, the server's) must
@@ -39,7 +39,11 @@ is far less likely than a bug in one. It checks:
 4. The rest the server enforces, so a log it did not write fails: an id
    approved or enrolled twice, a device-management action signed by a
    device without the admin scope, a device revoked twice, an enrolment
-   by an authkey never created or already revoked.
+   by an authkey never created or already revoked; a job action signed by
+   a device that is not a worker, or a worker signing anything else; a job
+   no push or result queued, claimed while a live worker holds it or once
+   it is settled, settled by a worker that does not hold it, retried
+   before it failed, or counted at the wrong attempt.
 
 What a signature proves is that a device sent a request with that method,
 path, query and body digest — not what the server did with it. A push's or
@@ -361,6 +365,9 @@ SUBJECT_KEYS = {
     "authkey_create": ["authkey_id", "tag", "ephemeral", "max_devices"],
     "authkey_revoke": ["authkey_id", "revoke_devices", "revoked_devices"],
     "start": ["version"],
+    "job_claim": ["job_id", "kind", "attempt", "lease_expires_at", "project_key", "file_path"],
+    "job_result": ["job_id", "project_key", "file_path", "state", "stored_sha256", "follow_up"],
+    "job_retry": ["job_id", "kind", "project_key", "file_path"],
 }
 # Who may do what: a device or the operator through the API, an authkey
 # enrolling the one device it approves, the server on its own.
@@ -376,10 +383,20 @@ ACTORS = {
     "enroll": {"authkey"},
     "sweep": {"server"},
     "start": {"server"},
+    # A worker, or the server merging without one; its own housekeeping
+    # (a lease run out, a job failed for want of anything to merge it)
+    # is a result too.
+    "job_claim": {"device", "server"},
+    "job_result": {"device", "server"},
+    "job_retry": {"device", "operator"},
 }
 # The actions whose request body the leaf keeps, and their routes.
 KEEPS_BODY = {"approve", "deny", "revoke", "authkey_create", "authkey_revoke"}
-ADMIN_ACTIONS = KEEPS_BODY
+ADMIN_ACTIONS = KEEPS_BODY | {"job_retry"}
+# The actions a worker device signs, and the only ones it may.
+WORKER_ACTIONS = {"job_claim", "job_result"}
+SCOPES = ("sync", "admin", "worker")
+JOB_STATES = ("queued", "leased", "done", "failed")
 COVERED = ["@method", "@authority", "@path", "@query", "content-digest", "recall-protocol"]
 TIMESTAMP = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z")
 HEX64 = re.compile(r"[0-9a-f]{64}")
@@ -456,8 +473,11 @@ def check_shape(leaf, position):
         expect_bool(subject["merged"], "subject.merged")
         if action == "delete" and subject["merged"]:
             raise Invalid("a delete says it merged")
-        if subject["merge_job"] is not None:
-            raise Invalid("subject.merge_job is not null")
+        job = subject["merge_job"]
+        if job is not None:
+            expect_str(job, "subject.merge_job")
+            if action == "delete" or subject["merged"]:
+                raise Invalid(f"a {'delete' if action == 'delete' else 'merged push'} queued a merge job")
     elif action in ("approve", "enroll"):
         for key in ("device_id", "name", "scope", "fingerprint"):
             expect_str(subject[key], f"subject.{key}")
@@ -465,7 +485,7 @@ def check_shape(leaf, position):
         fingerprint = "SHA256:" + base64.b64encode(hashlib.sha256(key).digest()).decode().rstrip("=")
         if subject["fingerprint"] != fingerprint:
             raise Invalid("subject.fingerprint is not the public key's")
-        if subject["scope"] not in ("sync", "admin"):
+        if subject["scope"] not in SCOPES:
             raise Invalid(f"subject.scope is {subject['scope']!r}")
         expect_bool(subject["ephemeral"], "subject.ephemeral")
         if action == "approve":
@@ -477,7 +497,7 @@ def check_shape(leaf, position):
             if subject["authkey_id"] != actor["id"] or subject["user_code"] is not None:
                 raise Invalid("an enrolled device does not name the authkey that enrolled it")
             if subject["scope"] != "sync":
-                raise Invalid("an authkey enrolled a device with the admin scope")
+                raise Invalid(f"an authkey enrolled a device with the {subject['scope']} scope")
     elif action == "authkey_create":
         expect_str(subject["authkey_id"], "subject.authkey_id")
         expect_str(subject["tag"], "subject.tag")
@@ -492,6 +512,29 @@ def check_shape(leaf, position):
             raise Invalid("subject.revoked_devices is not a list of ids")
         if revoked and not subject["revoke_devices"]:
             raise Invalid("devices were revoked though revoke_devices is false")
+    elif action == "job_claim":
+        expect_str(subject["job_id"], "subject.job_id")
+        expect_str(subject["kind"], "subject.kind")
+        if not is_int(subject["attempt"]) or subject["attempt"] < 1:
+            raise Invalid("subject.attempt is not an attempt")
+        if not isinstance(subject["lease_expires_at"], str) or not TIMESTAMP.fullmatch(subject["lease_expires_at"]):
+            raise Invalid("subject.lease_expires_at is not a timestamp")
+        if subject["kind"] == "merge":
+            expect_str(subject["project_key"], "subject.project_key")
+            expect_str(subject["file_path"], "subject.file_path")
+    elif action == "job_result":
+        for key in ("job_id", "project_key", "file_path"):
+            expect_str(subject[key], f"subject.{key}")
+        if subject["state"] not in ("queued", "done", "failed"):
+            raise Invalid(f"subject.state is {subject['state']!r}")
+        stored = subject["stored_sha256"]
+        if stored is not None:
+            if not isinstance(stored, str) or not HEX64.fullmatch(stored):
+                raise Invalid("subject.stored_sha256 is not a SHA-256")
+            if subject["state"] != "done" or subject["follow_up"] is not None:
+                raise Invalid("a result wrote the file but the job is not done, or has a follow-up")
+        if subject["follow_up"] is not None:
+            expect_str(subject["follow_up"], "subject.follow_up")
     else:
         for key, value in subject.items():
             expect_str(value, f"subject.{key}")
@@ -554,6 +597,10 @@ def route_of(action, subject):
         return "POST", f"/v1/devices/{urllib.parse.quote(subject['device_id'], safe='')}/revoke"
     if action == "authkey_revoke":
         return "POST", f"/v1/authkeys/{urllib.parse.quote(subject['authkey_id'], safe='')}/revoke"
+    if action == "job_result":
+        return "POST", f"/v1/jobs/{urllib.parse.quote(subject['job_id'], safe='')}/result"
+    if action == "job_retry":
+        return "POST", f"/v1/jobs/{urllib.parse.quote(subject['job_id'], safe='')}/retry"
     return {
         "push": ("POST", "/sync"),
         "delete": ("POST", "/sync"),
@@ -561,6 +608,7 @@ def route_of(action, subject):
         "approve": ("POST", "/v1/devices/approve"),
         "deny": ("POST", "/v1/devices/deny"),
         "authkey_create": ("POST", "/v1/authkeys"),
+        "job_claim": ("POST", "/v1/jobs/claim"),
     }[action]
 
 
@@ -605,6 +653,7 @@ class State:
     def __init__(self):
         self.devices = {}  # id -> {"public_key", "scope", "ephemeral", "authkey_id", "gone"}
         self.authkeys = {}  # id -> {"revoked": bool}
+        self.jobs = {}  # id -> {"file", "state", "holder", "attempt"}
         self.nonces = set()
         self.last_at = ""
 
@@ -651,6 +700,8 @@ def check_request(leaf, state, verify):
         raise Invalid(f"signed by {actor['id']}, which was revoked or swept before it")
     if action in ADMIN_ACTIONS and device["scope"] != "admin":
         raise Invalid(f"a {action} signed by {actor['id']}, which does not have the admin scope")
+    if (action in WORKER_ACTIONS) != (device["scope"] == "worker"):
+        raise Invalid(f"a {action} signed by {actor['id']}, whose scope is {device['scope']}")
     if verify is not None:
         signature = b64_strict(request["signature"], "request.signature", length=64)
         if not verify(device["public_key"], request["signature_base"].encode("ascii"), signature):
@@ -699,6 +750,59 @@ def apply(leaf, state):
             if device is None or device["authkey_id"] != subject["authkey_id"] or device["gone"]:
                 raise Invalid(f"{device_id} is not a live device {subject['authkey_id']} enrolled")
             device["gone"] = True
+    elif action in ("push", "delete"):
+        file = (subject["project_key"], subject["file_path"])
+        if action == "delete":
+            # A delete closes the file's open jobs in its own transaction.
+            for job in state.jobs.values():
+                if job["file"] == file and job["state"] in ("queued", "leased"):
+                    job.update(state="done", holder=None)
+        elif subject["merge_job"] is not None:
+            queue(state, subject["merge_job"], file)
+    elif action in ("job_claim", "job_result", "job_retry"):
+        apply_job(leaf, state)
+
+
+def queue(state, job_id, file):
+    if job_id in state.jobs:
+        raise Invalid(f"{job_id} was queued before")
+    state.jobs[job_id] = {"file": file, "state": "queued", "holder": None, "attempt": 0}
+
+
+def apply_job(leaf, state):
+    """A job's leaf follows from what the log says of that job so far."""
+    action, subject, actor = leaf["action"], leaf["subject"], leaf["actor"]
+    job = state.jobs.get(subject["job_id"])
+    if job is None:
+        raise Invalid(f"a {action} of {subject['job_id']}, which no push or result queued")
+    if (subject["project_key"], subject["file_path"]) != job["file"]:
+        raise Invalid(f"a {action} of {subject['job_id']} names another file than the one it was queued for")
+    who = actor.get("id", "server")
+    if action == "job_claim":
+        holder = job["holder"]
+        if job["state"] == "leased":
+            # The server frees a revoked worker's leases, and its own after a
+            # restart, before it claims them again; nothing frees a live
+            # worker's.
+            if holder != "server" and not state.devices[holder]["gone"]:
+                raise Invalid(f"{subject['job_id']} was claimed while {holder} held it")
+        elif job["state"] != "queued":
+            raise Invalid(f"{subject['job_id']} was claimed once it was {job['state']}")
+        if subject["attempt"] != job["attempt"] + 1:
+            raise Invalid(f"{subject['job_id']} was claimed at attempt {subject['attempt']}, not {job['attempt'] + 1}")
+        job.update(state="leased", holder=who, attempt=subject["attempt"])
+    elif action == "job_result":
+        if actor["kind"] == "device" and (job["state"] != "leased" or job["holder"] != who):
+            raise Invalid(f"a result for {subject['job_id']} from {who}, which does not hold it")
+        if job["state"] not in ("queued", "leased"):
+            raise Invalid(f"a result for {subject['job_id']} once it was {job['state']}")
+        job.update(state=subject["state"], holder=None)
+        if subject["follow_up"] is not None:
+            queue(state, subject["follow_up"], job["file"])
+    else:
+        if job["state"] != "failed":
+            raise Invalid(f"{subject['job_id']} was retried while {job['state']}")
+        job.update(state="queued", holder=None, attempt=0)
 
 
 # ---------------------------------------------------------------------------

@@ -383,7 +383,9 @@ impl Store {
     /// a merge of it with whatever it displaced, in one transaction with
     /// the push's leaf, which `build_leaf` makes knowing what was queued:
     /// the job's `stored` side is read under the same lock as the write, so
-    /// it is exactly the version this push replaced.
+    /// it is exactly the version this push replaced. Answers what was
+    /// queued and the write's `updated_at`, which is its leaf's `at`, as
+    /// every audited write's is; `incoming.updated_at` is not used.
     pub fn write_and_queue_merge_audited(
         &self,
         project_key: &str,
@@ -392,9 +394,15 @@ impl Store {
         job_id: &str,
         now: OffsetDateTime,
         build_leaf: impl FnOnce(u64, &str, &Queued) -> Vec<u8>,
-    ) -> Result<Queued> {
-        self.audited(
-            |tx, _| {
+    ) -> Result<(Queued, String)> {
+        let mut stamped = None;
+        let queued = self.audited(
+            |tx, at| {
+                stamped = Some(at.to_string());
+                let incoming = MergeSide {
+                    updated_at: at.to_string(),
+                    ..incoming.clone()
+                };
                 let displaced = read_file(tx, project_key, file_path)?
                     .filter(|e| !e.deleted && e.content != incoming.content);
                 write_file(
@@ -403,7 +411,7 @@ impl Store {
                     file_path,
                     &incoming.content,
                     &incoming.source_env,
-                    &incoming.updated_at,
+                    at,
                 )?;
                 let Some(displaced) = displaced else {
                     return Ok(Outcome::Commit(Queued::Nothing));
@@ -424,13 +432,14 @@ impl Store {
                         &displaced.source_env,
                         &displaced.updated_at,
                     ),
-                    incoming: incoming.clone(),
+                    incoming,
                 };
                 insert_merge_job(tx, job_id, &input, None, now)?;
                 Ok(Outcome::Commit(Queued::Queued(job_id.to_string())))
             },
             build_leaf,
-        )
+        )?;
+        Ok((queued, stamped.context("the write ran")?))
     }
 
     /// Puts every job whose lease ran out back in the queue, or fails it
@@ -672,7 +681,10 @@ impl Store {
                     .outcome();
                 let change = (job.project_key, job.file_path, stored);
                 Ok(Outcome::Commit((
-                    Settlement::Recorded(Settled { response, ..settled }),
+                    Settlement::Recorded(Settled {
+                        response,
+                        ..settled
+                    }),
                     Some(change),
                 )))
             },
@@ -1115,6 +1127,7 @@ mod tests {
             self.write_and_queue_merge_audited(pk, fp, incoming, job_id, now, |seq, at, _| {
                 test_leaf(seq, at)
             })
+            .map(|(queued, _)| queued)
         }
 
         fn claim_job(
@@ -1124,9 +1137,7 @@ mod tests {
             lease: Duration,
             now: OffsetDateTime,
         ) -> Result<Option<Job>> {
-            self.claim_job_audited(kinds, lease_id, lease, now, |seq, at, _| {
-                test_leaf(seq, at)
-            })
+            self.claim_job_audited(kinds, lease_id, lease, now, |seq, at, _| test_leaf(seq, at))
         }
 
         fn settle_job(
@@ -1229,7 +1240,15 @@ mod tests {
             ("A", "laptop")
         );
         assert_eq!(m.stored.sha256, content_sha256("A"));
-        assert_eq!(m.incoming, side("B", "cloud", 1));
+        // Stamped as the file it stored was: with its leaf's `at`.
+        let stored = st.get(P, F).unwrap().unwrap();
+        assert_eq!(
+            m.incoming,
+            MergeSide {
+                updated_at: stored.updated_at,
+                ..side("B", "cloud", 1)
+            }
+        );
         // Leased: nobody else gets it.
         assert!(st
             .claim_job(&merge_kinds(), "lse_2", Duration::from_secs(120), at(3))

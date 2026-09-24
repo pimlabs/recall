@@ -1171,7 +1171,12 @@ recomputes the tree with nothing but the standard library and checks:
    what `subject` says was done.
 4. What the server enforces holds: no device id approved twice, an admin
    action signed only by an `admin` device, no revoke of a revoked device,
-   no enrolment by an authkey never created or already revoked.
+   no enrolment by an authkey never created or already revoked. A job's
+   leaves follow from each other: it was queued by a push or a result
+   that names it, a worker signs its claims and results and nothing else,
+   a result comes from the worker holding the job, no one claims it while
+   a live worker holds it or once it is settled, each claim is the next
+   attempt, and only a failed job is retried.
 
 Signatures are checked with the `cryptography` package when it works, and
 otherwise with an Ed25519 of the script's own (RFC 8032, some milliseconds

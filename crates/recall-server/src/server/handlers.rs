@@ -193,9 +193,7 @@ pub(super) async fn handle_push(
     if stale.is_some() {
         match state.store.enrolled_worker() {
             Ok(Some(_)) => match merge_here_instead(&state) {
-                Ok(None) => {
-                    return queue_merge(&state, req, incoming, &actor, request.as_ref())
-                }
+                Ok(None) => return queue_merge(&state, req, incoming, &actor, request.as_ref()),
                 Ok(Some(why)) => eprintln!(
                     "{why}, so {}/{} is merged here rather than queued",
                     req.project_key, req.file_path
@@ -288,12 +286,12 @@ fn queue_merge(
         Ok(id) => id,
         Err(e) => return internal(e),
     };
-    let updated_at = now();
+    // Stamped with the push's leaf's `at` in the store.
     let side = MergeSide {
         sha256: recall_wire::content_sha256(&incoming),
         content: incoming,
         source_env: req.source_env.clone(),
-        updated_at: updated_at.clone(),
+        updated_at: String::new(),
     };
     // The push's leaf: what it stored is what it sent, and, when it was
     // queued, the job that will merge it.
@@ -325,13 +323,17 @@ fn queue_merge(
             )
         },
     );
+    let (queued, updated_at) = match queued {
+        Ok(done) => done,
+        Err(e) => return internal(e),
+    };
     let merge_job = match queued {
-        Ok(Queued::Queued(id)) => {
+        Queued::Queued(id) => {
             state.jobs_ready.notify_waiters();
             Some(id)
         }
-        Ok(Queued::Nothing) => None,
-        Ok(Queued::Full) => {
+        Queued::Nothing => None,
+        Queued::Full => {
             // /health answers anyone, so it names no project and no file;
             // the log does.
             let message = format!(
@@ -343,7 +345,6 @@ fn queue_merge(
             state.write().last_merge_error = Some(MergeError { message, at: now() });
             None
         }
-        Err(e) => return internal(e),
     };
     json(
         StatusCode::OK,
