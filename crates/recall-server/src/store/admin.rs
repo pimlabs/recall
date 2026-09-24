@@ -548,15 +548,19 @@ impl Store {
         // SQLITE_OPEN_READ_WRITE quietly falls back to read-only when the
         // file is not writable, and the first write would then fail half
         // way through a command that has already taken its backup.
-        if access == Access::Write && conn.is_readonly(rusqlite::DatabaseName::Main)? {
+        if access == Access::Write && conn.is_readonly(rusqlite::MAIN_DB)? {
             bail!("{} is not writable by this user", path.display());
         }
         // The journal mode is the file's own and is left alone: WAL once a
         // current server has opened it. How durable a commit is, though, is
         // this connection's setting, and a change here is acknowledged to
         // the owner just as a push is to a client, so it is synced as the
-        // server's are (see `use_durable_wal` in the store).
-        conn.execute_batch("PRAGMA synchronous = FULL")?;
+        // server's are, and keeps the WAL to the same size (see
+        // `use_durable_wal` in the store).
+        conn.execute_batch(&format!(
+            "PRAGMA synchronous = FULL; PRAGMA journal_size_limit = {}",
+            super::WAL_SIZE_LIMIT
+        ))?;
 
         let columns =
             memory_files_columns(&conn).with_context(|| format!("reading {}", path.display()))?;
@@ -606,11 +610,13 @@ impl Store {
         // reads the log in, checked, before it appends: most of it ahead of
         // its transaction (`Store::audit_read_ahead`), the rest under the
         // write lock, as `Store::audited_each` catches up with the table.
+        let file = super::file_id(&conn);
         Ok(Self {
             state: Mutex::new(super::StoreState {
                 conn,
                 audit: crate::audit::merkle::Tree::new(),
                 audit_at: String::new(),
+                file,
             }),
         })
     }
@@ -989,8 +995,9 @@ fn busy(err: rusqlite::Error, doing: &str) -> anyhow::Error {
     match err.sqlite_error_code() {
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => anyhow!(
             "the database stayed locked for {} seconds while {doing} (another process \
-             mid-write: the server, or another admin command). Rolled back. Run the command \
-             again",
+             mid-write: the server, or another admin command; or, on a file still in the \
+             rollback journal because no current server has opened it yet, a reader too, \
+             such as sqlite-web mid-read). Rolled back. Run the command again",
             BUSY_TIMEOUT.as_secs()
         ),
         _ => anyhow::Error::from(err).context(format!("{doing} failed")),
@@ -1401,5 +1408,51 @@ mod tests {
             )
             .unwrap();
         assert_eq!(restore.undone(&st).unwrap().paths, ["a.md"]);
+    }
+
+    /// An admin command's connection syncs every commit, as the server's
+    /// does, and keeps the WAL to the same size, whether it opened to read
+    /// or to write: its own settings, since neither is stored in the file.
+    #[test]
+    fn an_admin_connection_syncs_every_commit_as_the_servers_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, st) = live(&dir);
+        for store in [st, Store::open_existing(&path, Access::Read).unwrap()] {
+            let (sync, limit): (i64, i64) = store
+                .with_raw(|c| {
+                    Ok((
+                        c.query_row("PRAGMA synchronous", [], |r| r.get(0))?,
+                        c.query_row("PRAGMA journal_size_limit", [], |r| r.get(0))?,
+                    ))
+                })
+                .unwrap();
+            assert_eq!(sync, 2, "synchronous=FULL");
+            assert_eq!(limit, super::super::WAL_SIZE_LIMIT);
+        }
+    }
+
+    /// An admin command holds the file it opened too: moved aside under it
+    /// (a restore run while it waited for its confirmation), the change is
+    /// refused before anything is written, rather than made in the file
+    /// that is no longer the database.
+    #[cfg(unix)]
+    #[test]
+    fn a_change_to_a_database_moved_aside_under_the_command_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, st) = live(&dir);
+        let plan = st.plan_remove("old/key").unwrap();
+        let aside = dir.path().join("aside");
+        std::fs::create_dir(&aside).unwrap();
+        for f in ["recall.db", "recall.db-wal", "recall.db-shm"] {
+            if dir.path().join(f).exists() {
+                std::fs::rename(dir.path().join(f), aside.join(f)).unwrap();
+            }
+        }
+        let err = st.apply(&plan, leaf).unwrap_err();
+        assert!(format!("{err:#}").contains("moved or replaced"), "{err:#}");
+        drop(st);
+        let moved = Store::open_existing(&aside.join("recall.db"), Access::Read).unwrap();
+        assert_eq!(moved.rows("old/key").unwrap().len(), 3, "nothing removed");
+        assert!(!path.exists());
     }
 }

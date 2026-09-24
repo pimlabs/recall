@@ -161,10 +161,14 @@ fn last_at(conn: &Connection, size: u64) -> Result<String> {
 ///
 /// A table that holds fewer leaves than `held` was rolled back under a
 /// running server, and nothing more is appended onto it until the server
-/// restarts and reads it afresh. A backup copied over the file of a running
-/// server is not reliably seen here: under WAL the server's connection goes
-/// by its WAL and its cache, not the file, and writes on over the copy.
-/// That is why a restore stops the server first (`deploy/README.md`).
+/// restarts and reads it afresh. A backup put in place of the file of a
+/// running server is mostly not seen here, since under WAL the server's
+/// connection goes by its WAL and its cache rather than the file. The
+/// check that the path still names the file it opened (`FileId` in the
+/// store), made before this, catches a file moved aside or replaced by a
+/// new one; one overwritten in place is caught by neither, which is why a
+/// restore stops the server first and never copies over `recall.db`
+/// (`deploy/README.md`).
 fn catch_up(conn: &Connection, held: u64) -> Result<(Vec<Hash>, Option<String>)> {
     let stored: i64 =
         conn.query_row("SELECT COALESCE(MAX(seq) + 1, 0) FROM audit_log", [], |r| {
@@ -287,6 +291,16 @@ impl Store {
         build_leaves: impl FnOnce(u64, &str, &T) -> Vec<Vec<u8>>,
     ) -> Result<T> {
         let mut state = self.lock();
+        // Before anything is written: is the path still the file this
+        // connection opened? See `FileId` in the store.
+        if let Some(opened) = state.file {
+            if super::file_id(&state.conn) != Some(opened) {
+                bail!(
+                    "the database file {} was moved or replaced under this running server,                      which would otherwise go on writing into the file it had opened. Nothing                      was written. Restart the server, so it opens the file that is there now",
+                    state.conn.path().unwrap_or("")
+                );
+            }
+        }
         let (held, held_at) = (state.audit.size(), state.audit_at.clone());
         // `IMMEDIATE`: the database's write lock from the start, so another
         // process (`reset-passkeys`, `admin`) cannot append between the

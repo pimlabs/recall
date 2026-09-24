@@ -1568,6 +1568,45 @@ fn a_lock_held_past_the_busy_timeout_fails_cleanly() {
     assert_eq!(pulled(server.addr, OLD), 4);
 }
 
+/// The other case that stays locked: a file still in the rollback journal,
+/// which an admin command leaves as it finds it (only a server switches a
+/// file to WAL), where a reader mid-read does hold a change up past the
+/// busy timeout. The message names that case too, rather than sending the
+/// owner to look for a writer that is not there.
+#[test]
+fn a_reader_holds_up_a_change_on_a_file_still_in_the_rollback_journal() {
+    let fx = Fixture::new();
+    let before = fx.dump();
+    let mode: String = Connection::open(fx.db())
+        .unwrap()
+        .query_row("PRAGMA journal_mode = DELETE", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(mode, "delete");
+
+    let reader = Connection::open(fx.db()).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let _: i64 = reader
+        .query_row("SELECT count(*) FROM memory_files", [], |r| r.get(0))
+        .unwrap();
+    let out = fx.admin(&["remove", OLD, "--yes"]);
+    reader.execute_batch("COMMIT").unwrap();
+
+    assert_exit(&out, 1);
+    let (_, stderr) = text(&out);
+    assert!(stderr.contains("stayed locked"), "{stderr}");
+    assert!(
+        stderr.contains("still in the rollback journal") && stderr.contains("a reader too"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("The database was not changed."), "{stderr}");
+    assert_eq!(fx.dump(), before);
+    let mode: String = Connection::open(fx.db())
+        .unwrap()
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(mode, "delete", "the command left the journal mode alone");
+}
+
 /// What WAL changed for these commands: a reader mid-read, as sqlite-web
 /// is while a page loads, no longer holds a change up (under the rollback
 /// journal this was the case that timed out). The change commits at once,

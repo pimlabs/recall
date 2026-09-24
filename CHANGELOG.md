@@ -19,8 +19,11 @@ break will be described here in full rather than smoothed over.
 - **The server keeps its database in SQLite's WAL mode**, with every
   commit synced before the client is answered (`synchronous=FULL`), so a
   `200` still means the push is on disk. The first start converts the
-  existing `recall.db` by itself, once; nothing needs doing first, and an
-  older image still opens the file if you roll back. A push and a pull each
+  existing `recall.db` by itself, once; nothing needs doing first. An older
+  image rolled back to still serves the file, but its README's `cp` backup
+  and restore are wrong for it: use this version's procedures after a
+  rollback, or convert the file back first with the one command
+  `deploy/README.md` gives under "Updating". A push and a pull each
   take well under half as long on the server as they did (measured
   in-process, beside `use_durable_wal` in `store.rs`), and a reader such as
   sqlite-web or an admin command's backup no longer holds up a push or a
@@ -34,12 +37,30 @@ break will be described here in full rather than smoothed over.
   with `VACUUM INTO` before switching ingress or editing by hand, and a
   restore that moves all three files aside together before copying a
   snapshot in, since a WAL left beside a restored `recall.db` is replayed
-  into it. The volume has to be a local filesystem, never NFS or SMB.
+  into it. The restore stops and starts the containers by name
+  (`docker stop recall-server recall-sqlite-web`), so it works on every
+  ingress without `-f`, and checks the snapshot exists before it moves
+  anything. The volume has to be a local filesystem, never NFS or SMB.
+- **A server whose `recall.db` was moved or replaced under it refuses to
+  write.** Every push and pull answers 500 until it is restarted, rather
+  than 200 for writes into the file it had open, which after a restore
+  done without stopping it is no longer the database.
+- **The compose files give `recall-server` 60 seconds to stop**
+  (`stop_grace_period`), where Docker's default is 10: long enough for a
+  merge in flight to finish and for the server to empty the WAL into
+  `recall.db` as it stops. It takes effect at the next `docker compose up`.
+- **SQLite 3.51.3, up from 3.46.0** (rusqlite 0.39). It fixes a race in
+  which a checkpoint on one connection and a write that starts the WAL over
+  on another could copy stale pages into the database. Under WAL the
+  server and `recall-server admin` are two such connections.
 - **sqlite-web works while the server runs.** On its read-only mount it
   cannot create `recall.db-shm` itself, so it can show an error while
   `recall-server` is stopped. With direct TLS, whose sqlite-web mounts the
-  one file, it shows the database as last checkpointed, which the server
-  now does every ten minutes and when it stops.
+  one file, it can keep a WAL of its own inside its container, and shows the
+  database as last checkpointed, which the server now does every ten
+  minutes and when it stops, and a page loaded during a checkpoint can be
+  inconsistent or fail until reloaded. It still cannot change the
+  database.
 
 ## 0.4.2 — 2026-09-24
 

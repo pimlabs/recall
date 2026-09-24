@@ -42,6 +42,12 @@ services:
         GIT_COMMIT: ${GIT_COMMIT:-}
     container_name: recall-server
     restart: unless-stopped
+    # Docker's default is 10 seconds, then SIGKILL. A stop lets the requests
+    # in flight finish (a merge among them can take RECALL_MERGE_TIMEOUT_MS,
+    # 45 seconds by default) and then empties the WAL into recall.db, so the
+    # file left behind is the whole database. `docker stop recall-server`
+    # waits this long too. scripts/compose-check.py asserts it.
+    stop_grace_period: 60s
     environment:
       RECALL_TOKEN: ${RECALL_TOKEN:?set RECALL_TOKEN in deploy/.env}
       # Not 443: the container runs as the unprivileged `node` user (see
@@ -169,10 +175,13 @@ services:
     # file (rather than written in place) needs `docker compose restart
     # sqlite-web` to be seen; and recall.db-wal and recall.db-shm beside it
     # are invisible here. The server keeps the database in WAL mode, so
-    # this shows recall.db as last checkpointed (the server does that every
-    # ten minutes), and a page loaded mid-checkpoint can fail until
+    # SQLite in this container can keep a -wal and -shm of its own inside the
+    # container, unrelated to the server's, and shows recall.db as last
+    # checkpointed (the server does that every ten minutes), read with no
+    # coordination with the server's checkpoints: a page loaded while one is
+    # writing can mix rows from before and after it, or fail, until
     # reloaded. It cannot harm the database: the mount is read-only, and
-    # the server never relies on anything this container does.
+    # the server never reads anything this container writes.
     volumes:
       - type: volume
         source: recall-data

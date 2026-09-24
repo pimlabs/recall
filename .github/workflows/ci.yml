@@ -153,8 +153,10 @@ jobs:
       # beside the server only while it has no port, no ingress label or
       # network, and no volume the server has. One YAML line undoes any of
       # those, so each is asserted, and each assertion is shown to fail on a
-      # copy of the file with that line added.
-      - name: The merge worker stays unreachable in both compose files
+      # copy of the file with that line added. The same for what the
+      # database procedures rely on in all three files: the container names
+      # the restore stops by, and the server's stop grace period.
+      - name: The compose files keep the worker unreachable and the procedures' names
         run: python3 scripts/compose-check.py
 
       # Not a style check. The doc set has been reorganised twice — `docs/`
@@ -171,6 +173,7 @@ jobs:
           bash -n scripts/api-doc-check.sh
           bash -n scripts/trusted-ip-check.sh
           bash -n scripts/tls-trusted-ip-check.sh
+          bash -n scripts/restore-check.sh
           bash -n scripts/release.sh
           bash -n deploy/backup-offbox.sh
           bash -n scripts/backup-offbox-check.sh
@@ -302,6 +305,14 @@ jobs:
       # not certificate issuance.
       - name: Rate-limit bucket cannot be chosen by the client, over direct TLS
         run: ./scripts/tls-trusted-ip-check.sh target/release/recall-server
+
+      # The restore, the backups taken by hand and the switch back to the
+      # rollback journal are what an owner pastes when something is already
+      # wrong, and under WAL their mistakes are silent: a WAL left beside a
+      # restored file brings back the database it replaced. So deploy/README.md's
+      # own blocks are run, against a real server, through a stand-in `docker`.
+      - name: The database procedures in deploy/README.md work as written
+        run: ./scripts/restore-check.sh target/release/recall-server
 
   # 124 seconds of a 177-second run — 70% of the whole thing — went into the
   # steps below, on runs that could not possibly have learned anything from

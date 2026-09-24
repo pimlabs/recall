@@ -142,6 +142,21 @@ names the one header the ingress sets; everything else a client might send is
 ignored, and the compose files keep the origin unreachable except through that
 ingress. Change any of those three and this fails.
 
+### The database procedures are run, not read
+
+```sh
+./scripts/restore-check.sh target/release/recall-server
+```
+
+Thirty-three checks. The restore, the backups taken by hand and the switch
+back to the rollback journal in `deploy/README.md` are extracted from the
+README and run as written against a real server, through a stand-in
+`docker` on PATH (no daemon needed): a restore with the server running and
+after a crash, one naming a snapshot that is not there, one on a stack
+whose volume has another name, one whose stop stopped nothing. Under WAL
+the mistakes in these are silent, and the database is the only copy, so
+change a block and this runs it.
+
 ### Before touching anything frozen
 
 ```sh

@@ -197,6 +197,7 @@ run "cargo build --release"            cargo build --release --locked
 run "compat-check.sh (19 checks)"      ./scripts/compat-check.sh target/release/recall-server
 run "api-doc-check.sh (135 checks)"    ./scripts/api-doc-check.sh target/release/recall-server
 run "trusted-ip-check.sh (9 checks)"   ./scripts/trusted-ip-check.sh target/release/recall-server
+run "restore-check.sh (33 checks)"     ./scripts/restore-check.sh target/release/recall-server
 
 built=$(./target/release/recall version)
 printf '    built: %s\n' "$built"

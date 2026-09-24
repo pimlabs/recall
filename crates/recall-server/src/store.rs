@@ -73,10 +73,50 @@ pub struct Existing {
 /// every existing call site — `conn.execute(...)`, `conn.transaction()` —
 /// keeps compiling unchanged; only the audit-specific code reaches `audit`
 /// directly.
+///
+/// `file` is the database file this connection opened, as (device, inode),
+/// which every audited write checks is still the file at its path: see
+/// [`FileId`].
 struct StoreState {
     conn: Connection,
     audit: Tree,
     audit_at: String,
+    file: Option<FileId>,
+}
+
+/// Which file a path names: its device and inode.
+///
+/// A connection keeps the file it opened, whatever happens to the path. So
+/// a `recall.db` moved aside or replaced under a running server, which is
+/// what a restore done without stopping it does, leaves the server writing
+/// into the file it had, now under another name or no name at all, and
+/// answering 200 for writes nobody will read. Under the rollback journal
+/// the next read noticed the new file's change counter; under WAL nothing
+/// does, since a connection goes by its WAL index and its cache. So every
+/// audited write, which is every push and pull and every other change the
+/// log records, first checks that the path still names the file it
+/// opened, and refuses (a 500 to the client, who keeps its copy and pushes
+/// again later) if not.
+///
+/// A file overwritten in place keeps its inode and is not seen; copying
+/// over a live `recall.db` is what `deploy/README.md` forbids outright.
+/// Only on Unix, where a file has an inode to compare: elsewhere this is
+/// always `None` and nothing is checked.
+type FileId = (u64, u64);
+
+/// The [`FileId`] of the file `conn` has open, by its path; `None` for an
+/// in-memory database, a path that no longer names a file, or a platform
+/// without inodes.
+#[cfg(unix)]
+fn file_id(conn: &Connection) -> Option<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    let path = conn.path().filter(|p| !p.is_empty())?;
+    fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_id(_conn: &Connection) -> Option<FileId> {
+    None
 }
 
 impl std::ops::Deref for StoreState {
@@ -138,11 +178,13 @@ impl Store {
     }
 
     fn with_connection(conn: Connection) -> Result<Self> {
+        let file = file_id(&conn);
         let store = Self {
             state: Mutex::new(StoreState {
                 conn,
                 audit: Tree::new(),
                 audit_at: String::new(),
+                file,
             }),
         };
         store.migrate()?;
@@ -355,18 +397,25 @@ impl Store {
     }
 
     /// Copies the commits the WAL holds into the database file, as far as no
-    /// reader still needs them, waiting on nothing.
+    /// reader still needs them, waiting on nothing. Answers whether that
+    /// was all of them.
     ///
     /// SQLite already does this by itself once the WAL passes 1000 pages,
     /// which on a personal server can be days of pushes. The server also
     /// does it every sweep, so that `recall.db` on its own, all a reader
     /// that cannot see `recall.db-wal` has (sqlite-web's single-file mount
     /// in `deploy/docker-compose.direct.yml`), is never far behind. Nothing
-    /// relies on it for correctness: the WAL is part of the database.
-    pub fn checkpoint(&self) -> Result<()> {
-        self.lock()
-            .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()))?;
-        Ok(())
+    /// relies on it for correctness: the WAL is part of the database. A
+    /// reader that keeps one transaction open holds back everything
+    /// committed after it began, and the WAL grows until it lets go; the
+    /// server says so when that lasts several sweeps.
+    pub fn checkpoint(&self) -> Result<bool> {
+        let (frames, copied): (i64, i64) =
+            self.lock()
+                .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |r| {
+                    Ok((r.get(1)?, r.get(2)?))
+                })?;
+        Ok(copied >= frames)
     }
 
     /// Copies every commit the WAL holds into the database file and empties
@@ -521,9 +570,20 @@ fn use_durable_wal(conn: &Connection) -> Result<()> {
     if !mode.eq_ignore_ascii_case("wal") {
         anyhow::bail!("SQLite kept the {mode} journal");
     }
-    conn.execute_batch("PRAGMA synchronous = FULL")?;
+    conn.execute_batch(&format!(
+        "PRAGMA synchronous = FULL; PRAGMA journal_size_limit = {WAL_SIZE_LIMIT}"
+    ))?;
     Ok(())
 }
+
+/// What `recall.db-wal` is cut back to, in bytes, when SQLite next starts
+/// it over. The file is reused rather than shrunk as it cycles, so without
+/// a limit it stays as large as it ever grew: after one large transaction
+/// (an admin restore of a big key), or after a reader held checkpoints
+/// back for a day. 16 MiB is four times what the WAL reaches between
+/// SQLite's own checkpoints (1000 pages of 4 KiB), so ordinary traffic
+/// never meets it.
+const WAL_SIZE_LIMIT: i64 = 16 * 1024 * 1024;
 
 /// What [`existing_from`] reads, in its order.
 const EXISTING_COLUMNS: &str = "content, deleted, COALESCE(source_env, ''), updated_at";
@@ -779,10 +839,28 @@ mod tests {
         assert_eq!(mode, "wal");
         assert_eq!(sync, 2, "synchronous=FULL");
         assert_eq!(busy, admin::BUSY_TIMEOUT.as_millis() as i64);
+        let limit: i64 = st
+            .with_raw(|c| c.query_row("PRAGMA journal_size_limit", [], |r| r.get(0)))
+            .unwrap();
+        assert_eq!(limit, WAL_SIZE_LIMIT);
 
         assert_eq!(header_mode(&path), (2, 2));
         assert_eq!(journal_mode(&Connection::open(&path).unwrap()), "wal");
         assert!(wal_len(&path) > 0, "the commit went to the WAL");
+    }
+
+    /// The SQLite compiled in is 3.51.3 or later, the first with the fix
+    /// for a checkpoint on one connection racing a write that starts the
+    /// WAL over on another (the server's and an admin command's, under
+    /// WAL). A rusqlite pinned back, or a bundle that goes back, fails here
+    /// rather than in someone's database.
+    #[test]
+    fn the_sqlite_compiled_in_has_the_wal_restart_fix() {
+        assert!(
+            rusqlite::version_number() >= 3_051_003,
+            "SQLite {} predates 3.51.3",
+            rusqlite::version()
+        );
     }
 
     /// The upgrade: a file a server before WAL wrote, rows, audit log and
@@ -940,41 +1018,129 @@ mod tests {
         assert_eq!(n, 20);
     }
 
-    /// `recall.db` on its own, as a reader that cannot see the WAL has it
-    /// (sqlite-web's single-file mount; here, a hard link in another
-    /// directory): behind while the WAL holds commits, caught up by a
-    /// checkpoint, and whole after the one a server takes as it stops,
-    /// which also empties the WAL.
+    /// How many rows `recall.db` holds on its own: the main file alone,
+    /// copied into a directory of its own with no WAL beside it and opened
+    /// there, which is all a reader that cannot see `recall.db-wal` has
+    /// (sqlite-web's single-file mount with direct TLS).
+    fn rows_in_the_file_alone(db: &Path) -> i64 {
+        let alone = tempfile::tempdir().unwrap();
+        let copy = alone.path().join("recall.db");
+        fs::copy(db, &copy).unwrap();
+        Connection::open(&copy)
+            .unwrap()
+            .query_row("SELECT count(*) FROM memory_files", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// The file on its own is behind while the WAL holds commits, caught up
+    /// by the sweep's checkpoint, and whole after the one a server takes as
+    /// it stops, which also empties the WAL.
     #[test]
     fn a_checkpoint_brings_the_file_on_its_own_up_to_date() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("recall.db");
         let st = Store::open(&path).unwrap();
         put(&st, "acme/app", "a.md", "x", "laptop");
-        let alone = dir.path().join("alone");
-        fs::create_dir(&alone).unwrap();
-        fs::hard_link(&path, alone.join("recall.db")).unwrap();
-        let count = || -> i64 {
-            Connection::open_with_flags(
-                alone.join("recall.db"),
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )
-            .and_then(|c| c.query_row("SELECT count(*) FROM memory_files", [], |r| r.get(0)))
-            .unwrap_or(-1)
-        };
-
-        let behind = count();
-        assert!(
-            behind < 1,
-            "the file alone lacks the WAL's commit: {behind}"
-        );
-        st.checkpoint().unwrap();
-        assert_eq!(count(), 1);
-
-        put(&st, "acme/app", "b.md", "x", "laptop");
         assert!(st.checkpoint_all().unwrap());
         assert_eq!(wal_len(&path), 0, "emptied");
-        assert_eq!(count(), 2);
+        assert_eq!(rows_in_the_file_alone(&path), 1);
+
+        put(&st, "acme/app", "b.md", "x", "laptop");
+        assert_eq!(rows_in_the_file_alone(&path), 1, "b.md is only in the WAL");
+        assert!(st.checkpoint().unwrap(), "nothing held it back");
+        assert_eq!(rows_in_the_file_alone(&path), 2);
+
+        put(&st, "acme/app", "c.md", "x", "laptop");
+        assert!(st.checkpoint_all().unwrap());
+        assert_eq!(wal_len(&path), 0, "emptied");
+        assert_eq!(rows_in_the_file_alone(&path), 3);
+    }
+
+    /// A reader in the middle of a transaction holds back what was committed
+    /// after it began, and the sweep's checkpoint says so rather than
+    /// claiming the file caught up; once the reader is done, it does.
+    #[test]
+    fn a_checkpoint_says_when_a_reader_held_it_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recall.db");
+        let st = Store::open(&path).unwrap();
+        put(&st, "acme/app", "a.md", "x", "laptop");
+        assert!(st.checkpoint_all().unwrap());
+
+        let reader = Connection::open(&path).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let _: i64 = reader
+            .query_row("SELECT count(*) FROM memory_files", [], |r| r.get(0))
+            .unwrap();
+        put(&st, "acme/app", "b.md", "x", "laptop");
+        assert!(!st.checkpoint().unwrap(), "held back by the reader");
+        assert_eq!(rows_in_the_file_alone(&path), 1);
+
+        reader.execute_batch("COMMIT").unwrap();
+        assert!(st.checkpoint().unwrap());
+        assert_eq!(rows_in_the_file_alone(&path), 2);
+    }
+
+    /// The WAL is cut back to `WAL_SIZE_LIMIT` when it next starts over
+    /// after something made it large, instead of staying that large for
+    /// good.
+    #[test]
+    fn a_wal_grown_large_is_cut_back_to_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recall.db");
+        let st = Store::open(&path).unwrap();
+        let big = "x".repeat(24 * 1024 * 1024);
+        put(&st, "acme/app", "big.md", &big, "laptop");
+        let grown = wal_len(&path);
+        assert!(grown > WAL_SIZE_LIMIT as u64, "{grown}");
+        assert!(st.checkpoint().unwrap());
+
+        put(&st, "acme/app", "small.md", "x", "laptop");
+        let now = wal_len(&path);
+        assert!(now <= WAL_SIZE_LIMIT as u64, "{now} after {grown}");
+        assert_eq!(st.get("acme/app", "big.md").unwrap().unwrap().content, big);
+    }
+
+    /// `recall.db` moved aside under a running store, the way a restore run
+    /// without stopping the server does it, and a new file put where it
+    /// was: every audited write (a push, and a pull's leaf) is refused, and
+    /// neither file is written to. Without the check, the store writes on
+    /// into the moved file, and the push is answered 200 for a write the
+    /// database at the path never gets.
+    #[cfg(unix)]
+    #[test]
+    fn a_database_moved_aside_under_a_running_store_is_not_written_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recall.db");
+        let st = Store::open(&path).unwrap();
+        put(&st, "acme/app", "a.md", "x", "laptop");
+        let snapshot = st.backup(dir.path().join("backups"), 7).unwrap();
+
+        let aside = dir.path().join("aside");
+        fs::create_dir(&aside).unwrap();
+        for f in ["recall.db", "recall.db-wal", "recall.db-shm"] {
+            if dir.path().join(f).exists() {
+                fs::rename(dir.path().join(f), aside.join(f)).unwrap();
+            }
+        }
+        let refused = |st: &Store| {
+            let err = st
+                .upsert_audited("acme/app", "b.md", "y", "laptop", test_leaf)
+                .unwrap_err();
+            assert!(format!("{err:#}").contains("moved or replaced"), "{err:#}");
+            let err = st.audit_append(test_leaf).unwrap_err();
+            assert!(format!("{err:#}").contains("moved or replaced"), "{err:#}");
+        };
+        refused(&st);
+        fs::copy(&snapshot, &path).unwrap();
+        refused(&st);
+        drop(st);
+
+        for db in [aside.join("recall.db"), path] {
+            let files = Store::open(&db).unwrap().list("acme/app").unwrap();
+            let names: Vec<_> = files.iter().map(|f| f.file_path.as_str()).collect();
+            assert_eq!(names, ["a.md"], "{}", db.display());
+        }
     }
 
     /// Push latency under the rollback journal, WAL with NORMAL and WAL

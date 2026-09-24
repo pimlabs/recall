@@ -478,6 +478,7 @@ impl Server {
         {
             let state = self.state.clone();
             tasks.push(tokio::spawn(async move {
+                let mut wal = WalWatch::default();
                 loop {
                     let s = state.clone();
                     match tokio::task::spawn_blocking(move || sweep_devices(&s)).await {
@@ -505,10 +506,14 @@ impl Server {
                     // file on its own is never more than a sweep behind:
                     // see Store::checkpoint.
                     let s = state.clone();
-                    if let Ok(Err(e)) =
-                        tokio::task::spawn_blocking(move || s.store.checkpoint()).await
-                    {
-                        eprintln!("checkpointing the WAL failed: {e:#}");
+                    match tokio::task::spawn_blocking(move || s.store.checkpoint()).await {
+                        Ok(Ok(complete)) => {
+                            if let Some(said) = wal.record(complete) {
+                                eprintln!("{said}");
+                            }
+                        }
+                        Ok(Err(e)) => eprintln!("checkpointing the WAL failed: {e:#}"),
+                        Err(_) => {}
                     }
                     tokio::time::sleep(SWEEP_EVERY).await;
                 }
@@ -760,6 +765,43 @@ fn sweep_devices(state: &AppState) -> Result<(usize, usize)> {
     )
 }
 
+/// Counts the sweeps in a row whose checkpoint could not copy the whole WAL
+/// back into `recall.db`, and says so once that has lasted long enough to
+/// be a reader holding a transaction open rather than a page being read.
+///
+/// Only a log line, not a `/health` field: `Health` is a frozen shape
+/// released clients read, and this is something for the owner looking at
+/// the server's own output, which is where the other background failures
+/// are reported too.
+#[derive(Debug, Default)]
+struct WalWatch {
+    behind: u32,
+}
+
+impl WalWatch {
+    /// How many sweeps in a row, of `SWEEP_EVERY` each, before it is said.
+    const SWEEPS: u32 = 3;
+
+    /// Records one sweep's checkpoint; answers what to log, if anything:
+    /// every [`Self::SWEEPS`] sweeps while it lasts, and once when it ends.
+    fn record(&mut self, complete: bool) -> Option<String> {
+        if complete {
+            let was = std::mem::take(&mut self.behind);
+            return (was >= Self::SWEEPS)
+                .then(|| "the WAL is fully checkpointed into recall.db again".to_string());
+        }
+        self.behind += 1;
+        self.behind.is_multiple_of(Self::SWEEPS).then(|| {
+            format!(
+                "the WAL has not been fully checkpointed into recall.db for {} sweeps in a \
+                 row: a reader is keeping a transaction open (sqlite-web on a page, a \
+                 `sqlite3` shell), and recall.db-wal grows until it ends. Nothing is lost",
+                self.behind
+            )
+        })
+    }
+}
+
 fn run_backup(state: &AppState) {
     if state.cfg.backup_dir.is_empty() {
         return;
@@ -795,5 +837,28 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {}
         _ = terminate => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WalWatch;
+
+    /// Said after three sweeps behind in a row and every three after, said
+    /// once more when it catches up, and not at all for a sweep or two.
+    #[test]
+    fn a_wal_held_back_for_several_sweeps_is_reported_and_so_is_its_end() {
+        let mut w = WalWatch::default();
+        assert_eq!(w.record(false), None);
+        assert_eq!(w.record(true), None, "one sweep behind is nothing");
+        assert_eq!(w.record(false), None);
+        assert_eq!(w.record(false), None);
+        let said = w.record(false).expect("three in a row");
+        assert!(said.contains("for 3 sweeps"), "{said}");
+        assert_eq!(w.record(false), None);
+        assert_eq!(w.record(false), None);
+        assert!(w.record(false).unwrap().contains("for 6 sweeps"));
+        assert!(w.record(true).unwrap().contains("again"));
+        assert_eq!(w.record(true), None);
     }
 }

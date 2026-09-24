@@ -437,9 +437,22 @@ taken while pushes land restores every push acknowledged before it, which
 a file copy fails. A restore moves `recall.db`, `recall.db-wal` and
 `recall.db-shm` aside together, because SQLite replays a WAL it finds into
 the file beside it, whichever file that is; `deploy/README.md` has the
-procedures, and why the volume has to be a local filesystem. The server
+procedures, and why the volume has to be a local filesystem, and
+`scripts/restore-check.sh` runs them, as the README has them, against a
+real server. The server
 checkpoints every sweep, so the file alone is never far behind, and empties
 the WAL into the file when it stops; neither is relied on for correctness.
+
+Two things WAL took away are put back by hand. Under the rollback journal a
+connection noticed a `recall.db` replaced beneath it by the file's change
+counter; under WAL it goes by its WAL index and its cache, and writes on
+into the file it opened, moved aside or not, answering 200. So the store
+records the (device, inode) it opened, and every audited write first checks
+the path still names it, refusing (a 500) if not; a file overwritten in
+place is still not seen, and the restore never does that. And the bundled
+SQLite is at least 3.51.3, the first with the fix for a race between a
+checkpoint on one connection and a write that starts the WAL over on
+another, which the server and an admin command running beside it are.
 
 ## Merge strategy
 

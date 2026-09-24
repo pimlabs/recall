@@ -616,9 +616,26 @@ The first start of a server with WAL (see the next section) switches the
 database to it, once, by itself; nothing needs doing first. The switch
 needs the file to itself for a moment; if something holds it for more than
 five seconds (sqlite-web in the middle of a long read), the server says so
-and exits, and Docker's restart tries again. Rolling back to an older image
-afterwards works too: every SQLite opens a WAL database, and the older
-server keeps it in WAL.
+and exits, and Docker's restart tries again.
+
+Rolling back to an older image afterwards serves as before: every SQLite
+opens a WAL database, and the older server keeps it in WAL. What does not
+carry over is the older image's README, whose backup and restore copy
+`recall.db` alone and leave the WAL beside it, which loses the newest
+commits and can corrupt a restore. After a rollback, back up and restore
+with the procedures in this README, which work whatever version is running.
+Or put the file back in the rollback journal before starting the older
+image, with both containers stopped:
+
+```sh
+docker stop recall-server recall-sqlite-web
+docker run --rm -v recall_recall-data:/data alpine sh -c \
+  "apk add --no-cache sqlite >/dev/null && sqlite3 /data/recall.db 'PRAGMA journal_mode=DELETE'"
+```
+
+It prints `delete`, having copied what the WAL held into `recall.db` and
+removed `recall.db-wal` and `recall.db-shm`. A server with WAL switches the
+file back at its next start.
 
 ## The database files
 
@@ -626,8 +643,14 @@ The server keeps its database in SQLite's WAL mode: a commit is appended to
 `recall.db-wal` and synced there before the client gets its `200`, and is
 copied back into `recall.db` later, a little at a time (at the latest every
 ten minutes, and when the server stops). `recall.db-shm` beside them is the
-index to the WAL that every process reading the database shares. So in the
-`recall-data` volume:
+index to the WAL that every process reading the database shares.
+`recall.db-wal` stays around 4 MiB or less, and when something makes it
+larger (a large restore, a reader holding checkpoints back, which the
+server's log reports after half an hour) it is cut back to 16 MiB the next
+time it starts over. The compose files give the server 60 seconds to stop
+(`stop_grace_period`) rather than Docker's 10, so that a stop, `docker stop
+recall-server` included, reaches the checkpoint that empties the WAL into
+`recall.db`. So in the `recall-data` volume:
 
 - **`recall.db` alone is not the database** while the server runs, or after
   a crash: the newest commits can be only in `recall.db-wal`. Never copy it
@@ -685,35 +708,65 @@ them out with no WAL of its own. That is what makes it safe to copy, upload
 and restore from, where `recall.db` itself is not (see
 [The database files](#the-database-files)).
 
-**To restore:** stop the server and sqlite-web, move the live database
-aside, all three of its files together, copy a `deploy/backups/recall-*.db`
-file in as `recall.db`, start them again. That replaces everything; to put
-back one project, `recall-server admin restore` copies a single key's rows
-out of a backup while the server keeps running.
+**To restore:** name the snapshot, and paste this whole block, from the
+deployment's `deploy/` directory, whichever compose file it runs:
 
 ```sh
-docker compose stop recall-server sqlite-web
-docker run --rm -v recall_recall-data:/data -v "$(pwd)/backups":/backups:ro alpine sh -c '
-  set -e
+cd deploy
+snap=recall-<timestamp>.db      # the snapshot to restore: a file in backups/
+[ -f "backups/$snap" ] &&
+docker inspect -f '{{range .Mounts}}{{.Name}} {{end}}' recall-server | grep -qw recall_recall-data &&
+docker stop recall-server recall-sqlite-web &&
+docker run --rm -e SNAP="$snap" -v recall_recall-data:/data -v "$(pwd)/backups":/backups:ro alpine sh -euc '
+  cp "/backups/$SNAP" /data/recall.db.restoring
+  [ "$(head -c 15 /data/recall.db.restoring)" = "SQLite format 3" ]
   aside=/data/replaced-$(date +%Y%m%d-%H%M%S)
   mkdir "$aside"
-  for f in /data/recall.db /data/recall.db-wal /data/recall.db-shm /data/recall.db-journal; do
-    if [ -e "$f" ]; then mv "$f" "$aside/"; fi
+  for f in recall.db recall.db-wal recall.db-shm recall.db-journal; do
+    if [ -e "/data/$f" ]; then mv "/data/$f" "$aside/"; fi
   done
-  cp /backups/recall-<timestamp>.db /data/recall.db'
-docker compose start recall-server sqlite-web
+  mv /data/recall.db.restoring /data/recall.db' &&
+docker start recall-server recall-sqlite-web
 ```
 
-Moving the WAL aside is not tidying up. Left beside the restored file, it
-would be replayed into it on the next start: SQLite applies whatever WAL it
-finds next to a database, and a test of exactly this mistake got back the
-database it was meant to replace, reporting no error. Moved together, the
-three files in `replaced-<time>/` are still the database as it was, so the
-restore can be undone; delete that directory once you are sure. Both
-services are stopped because the restore replaces a file they hold open: a
-server left running does not notice the new file, and goes on writing into
-it from its WAL and its cache of the old one, which leaves neither
-database.
+That replaces everything; to put back one project, `recall-server admin
+restore` copies a single key's rows out of a backup while the server keeps
+running. `scripts/restore-check.sh` runs this block, as written here,
+against a real server.
+
+Every step is chained with `&&`, so the first that fails stops the rest,
+and the order is the point of it:
+
+- **The snapshot is checked first**, then copied in beside the live
+  database as `recall.db.restoring` and checked to be an SQLite file, all
+  before anything live is touched. A mistyped name stops the block with the
+  server still running on its database; moving the live files first would
+  have left the server nothing, and it creates an empty database where it
+  finds none.
+- **The containers are stopped by name.** `recall-server` and
+  `recall-sqlite-web` are the names all three compose files give them, so
+  this needs no `-f`, which `docker compose stop` would: without it, on a
+  Traefik or direct-TLS host it reads `docker-compose.yml`, fails, and
+  stops nothing. `docker inspect` checks that the server's container
+  really has `recall_recall-data`, the volume all three compose files
+  declare, since `docker run` would otherwise create an empty one and
+  restore into that. A stack started with `-p` has another name for it (see
+  [Switching ingress](#switching-ingress-on-a-server-that-is-already-running));
+  the block then stops before touching anything, and the name in it is the
+  one to change.
+- **Both are stopped before the files move**, because the restore replaces
+  a file they hold open. A server left running would go on writing into
+  the file it opened, now moved aside, and answering 200 for it; it now
+  refuses instead, answering 500 to every push and pull until it is
+  restarted, but stopped is still the only safe way to do this.
+- **The live database moves aside whole**, all of its files together into
+  `replaced-<time>/`. Moving the WAL aside is not tidying up. Left beside
+  the restored file, it would be replayed into it on the next start: SQLite
+  applies whatever WAL it finds next to a database, and a test of exactly
+  this mistake got back the database it was meant to replace, reporting no
+  error. Moved together, the files in `replaced-<time>/` are still the
+  database as it was, so the restore can be undone; delete that directory
+  once you are sure.
 
 **Restoring a backup rolls the audit log back with it.** The log lives in
 the same database, so it ends where the backup ends, and every leaf
@@ -1320,8 +1373,10 @@ server that will not start. Every step here is one they take for you, so read
 this as the checklist they follow as much as a procedure.
 
 ```sh
-# 1. Stop the server, so nothing writes while you edit by hand.
-docker compose stop recall-server
+cd deploy
+# 1. Stop the server, so nothing writes while you edit by hand. By its
+#    container name, which needs no -f, whichever compose file it runs.
+docker stop recall-server
 
 # 2. A backup you can actually restore from. Do not skip this. VACUUM INTO,
 #    not cp: even with the server stopped, recall.db-wal can hold commits
@@ -1369,8 +1424,8 @@ SELECT changes();  -- must be the count above; if it is not, ROLLBACK;
 COMMIT;
 ```
 
-Then `docker compose start recall-server`, which also hands the files back to
-the user it runs as, and confirm it is healthy with
+Then `docker start recall-server`, which also hands the files back to the
+user it runs as, and confirm it is healthy with
 `curl -sf https://your-host/health`.
 
 ## Monitoring / inspecting the database
@@ -1391,11 +1446,17 @@ server, both for the owner's own use:
   Read-only has a consequence under WAL: sqlite-web cannot create
   `recall.db-shm` itself, so it works while `recall-server` is running,
   which keeps that file, and can show an error page while the server is
-  stopped. With direct TLS it has one file of the volume and no WAL at all,
-  so it shows `recall.db` as the server last checkpointed it: up to ten
-  minutes behind, and a page that loads while a checkpoint is writing can
-  fail with an SQLite error, which a reload clears. Neither can touch the
-  database: the mount is read-only.
+  stopped. With direct TLS it has one file of the volume and cannot see the
+  server's WAL at all. SQLite in its container can then keep a `-wal` and
+  `-shm` of its own there, beside the mounted file, that know nothing of
+  the server's, so what it shows is `recall.db` as the server last
+  checkpointed it (up to ten minutes behind), read with no coordination
+  with the server's checkpoints: a page loaded while one is writing can
+  show rows from before and after it together, or fail with an SQLite
+  error. Reload it; for anything that matters, read a snapshot or use
+  `recall-server admin list`. Neither setup can touch the database: the
+  mount is read-only, and the server never reads anything sqlite-web's
+  container writes.
 - **`GET /admin`**, built into `recall-server` itself, is reachable at
   the regular public URL (`https://recall.yourdomain.com/admin`). It
   signs in with a passkey (step 6), or with the same `RECALL_TOKEN` as
