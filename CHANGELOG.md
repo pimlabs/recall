@@ -14,7 +14,14 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
-## 0.4.3 — 2026-09-24
+## 0.4.4 — 2026-09-24
+
+0.4.3 was tagged but never published: its release build stopped at the new
+check on the macOS binaries' architecture, before anything reached a
+registry or a server. Everything listed under 0.4.3 below ships for the
+first time in this release. Nothing else changed.
+
+## 0.4.3 — 2026-09-24 (tagged, never published; shipped in 0.4.4)
 
 - **The server keeps its database in SQLite's WAL mode**, with every
   commit synced before the client is answered (`synchronous=FULL`), so a
