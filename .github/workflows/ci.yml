@@ -355,7 +355,7 @@ jobs:
       # pointed at the original builder rather than this new one.
       - name: Set up a cache-backed builder for the source build
         id: buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
         with:
           use: false
 
@@ -366,7 +366,7 @@ jobs:
       # token. It exports those values into the environment of the steps
       # after it, and nothing else.
       - name: Expose the Actions cache service to the build step
-        uses: crazy-max/ghaction-github-runtime@v3
+        uses: crazy-max/ghaction-github-runtime@v4
 
       # The image, both ways it can be built. This is where a crate rename
       # slipped through once: the Dockerfile has no file extension and was
