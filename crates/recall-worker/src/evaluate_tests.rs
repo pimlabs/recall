@@ -176,6 +176,45 @@ fn planted() -> Vec<(&'static str, String)> {
             ),
         ),
         ("hex secret", fake("", HEX, 40)),
+        (
+            "OpenAI service account key",
+            fake(&["sk", "-svcacct-"].concat(), "Ab3_Cd4-Ef5Gh6", 64),
+        ),
+        (
+            "Slack app token",
+            fake(&["xa", "pp-"].concat(), "1-A0123-4567-abcd", 60),
+        ),
+        ("npm token", fake(&["np", "m_"].concat(), ALNUM, 36)),
+        ("Hugging Face token", fake(&["h", "f_"].concat(), ALNUM, 34)),
+        (
+            "aws_secret_access_key",
+            fake("", "wJalrXUtnFEMI/K7MDENG+bPxRfiCY", 40),
+        ),
+        ("password", "Zq8!wLr2vXp".to_string()),
+    ]
+}
+
+/// Secrets that sit inside other text on their line: the text the line
+/// holds, and the secret in it.
+fn planted_in_text() -> Vec<(&'static str, String, String)> {
+    let hex = fake("", HEX, 32);
+    vec![
+        (
+            "deploy URL",
+            "https://deploy:Tq4wLp9Rz2@db.example.com/app".to_string(),
+            "Tq4wLp9Rz2".to_string(),
+        ),
+        // The first `token` on the line is not the one assigned a secret.
+        ("second token", format!("none yet, token = {hex}"), hex),
+        (
+            "config",
+            format!(
+                "passwd=Hj7#kq2Lx9 and {}{}",
+                ["npm", "_"].concat(),
+                fake("", ALNUM, 36)
+            ),
+            "Hj7#kq2Lx9".to_string(),
+        ),
     ]
 }
 
@@ -279,10 +318,14 @@ async fn the_checks_that_read_files_make_no_claude_call() {
 /// off nothing.
 #[test]
 fn the_secret_check_finds_every_planted_token_and_nothing_in_ordinary_notes() {
-    let planted = planted();
+    let mut planted = planted();
     let mut content = String::from("# Credentials, to move out of here\n\n");
     for (what, token) in &planted {
         content.push_str(&format!("- {what}: {token}\n"));
+    }
+    for (what, text, secret) in planted_in_text() {
+        content.push_str(&format!("- {what}: {text}\n"));
+        planted.push((what, secret));
     }
     content.push_str("- private_key: ");
     content.push_str(&fake("", HEX, 64));
@@ -340,6 +383,13 @@ fn the_secret_check_finds_every_planted_token_and_nothing_in_ordinary_notes() {
         "- colors: #ff8800 and #00aaff; build 20260925.1\n",
         "- eyJ is how a JWT starts; ours are short-lived\n",
         "- the token hash is sha256 and 64 characters long\n",
+        "- password: correct horse, see 1Password\n",
+        "- password: ${DB_PASSWORD} from the environment\n",
+        "- the password: kept in the vault, rotated monthly\n",
+        "- clone https://github.com/pimlabs/recall and https://user@example.com/x\n",
+        "- postgres://app:${PGPASSWORD}@db:5432/app is the URL shape\n",
+        "- hf_hub_download fetches the weights; npm_config_cache is the cache\n",
+        "- secret_access_key: in the vault, never here\n",
     ];
     for note in ordinary {
         let found = secrets(&file(P, "note.md", note));
@@ -500,7 +550,12 @@ fn a_report_numbers_its_findings_most_urgent_first() {
             &format!("key: {}\n", fake(&["AK", "IA"].concat(), UPPER, 16)),
         ),
     ];
-    let report = assemble(deterministic(&input(files, false), &settings()), Vec::new());
+    let redactor = Redactor::new(&files);
+    let report = assemble(
+        deterministic(&input(files, false), &settings()),
+        Vec::new(),
+        &redactor,
+    );
     let ids: Vec<(&str, &str)> = report
         .findings
         .iter()
@@ -566,4 +621,157 @@ async fn contradictions_are_skipped_and_said_so_when_they_cannot_run() {
     let (_, skipped) = contradictions(&input(files, true), &settings(), &junk.merger()).await;
     assert!(skipped[0].reason.contains("not the JSON"), "{skipped:?}");
     assert_eq!(claude.calls(), 0);
+}
+
+/// A secret is masked wherever a report quotes it, whichever check does:
+/// a token or a private key that is also in a duplicated paragraph, a
+/// stale note, a note in the wrong scope, a dead link's line, or what
+/// `claude` says of a contradiction appears nowhere in the report, the
+/// suggested edits included.
+#[tokio::test]
+async fn a_secret_is_masked_wherever_a_report_quotes_it() {
+    let token = fake(&["gh", "p_"].concat(), ALNUM, 36);
+    let aws = fake(&["AK", "IA"].concat(), UPPER, 16);
+    let key_line = "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfnzYy8x2Cc";
+    let key = format!(
+        "{}\n{key_line}\n{}\n",
+        ["-----BEGIN RSA ", "PRIVATE KEY-----"].concat(),
+        ["-----END RSA ", "PRIVATE KEY-----"].concat()
+    );
+    let mut old = file(
+        P,
+        "old.md",
+        &format!("Deploy with `make ship TOKEN={token}`\n\n```\n{key}```\n"),
+    );
+    old.updated_at = "2025-01-01T00:00:00.000Z".into();
+    let files = vec![
+        file(P, "MEMORY.md", &format!("- [Gone](gone.md) uses {token}\n")),
+        file(
+            P,
+            "a.md",
+            &format!("- the deploy token is {token} for now\n"),
+        ),
+        file(
+            P,
+            "b.md",
+            &format!("- the deploy token is {token} for now\n"),
+        ),
+        file(
+            P,
+            "me.md",
+            &format!("---\nname: me {aws}\ntype: user\n---\nPrefers tabs\n"),
+        ),
+        old,
+    ];
+    let claude = FakeClaude::new(&format!(
+        r#"{{"contradictions":[{{"file":"F2","lines":[1,1],"other_file":"F3","other_lines":[1,1],"explanation":"both say {token} and {key_line}"}}]}}"#
+    ));
+    let report = evaluate(&input(files, true), &settings(), &claude.merger()).await;
+    let kinds: HashSet<&str> = report.findings.iter().map(|f| f.kind.as_str()).collect();
+    for kind in [
+        KIND_SECRET,
+        KIND_DUPLICATE,
+        KIND_STALE,
+        KIND_WRONG_SCOPE,
+        KIND_DEAD_LINK,
+        KIND_CONTRADICTION,
+    ] {
+        assert!(kinds.contains(kind), "no {kind} in {:#?}", report.findings);
+    }
+    let all = format!(
+        "{}{}",
+        serde_json::to_string(&report.findings).unwrap(),
+        serde_json::to_string(&report.details).unwrap()
+    );
+    for secret in [token.as_str(), aws.as_str(), key_line] {
+        assert!(!all.contains(secret), "{secret} is in {all}");
+    }
+    assert!(all.contains("masked"), "{all}");
+}
+
+/// The scan is linear: lines built to make it read the same bytes over and
+/// over (a prefix repeated inside what it allows, a name repeated with no
+/// value, `](` with no end) take no longer than any others of their length.
+/// Before, 400 KB of `.recall-ek-` took 14 seconds.
+#[test]
+fn a_line_built_to_slow_the_scan_does_not() {
+    let started = Instant::now();
+    for unit in [
+        [".recall", "-ek-"].concat(),
+        ["recall", "-ak-"].concat(),
+        "eyJ".to_string(),
+        "token".to_string(),
+        "password ".to_string(),
+        "://a".to_string(),
+        ["sk", "-"].concat(),
+    ] {
+        let line = unit.repeat(400_000 / unit.len());
+        tokens_in(&line);
+    }
+    let index = file(P, "MEMORY.md", &"](".repeat(200_000));
+    dead_links(std::slice::from_ref(&index));
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "took {:?}",
+        started.elapsed()
+    );
+}
+
+/// However much a report finds, its details stay under
+/// `MAX_DETAILS_BYTES`, each excerpt under `MAX_EXCERPT_BYTES`, and what
+/// was cut or left out is said: a report always fits in a result the
+/// server takes.
+#[test]
+fn a_report_is_held_to_a_size_the_server_takes() {
+    let paragraphs: String = (0..600)
+        .map(|i| {
+            format!(
+                "Paragraph {i}: {}\n\n",
+                "a long note about the deploy ".repeat(180)
+            )
+        })
+        .collect();
+    let files = vec![file(P, "a.md", &paragraphs), file(P, "b.md", &paragraphs)];
+    let redactor = Redactor::new(&files);
+    let report = assemble(
+        deterministic(&input(files, false), &settings()),
+        Vec::new(),
+        &redactor,
+    );
+    assert_eq!(report.findings.len(), 600);
+    let details = serde_json::to_string(&report.details).unwrap();
+    assert!(
+        details.len() <= MAX_DETAILS_BYTES + 4096,
+        "{} bytes of details",
+        details.len()
+    );
+    assert!(report
+        .details
+        .findings
+        .values()
+        .all(|d| d.excerpt.len() <= MAX_EXCERPT_BYTES + 64));
+    let skipped: Vec<&str> = report
+        .details
+        .skipped
+        .iter()
+        .map(|s| s.reason.as_str())
+        .collect();
+    assert!(
+        skipped.iter().any(|r| r.contains("have no details")),
+        "{skipped:?}"
+    );
+    assert!(
+        skipped.iter().any(|r| r.contains("were cut")),
+        "{skipped:?}"
+    );
+    let result = recall_wire::ResultRequest {
+        lease_id: "lse".into(),
+        merge: None,
+        error: None,
+        evaluate: Some(recall_wire::EvaluateResult {
+            findings: report.findings,
+            details: serde_json::to_value(&report.details).unwrap(),
+        }),
+    };
+    assert!(serde_json::to_vec(&result).unwrap().len() < 5 << 20);
 }

@@ -5,7 +5,7 @@
 //!
 //! | Check | What it reports |
 //! |---|---|
-//! | `secret` | A private key, a cloud or GitHub token, a Recall authkey or key, or a long hex string assigned to something called a secret, token or password |
+//! | `secret` | A private key; a cloud, GitHub, GitLab, Slack, Stripe, Google, OpenAI, Anthropic, npm or Hugging Face token; a Recall authkey or key; a JSON Web Token; a password in a URL; an AWS secret access key, a password, or a long hex string assigned to a name that says so |
 //! | `duplicate` | The same normalized paragraph, or list item, in two files or two scopes |
 //! | `dead_link` | A `MEMORY.md` link to a file that is not there |
 //! | `wrong_scope` | A project file whose front matter says `type: user`, the case `recall promote` exists for |
@@ -20,8 +20,11 @@
 //! finding is built from enums, the file it is in, line numbers and related
 //! files, and every excerpt, reason and suggested edit goes in
 //! [`Details`]. The server refuses a finding with anything else in it
-//! anyway. A secret is masked even in `details`: a report is not another
-//! place for a key to be kept.
+//! anyway. A secret is masked even in `details`, wherever a report quotes
+//! it and whichever check does ([`Redactor`]): a report is not another
+//! place for a key to be kept. And `details` is held to a size
+//! ([`MAX_DETAILS_BYTES`]), so a report always fits in a result the server
+//! takes.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -101,7 +104,7 @@ pub async fn evaluate(input: &EvaluateInput, settings: &Settings, claude: &Merge
         found.extend(more);
         skipped.extend(missed);
     }
-    assemble(found, skipped)
+    assemble(found, skipped, &Redactor::new(&input.files))
 }
 
 /// The five checks that read the files and nothing else. No `claude`.
@@ -117,9 +120,46 @@ fn deterministic(input: &EvaluateInput, settings: &Settings) -> Vec<Found> {
     found
 }
 
+/// The most of one excerpt kept in `details`, in bytes.
+pub const MAX_EXCERPT_BYTES: usize = 4 * 1024;
+
+/// The most of one reasoning, or one reason a check was skipped, kept.
+pub const MAX_REASON_BYTES: usize = 2 * 1024;
+
+/// The largest suggested edit kept. One larger is left out: an edit cannot
+/// be cut and still be the edit.
+pub const MAX_EDIT_BYTES: usize = 16 * 1024;
+
+/// The most `details` a report carries, in bytes, well inside the 5 MiB a
+/// result may be. Past it, the rest of the findings keep no details.
+pub const MAX_DETAILS_BYTES: usize = 2 * 1024 * 1024;
+
+/// `text` cut to at most `max` bytes, on a character boundary, saying how
+/// much was cut. [`None`] when it fits.
+fn cut(text: &str, max: usize) -> Option<String> {
+    if text.len() <= max {
+        return None;
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(format!(
+        "{}\n[… {} more bytes cut]\n",
+        &text[..end],
+        text.len() - end
+    ))
+}
+
 /// Orders the findings most urgent first, numbers them, and splits each
 /// into the finding and its details.
-fn assemble(mut found: Vec<Found>, mut skipped: Vec<Skipped>) -> Report {
+///
+/// Every string that goes into `details` passes through `redactor` first,
+/// whichever check wrote it, so no secret in memory is quoted anywhere in
+/// a report; and each is held to a size, as the whole is, so a report
+/// always fits in a result the server takes. What was cut or left out is
+/// said in `skipped`.
+fn assemble(mut found: Vec<Found>, mut skipped: Vec<Skipped>, redactor: &Redactor) -> Report {
     let rank = |kind: &str| KINDS.iter().position(|k| *k == kind).unwrap_or(KINDS.len());
     found.sort_by(|a, b| (rank(a.kind), &a.file, a.lines).cmp(&(rank(b.kind), &b.file, b.lines)));
     found.dedup_by(|a, b| a.kind == b.kind && a.file == b.file && a.lines == b.lines);
@@ -142,9 +182,40 @@ fn assemble(mut found: Vec<Found>, mut skipped: Vec<Skipped>) -> Report {
         },
         ..Report::default()
     };
+    let (mut cut_excerpts, mut dropped_edits, mut without_details) = (0, 0, 0);
+    let mut size = 0usize;
+    for s in &mut report.details.skipped {
+        s.reason = redactor.text(&s.reason);
+        if let Some(shorter) = cut(&s.reason, MAX_REASON_BYTES) {
+            s.reason = shorter;
+        }
+    }
     for (i, f) in found.into_iter().enumerate() {
         let id = format!("f{}", i + 1);
-        report.details.findings.insert(id.clone(), f.detail);
+        let mut detail = f.detail;
+        detail.excerpt = redactor.text(&detail.excerpt);
+        if let Some(shorter) = cut(&detail.excerpt, MAX_EXCERPT_BYTES) {
+            detail.excerpt = shorter;
+            cut_excerpts += 1;
+        }
+        detail.reasoning = redactor.text(&detail.reasoning);
+        if let Some(shorter) = cut(&detail.reasoning, MAX_REASON_BYTES) {
+            detail.reasoning = shorter;
+        }
+        if let Some(edit) = &mut detail.suggested_edit {
+            edit.replacement = redactor.text(&edit.replacement);
+            if edit.replacement.len() > MAX_EDIT_BYTES {
+                detail.suggested_edit = None;
+                dropped_edits += 1;
+            }
+        }
+        let bytes = serde_json::to_string(&detail).map_or(0, |d| d.len()) + id.len() + 4;
+        if size + bytes <= MAX_DETAILS_BYTES {
+            size += bytes;
+            report.details.findings.insert(id.clone(), detail);
+        } else {
+            without_details += 1;
+        }
         report.findings.push(Finding {
             id,
             kind: f.kind.to_string(),
@@ -154,6 +225,27 @@ fn assemble(mut found: Vec<Found>, mut skipped: Vec<Skipped>) -> Report {
             lines: f.lines,
             related: f.related,
         });
+    }
+    let note = |reason: String| Skipped {
+        check: String::new(),
+        project_key: String::new(),
+        reason,
+    };
+    if cut_excerpts > 0 {
+        report.details.skipped.push(note(format!(
+            "{cut_excerpts} excerpts were cut to {MAX_EXCERPT_BYTES} bytes"
+        )));
+    }
+    if dropped_edits > 0 {
+        report.details.skipped.push(note(format!(
+            "{dropped_edits} suggested edits were left out, each larger than {MAX_EDIT_BYTES} bytes"
+        )));
+    }
+    if without_details > 0 {
+        report.details.skipped.push(note(format!(
+            "{without_details} findings have no details: a report's details are kept under \
+             {MAX_DETAILS_BYTES} bytes"
+        )));
     }
     report
 }
@@ -200,7 +292,13 @@ fn front_matter_end(lines: &[&str]) -> usize {
 
 /// An edit removing lines `first` to `last`, and one blank line after
 /// them when they were a paragraph of their own, so no double gap is left.
-fn removal(file: &EvaluateFile, lines: &[&str], first: u32, mut last: u32) -> SuggestedEdit {
+fn removal(
+    file: &EvaluateFile,
+    base_sha256: &str,
+    lines: &[&str],
+    first: u32,
+    mut last: u32,
+) -> SuggestedEdit {
     let blank = |n: u32| {
         n == 0
             || lines
@@ -213,7 +311,7 @@ fn removal(file: &EvaluateFile, lines: &[&str], first: u32, mut last: u32) -> Su
     SuggestedEdit {
         project_key: file.project_key.clone(),
         file_path: file.file_path.clone(),
-        base_sha256: content_sha256(&file.content),
+        base_sha256: base_sha256.to_string(),
         lines: [first, last],
         replacement: String::new(),
     }
@@ -247,174 +345,156 @@ fn dashed(b: u8) -> bool {
 fn keyish(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')
 }
+fn base64ish(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'/' | b'+')
+}
+fn hex(b: u8) -> bool {
+    b.is_ascii_hexdigit()
+}
+fn unspaced(b: u8) -> bool {
+    b.is_ascii_graphic() && !matches!(b, b'"' | b'\'' | b'`' | b',' | b';')
+}
+
+/// A token of `what`: `prefix`, then `min` to `max` bytes `allowed` takes.
+const fn pattern(
+    what: &'static str,
+    prefix: &'static str,
+    allowed: fn(u8) -> bool,
+    min: usize,
+    max: usize,
+) -> Pattern {
+    Pattern {
+        what,
+        prefix,
+        allowed,
+        min,
+        max,
+    }
+}
 
 const PATTERNS: &[Pattern] = &[
-    Pattern {
-        what: "AWS access key",
-        prefix: "AKIA",
-        allowed: upper_digit,
-        min: 16,
-        max: 16,
+    pattern("AWS access key", "AKIA", upper_digit, 16, 16),
+    pattern("AWS access key", "ASIA", upper_digit, 16, 16),
+    pattern("GitHub token", "ghp_", alnum, 36, 255),
+    pattern("GitHub token", "gho_", alnum, 36, 255),
+    pattern("GitHub token", "ghu_", alnum, 36, 255),
+    pattern("GitHub token", "ghs_", alnum, 36, 255),
+    pattern("GitHub token", "ghr_", alnum, 36, 255),
+    pattern("GitHub token", "github_pat_", word, 40, 255),
+    pattern("GitLab token", "glpat-", dashed, 20, 255),
+    pattern("Slack token", "xoxb-", dashed, 20, 255),
+    pattern("Slack token", "xoxp-", dashed, 20, 255),
+    pattern("Slack token", "xoxa-", dashed, 20, 255),
+    pattern("Slack token", "xoxr-", dashed, 20, 255),
+    pattern("Slack token", "xoxs-", dashed, 20, 255),
+    pattern("Slack app token", "xapp-", dashed, 20, 255),
+    pattern("Stripe key", "sk_live_", alnum, 20, 255),
+    pattern("Stripe key", "rk_live_", alnum, 20, 255),
+    pattern("Anthropic API key", "sk-ant-", dashed, 30, 255),
+    pattern("OpenAI API key", "sk-proj-", dashed, 20, 255),
+    pattern("OpenAI API key", "sk-svcacct-", dashed, 20, 255),
+    pattern("OpenAI API key", "sk-admin-", dashed, 20, 255),
+    pattern("OpenAI API key", "sk-", alnum, 40, 255),
+    pattern("Google API key", "AIza", dashed, 35, 35),
+    pattern("npm token", "npm_", alnum, 36, 36),
+    pattern("Hugging Face token", "hf_", alnum, 30, 40),
+    pattern("Recall authkey", "recall-ak-", alnum, 20, 255),
+    pattern("Recall enrolment key", "recall-ek-", keyish, 16, 255),
+    pattern("Recall recovery key", "recall-rk-", keyish, 16, 255),
+];
+
+/// A value assigned to a name that says it is a secret: `names`, then `:`
+/// or `=`, then at least `min` bytes `value` takes, that `plausible`
+/// accepts.
+struct Named {
+    what: &'static str,
+    names: &'static [&'static str],
+    value: fn(u8) -> bool,
+    min: usize,
+    plausible: fn(&str) -> bool,
+}
+
+fn any_value(_: &str) -> bool {
+    true
+}
+
+/// Whether what follows `password:` looks like a password rather than a
+/// word about one: long enough, of more than one kind of character, and
+/// not a placeholder, a path, or the name of where it is kept.
+fn plausible_password(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let starts_odd = value.starts_with(['$', '<', '{', '*', '%', '(', '[', '/', '~', '.']);
+    let names_a_vault = [
+        "1password",
+        "bitwarden",
+        "keychain",
+        "lastpass",
+        "keepass",
+        "vault",
+        "redacted",
+        "secret",
+    ]
+    .iter()
+    .any(|v| lower.contains(v));
+    let letters = value.bytes().any(|b| b.is_ascii_alphabetic());
+    let others = value.bytes().any(|b| !b.is_ascii_alphabetic());
+    (8..=128).contains(&value.len())
+        && !starts_odd
+        && !names_a_vault
+        && !lower.contains("://")
+        && letters
+        && others
+}
+
+const NAMED: &[Named] = &[
+    Named {
+        what: "secret value",
+        names: &[
+            "secret",
+            "token",
+            "password",
+            "passwd",
+            "api_key",
+            "apikey",
+            "api-key",
+            "private_key",
+            "access_key",
+        ],
+        value: hex,
+        min: 32,
+        plausible: any_value,
     },
-    Pattern {
-        what: "AWS access key",
-        prefix: "ASIA",
-        allowed: upper_digit,
-        min: 16,
-        max: 16,
-    },
-    Pattern {
-        what: "GitHub token",
-        prefix: "ghp_",
-        allowed: alnum,
-        min: 36,
-        max: 255,
-    },
-    Pattern {
-        what: "GitHub token",
-        prefix: "gho_",
-        allowed: alnum,
-        min: 36,
-        max: 255,
-    },
-    Pattern {
-        what: "GitHub token",
-        prefix: "ghu_",
-        allowed: alnum,
-        min: 36,
-        max: 255,
-    },
-    Pattern {
-        what: "GitHub token",
-        prefix: "ghs_",
-        allowed: alnum,
-        min: 36,
-        max: 255,
-    },
-    Pattern {
-        what: "GitHub token",
-        prefix: "ghr_",
-        allowed: alnum,
-        min: 36,
-        max: 255,
-    },
-    Pattern {
-        what: "GitHub token",
-        prefix: "github_pat_",
-        allowed: word,
+    Named {
+        what: "AWS secret access key",
+        names: &[
+            "aws_secret_access_key",
+            "secret_access_key",
+            "aws_secret_key",
+        ],
+        value: base64ish,
         min: 40,
-        max: 255,
+        plausible: any_value,
     },
-    Pattern {
-        what: "GitLab token",
-        prefix: "glpat-",
-        allowed: dashed,
-        min: 20,
-        max: 255,
-    },
-    Pattern {
-        what: "Slack token",
-        prefix: "xoxb-",
-        allowed: dashed,
-        min: 20,
-        max: 255,
-    },
-    Pattern {
-        what: "Slack token",
-        prefix: "xoxp-",
-        allowed: dashed,
-        min: 20,
-        max: 255,
-    },
-    Pattern {
-        what: "Slack token",
-        prefix: "xoxa-",
-        allowed: dashed,
-        min: 20,
-        max: 255,
-    },
-    Pattern {
-        what: "Stripe key",
-        prefix: "sk_live_",
-        allowed: alnum,
-        min: 20,
-        max: 255,
-    },
-    Pattern {
-        what: "Stripe key",
-        prefix: "rk_live_",
-        allowed: alnum,
-        min: 20,
-        max: 255,
-    },
-    Pattern {
-        what: "Anthropic API key",
-        prefix: "sk-ant-",
-        allowed: dashed,
-        min: 30,
-        max: 255,
-    },
-    Pattern {
-        what: "OpenAI API key",
-        prefix: "sk-proj-",
-        allowed: dashed,
-        min: 30,
-        max: 255,
-    },
-    Pattern {
-        what: "OpenAI API key",
-        prefix: "sk-",
-        allowed: alnum,
-        min: 40,
-        max: 255,
-    },
-    Pattern {
-        what: "Google API key",
-        prefix: "AIza",
-        allowed: dashed,
-        min: 35,
-        max: 35,
-    },
-    Pattern {
-        what: "Recall authkey",
-        prefix: "recall-ak-",
-        allowed: alnum,
-        min: 20,
-        max: 255,
-    },
-    Pattern {
-        what: "Recall enrolment key",
-        prefix: "recall-ek-",
-        allowed: keyish,
-        min: 16,
-        max: 255,
-    },
-    Pattern {
-        what: "Recall recovery key",
-        prefix: "recall-rk-",
-        allowed: keyish,
-        min: 16,
-        max: 255,
+    Named {
+        what: "password",
+        names: &["password", "passwd", "passphrase"],
+        value: unspaced,
+        min: 8,
+        plausible: plausible_password,
     },
 ];
 
-/// Names a long hex value assigned after them is a secret by.
-const SECRET_WORDS: &[&str] = &[
-    "secret",
-    "token",
-    "password",
-    "passwd",
-    "api_key",
-    "apikey",
-    "api-key",
-    "private_key",
-    "access_key",
-];
-
-/// The shortest hex value [`SECRET_WORDS`] makes a secret.
-const MIN_SECRET_HEX: usize = 32;
+/// How far after a name its `:` or `=` may be: a closing quote and some
+/// space, and no further, so a name mentioned in prose is not read as an
+/// assignment made halfway along the line.
+const ASSIGN_WINDOW: usize = 4;
 
 /// Every token in `line`: where it starts and ends, and what it is.
+///
+/// Linear in the line's length: every search moves on past what it has
+/// already read, so a line built to make a scan go back over itself (a
+/// prefix repeated inside what it allows, over and over) costs no more
+/// than any other line of its length.
 fn tokens_in(line: &str) -> Vec<(usize, usize, &'static str)> {
     let bytes = line.as_bytes();
     let mut out: Vec<(usize, usize, &'static str)> = Vec::new();
@@ -433,6 +513,8 @@ fn tokens_in(line: &str) -> Vec<(usize, usize, &'static str)> {
             }
             let end = run(from, p.allowed);
             let len = end - from;
+            // Past the run this read: nothing inside it is read again.
+            from = from.max(end);
             // A token ends where the word does: a longer run of the same
             // letters is something else.
             let ends_clean = end == bytes.len() || !word(bytes[end]);
@@ -462,28 +544,62 @@ fn tokens_in(line: &str) -> Vec<(usize, usize, &'static str)> {
             }
             end += 1;
         }
+        from = from.max(end);
         if parts == 3 {
             out.push((at, end, "JSON Web Token"));
         }
     }
-    // A long hex value assigned to something named like a secret.
+    // A value assigned to a name that says it is a secret: every such
+    // name on the line, not only the first.
     let lower = line.to_ascii_lowercase();
-    for name in SECRET_WORDS {
-        let Some(at) = lower.find(name) else {
-            continue;
-        };
-        let rest = &lower[at + name.len()..];
-        let Some(assign) = rest.find([':', '=']) else {
-            continue;
-        };
-        let mut start = at + name.len() + assign + 1;
-        while start < bytes.len() && matches!(bytes[start], b' ' | b'\t' | b'"' | b'\'' | b'`') {
-            start += 1;
+    for named in NAMED {
+        for name in named.names {
+            let mut from = 0;
+            while let Some(at) = lower[from..].find(name).map(|i| from + i) {
+                from = at + name.len();
+                let mut i = from;
+                while i < bytes.len()
+                    && i < from + ASSIGN_WINDOW
+                    && matches!(bytes[i], b' ' | b'\t' | b'"' | b'\'')
+                {
+                    i += 1;
+                }
+                if !matches!(bytes.get(i), Some(b':' | b'=')) {
+                    continue;
+                }
+                let mut start = i + 1;
+                while start < bytes.len()
+                    && matches!(bytes[start], b' ' | b'\t' | b'"' | b'\'' | b'`')
+                {
+                    start += 1;
+                }
+                let end = run(start, named.value);
+                from = from.max(end);
+                let ends_clean = end == bytes.len() || !word(bytes[end]);
+                if end - start >= named.min && ends_clean && (named.plausible)(&line[start..end]) {
+                    out.push((start, end, named.what));
+                }
+            }
         }
-        let end = run(start, |b| b.is_ascii_hexdigit());
-        let ends_clean = end == bytes.len() || !word(bytes[end]);
-        if end - start >= MIN_SECRET_HEX && ends_clean {
-            out.push((start, end, "secret value"));
+    }
+    // A password in a URL: `scheme://user:password@host`.
+    let mut from = 0;
+    while let Some(at) = line[from..].find("://").map(|i| from + i) {
+        let start = at + 3;
+        let end = run(start, |b| {
+            b.is_ascii_graphic()
+                && !matches!(b, b'/' | b'?' | b'#' | b'@' | b'"' | b'\'' | b'<' | b'>')
+        });
+        from = end.max(start);
+        if bytes.get(end) != Some(&b'@') {
+            continue;
+        }
+        let Some(colon) = line[start..end].find(':').map(|i| start + i) else {
+            continue;
+        };
+        let password = &line[colon + 1..end];
+        if !password.is_empty() && !password.starts_with(['$', '<', '{', '*', '%']) {
+            out.push((colon + 1, end, "password in a URL"));
         }
     }
     out.sort();
@@ -498,10 +614,16 @@ fn tokens_in(line: &str) -> Vec<(usize, usize, &'static str)> {
     kept
 }
 
-/// `token`, masked: its first four characters and its length.
+/// `token`, masked: its length, and its first four characters when it is
+/// long enough that they are a prefix rather than a part of the secret.
 fn mask(token: &str) -> String {
-    let shown: String = token.chars().take(4).collect();
-    format!("{shown}… ({} characters, masked)", token.chars().count())
+    let count = token.chars().count();
+    if count >= 24 {
+        let shown: String = token.chars().take(4).collect();
+        format!("{shown}… ({count} characters, masked)")
+    } else {
+        format!("[{count} characters, masked]")
+    }
 }
 
 /// `line` with each token replaced by `with(token)`.
@@ -521,8 +643,108 @@ fn replace_tokens(
     out
 }
 
+/// Whether `line` opens a private key block.
+fn opens_key(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with("-----BEGIN ") && t.contains("PRIVATE KEY")
+}
+
+/// Whether `line` closes one.
+fn closes_key(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with("-----END ") && t.contains("PRIVATE KEY")
+}
+
+/// Whether `line` could be a line of a key block's body: base64 and
+/// nothing else, long enough not to be a word.
+fn key_body(line: &str) -> bool {
+    let t = line.trim();
+    t.len() >= 16
+        && t.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+}
+
+/// What masks every secret in memory wherever a report quotes it, not
+/// only in the `secret` finding that names it: a duplicate, a stale note,
+/// a note in the wrong scope or a contradiction may quote the same line.
+///
+/// Built from every file an evaluation reads: each token [`tokens_in`]
+/// finds, and each line of a private key's body. Every string that goes
+/// into `details` passes through [`Redactor::text`], which replaces each of
+/// them, and any token it finds itself, with a mask.
+#[derive(Debug, Default)]
+pub(crate) struct Redactor {
+    tokens: Vec<String>,
+    key_lines: HashSet<String>,
+}
+
+impl Redactor {
+    pub(crate) fn new(files: &[EvaluateFile]) -> Self {
+        let mut tokens = HashSet::new();
+        let mut key_lines = HashSet::new();
+        for file in files {
+            let mut in_key = false;
+            for line in file.content.lines() {
+                if opens_key(line) {
+                    in_key = true;
+                    continue;
+                }
+                if in_key {
+                    if closes_key(line) || !key_body(line) {
+                        in_key = false;
+                    } else {
+                        key_lines.insert(line.trim().to_string());
+                        continue;
+                    }
+                }
+                for (start, end, _) in tokens_in(line) {
+                    tokens.insert(line[start..end].to_string());
+                }
+            }
+        }
+        let mut tokens: Vec<String> = tokens.into_iter().collect();
+        // Longest first, so a token inside another is never masked first
+        // and the longer left half shown.
+        tokens.sort_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b)));
+        Self { tokens, key_lines }
+    }
+
+    /// `text` with every secret this knows of, and every token it finds,
+    /// masked, and every line of a private key's body replaced.
+    pub(crate) fn text(&self, text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        for line in text.split_inclusive('\n') {
+            let body = line.trim_end_matches(['\n', '\r']);
+            let ending = &line[body.len()..];
+            if self.key_lines.contains(body.trim()) {
+                out.push_str("[a line of a private key, masked]");
+                out.push_str(ending);
+                continue;
+            }
+            let mut body = body.to_string();
+            for key_line in &self.key_lines {
+                if body.contains(key_line.as_str()) {
+                    body = body.replace(key_line.as_str(), "[a line of a private key, masked]");
+                }
+            }
+            for token in &self.tokens {
+                if body.contains(token.as_str()) {
+                    body = body.replace(token.as_str(), &mask(token));
+                }
+            }
+            let found = tokens_in(&body);
+            out.push_str(&replace_tokens(&body, &found, mask));
+            out.push_str(ending);
+        }
+        out
+    }
+}
+
 fn secrets(file: &EvaluateFile) -> Vec<Found> {
     let lines = raw_lines(&file.content);
+    // Once per file, not once per finding: a large file with many findings
+    // would otherwise be hashed as many times over.
+    let base = content_sha256(&file.content);
     let mut found = Vec::new();
     let reasoning = |what: &str| {
         format!(
@@ -536,12 +758,9 @@ fn secrets(file: &EvaluateFile) -> Vec<Found> {
     while n < lines.len() {
         let line = lines[n];
         let number = n as u32 + 1;
-        let trimmed = line.trim();
-        if trimmed.starts_with("-----BEGIN ") && trimmed.contains("PRIVATE KEY") {
+        if opens_key(line) {
             let end = (n..lines.len())
-                .find(|&i| {
-                    lines[i].trim().starts_with("-----END ") && lines[i].contains("PRIVATE KEY")
-                })
+                .find(|&i| closes_key(lines[i]))
                 .unwrap_or(n);
             let last = end as u32 + 1;
             found.push(Found {
@@ -560,7 +779,7 @@ fn secrets(file: &EvaluateFile) -> Vec<Found> {
                     suggested_edit: Some(SuggestedEdit {
                         project_key: file.project_key.clone(),
                         file_path: file.file_path.clone(),
-                        base_sha256: content_sha256(&file.content),
+                        base_sha256: base.clone(),
                         lines: [number, last],
                         replacement: String::new(),
                     }),
@@ -583,7 +802,7 @@ fn secrets(file: &EvaluateFile) -> Vec<Found> {
                     suggested_edit: Some(SuggestedEdit {
                         project_key: file.project_key.clone(),
                         file_path: file.file_path.clone(),
-                        base_sha256: content_sha256(&file.content),
+                        base_sha256: base.clone(),
                         lines: [number, number],
                         replacement: replace_tokens(line, &tokens, |_| {
                             "[removed: see recall eval]".to_string()
@@ -717,6 +936,9 @@ fn duplicates(files: &[EvaluateFile]) -> Vec<Found> {
             entry.push(unit);
         }
     }
+    // Each file's lines and hash, once, however many copies it holds.
+    let lines_of: Vec<Vec<&str>> = files.iter().map(|f| raw_lines(&f.content)).collect();
+    let mut base_of: HashMap<usize, String> = HashMap::new();
     let mut found = Vec::new();
     for text in order {
         let copies = &by_text[&text];
@@ -733,18 +955,22 @@ fn duplicates(files: &[EvaluateFile]) -> Vec<Found> {
                 continue;
             }
             let file = &files[unit.file];
-            let lines = raw_lines(&file.content);
+            let lines = &lines_of[unit.file];
+            let base = base_of
+                .entry(unit.file)
+                .or_insert_with(|| content_sha256(&file.content))
+                .clone();
             let [first, last] = unit.lines;
             let edit = if unit.item {
                 SuggestedEdit {
                     project_key: file.project_key.clone(),
                     file_path: file.file_path.clone(),
-                    base_sha256: content_sha256(&file.content),
+                    base_sha256: base,
                     lines: [first, last],
                     replacement: String::new(),
                 }
             } else {
-                removal(file, &lines, first, last)
+                removal(file, &base, lines, first, last)
             };
             let where_kept = if kept.project_key.starts_with(GLOBAL_PREFIX) {
                 format!(
@@ -788,11 +1014,12 @@ fn link_targets(line: &str) -> Vec<String> {
     let mut from = 0;
     while let Some(at) = line[from..].find("](").map(|i| from + i) {
         let rest = &line[at + 2..];
-        from = at + 2;
         let target = match rest.strip_prefix('<') {
             Some(inner) => inner.split('>').next().unwrap_or_default(),
             None => rest.split([')', ' ', '\t']).next().unwrap_or_default(),
         };
+        // On past the target, so a line of `](` over and over is read once.
+        from = at + 2 + target.len();
         out.push(target.to_string());
     }
     out
@@ -858,6 +1085,7 @@ fn dead_links(files: &[EvaluateFile]) -> Vec<Found> {
     let mut found = Vec::new();
     for index in files.iter().filter(|f| is_index(f)) {
         let lines = raw_lines(&index.content);
+        let base = content_sha256(&index.content);
         for (n, line) in lines.iter().enumerate() {
             let number = n as u32 + 1;
             let dead: Vec<String> = link_targets(line)
@@ -898,7 +1126,7 @@ fn dead_links(files: &[EvaluateFile]) -> Vec<Found> {
                     suggested_edit: Some(SuggestedEdit {
                         project_key: index.project_key.clone(),
                         file_path: index.file_path.clone(),
-                        base_sha256: content_sha256(&index.content),
+                        base_sha256: base.clone(),
                         lines: [number, number],
                         replacement: String::new(),
                     }),

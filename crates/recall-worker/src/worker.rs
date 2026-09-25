@@ -753,14 +753,17 @@ impl Worker {
     /// Posting the same result twice is safe: the server records it once.
     async fn report(&self, job: &Job, result: &ResultRequest) -> Result<Step, ApiError> {
         let device_id = self.id.device_id.clone().unwrap_or_default();
+        let mut result = result.clone();
         let mut wait = Duration::from_secs(1);
         let mut last = None;
-        for _ in 0..RESULT_TRIES {
+        let mut tries = 0;
+        while tries < RESULT_TRIES {
+            tries += 1;
             let posted: Result<ResultResponse, ApiError> = self
                 .api
                 .post_signed(
                     &jobs::result_path(&job.id),
-                    result,
+                    &result,
                     self.id.key(),
                     &device_id,
                     RESULT_TIMEOUT,
@@ -768,11 +771,44 @@ impl Worker {
                 .await;
             match posted {
                 Ok(outcome) => return Ok(Step::Done(outcome)),
+                // A result the server will not take as it is, too large or
+                // not of the shape it takes: asking again would be answered
+                // the same way, and a worker that stopped over one job
+                // would stop merging too. The job gets an error instead,
+                // and is retried later, or fails, as any job does.
+                Err(e)
+                    if result.error.is_none()
+                        && matches!(
+                            e.status(),
+                            Some(StatusCode::PAYLOAD_TOO_LARGE | StatusCode::BAD_REQUEST)
+                        ) =>
+                {
+                    let why = if e.status() == Some(StatusCode::PAYLOAD_TOO_LARGE) {
+                        format!(
+                            "the result came to {} bytes, more than the server takes",
+                            serde_json::to_vec(&result).map_or(0, |b| b.len())
+                        )
+                    } else {
+                        let said: String = e.message().chars().take(200).collect();
+                        format!("the server refused the result: {said}")
+                    };
+                    log(&format!("job {}: {why}; reporting that instead", job.id));
+                    result = ResultRequest {
+                        lease_id: result.lease_id.clone(),
+                        merge: None,
+                        error: Some(why),
+                        evaluate: None,
+                    };
+                    tries = 0;
+                }
                 Err(e)
                     if matches!(
                         e.status(),
                         Some(
-                            StatusCode::CONFLICT | StatusCode::NOT_FOUND | StatusCode::BAD_REQUEST
+                            StatusCode::CONFLICT
+                                | StatusCode::NOT_FOUND
+                                | StatusCode::BAD_REQUEST
+                                | StatusCode::PAYLOAD_TOO_LARGE
                         )
                     ) =>
                 {
@@ -1056,6 +1092,105 @@ mod tests {
             }
         });
         (url, count)
+    }
+
+    /// A result the server will not take (413, too large) does not stop
+    /// the worker: the job gets an error instead, which it does take.
+    #[tokio::test]
+    async fn a_result_too_large_to_post_becomes_an_error() {
+        use std::sync::{Arc, Mutex};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let bodies: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = bodies.clone();
+        tokio::spawn(async move {
+            while let Ok((mut conn, _)) = listener.accept().await {
+                let seen = seen.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 65536];
+                    let head_end = loop {
+                        let n = conn.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break i + 4;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                    let length = head
+                        .lines()
+                        .find_map(|l| {
+                            let (k, v) = l.split_once(':')?;
+                            k.eq_ignore_ascii_case("content-length")
+                                .then(|| v.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                    while buf.len() < head_end + length {
+                        let n = conn.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
+                    let body = String::from_utf8_lossy(&buf[head_end..]).to_string();
+                    let (status, answer) = if body.contains("\"evaluate\"") {
+                        (413, r#"{"error":"request body too large"}"#.to_string())
+                    } else {
+                        (
+                            200,
+                            r#"{"id":"job_1","state":"queued","applied":false,"follow_up":null}"#
+                                .to_string(),
+                        )
+                    };
+                    seen.lock().unwrap().push(body);
+                    let resp = format!(
+                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    );
+                    let _ = conn.write_all(resp.as_bytes()).await;
+                    let _ = conn.shutdown().await;
+                });
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let w = Worker::new(config(dir.path(), &url)).unwrap();
+        let job = Job {
+            id: "job_1".into(),
+            kind: KIND_EVALUATE.into(),
+            lease_id: "lse_1".into(),
+            lease_expires_at: "2026-10-02T09:16:03.118Z".into(),
+            attempt: 1,
+            merge: None,
+            evaluate: None,
+        };
+        let report = ResultRequest {
+            lease_id: "lse_1".into(),
+            merge: None,
+            error: None,
+            evaluate: Some(EvaluateResult {
+                findings: Vec::new(),
+                details: serde_json::json!({"skipped": [], "findings": {}}),
+            }),
+        };
+        let step = tokio::time::timeout(Duration::from_secs(10), w.report(&job, &report))
+            .await
+            .expect("the worker kept retrying a result the server will never take");
+        assert!(matches!(step, Ok(Step::Done(_))), "{step:?}");
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 2, "{bodies:?}");
+        let error: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap()
+                .contains("more than the server takes"),
+            "{error}"
+        );
+        assert_eq!(error["lease_id"], "lse_1");
     }
 
     fn discovery(capabilities: &str) -> String {
