@@ -359,3 +359,24 @@ if curl -s "$URL/.well-known/recall" | grep -q '"merge_queue"' && command -v ope
   fetch jobs -H "$AUTH" "$JURL/v1/jobs"
   keep job_list_response.json jobs
 fi
+
+# Evaluation reports, from the version that added them (0.4.5): on the
+# queue's server, with its worker, one run asked for, claimed and
+# reported, each response a real one. The report names the file the
+# conflict above wrote; its details are what a worker writes.
+if [ -n "${WORKER_ID:-}" ] && curl -s "$JURL/.well-known/recall" | grep -q '"evaluation"'; then
+  fetch evaluation -X POST -H "$AUTH" -H "$JSON" -d '{"projects":["acme/app"]}' \
+    "$JURL/v1/evaluations"
+  keep evaluation_created_response.json evaluation
+  EVAL=$(field evaluation id)
+  signed eclaim /v1/jobs/claim "{\"kinds\":[\"evaluate\"],\"wait_seconds\":0,\"lease_seconds\":120,$CLI}"
+  keep job_claim_response_evaluate.json eclaim
+  EJOB=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["job"]["id"])' "$WORK/eclaim")
+  ELEASE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["job"]["lease_id"])' "$WORK/eclaim")
+  signed ereport "/v1/jobs/$EJOB/result" \
+    "{\"lease_id\":\"$ELEASE\",\"evaluate\":{\"findings\":[{\"id\":\"f1\",\"kind\":\"stale\",\"severity\":\"low\",\"project_key\":\"acme/app\",\"file_path\":\"topics/auth.md\",\"lines\":[2,2],\"related\":[]}],\"details\":{\"findings\":{\"f1\":{\"excerpt\":\"- tokens live in 1Password\\n\",\"reasoning\":\"Unchanged since 2026-01-02 (120 days), and it names paths or commands.\",\"suggested_edit\":null}},\"skipped\":[]}}}"
+  fetch evaluations -H "$AUTH" "$JURL/v1/evaluations"
+  keep evaluation_list_response.json evaluations
+  fetch shown -H "$AUTH" "$JURL/v1/evaluations/$EVAL"
+  keep evaluation_response.json shown
+fi

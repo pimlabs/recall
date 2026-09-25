@@ -1841,6 +1841,211 @@ async fn a_queue_log_verifies_offline_and_forged_job_leaves_are_refused() {
 }
 
 // ---------------------------------------------------------------------------
+// evaluations
+// ---------------------------------------------------------------------------
+
+/// A log with evaluations in it: one an admin device asks for and a worker
+/// makes, one on the schedule, whose attempt fails, and one the operator
+/// asks for with the contradiction check. Answers the admin device's run's
+/// job.
+async fn an_evaluation_log() -> (Harness, Vec<String>, String) {
+    let h = harness();
+    let mut worker = Machine::new(31);
+    h.enrol(&mut worker, "worker", "worker").await;
+    let mut laptop = Machine::new(32);
+    h.enrol(&mut laptop, "laptop", "admin").await;
+    let push = json!({"project_key": "acme/app", "file_path": "MEMORY.md",
+                      "content": "- [Gone](gone.md)\n", "source_env": "laptop"});
+    let _: Value = ok(h.signed(&laptop, "POST", "/sync", Some(push)).await);
+
+    let asked: Value = ok(h
+        .signed(
+            &laptop,
+            "POST",
+            recall_wire::evaluations::EVALUATIONS_PATH,
+            Some(json!({"projects": ["acme/app", "acme/app"]})),
+        )
+        .await);
+    let job = asked["job"].as_str().unwrap().to_string();
+    let claim = json!({"kinds": ["evaluate"], "wait_seconds": 0, "lease_seconds": 60});
+    let claimed: Value = ok(h
+        .signed(&worker, "POST", wire_jobs::CLAIM_PATH, Some(claim.clone()))
+        .await);
+    assert_eq!(claimed["job"]["id"], json!(job));
+    let lease = claimed["job"]["lease_id"].as_str().unwrap();
+    let report = json!({"lease_id": lease, "evaluate": {
+        "findings": [{"id": "f1", "kind": "dead_link", "severity": "medium",
+                      "project_key": "acme/app", "file_path": "MEMORY.md",
+                      "lines": [1, 1], "related": []}],
+        "details": {"findings": {"f1": {"excerpt": "- [Gone](gone.md)\n"}}}}});
+    let _: Value = ok(h
+        .signed(&worker, "POST", &wire_jobs::result_path(&job), Some(report))
+        .await);
+
+    assert!(h.server.run_scheduled_evaluation().unwrap().is_some());
+    let _: Value = ok(h
+        .call(
+            "POST",
+            recall_wire::evaluations::EVALUATIONS_PATH,
+            Some(TOKEN),
+            Some(json!({"contradictions": true})),
+        )
+        .await);
+    let claimed: Value = ok(h
+        .signed(&worker, "POST", wire_jobs::CLAIM_PATH, Some(claim))
+        .await);
+    let second = claimed["job"]["id"].as_str().unwrap().to_string();
+    let lease = claimed["job"]["lease_id"].as_str().unwrap();
+    let _: Value = ok(h
+        .signed(
+            &worker,
+            "POST",
+            &wire_jobs::result_path(&second),
+            Some(json!({"lease_id": lease, "error": "claude timed out"})),
+        )
+        .await);
+    let leaves = h.leaf_strings().await;
+    (h, leaves, job)
+}
+
+/// Asking for an evaluation appends one `evaluate` leaf, which names the
+/// run, its job and what was asked, and keeps an admin device's body; the
+/// job's claim and result are the leaves any job's are, and none of them
+/// holds what the report found.
+#[tokio::test]
+async fn an_evaluation_appends_its_leaves_and_no_finding() {
+    let (_h, leaves, job) = an_evaluation_log().await;
+    let parsed: Vec<Value> = leaves
+        .iter()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let actions: Vec<String> = parsed
+        .iter()
+        .filter(|l| l["action"] == "evaluate" || l["subject"]["job_id"] == json!(job))
+        .map(|l| {
+            format!(
+                "{} {}",
+                l["action"].as_str().unwrap(),
+                l["actor"]["kind"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(
+        actions,
+        [
+            "evaluate device",
+            "job_claim device",
+            "job_result device",
+            "evaluate server",
+            "evaluate operator",
+        ]
+    );
+    let asked = parsed.iter().find(|l| l["action"] == "evaluate").unwrap();
+    assert_eq!(asked["subject"]["projects"], json!(["acme/app"]));
+    assert_eq!(asked["subject"]["job_id"], json!(job));
+    assert_eq!(
+        asked["request"]["body"],
+        json!(r#"{"projects":["acme/app","acme/app"]}"#)
+    );
+    let result = parsed
+        .iter()
+        .find(|l| l["action"] == "job_result" && l["subject"]["job_id"] == json!(job))
+        .unwrap();
+    assert_eq!(result["subject"]["state"], json!("done"));
+    assert_eq!(result["subject"]["stored_sha256"], Value::Null);
+    assert!(
+        !leaves
+            .iter()
+            .any(|l| l.contains("dead_link") || l.contains("Gone")),
+        "a finding is in the log"
+    );
+}
+
+/// A log with evaluations verifies offline, and each way a server could
+/// misstate one is refused.
+#[tokio::test]
+async fn an_evaluation_log_verifies_offline_and_forgeries_are_refused() {
+    let (h, honest, job) = an_evaluation_log().await;
+    let (code, out) = verify(&h.export().await, &[]);
+    assert_eq!(code, 0, "{out}");
+
+    let parsed: Vec<Value> = honest
+        .iter()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let first = parsed
+        .iter()
+        .position(|l| l["action"] == "evaluate")
+        .unwrap();
+    let forged = |at: usize, edit: Option<&dyn Fn(&mut Value)>| -> String {
+        let mut leaves: Vec<Value> = parsed.clone();
+        match edit {
+            Some(edit) => edit(&mut leaves[at]),
+            None => {
+                leaves.remove(at);
+            }
+        }
+        let leaves: Vec<String> = leaves
+            .into_iter()
+            .enumerate()
+            .map(|(seq, mut l)| {
+                l["seq"] = json!(seq);
+                serde_json::to_string(&l).unwrap()
+            })
+            .collect();
+        export_of(&leaves)
+    };
+    let refused = |name: &str, export: String, want: &str| {
+        let (code, out) = verify(&export, &[]);
+        assert_eq!(code, 1, "{name} was accepted: {out}");
+        assert!(out.contains(want), "{name}: wanted {want:?} in {out}");
+    };
+    refused(
+        "a job no evaluation queued",
+        forged(first, None),
+        &format!("{job}, which no push or result queued"),
+    );
+    refused(
+        "other projects than the body asked for",
+        forged(
+            first,
+            Some(&|l: &mut Value| l["subject"]["projects"] = json!(["acme/web"])),
+        ),
+        "the body asked for other projects",
+    );
+    refused(
+        "the contradiction check, which the body did not ask for",
+        forged(
+            first,
+            Some(&|l: &mut Value| l["subject"]["contradictions"] = json!(true)),
+        ),
+        "the body asked for another contradictions",
+    );
+    refused(
+        "a run an authkey asked for",
+        forged(
+            first,
+            Some(&|l: &mut Value| {
+                l["actor"] = json!({"kind": "authkey", "id": "ak_x", "tag": "cloud"});
+                l["request"] = Value::Null;
+            }),
+        ),
+        "a authkey cannot evaluate",
+    );
+    refused(
+        "the laptop approved as a sync device",
+        forged(
+            parsed
+                .iter()
+                .position(|l| l["action"] == "approve" && l["subject"]["name"] == "laptop")
+                .unwrap(),
+            Some(&|l: &mut Value| l["subject"]["scope"] = json!("sync")),
+        ),
+        "does not have the admin scope",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // the host's admin commands
 // ---------------------------------------------------------------------------
 
