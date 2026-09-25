@@ -628,9 +628,13 @@ arriving new**, and **it has to stay cheap**.
       logic was added — 0.2.0 failed partway through, twice. Adding surface to
       a path that has never survived a real run is the wrong order.
 
-      Half done in 0.4.0: the server no longer compiles anything, because the
-      image installs the release's own `recall-server` binary. The image itself
-      is still assembled on the server.
+      Half done in Part 4 (#98), shipping as 0.4.0: the server no longer
+      compiles anything, because the image installs the release's own
+      `recall-server` binary, checked against that release's checksums. What
+      is still open: `deploy.yml`'s SSH step runs `docker compose ... up -d
+      --build` on the VPS itself, so the image is still assembled there on
+      every deploy; nothing publishes a finished image from CI for the VPS
+      to pull instead.
 
 - [x] **Setting up the off-box backup is eight manual steps and a trap.**
       Two `rclone config` invocations, a crypt password that must be stored
@@ -850,20 +854,39 @@ See `docs/design/handshake.md` for the reasoning.
 - [x] Part 4: `recall-server` is its own binary; the server image holds the
       release's own binary; a server runs releases, not `main`. PR #98,
       shipping as 0.4.0.
-- [ ] Part 2a: device keys, RFC 9421 signed requests and device enrolment,
+- [x] Part 2a: device keys, RFC 9421 signed requests and device enrolment,
       server side. PR #100.
-- [ ] Part 2b: the client enrols during `recall connect`, signs its requests,
+- [x] Part 2b: the client enrols during `recall connect`, signs its requests,
       and gains `recall devices`; cloud sessions enrol with an enrolment key.
-- [ ] Part 2c: the `/admin` page gets a Devices tab with passkey sign-in, so a
-      phone is enough.
-- [ ] Part 5: an audit log chained with hashes; `recall-worker` runs merges
-      and memory evaluation off the public server; client-side encryption, so
-      the API stores ciphertext.
-- [ ] Windows client: native builds, `install.ps1`, npm, and a Git Bash check
+      PR #109.
+- [x] Part 2c: the `/admin` page gets a Devices tab with passkey sign-in, so a
+      phone is enough. PR #110.
+- [x] Part 5, PR 1: an audit log chained with hashes, exported and verified
+      offline, and the client's audit witness (every pull keeps its
+      checkpoint; `recall audit export` and `verify`). PR #111, client half
+      PR #127.
+- [x] Part 5, PR 2: a merge queue and `recall-worker`, so merges run off the
+      public server. PR #112.
+- [ ] Part 5, PRs 3, 4, 5 and 7 (content keys, sealed sync, ciphertext only,
+      strict end-to-end): **parked on 2026-09-25.** The owner is
+      reconsidering the trade between ease of use and security, for example,
+      with encryption a cloud session can no longer be set up from a phone
+      alone. **PR 6, evaluation reports, goes ahead without encryption:** the
+      worker's report details are stored unsealed for now, and the
+      findings/details split is kept so encryption can be added later. See
+      `docs/design/part5-plan.md`.
+- [x] SQLite WAL: the server's database is kept in WAL mode, synced at every
+      commit. PR #126.
+- [x] Windows client: native builds, `install.ps1`, npm, and a Git Bash check
       in `doctor`. PR #99.
-- [ ] winget publishing for the Windows client.
-- [ ] Optional direct TLS in `recall-server` (certificate files or ACME), for
-      a server with no ingress in front of it.
+- [ ] winget publishing for the Windows client. **Shelved on 2026-09-24:** the
+      one-time `winget-pkgs` setup (fork ownership, manual first submission,
+      moderation) was too much friction for a single-owner tool. Windows
+      installs with `install.ps1` or npm instead. The `winget` job stays in
+      `release.yml` and skips while `WINGET_TOKEN` is unset on the `release`
+      environment.
+- [x] Optional direct TLS in `recall-server` (certificate files or ACME), for
+      a server with no ingress in front of it. PR #105.
 - Parked, not agreed: a claude.ai connector (remote MCP) for Recall
   memory; see the design doc's 'Future idea' section.
 
