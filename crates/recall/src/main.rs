@@ -29,6 +29,7 @@ mod backfill;
 mod connect;
 mod devices;
 mod doctor;
+mod eval;
 mod hook;
 mod init;
 mod project;
@@ -134,6 +135,10 @@ enum Cmd {
     /// export offline, or check the log still extends what was saved here
     #[command(subcommand)]
     Audit(audit::Cmd),
+    /// Ask the server's worker for a report on what memory holds, read the
+    /// reports, and make a finding's suggested edit
+    #[command(subcommand)]
+    Eval(eval::Cmd),
     /// Remove a saved token, and this machine's device key
     Disconnect {
         /// The server; defaults to the one most recently connected
@@ -210,6 +215,7 @@ fn main() {
         Cmd::Devices(cmd) => block_on_current(devices::run(cmd)),
         Cmd::Authkey(cmd) => block_on_current(devices::run_authkey(cmd)),
         Cmd::Audit(cmd) => block_on_current(audit::run(cmd)),
+        Cmd::Eval(cmd) => block_on_current(eval::run(cmd)),
         Cmd::Status { json } => block_on_current(status::run(json)),
         Cmd::Doctor { json } => block_on_current(doctor::run(json)),
         Cmd::Push => block_on_current(hook::push()),
