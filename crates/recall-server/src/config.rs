@@ -128,6 +128,7 @@ pub enum ConfigError {
 /// [`claude_bin`]: Config::claude_bin
 /// [`claude_status_interval`]: Config::claude_status_interval
 /// [`ephemeral_device_ttl`]: Config::ephemeral_device_ttl
+/// [`eval_interval`]: Config::eval_interval
 /// [`public_url`]: Config::public_url
 /// [`tls`]: Config::tls
 /// [`tls_max_connections`]: Config::tls_max_connections

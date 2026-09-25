@@ -319,8 +319,9 @@ fn the_secret_check_finds_every_planted_token_and_nothing_in_ordinary_notes() {
         }
         assert!(!detail.contains("MIIEpAIBAAKCAQEA"), "{detail}");
         let edit = f.detail.suggested_edit.as_ref().unwrap();
-        let fixed = edit.apply_to(&f_content(&content)).unwrap();
-        assert!(tokens_in(&fixed.lines().nth(f.lines[0] as usize - 1).unwrap_or("")).is_empty());
+        let fixed = edit.apply_to(&content).unwrap();
+        let line = fixed.lines().nth(f.lines[0] as usize - 1).unwrap_or("");
+        assert!(tokens_in(line).is_empty(), "{line}");
     }
 
     let ordinary = [
@@ -344,10 +345,6 @@ fn the_secret_check_finds_every_planted_token_and_nothing_in_ordinary_notes() {
         let found = secrets(&file(P, "note.md", note));
         assert!(found.is_empty(), "{note:?} was reported: {found:#?}");
     }
-}
-
-fn f_content(content: &str) -> String {
-    content.to_string()
 }
 
 /// The contradiction check spends the owner's Claude usage, so it runs
