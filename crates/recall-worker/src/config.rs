@@ -74,6 +74,7 @@ pub enum ConfigError {
 /// | [`merge_timeout`] | `RECALL_MERGE_TIMEOUT_MS` | 45s, at most [`MAX_MERGE_TIMEOUT`] |
 /// | [`claude_status_interval`] | `RECALL_CLAUDE_STATUS_INTERVAL_MS` | 30m |
 /// | [`lease_seconds`] | `RECALL_WORKER_LEASE_SECONDS` | 120 |
+/// | [`eval_stale_days`] | `RECALL_EVAL_STALE_DAYS` | 90 |
 ///
 /// [`server`]: Config::server
 /// [`data_dir`]: Config::data_dir
@@ -82,6 +83,7 @@ pub enum ConfigError {
 /// [`merge_timeout`]: Config::merge_timeout
 /// [`claude_status_interval`]: Config::claude_status_interval
 /// [`lease_seconds`]: Config::lease_seconds
+/// [`eval_stale_days`]: Config::eval_stale_days
 #[derive(Debug, Clone)]
 pub struct Config {
     /// The server, such as `http://recall-server:8787` from inside the
@@ -109,6 +111,10 @@ pub struct Config {
     pub lease_seconds: u64,
     /// How long one claim waits for a job.
     pub wait_seconds: u64,
+    /// How many days a file must go unchanged, naming a path or a command,
+    /// before an evaluation reports it as `stale` for the owner to
+    /// confirm.
+    pub eval_stale_days: u64,
 }
 
 impl Default for Config {
@@ -122,6 +128,7 @@ impl Default for Config {
             claude_status_interval: Duration::from_secs(30 * 60),
             lease_seconds: 120,
             wait_seconds: 25,
+            eval_stale_days: 90,
         }
     }
 }
@@ -183,6 +190,9 @@ impl Config {
                 .unwrap_or(defaults.claude_status_interval),
             lease_seconds,
             wait_seconds: defaults.wait_seconds.min(MAX_WAIT_SECONDS),
+            eval_stale_days: num("RECALL_EVAL_STALE_DAYS")
+                .filter(|d| *d > 0)
+                .unwrap_or(defaults.eval_stale_days),
         })
     }
 

@@ -682,15 +682,31 @@ async fn claims_and_results_are_checked() {
     for body in [
         json!({"lease_id": job.lease_id}),
         json!({"lease_id": job.lease_id, "merge": {"content": "x"}, "error": "y"}),
+        json!({"lease_id": job.lease_id, "merge": {"content": "x"},
+               "evaluate": {"findings": [], "details": {}}}),
     ] {
         assert_eq!(
             error_of(h.result(&w, &job.id, body).await),
             (
                 StatusCode::BAD_REQUEST,
-                "a result carries exactly one of merge and error".into()
+                "a result carries exactly one of merge, evaluate and error".into()
             )
         );
     }
+    assert_eq!(
+        error_of(
+            h.result(
+                &w,
+                &job.id,
+                json!({"lease_id": job.lease_id, "evaluate": {"findings": [], "details": {}}})
+            )
+            .await
+        ),
+        (
+            StatusCode::BAD_REQUEST,
+            "an evaluate result for a job that is not an evaluation".into()
+        )
+    );
     assert_eq!(
         error_of(
             h.result(

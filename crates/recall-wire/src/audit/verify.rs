@@ -314,6 +314,7 @@ fn subject_keys(action: &str) -> Option<&'static [&'static str]> {
             "follow_up",
         ],
         "job_retry" => &["job_id", "kind", "project_key", "file_path"],
+        "evaluate" => &["evaluation_id", "job_id", "projects", "contradictions"],
         "passkey_add" => &["credential_id", "name", "first"],
         "passkey_remove" => &["credential_id", "name"],
         "sessions_end" => &["ended"],
@@ -351,6 +352,9 @@ fn may(kind: &str, action: &str) -> bool {
         // to merge it) is a result too.
         "job_claim" | "job_result" => &["device", "server"],
         "job_retry" => &["device", "operator"],
+        // The owner, by any admin credential, or the server on the
+        // schedule.
+        "evaluate" => &["device", "operator", "session", "server"],
         // The first passkey takes RECALL_TOKEN (and the bootstrap code);
         // every other passkey action, a session.
         "passkey_add" => &["operator", "session"],
@@ -368,6 +372,7 @@ const KEEPS_BODY: &[&str] = &[
     "revoke",
     "authkey_create",
     "authkey_revoke",
+    "evaluate",
 ];
 
 /// The actions only an admin device may sign: the ones that keep their
@@ -619,6 +624,18 @@ fn check_subject(
             if !subject["follow_up"].is_null() {
                 expect_str(&subject["follow_up"], "subject.follow_up")?;
             }
+        }
+        "evaluate" => {
+            expect_str(&subject["evaluation_id"], "subject.evaluation_id")?;
+            expect_str(&subject["job_id"], "subject.job_id")?;
+            let Some(projects) = string_list(&subject["projects"]) else {
+                return bad("subject.projects is not a list of project keys");
+            };
+            let distinct: HashSet<&str> = projects.iter().copied().collect();
+            if distinct.len() != projects.len() {
+                return bad("subject.projects names a project twice");
+            }
+            expect_bool(&subject["contradictions"], "subject.contradictions")?;
         }
         "passkey_add" | "passkey_remove" => {
             expect_str(&subject["credential_id"], "subject.credential_id")?;
@@ -1011,6 +1028,7 @@ fn route_of(leaf: &Leaf<'_>) -> (&'static str, String) {
         "deny" => ("POST", "/v1/devices/deny".to_string()),
         "authkey_create" => ("POST", "/v1/authkeys".to_string()),
         "job_claim" => ("POST", "/v1/jobs/claim".to_string()),
+        "evaluate" => ("POST", "/v1/evaluations".to_string()),
         // Nothing else is signed: `may` lets no device do it.
         _ => ("", String::new()),
     }
@@ -1072,16 +1090,17 @@ fn check_body(action: &str, subject: &Map<String, Value>, body: &str) -> Check {
     }
     let empty = Map::new();
     let parsed;
-    let asked: &Map<String, Value> =
-        if action == "authkey_revoke" && body.trim_matches([' ', '\t', '\r', '\n']).is_empty() {
-            &empty
-        } else {
-            parsed = strict_json(body).map_err(|e| format!("the request body is not JSON: {e}"))?;
-            match &parsed {
-                Value::Object(map) => map,
-                _ => return bad("the request body is not an object"),
-            }
-        };
+    let asked: &Map<String, Value> = if matches!(action, "authkey_revoke" | "evaluate")
+        && body.trim_matches([' ', '\t', '\r', '\n']).is_empty()
+    {
+        &empty
+    } else {
+        parsed = strict_json(body).map_err(|e| format!("the request body is not JSON: {e}"))?;
+        match &parsed {
+            Value::Object(map) => map,
+            _ => return bad("the request body is not an object"),
+        }
+    };
     if matches!(action, "approve" | "deny") {
         let asked_code = asked
             .get("user_code")
@@ -1138,6 +1157,23 @@ fn check_body(action: &str, subject: &Map<String, Value>, body: &str) -> Check {
             let asked_revoke = asked.get("revoke_devices").unwrap_or(&Value::Bool(false));
             if !asked_revoke.is_boolean() || *asked_revoke != subject["revoke_devices"] {
                 return bad("the body asked for another revoke_devices");
+            }
+        }
+        "evaluate" => {
+            // The server keeps the first of any project named twice.
+            let empty = Value::Array(Vec::new());
+            let asked_projects = string_list(asked.get("projects").unwrap_or(&empty));
+            let mut seen = HashSet::new();
+            let asked_projects: Option<Vec<&str>> =
+                asked_projects.map(|p| p.into_iter().filter(|k| seen.insert(*k)).collect());
+            if asked_projects != string_list(&subject["projects"]) {
+                return bad("the body asked for other projects");
+            }
+            let asked_contradictions = asked.get("contradictions").unwrap_or(&Value::Bool(false));
+            if !asked_contradictions.is_boolean()
+                || *asked_contradictions != subject["contradictions"]
+            {
+                return bad("the body asked for another contradictions");
             }
         }
         _ => {}
@@ -1304,6 +1340,12 @@ fn apply(leaf: &Leaf<'_>, state: &mut State) -> Check {
             }
         }
         "job_claim" | "job_result" | "job_retry" => apply_job(leaf, state)?,
+        // An evaluation's job names no file: it reads many.
+        "evaluate" => queue(
+            state,
+            leaf.subject_str("job_id"),
+            (String::new(), String::new()),
+        )?,
         "passkey_add" | "passkey_remove" | "sessions_end" | "bootstrap_code" | "passkey_reset" => {
             apply_passkey(leaf, state)?
         }

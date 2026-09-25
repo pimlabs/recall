@@ -40,6 +40,10 @@ pub fn retry_path(id: &str) -> String {
 /// Reconcile two versions of one file.
 pub const KIND_MERGE: &str = "merge";
 
+/// Look over memory and report what needs the owner's attention: see
+/// [`crate::evaluations`].
+pub const KIND_EVALUATE: &str = "evaluate";
+
 /// Waiting to be claimed, or to reach its `not_before` after a failed
 /// attempt.
 pub const STATE_QUEUED: &str = "queued";
@@ -131,6 +135,9 @@ pub struct Job {
     /// The input of a [`KIND_MERGE`] job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge: Option<MergeInput>,
+    /// The input of a [`KIND_EVALUATE`] job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluate: Option<EvaluateInput>,
 }
 
 /// What a merge job reconciles.
@@ -160,8 +167,54 @@ pub struct MergeSide {
     pub updated_at: String,
 }
 
-/// Body of `POST /v1/jobs/{id}/result`: exactly one of `merge` and
-/// `error`.
+/// What an evaluate job looks at, as the claim that leases it carries it.
+///
+/// The files come with the claim, read when it is made, rather than by the
+/// worker pulling each project: a worker then reads memory only while it
+/// holds an evaluation the owner asked for, and only the projects asked
+/// for, and the worker scope stays what it was, the job routes and nothing
+/// else.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvaluateInput {
+    /// The run this job makes the report for: `eval_…`.
+    pub evaluation_id: String,
+    /// The projects asked for; empty for every project.
+    pub projects: Vec<String>,
+    /// Whether to run the contradiction check, which asks `claude`.
+    pub contradictions: bool,
+    /// Every live file of the projects asked for (every project, when none
+    /// was named) and of every global scope, ordered by project and path.
+    /// Tombstones are left out.
+    #[serde(default)]
+    pub files: Vec<EvaluateFile>,
+}
+
+/// One file, as an evaluate job carries it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvaluateFile {
+    /// The project, or scope, it belongs to.
+    pub project_key: String,
+    /// The file.
+    pub file_path: String,
+    /// Its exact bytes.
+    pub content: String,
+    /// When it was last written.
+    pub updated_at: String,
+}
+
+/// An evaluate job's result: see [`crate::evaluations`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvaluateResult {
+    /// What was found, each holding nothing but enums, a file, lines and
+    /// related files; the server refuses a finding with any other key.
+    pub findings: Vec<crate::evaluations::Finding>,
+    /// Everything that quotes a note, as a
+    /// [`Details`](crate::evaluations::Details) object.
+    pub details: serde_json::Value,
+}
+
+/// Body of `POST /v1/jobs/{id}/result`: exactly one of `merge`, `evaluate`
+/// and `error`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResultRequest {
     /// The lease the job was claimed under.
@@ -173,6 +226,24 @@ pub struct ResultRequest {
     /// minutes, then marked failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// An evaluate job's result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluate: Option<EvaluateResult>,
+}
+
+impl ResultRequest {
+    /// How many of `merge`, `evaluate` and `error` it carries: exactly one
+    /// is a result the server records.
+    pub fn members(&self) -> usize {
+        [
+            self.merge.is_some(),
+            self.evaluate.is_some(),
+            self.error.is_some(),
+        ]
+        .into_iter()
+        .filter(|m| *m)
+        .count()
+    }
 }
 
 /// A merge job's result.
@@ -190,7 +261,8 @@ pub struct ResultResponse {
     /// Its state now.
     pub state: String,
     /// Whether a merge result was written to the file. `false` for an
-    /// error, and for a result the file had moved on from.
+    /// error, for a result the file had moved on from, and for an
+    /// evaluation, which writes no file.
     pub applied: bool,
     /// When the file changed while the job ran: the job that merges this
     /// result with the newer version.
@@ -259,6 +331,7 @@ mod tests {
                 content: "merged".into(),
             }),
             error: None,
+            evaluate: None,
         };
         assert_eq!(
             serde_json::to_string(&ok).unwrap(),
@@ -268,6 +341,7 @@ mod tests {
             lease_id: "lse_a".into(),
             merge: None,
             error: Some("claude merge timed out after 45s".into()),
+            evaluate: None,
         };
         assert_eq!(
             serde_json::to_string(&failed).unwrap(),

@@ -23,6 +23,7 @@
 //! | [`discovery`] | `GET /.well-known/recall` — what the server is and speaks |
 //! | [`devices`] | `/v1/devices`, `/v1/authkeys` — enrolling and managing devices |
 //! | [`jobs`] | `/v1/jobs` — the merge queue a worker drains |
+//! | [`evaluations`] | `/v1/evaluations` — reports the worker makes on what memory holds |
 //! | [`audit`] | `/v1/audit/*`: the log's checkpoint, leaves and proofs, the tree they hash to, and checking an export offline |
 //! | [`signature`] | not an endpoint: how a device signs every request |
 //! | [`validate`] | the rules both halves enforce |
@@ -50,6 +51,7 @@ pub mod admin;
 pub mod audit;
 pub mod devices;
 pub mod discovery;
+pub mod evaluations;
 pub mod health;
 pub mod jobs;
 pub mod signature;
@@ -65,10 +67,14 @@ pub use devices::{
     PendingEnrollment,
 };
 pub use discovery::{Discovery, DISCOVERY_PATH, PROTOCOL, PROTOCOL_HEADER};
+pub use evaluations::{
+    Details, Evaluation, EvaluationCreated, EvaluationList, EvaluationRequest, EvaluationSummary,
+    FileRef, Finding, FindingDetail, Skipped, SuggestedEdit,
+};
 pub use health::{ClaudeCliStatus, Health, MergeError, MergeStatus, QueueStatus, WorkerStatus};
 pub use jobs::{
-    ClaimRequest, ClaimResponse, ClaudeCliReport, Job, JobList, JobSummary, MergeInput,
-    MergeResult, MergeSide, ResultRequest, ResultResponse,
+    ClaimRequest, ClaimResponse, ClaudeCliReport, EvaluateFile, EvaluateInput, EvaluateResult, Job,
+    JobList, JobSummary, MergeInput, MergeResult, MergeSide, ResultRequest, ResultResponse,
 };
 /// The hash a push names its base by: SHA-256 of the file's exact bytes, as
 /// lowercase hex.

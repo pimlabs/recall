@@ -29,6 +29,8 @@ pub mod api;
 #[cfg(feature = "client")]
 pub mod config;
 #[cfg(feature = "client")]
+pub mod evaluate;
+#[cfg(feature = "client")]
 pub mod identity;
 #[cfg(feature = "client")]
 pub mod worker;

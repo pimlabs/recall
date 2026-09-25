@@ -9,7 +9,10 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use recall_wire::jobs::{KIND_MERGE, STATE_DONE, STATE_FAILED, STATE_LEASED, STATE_QUEUED};
+use recall_wire::jobs::{
+    KIND_EVALUATE, KIND_MERGE, MAX_LEASE_SECONDS, STATE_DONE, STATE_FAILED, STATE_LEASED,
+    STATE_QUEUED,
+};
 use recall_wire::{
     content_sha256, Job, JobSummary, MergeInput, MergeSide, QueueStatus, ResultRequest,
     ResultResponse,
@@ -17,6 +20,7 @@ use recall_wire::{
 use rusqlite::{Connection, OptionalExtension, Row};
 use time::OffsetDateTime;
 
+use super::evaluations;
 use super::{read_file, write_file, Outcome, Store};
 use crate::audit::leaf;
 use crate::format_timestamp;
@@ -214,6 +218,8 @@ fn side_of(content: &str, source_env: &str, updated_at: &str) -> MergeSide {
 pub struct Failure {
     /// The job.
     pub id: String,
+    /// What kind of job: only a merge's failure is `/health`'s business.
+    pub kind: String,
     /// The project its file belongs to.
     pub project_key: String,
     /// The file.
@@ -230,17 +236,21 @@ impl Failure {
     /// of it, and where to look.
     pub fn public(&self) -> String {
         format!(
-            "merge job {} {}; see GET /v1/jobs?state=failed",
-            self.id, self.what
+            "{} job {} {}; see GET /v1/jobs?state=failed",
+            self.kind, self.id, self.what
         )
     }
 
     /// What the server's log says: the file and the error too.
     pub fn logged(&self) -> String {
-        let mut line = format!(
-            "merge job {} for {}/{} {}",
-            self.id, self.project_key, self.file_path, self.what
-        );
+        let mut line = if self.kind == KIND_MERGE {
+            format!(
+                "merge job {} for {}/{} {}",
+                self.id, self.project_key, self.file_path, self.what
+            )
+        } else {
+            format!("{} job {} {}", self.kind, self.id, self.what)
+        };
         if !self.error.is_empty() {
             line.push_str(": ");
             line.push_str(&self.error);
@@ -288,8 +298,13 @@ pub enum Settlement {
     /// The lease is not the job's current one, or has run out: someone
     /// else has, or will have, the job.
     LeaseEnded,
-    /// A merge result for a job that is not a merge.
-    WrongKind,
+    /// A result of one kind for a job of another: the kind the result
+    /// was.
+    WrongKind(&'static str),
+    /// An evaluation's report that cannot be recorded, and why: a finding
+    /// names a file the store does not hold, two share an id, or there
+    /// are too many. Nothing was changed.
+    Invalid(String),
 }
 
 /// What retrying a job came to.
@@ -343,6 +358,7 @@ fn after_failure(
             )?;
             Ok(Some(Failure {
                 id: job.id.clone(),
+                kind: job.kind.clone(),
                 project_key: job.project_key.clone(),
                 file_path: job.file_path.clone(),
                 what: format!("failed after {} attempts", job.attempt),
@@ -552,6 +568,14 @@ impl Store {
                 let Some(job) = job else {
                     return Ok(Outcome::Refuse(None));
                 };
+                // An evaluation reads every project and may ask claude once
+                // for each, so it gets the longest lease there is, whatever
+                // the claim asked for.
+                let lease = if job.kind == KIND_EVALUATE {
+                    lease.max(Duration::from_secs(MAX_LEASE_SECONDS))
+                } else {
+                    lease
+                };
                 let expires = ts(now + lease);
                 tx.execute(
                     "UPDATE jobs SET state = 'leased', lease_id = ?2, lease_expires_at = ?3,
@@ -563,6 +587,10 @@ impl Store {
                     KIND_MERGE => Some(job.merge_input()?),
                     _ => None,
                 };
+                let evaluate = match job.kind.as_str() {
+                    KIND_EVALUATE => Some(evaluations::evaluate_input(tx, &job.payload)?),
+                    _ => None,
+                };
                 Ok(Outcome::Commit(Some(Job {
                     id: job.id,
                     kind: job.kind,
@@ -570,6 +598,7 @@ impl Store {
                     lease_expires_at: expires,
                     attempt: job.attempt + 1,
                     merge,
+                    evaluate,
                 })))
             },
             |seq, at, job| build_leaf(seq, at, job.as_ref().expect("a leaf only for a lease")),
@@ -627,7 +656,39 @@ impl Store {
                 }
 
                 let mut stored = None;
+                if result.members() != 1 {
+                    anyhow::bail!("a result carries exactly one of merge, evaluate and error");
+                }
                 let settled = match (&result.merge, &result.error) {
+                    (None, None) => {
+                        let report = result.evaluate.as_ref().context("checked above")?;
+                        if job.kind != KIND_EVALUATE {
+                            return refuse(Settlement::WrongKind(KIND_EVALUATE));
+                        }
+                        if let Some(why) = evaluations::check_files(tx, &report.findings)? {
+                            return refuse(Settlement::Invalid(why));
+                        }
+                        if !report.details.is_object() {
+                            return refuse(Settlement::Invalid(
+                                "details is not an object".to_string(),
+                            ));
+                        }
+                        evaluations::record_report(
+                            tx,
+                            &job.id,
+                            &job.payload,
+                            &report.findings,
+                            &report.details,
+                            now,
+                        )?;
+                        finish(tx, &job, STATE_DONE, false, None, None, None, now)?;
+                        Settled {
+                            response: ResultResponse::default(),
+                            applied: false,
+                            queued: false,
+                            failed: None,
+                        }
+                    }
                     (_, Some(error)) => {
                         let failed = after_failure(tx, &job, error, now, true)?.map(Box::new);
                         Settled {
@@ -639,7 +700,7 @@ impl Store {
                     }
                     (Some(merged), None) => {
                         if job.kind != KIND_MERGE {
-                            return refuse(Settlement::WrongKind);
+                            return refuse(Settlement::WrongKind(KIND_MERGE));
                         }
                         let input = job.merge_input()?;
                         // Nothing from two versions that had something is
@@ -674,7 +735,6 @@ impl Store {
                             settled
                         }
                     }
-                    (None, None) => anyhow::bail!("a result carries a merge or an error"),
                 };
                 let response = get_job(tx, id)?
                     .context("the job was read above")?
@@ -790,11 +850,15 @@ impl Store {
     /// Not in the audit log: it changes no file, and what it frees is
     /// recorded around it — the `revoke` of the worker that held a lease
     /// before, and the server's own `job_claim` of each job after.
+    ///
+    /// Merge jobs only: an evaluation waits for a worker, since the server
+    /// does not evaluate, and a lease a revoked worker held on one runs out
+    /// by itself.
     pub fn release_open_jobs(&self, now: OffsetDateTime) -> Result<usize> {
         Ok(self.lock().execute(
             "UPDATE jobs SET state = 'queued', lease_id = NULL, lease_expires_at = NULL,
                  not_before = ?1
-             WHERE state IN ('queued', 'leased')",
+             WHERE kind = 'merge' AND state IN ('queued', 'leased')",
             (ts(now),),
         )?)
     }
@@ -816,7 +880,8 @@ impl Store {
                 let jobs = {
                     let mut stmt = tx.prepare(
                         "SELECT id, project_key, file_path FROM jobs
-                         WHERE state IN ('queued', 'leased') ORDER BY created_at, id",
+                         WHERE kind = 'merge' AND state IN ('queued', 'leased')
+                         ORDER BY created_at, id",
                     )?;
                     let rows = stmt.query_map([], |r| {
                         Ok((
@@ -833,7 +898,7 @@ impl Store {
                 tx.execute(
                     "UPDATE jobs SET state = 'failed', lease_id = NULL, lease_expires_at = NULL,
                          error = ?1, applied = 0, updated_at = ?2
-                     WHERE state IN ('queued', 'leased')",
+                     WHERE kind = 'merge' AND state IN ('queued', 'leased')",
                     (clip(why, MAX_ERROR_BYTES), ts(now)),
                 )?;
                 Ok(Outcome::Commit(jobs))
@@ -861,12 +926,14 @@ impl Store {
         Ok(jobs.into_iter().map(|(id, _, _)| id).collect())
     }
 
-    /// What `/health` says about the queue.
+    /// What `/health` says about the merge queue. Merge jobs only: an
+    /// evaluation waiting is not a merge held up, and `GET
+    /// /v1/evaluations` shows it.
     pub fn queue_status(&self) -> Result<QueueStatus> {
         let conn = self.lock();
         let count = |state: &str| -> Result<u64> {
             let n: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM jobs WHERE state = ?1",
+                "SELECT COUNT(*) FROM jobs WHERE kind = 'merge' AND state = ?1",
                 (state,),
                 |r| r.get(0),
             )?;
@@ -877,7 +944,7 @@ impl Store {
             leased: count(STATE_LEASED)?,
             failed: count(STATE_FAILED)?,
             oldest_queued_at: conn.query_row(
-                "SELECT MIN(created_at) FROM jobs WHERE state = 'queued'",
+                "SELECT MIN(created_at) FROM jobs WHERE kind = 'merge' AND state = 'queued'",
                 [],
                 |r| r.get(0),
             )?,
@@ -981,6 +1048,7 @@ fn apply_merge(
                 false,
                 Some(Box::new(Failure {
                     id: job.id.clone(),
+                    kind: job.kind.clone(),
                     project_key: job.project_key.clone(),
                     file_path: job.file_path.clone(),
                     what: "was not applied: the file kept changing while it was merged".to_string(),
@@ -1278,6 +1346,7 @@ mod tests {
                 content: content.into(),
             }),
             error: None,
+            evaluate: None,
         }
     }
 
@@ -1286,6 +1355,7 @@ mod tests {
             lease_id: lease.into(),
             merge: None,
             error: Some(why.into()),
+            evaluate: None,
         }
     }
 

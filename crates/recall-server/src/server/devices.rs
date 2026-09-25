@@ -65,14 +65,14 @@ const UNTAGGED: &str = "device";
 
 /// Reads a JSON body, answering with the wording `POST /sync` uses for one
 /// that does not parse.
-fn body<T: DeserializeOwned>(bytes: &Bytes) -> Result<T, Refusal> {
+pub(super) fn body<T: DeserializeOwned>(bytes: &Bytes) -> Result<T, Refusal> {
     serde_json::from_slice(bytes)
         .map_err(|_| Refusal::new(StatusCode::BAD_REQUEST, "invalid json body"))
 }
 
 /// A body on the routes with a small limit: one over it is refused in the
 /// usual JSON shape rather than axum's plain text.
-fn small_body(bytes: Result<Bytes, BytesRejection>) -> Result<Bytes, Refusal> {
+pub(super) fn small_body(bytes: Result<Bytes, BytesRejection>) -> Result<Bytes, Refusal> {
     bytes.map_err(|rejection| match rejection.status() {
         StatusCode::PAYLOAD_TOO_LARGE => too_large(),
         status => Refusal::new(status, "could not read the request body"),
@@ -83,7 +83,7 @@ fn small_body(bytes: Result<Bytes, BytesRejection>) -> Result<Bytes, Refusal> {
 /// beside the signature (see `leaf::SignedRequest::body`). Any JSON body
 /// is UTF-8 already; this refuses the one route that reads none, revoking
 /// a device, a body that is not.
-fn body_text(bytes: &Bytes) -> Result<&str, Refusal> {
+pub(super) fn body_text(bytes: &Bytes) -> Result<&str, Refusal> {
     std::str::from_utf8(bytes)
         .map_err(|_| Refusal::new(StatusCode::BAD_REQUEST, "the request body must be UTF-8"))
 }

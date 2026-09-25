@@ -16,6 +16,7 @@ use axum::middleware::{from_fn, from_fn_with_state};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
+use recall_wire::evaluations::check_finding;
 use recall_wire::jobs::{
     self, KIND_MERGE, MAX_LEASE_SECONDS, MAX_WAIT_SECONDS, MIN_LEASE_SECONDS, STATES,
 };
@@ -106,9 +107,13 @@ fn server_result(seq: u64, at: &str, change: &leaf::JobChange<'_>) -> Vec<u8> {
 
 /// Logs a failed job with its file, and shows it in `/health` without:
 /// `/health` answers anyone, and names a job, never a project or a path.
+/// Only a merge's: `/health` reports the merge queue, and a failed
+/// evaluation shows in `GET /v1/evaluations`.
 fn record_failure(state: &AppState, failure: &Failure) {
     eprintln!("{}", failure.logged());
-    record_error(state, failure.public());
+    if failure.kind == KIND_MERGE {
+        record_error(state, failure.public());
+    }
 }
 
 fn record_error(state: &AppState, message: String) {
@@ -239,11 +244,28 @@ pub(super) async fn handle_result(
     Path(id): Path<String>,
     bytes: Bytes,
 ) -> Response {
-    let Ok(req) = serde_json::from_slice::<ResultRequest>(&bytes) else {
+    let Ok(raw) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return bad("invalid json body");
     };
-    if req.merge.is_some() == req.error.is_some() {
-        return bad("a result carries exactly one of merge and error");
+    // Read before the typed parse, which would drop an unknown key rather
+    // than refuse it: a finding holds nothing but its enums, its file,
+    // its lines and related files, so no note text reaches the part of a
+    // report the API serves.
+    if let Some(findings) = raw.get("evaluate").and_then(|e| e.get("findings")) {
+        let Some(findings) = findings.as_array() else {
+            return bad("evaluate.findings is not a list");
+        };
+        for finding in findings {
+            if let Err(why) = check_finding(finding) {
+                return bad(&why);
+            }
+        }
+    }
+    let Ok(req) = serde_json::from_value::<ResultRequest>(raw) else {
+        return bad("invalid json body");
+    };
+    if req.members() != 1 {
+        return bad("a result carries exactly one of merge, evaluate and error");
     }
     if let Err(e) = expire_leases(&state) {
         return internal(e);
@@ -287,7 +309,13 @@ pub(super) async fn handle_result(
             StatusCode::CONFLICT,
             "this lease has ended; the job was handed out again",
         ),
-        Ok(Settlement::WrongKind) => bad("a merge result for a job that is not a merge"),
+        Ok(Settlement::WrongKind(KIND_MERGE)) => {
+            bad("a merge result for a job that is not a merge")
+        }
+        Ok(Settlement::WrongKind(_)) => {
+            bad("an evaluate result for a job that is not an evaluation")
+        }
+        Ok(Settlement::Invalid(why)) => bad(&why),
         Err(e) => internal(e),
     }
 }
@@ -348,11 +376,20 @@ pub(super) async fn handle_retry(
     }
 }
 
-/// Removes finished jobs older than [`DONE_JOBS_KEPT`].
+/// Evaluation reports are kept this long after they came in, then
+/// removed, details and all.
+pub(super) const EVALUATIONS_KEPT: Duration = Duration::from_secs(90 * 24 * 60 * 60);
+
+/// Removes finished jobs older than [`DONE_JOBS_KEPT`], and evaluation
+/// reports older than [`EVALUATIONS_KEPT`]. Answers how many jobs.
 pub(super) fn prune(state: &AppState) -> anyhow::Result<usize> {
-    state.store.prune_jobs(&format_timestamp(
-        OffsetDateTime::now_utc() - DONE_JOBS_KEPT,
-    ))
+    let now = OffsetDateTime::now_utc();
+    state
+        .store
+        .prune_evaluations(&format_timestamp(now - EVALUATIONS_KEPT))?;
+    state
+        .store
+        .prune_jobs(&format_timestamp(now - DONE_JOBS_KEPT))
 }
 
 /// Merges what is left in the queue here, once no worker is left to.
@@ -469,6 +506,7 @@ pub(super) async fn drain_without_worker(state: &Arc<AppState>) -> anyhow::Resul
                 lease_id,
                 merge: Some(MergeResult { content }),
                 error: None,
+                evaluate: None,
             },
             Err(error) => {
                 eprintln!(
@@ -479,6 +517,7 @@ pub(super) async fn drain_without_worker(state: &Arc<AppState>) -> anyhow::Resul
                     lease_id,
                     merge: None,
                     error: Some(error),
+                    evaluate: None,
                 }
             }
         };

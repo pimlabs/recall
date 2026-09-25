@@ -145,6 +145,33 @@ impl Merger {
 
     /// Returns a single reconciled version of the two inputs.
     pub async fn merge(&self, old_content: &str, new_content: &str) -> Result<String, Error> {
+        let result = self
+            .ask(SYSTEM_PROMPT, &prompt(old_content, new_content))
+            .await?;
+
+        // A merge that comes back empty while both inputs had content is a
+        // malfunction, not a result — the model refused, or emitted nothing,
+        // or the envelope carried `is_error: false` over an empty body.
+        //
+        // Storing it would be the worst outcome this server can produce:
+        // both machines' notes replaced by "", reported as `merged: true`,
+        // and then written out as an empty file everywhere on the next pull.
+        // Every other failure here degrades to last-write-wins, and so does
+        // this one.
+        if result.trim().is_empty()
+            && !(old_content.trim().is_empty() && new_content.trim().is_empty())
+        {
+            return Err(Error::EmptyResult);
+        }
+        Ok(result)
+    }
+
+    /// One `claude -p` call: `system_prompt` in place of Claude Code's own,
+    /// `body` on stdin, and the answer's text. Every flag that keeps a merge
+    /// cheap and inert applies to any call made here: no tools, one turn,
+    /// nothing persisted, no MCP servers, a neutral working directory.
+    /// The evaluation's contradiction check asks through this too.
+    pub async fn ask(&self, system_prompt: &str, body: &str) -> Result<String, Error> {
         let limit = if self.timeout.is_zero() {
             DEFAULT_TIMEOUT
         } else {
@@ -155,7 +182,7 @@ impl Merger {
         cmd.arg("-p")
             .args(["--output-format", "json"])
             .args(["--input-format", "text"])
-            .args(["--system-prompt", SYSTEM_PROMPT])
+            .args(["--system-prompt", system_prompt])
             .arg("--exclude-dynamic-system-prompt-sections")
             .arg("--strict-mcp-config")
             // No tools, and one turn: a merge is text in and text out, so a
@@ -190,7 +217,7 @@ impl Merger {
         })?;
 
         let mut stdin = child.stdin.take().expect("stdin was piped");
-        let body = prompt(old_content, new_content);
+        let body = body.to_string();
         // Writing and draining run together: a prompt larger than the pipe
         // buffer would deadlock if we wrote it all before reading output.
         let run = async {
@@ -239,21 +266,6 @@ impl Merger {
             return Err(Error::Rejected(
                 truncate(&parsed.result, DETAIL_LIMIT).to_string(),
             ));
-        }
-
-        // A merge that comes back empty while both inputs had content is a
-        // malfunction, not a result — the model refused, or emitted nothing,
-        // or the envelope carried `is_error: false` over an empty body.
-        //
-        // Storing it would be the worst outcome this server can produce:
-        // both machines' notes replaced by "", reported as `merged: true`,
-        // and then written out as an empty file everywhere on the next pull.
-        // Every other failure here degrades to last-write-wins, and so does
-        // this one.
-        if parsed.result.trim().is_empty()
-            && !(old_content.trim().is_empty() && new_content.trim().is_empty())
-        {
-            return Err(Error::EmptyResult);
         }
         Ok(parsed.result)
     }
