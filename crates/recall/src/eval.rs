@@ -74,6 +74,7 @@ pub enum Cmd {
 }
 
 /// Why a command stopped.
+#[derive(Debug)]
 enum Failed {
     /// Already said, with this exit code.
     Said(i32),
@@ -423,6 +424,73 @@ fn confirmed(question: &str, yes: bool) -> Result<bool, Failed> {
         .map_err(|_| Failed::Said(exit::CONFIG))
 }
 
+/// What [`make_edit`] came to.
+#[derive(Debug, PartialEq, Eq)]
+enum Made {
+    /// The edit is in the file.
+    Written,
+    /// The owner said no; nothing was changed.
+    Declined,
+}
+
+/// Makes `edit` to the file at `path`, once `confirm` agrees, given what the
+/// edit is, as text to show.
+///
+/// The file is read, and the edit checked against the version the report
+/// read, before asking. Asking takes as long as the owner does, and a
+/// Claude Code session may edit and push the same file meanwhile; writing
+/// the edit made from the first read would then replace that edit here
+/// and, pushed from a base that is now the session's, everywhere. So the
+/// file is read again after the answer, and the edit is written only if it
+/// is still exactly what was read before, with nothing between that check
+/// and the write but the write. `--yes` goes through the same check.
+fn make_edit(
+    path: &std::path::Path,
+    edit: &SuggestedEdit,
+    confirm: impl FnOnce(&str) -> Result<bool, Failed>,
+) -> Result<Made, Failed> {
+    let read = |path: &std::path::Path| {
+        std::fs::read_to_string(path).map_err(|e| {
+            refuse(
+                &format!("cannot read {}: {e}", path.display()),
+                "Start a Claude Code session here first, so the file is on this machine.",
+            )
+        })
+    };
+    let local = read(path)?;
+    let changed = edit.apply_to(&local).map_err(|why| {
+        refuse(
+            &format!("{why}, here or on another machine, so the edit may no longer fit."),
+            "Pull, then run a new evaluation: recall eval run",
+        )
+    })?;
+    let shown = if edit.replacement.is_empty() {
+        format!("Edit   remove {}", lines(&edit.lines))
+    } else {
+        format!(
+            "Edit   {} become:\n{}",
+            lines(&edit.lines),
+            indented(&edit.replacement)
+        )
+    };
+    if !confirm(&shown)? {
+        return Ok(Made::Declined);
+    }
+    if read(path)? != local {
+        return Err(refuse(
+            &format!(
+                "{} changed while you were asked, so the edit was not made: it would have \
+                 replaced that change.",
+                path.display()
+            ),
+            "Run recall eval apply again; if the report no longer fits, run a new one.",
+        ));
+    }
+    std::fs::write(path, changed)
+        .map_err(|e| refuse(&format!("cannot write {}: {e}", path.display()), ""))?;
+    Ok(Made::Written)
+}
+
 async fn apply(client: &Client, finding: &str, evaluation: Option<String>, yes: bool) -> Done {
     let evaluation = fetch(client, evaluation, true).await?;
     if evaluation.state != STATE_DONE {
@@ -456,41 +524,18 @@ async fn apply(client: &Client, finding: &str, evaluation: Option<String>, yes: 
         Err(e) => return Err(refuse(&format!("{e:#}"), "")),
     };
     let path = local_path(&ctx, &edit)?;
-    let local = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) => {
-            return Err(refuse(
-                &format!("cannot read {}: {e}", path.display()),
-                "Start a Claude Code session here first, so the file is on this machine.",
-            ))
+    let question = format!("Make this edit to {} and push it?", edit.file_path);
+    match make_edit(&path, &edit, |shown| {
+        eprintln!("{} {}", f.id, f.kind);
+        eprintln!("File   {}", path.display());
+        eprintln!("{shown}");
+        confirmed(&question, yes)
+    })? {
+        Made::Declined => {
+            eprintln!("Nothing was changed.");
+            return Ok(exit::CONFIG);
         }
-    };
-    let changed = match edit.apply_to(&local) {
-        Ok(text) => text,
-        Err(why) => {
-            return Err(refuse(
-                &format!("{why}, here or on another machine, so the edit may no longer fit."),
-                "Pull, then run a new evaluation: recall eval run",
-            ))
-        }
-    };
-    eprintln!("{} {}", f.id, f.kind);
-    eprintln!("File   {}", path.display());
-    if edit.replacement.is_empty() {
-        eprintln!("Edit   remove {}", lines(&edit.lines));
-    } else {
-        eprintln!("Edit   {} become:", lines(&edit.lines));
-        eprintln!("{}", indented(&edit.replacement));
-    }
-    if !confirmed(
-        &format!("Make this edit to {} and push it?", edit.file_path),
-        yes,
-    )? {
-        eprintln!("Nothing was changed.");
-        return Ok(exit::CONFIG);
-    }
-    if let Err(e) = std::fs::write(&path, changed) {
-        return Err(refuse(&format!("cannot write {}: {e}", path.display()), ""));
+        Made::Written => {}
     }
     match recall_hooks::push(&ctx, &path).await {
         Ok(_) => {
@@ -502,5 +547,58 @@ async fn apply(client: &Client, finding: &str, evaluation: Option<String>, yes: 
             eprintln!("  The file is changed here, and goes with the next edit made to it.");
             Ok(exit::SERVER)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn edit_for(content: &str) -> SuggestedEdit {
+        SuggestedEdit {
+            project_key: "acme/app".into(),
+            file_path: "deploy.md".into(),
+            base_sha256: recall_wire::content_sha256(content),
+            lines: [2, 2],
+            replacement: "- key: [removed]\n".into(),
+        }
+    }
+
+    /// A session that edits the file while the owner is asked keeps its
+    /// edit: the suggested one is not written over it.
+    #[test]
+    fn an_edit_made_while_asking_is_not_written_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deploy.md");
+        let content = "# Deploy\n- key: abc123\n";
+        std::fs::write(&path, content).unwrap();
+        let theirs = "# Deploy\n- key: abc123\n- a line a session just added\n";
+        let made = make_edit(&path, &edit_for(content), |_| {
+            std::fs::write(&path, theirs).unwrap();
+            Ok(true)
+        });
+        assert!(matches!(made, Err(Failed::Said(_))), "{made:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), theirs);
+    }
+
+    #[test]
+    fn an_unchanged_file_gets_the_edit_and_a_no_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deploy.md");
+        let content = "# Deploy\n- key: abc123\n";
+        std::fs::write(&path, content).unwrap();
+        assert_eq!(
+            make_edit(&path, &edit_for(content), |_| Ok(false)).unwrap(),
+            Made::Declined
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        assert_eq!(
+            make_edit(&path, &edit_for(content), |_| Ok(true)).unwrap(),
+            Made::Written
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# Deploy\n- key: [removed]\n"
+        );
     }
 }
