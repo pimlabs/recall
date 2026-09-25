@@ -1625,7 +1625,9 @@ Admin. Asks for a run. Both members may be left out, and so may the body:
 ```
 
 A project named twice counts once. The run is queued as an `evaluate` job
-for the worker, which a claim picks up within a second.
+for the worker, which a claim picks up within a second. A worker older
+than 0.4.5 claims merges only, so a run waits, `queued`, until the worker
+is upgraded.
 
 | Code | When |
 |:---:|---|
