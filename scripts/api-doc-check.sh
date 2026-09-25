@@ -536,6 +536,10 @@ check "with no worker enrolled, no evaluation is queued" \
      -d '{"contradictions":false}' "$URL/v1/evaluations") $(cat "$WORK/eval.json")"
 check "a project the server does not hold is 400" '{"error":"no project has the key \"no/such\""}' \
   "$(curl -s -X POST "${auth[@]}" "${json[@]}" -d '{"projects":["no/such"]}' "$URL/v1/evaluations")"
+check "a body of a no-break space is not an empty body" '{"error":"invalid json body"}' \
+  "$(printf '\302\240' | curl -s -X POST "${auth[@]}" "${json[@]}" --data-binary @- "$URL/v1/evaluations")"
+check "a body of a form feed is not an empty body" '{"error":"invalid json body"}' \
+  "$(printf '\f' | curl -s -X POST "${auth[@]}" "${json[@]}" --data-binary @- "$URL/v1/authkeys/ak_nothing/revoke")"
 check "no evaluations yet" '{"evaluations":[]}' "$(curl -s "${auth[@]}" "$URL/v1/evaluations")"
 check "an unknown evaluation is 404" '{"error":"no evaluation has that id"}' \
   "$(curl -s "${auth[@]}" "$URL/v1/evaluations/eval_nothing")"

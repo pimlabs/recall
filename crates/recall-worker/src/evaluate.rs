@@ -21,7 +21,7 @@
 //! files, and every excerpt, reason and suggested edit goes in
 //! [`Details`]. The server refuses a finding with anything else in it
 //! anyway. A secret is masked even in `details`, wherever a report quotes
-//! it and whichever check does ([`Redactor`]): a report is not another
+//! it and whichever check does (`Redactor`): a report is not another
 //! place for a key to be kept. And `details` is held to a size
 //! ([`MAX_DETAILS_BYTES`]), so a report always fits in a result the server
 //! takes.
@@ -987,7 +987,7 @@ fn duplicates(files: &[EvaluateFile]) -> Vec<Found> {
                 lines: unit.lines,
                 related: vec![file_ref(kept)],
                 detail: FindingDetail {
-                    excerpt: excerpt(&lines, first, last),
+                    excerpt: excerpt(lines, first, last),
                     reasoning: format!(
                         "The same {} is in {where_kept}, lines {}-{}. A session that loads \
                          both reads it twice, and the copies drift apart the first time one \

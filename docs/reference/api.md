@@ -1047,7 +1047,9 @@ until revoked):
 ```
 
 Revoking one stops it enrolling anything more and answers with the key as it
-now stands. Its body may be empty; with `{"revoke_devices": true}` every
+now stands. Its body may be empty, or only spaces, tabs, carriage returns
+and line feeds (anything else, a form feed among it, is `400`, as it is not
+JSON); with `{"revoke_devices": true}` every
 device the key enrolled is revoked too, which is what to do when a key has
 leaked. Without it they keep working. Since 0.4.2, asking for the devices of
 a key revoked earlier on its own revokes them as well. `404` with
@@ -1585,7 +1587,7 @@ named, and every global scope beside them, and runs six checks:
 
 | Check | Finds | Severity |
 |---|---|---|
-| `secret` | A private key, a cloud, GitHub, GitLab, Slack, Stripe, Google, OpenAI or Anthropic token, a Recall authkey or key, a JSON Web Token, or a long hex value assigned to something called a secret, token or password | `high` |
+| `secret` | A private key; a cloud, GitHub, GitLab, Slack, Stripe, Google, OpenAI, Anthropic, npm or Hugging Face token; a Recall authkey or key; a JSON Web Token; a password in a URL; or an AWS secret access key, a password, or a long hex value assigned to a name that says what it is | `high` |
 | `contradiction` | Two notes that cannot both be true now, in a project or between it and the global scope | `medium` |
 | `dead_link` | A `MEMORY.md` line linking to a file that is not in memory | `medium` |
 | `wrong_scope` | A project file whose front matter says `type: user`, which `recall promote` moves to the global scope | `low` |
@@ -1603,10 +1605,16 @@ usage. A scheduled run never includes it.
 `related` files: never a word of a note. The server refuses a result whose
 finding has any other key, an `id` of any other shape, or names a file it
 does not hold. `details` holds everything that quotes a note: per finding
-id, an `excerpt` (a secret masked even there), the `reasoning`, and a
-`suggested_edit` when there is one (lines of one file, replaced, against
-the `base_sha256` of the version the worker read); and `skipped`, what was
-not checked and why. `details` is stored as plain JSON on the server.
+id, an `excerpt`, the `reasoning`, and a `suggested_edit` when there is one
+(lines of one file, replaced, against the `base_sha256` of the version the
+worker read); and `skipped`, what was not checked, cut or left out, and
+why. Every secret the `secret` check knows is masked wherever `details`
+quotes it, whichever finding does, and every line of a private key's body
+replaced. `details` is kept under 2 MiB: an excerpt is cut at 4 KiB, a
+reason at 2 KiB, a suggested edit over 16 KiB is left out, and past the
+total the last findings keep no details; `skipped` says so. A result the
+server refuses (`413`, `400`) the worker reports as the job's `error`
+instead. `details` is stored as plain JSON on the server.
 Encrypting it with the content key is the design's end state
 ([`part5-plan.md`](../design/part5-plan.md), PR 6); that was parked on
 2026-09-25, and when it returns only how `details` is stored changes.
@@ -1624,8 +1632,11 @@ Admin. Asks for a run. Both members may be left out, and so may the body:
 { "id": "eval_hgv5dgl5wsqve4pc", "state": "queued", "job": "job_hwqyy6elq4raxjjk" }
 ```
 
-A project named twice counts once. The run is queued as an `evaluate` job
-for the worker, which a claim picks up within a second. A worker older
+A project named twice counts once; a body of only spaces, tabs, carriage
+returns and line feeds is `{}`. The run is queued as an `evaluate` job for
+the worker, which a claim picks up within a second. **One run at a time**:
+while another is queued or running, the request is refused, so runs never
+pile up in the job queue that merges share. A worker older
 than 0.4.5 claims merges only, so a run waits, `queued`, until the worker
 is upgraded.
 
@@ -1634,7 +1645,7 @@ is upgraded.
 | `200` | Queued. |
 | `400` | Bad JSON; a project key that is not one (the [`POST /sync`](#post-sync) rules), `{"error":"no project has the key \"acme/nothing\""}` for one the server holds no file of, or `{"error":"at most 100 projects"}`. |
 | `401`, `403` | See [Authentication](#authentication). |
-| `409` | `{"error":"no worker is enrolled to make an evaluation: run recall-worker and approve it (recall devices approve <code> --worker)"}`, and nothing is queued. Also when the queue is full (1000 jobs waiting or held). |
+| `409` | `{"error":"no worker is enrolled to make an evaluation: run recall-worker and approve it (recall devices approve <code> --worker)"}`; `{"error":"evaluation eval_hgv5dgl5wsqve4pc is still queued or running; ask for another once it is done"}`; or `{"error":"the job queue is full (1000 jobs waiting or held); ask again once the worker has drained it"}`. Nothing is queued. |
 
 ## `GET /v1/evaluations` and `GET /v1/evaluations/{id}`
 
@@ -1693,8 +1704,11 @@ is done:
 
 **`details` is `null` for the admin page's passkey session**, always: the
 page shows kinds, files and lines, and says to run `recall eval show` for
-the rest, so a browser session never holds note text. The operator's
-token and an admin device get it whole. `404` with
+the rest, so a browser session never holds note text. Nor is it shown the
+worker's own text: a run's `error` reads `the worker reported an error;
+recall eval show names it` to the session, here and in the listing. The
+operator's token and an admin device get both whole. The server's log
+records an evaluation's failure without its error. `404` with
 `{"error":"no evaluation has that id"}`. Reports are removed 90 days after
 they came in.
 

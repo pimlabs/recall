@@ -509,7 +509,16 @@ changed from the plan below, and why:
   decision 5) never includes it; there is no setting that would.
 - **`recall eval apply`** takes a finding id and `--eval <id>` (the newest
   finished report by default), and refuses unless the local file is still
-  the version the report read (`base_sha256`).
+  the version the report read (`base_sha256`), checked again after the
+  owner answers, just before the write.
+- **Secrets are masked everywhere in `details`**, not only in the `secret`
+  finding: every excerpt, reason and edit passes one redactor built from
+  every token and private-key line in the files read. `details` is kept
+  under 2 MiB, so a report always fits in a result.
+- **One evaluation at a time**: a request while another is queued or
+  running is a `409`, so evaluations cannot crowd merges out of the queue
+  they share. The passkey session sees neither `details` nor the worker's
+  error text.
 - **The audit log** gains `evaluate`, one leaf per run asked for (the
   server's own for a scheduled one), keeping an admin device's signed
   body; the job's claim and result are `job_claim` and `job_result` as for
@@ -1097,6 +1106,12 @@ the test fail. A property that no mutation fails is not pinned.
 | The deterministic checks make no `claude` call, counted by a fake | Call `claude` from one of them |
 | The secret check finds every planted token in a fixture set and nothing in a set of ordinary notes | Drop a pattern; take any long hex string for a secret |
 | The contradiction check runs only when the request asks for it, and a scheduled run never does (added as built) | Ignore the flag |
+| A token or private-key line another check quotes is masked in `details` too (added after review) | Mask only the `secret` finding's excerpt |
+| `details` stays under 2 MiB, and a result the server refuses is posted as an error rather than stopping the worker (added after review) | Drop the cap; exit on a `413` |
+| The token scan is linear on lines built to make it reread itself (added after review) | Restart each search inside the run just read |
+| `recall eval apply` never writes over an edit made while the owner was asked (added after review) | Write from the read made before asking |
+| A body both verifiers would not read as blank is never kept as one (added after review) | Trim Unicode whitespace on the server |
+| A second evaluation is refused while one is open (added after review) | Queue it |
 
 As built, these are in `crates/recall-worker/src/evaluate_tests.rs` and
 `crates/recall-server/tests/evaluations.rs`, beside an end-to-end test of
