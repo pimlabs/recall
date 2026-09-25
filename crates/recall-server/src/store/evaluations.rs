@@ -65,6 +65,8 @@ struct Payload {
 pub enum Requested {
     /// Queued as this job.
     Queued(String),
+    /// Another run, this one, is queued or running: nothing was made.
+    Busy(String),
     /// The queue is full: nothing was made.
     Full,
 }
@@ -262,9 +264,10 @@ impl Store {
     }
 
     /// Queues a run as `id`, with its `evaluate` job `job_id`, and appends
-    /// the `evaluate` leaf `build_leaf` makes, all in one transaction. A
-    /// queue already holding [`super::MAX_OPEN_JOBS`] open jobs makes
-    /// nothing and appends nothing.
+    /// the `evaluate` leaf `build_leaf` makes, all in one transaction. While
+    /// another run is queued or running, or the queue already holds
+    /// [`super::MAX_OPEN_JOBS`] open jobs, it makes nothing and appends
+    /// nothing.
     pub fn request_evaluation_audited(
         &self,
         id: &str,
@@ -275,6 +278,19 @@ impl Store {
     ) -> Result<Requested> {
         self.audited(
             |tx, _| {
+                // One run at a time, checked in the transaction that would
+                // queue the next, so two asked for at once cannot both be.
+                let busy: Option<String> = tx
+                    .query_row(
+                        "SELECT e.id FROM evaluations e JOIN jobs j ON j.id = e.job_id
+                         WHERE j.state IN ('queued', 'leased') LIMIT 1",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if let Some(open) = busy {
+                    return Ok(Outcome::Refuse(Requested::Busy(open)));
+                }
                 let open: i64 = tx.query_row(
                     "SELECT COUNT(*) FROM jobs WHERE state IN ('queued', 'leased')",
                     [],

@@ -241,16 +241,17 @@ impl Failure {
         )
     }
 
-    /// What the server's log says: the file and the error too.
+    /// What the server's log says: the file and the error too, for a
+    /// merge. For any other job, only what became of it: an evaluation's
+    /// error is the worker's own text, which the log is not where to keep.
     pub fn logged(&self) -> String {
-        let mut line = if self.kind == KIND_MERGE {
-            format!(
-                "merge job {} for {}/{} {}",
-                self.id, self.project_key, self.file_path, self.what
-            )
-        } else {
-            format!("{} job {} {}", self.kind, self.id, self.what)
-        };
+        if self.kind != KIND_MERGE {
+            return format!("{} job {} {}", self.kind, self.id, self.what);
+        }
+        let mut line = format!(
+            "merge job {} for {}/{} {}",
+            self.id, self.project_key, self.file_path, self.what
+        );
         if !self.error.is_empty() {
             line.push_str(": ");
             line.push_str(&self.error);
@@ -1964,6 +1965,25 @@ mod tests {
         .unwrap()
         .public();
         assert!(!public.contains(P) && !public.contains(F), "{public}");
+    }
+
+    /// An evaluation's error is the worker's own text: the server's log
+    /// says what became of the job, and not that.
+    #[test]
+    fn an_evaluations_failure_is_logged_without_the_workers_text() {
+        let failure = Failure {
+            id: "job_e".into(),
+            kind: KIND_EVALUATE.into(),
+            project_key: String::new(),
+            file_path: String::new(),
+            what: "failed after 4 attempts".into(),
+            error: "the worker said SENTINEL".into(),
+        };
+        assert_eq!(
+            failure.logged(),
+            "evaluate job job_e failed after 4 attempts"
+        );
+        assert!(!failure.public().contains("SENTINEL"));
     }
 
     #[test]

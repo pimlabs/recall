@@ -79,6 +79,19 @@ pub(super) fn small_body(bytes: Result<Bytes, BytesRejection>) -> Result<Bytes, 
     })
 }
 
+/// Whether a body kept in an audit leaf counts as no body at all: nothing
+/// but spaces, tabs, carriage returns and line feeds, exactly what both
+/// offline verifiers (`recall_wire::audit::verify` and
+/// `scripts/audit-verify.py`) strip before reading a kept body as JSON.
+/// Anything else a route took for blank, a form feed or a no-break space,
+/// would be a leaf both verifiers refuse forever as a body that is not
+/// JSON.
+pub(super) fn blank_body(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+}
+
 /// A device-management request's body, as the text its audit leaf keeps
 /// beside the signature (see `leaf::SignedRequest::body`). Any JSON body
 /// is UTF-8 already; this refuses the one route that reads none, revoking
@@ -776,7 +789,7 @@ pub(super) async fn handle_revoke_authkey(
         Ok(bytes) => bytes,
         Err(refused) => return refused.into_response(),
     };
-    let req: AuthkeyRevokeRequest = if bytes.iter().all(u8::is_ascii_whitespace) {
+    let req: AuthkeyRevokeRequest = if blank_body(&bytes) {
         AuthkeyRevokeRequest::default()
     } else {
         match body(&bytes) {

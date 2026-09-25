@@ -1882,17 +1882,11 @@ async fn an_evaluation_log() -> (Harness, Vec<String>, String) {
         .signed(&worker, "POST", &wire_jobs::result_path(&job), Some(report))
         .await);
 
+    // On the schedule: its first attempt fails, and its second, once the
+    // retry delay is past, makes the report.
     assert!(h.server.run_scheduled_evaluation().unwrap().is_some());
-    let _: Value = ok(h
-        .call(
-            "POST",
-            recall_wire::evaluations::EVALUATIONS_PATH,
-            Some(TOKEN),
-            Some(json!({"contradictions": true})),
-        )
-        .await);
     let claimed: Value = ok(h
-        .signed(&worker, "POST", wire_jobs::CLAIM_PATH, Some(claim))
+        .signed(&worker, "POST", wire_jobs::CLAIM_PATH, Some(claim.clone()))
         .await);
     let second = claimed["job"]["id"].as_str().unwrap().to_string();
     let lease = claimed["job"]["lease_id"].as_str().unwrap();
@@ -1904,8 +1898,84 @@ async fn an_evaluation_log() -> (Harness, Vec<String>, String) {
             Some(json!({"lease_id": lease, "error": "claude timed out"})),
         )
         .await);
+    rusqlite::Connection::open(h.dir.path().join("recall.db"))
+        .unwrap()
+        .execute(
+            "UPDATE jobs SET not_before = '2000-01-01T00:00:00.000Z' WHERE id = ?1",
+            [&second],
+        )
+        .unwrap();
+    let claimed: Value = ok(h
+        .signed(&worker, "POST", wire_jobs::CLAIM_PATH, Some(claim))
+        .await);
+    assert_eq!(claimed["job"]["attempt"], json!(2));
+    let lease = claimed["job"]["lease_id"].as_str().unwrap();
+    let _: Value = ok(h
+        .signed(
+            &worker,
+            "POST",
+            &wire_jobs::result_path(&second),
+            Some(json!({"lease_id": lease, "evaluate": {"findings": [], "details": {}}})),
+        )
+        .await);
+
+    let _: Value = ok(h
+        .call(
+            "POST",
+            recall_wire::evaluations::EVALUATIONS_PATH,
+            Some(TOKEN),
+            Some(json!({"contradictions": true})),
+        )
+        .await);
     let leaves = h.leaf_strings().await;
     (h, leaves, job)
+}
+
+/// A kept body the server reads as no body at all must be one both
+/// verifiers read the same way: only spaces, tabs, carriage returns and
+/// line feeds. A no-break space, a form feed, a vertical tab or a line
+/// separator is refused as not JSON, never kept in a leaf the verifiers
+/// would then refuse forever.
+#[tokio::test]
+async fn a_blank_body_is_blank_to_the_verifiers_too() {
+    let h = harness();
+    let mut worker = Machine::new(33);
+    h.enrol(&mut worker, "worker", "worker").await;
+    let mut laptop = Machine::new(34);
+    h.enrol(&mut laptop, "laptop", "admin").await;
+    let key = h.authkey(true).await;
+    for body in ["\u{a0}", "\x0c", "\x0b", "\u{2028}", " \x0c\n"] {
+        for path in [
+            recall_wire::evaluations::EVALUATIONS_PATH.to_string(),
+            revoke_authkey_path(&key.id),
+        ] {
+            let (status, _, _) = h
+                .signed_raw(&laptop, "POST", &path, body.as_bytes().to_vec())
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path} took {body:?}");
+        }
+    }
+    // What both read as blank still is.
+    let (status, _, _) = h
+        .signed_raw(
+            &laptop,
+            "POST",
+            recall_wire::evaluations::EVALUATIONS_PATH,
+            b" \t\r\n".to_vec(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = h
+        .signed_raw(
+            &laptop,
+            "POST",
+            &revoke_authkey_path(&key.id),
+            b"\r\n".to_vec(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (code, out) = verify(&h.export().await, &[]);
+    assert_eq!(code, 0, "{out}");
 }
 
 /// Asking for an evaluation appends one `evaluate` leaf, which names the

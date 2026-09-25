@@ -2167,4 +2167,57 @@ async fn a_session_reads_a_reports_findings_but_never_its_details() {
     );
     let as_operator = h.call("GET", &path, As::Token, None).await;
     assert!(as_operator.body["details"].to_string().contains("SENTINEL"));
+
+    // An attempt that fails: the error is the worker's own text, which the
+    // session is not shown either.
+    let asked = h
+        .call(
+            "POST",
+            "/v1/evaluations",
+            session.with_csrf(),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(asked.status, StatusCode::OK, "{}", asked.body);
+    let id = asked.body["id"].as_str().unwrap().to_string();
+    let claimed = h
+        .raw(signed_with(
+            &key,
+            &worker,
+            "POST",
+            "/v1/jobs/claim",
+            "eval-claim-2",
+            None,
+            Some(&json!({"kinds": ["evaluate"]})),
+        ))
+        .await;
+    let job = &claimed.body["job"];
+    let failed = h
+        .raw(signed_with(
+            &key,
+            &worker,
+            "POST",
+            &format!("/v1/jobs/{}/result", job["id"].as_str().unwrap()),
+            "eval-error",
+            None,
+            Some(&json!({"lease_id": job["lease_id"], "error": "could not read SENTINEL"})),
+        ))
+        .await;
+    assert_eq!(failed.status, StatusCode::OK, "{}", failed.body);
+    let path = format!("/v1/evaluations/{id}");
+    let shown = h
+        .call("GET", &path, As::Session(&session, None), None)
+        .await;
+    let listed = h
+        .call("GET", "/v1/evaluations", As::Session(&session, None), None)
+        .await;
+    for body in [&shown.body, &listed.body] {
+        assert!(!body.to_string().contains("SENTINEL"), "{body}");
+    }
+    assert_eq!(
+        shown.body["error"],
+        "the worker reported an error; recall eval show names it"
+    );
+    let as_operator = h.call("GET", &path, As::Token, None).await;
+    assert!(as_operator.body["error"].to_string().contains("SENTINEL"));
 }

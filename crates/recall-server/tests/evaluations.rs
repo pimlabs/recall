@@ -528,11 +528,49 @@ async fn contradictions_are_off_unless_asked_for_and_never_scheduled() {
     ] {
         let created = h.request(body).await;
         let job = h.claim(&w).await;
-        let input = job.evaluate.unwrap();
+        let input = job.evaluate.clone().unwrap();
         assert_eq!(input.evaluation_id, created.id);
         assert_eq!(input.contradictions, want);
         assert_eq!(h.evaluation(&created.id).await.contradictions, want);
+        let _: ResultResponse = ok(h.result(&w, &job.id, report(&job.lease_id)).await);
     }
+}
+
+/// One run at a time: while one is queued or running another is refused,
+/// so evaluations never pile up in the queue merges share. Once it is done,
+/// or has failed, the next may be asked for.
+#[tokio::test]
+async fn a_second_evaluation_waits_for_the_first() {
+    let h = harness();
+    h.seed().await;
+    let w = h.worker().await;
+    let first = h.request(json!({})).await;
+    let busy = format!(
+        "evaluation {} is still queued or running; ask for another once it is done",
+        first.id
+    );
+    assert_eq!(
+        error_of(h.call("POST", EVALUATIONS_PATH, Some(json!({}))).await),
+        (StatusCode::CONFLICT, busy.clone())
+    );
+    let job = h.claim(&w).await;
+    assert_eq!(
+        error_of(
+            h.call(
+                "POST",
+                EVALUATIONS_PATH,
+                Some(json!({"contradictions": true}))
+            )
+            .await
+        ),
+        (StatusCode::CONFLICT, busy)
+    );
+    assert_eq!(h.server.run_scheduled_evaluation().unwrap(), None);
+    let _: ResultResponse = ok(h.result(&w, &job.id, report(&job.lease_id)).await);
+    let second = h.request(json!({})).await;
+    assert_ne!(second.id, first.id);
+    let listed: EvaluationList = ok(h.call("GET", EVALUATIONS_PATH, None).await);
+    assert_eq!(listed.evaluations.len(), 2);
 }
 
 /// Who may ask and read: an admin device and the operator; not a sync
