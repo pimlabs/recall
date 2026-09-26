@@ -1015,8 +1015,10 @@ from the same Dockerfile (`target: worker`), with:
   container never holds either.
 - **a device identity** like any machine's: it signs every request, it is
   listed with the other devices, and it can be revoked. Its `worker` scope
-  lets it claim merge jobs and post their results, and nothing else: it
-  cannot pull or push memory itself.
+  lets it claim jobs and post their results, and nothing else: it cannot
+  pull or push memory itself. An evaluation report hands it the files it
+  reads with the job, so it reads memory only while it makes one the
+  owner asked for.
 
 It is also **off unless you turn it on**: the service is in the compose
 files behind a profile, `worker`, and `docker compose up` leaves it alone
@@ -1165,7 +1167,39 @@ names the server uses.
 | `RECALL_MERGE_TIMEOUT_MS` | 45000 | One merge, before it is reported as an error and retried later. At most 585000, so a merge always ends inside the longest lease (600 seconds) with 15 to spare; more is refused. |
 | `RECALL_CLAUDE_BIN` | `claude` | The CLI. Never the Anthropic API. |
 | `RECALL_CLAUDE_STATUS_INTERVAL_MS` | 30 minutes | How often it re-checks a logged-in CLI. It also re-checks at once after any merge fails. |
-| `RECALL_WORKER_LEASE_SECONDS` | 120 | How long a claimed job is its own; always at least the merge timeout plus 15 seconds. |
+| `RECALL_WORKER_LEASE_SECONDS` | 120 | How long a claimed job is its own; always at least the merge timeout plus 15 seconds. An evaluation is always leased for 600 seconds. |
+| `RECALL_EVAL_STALE_DAYS` | 90 | How long a note that names a path or a command goes unchanged before an evaluation reports it as stale. Passed through from `deploy/.env`. |
+
+### Evaluation reports
+
+From 0.4.5 the worker also makes reports on what memory holds: secrets,
+duplicates, dead links in `MEMORY.md`, notes in the wrong scope, stale
+notes, and, when asked, notes that contradict each other. Nothing in
+memory changes. From a machine with an admin device (or `RECALL_TOKEN`):
+
+```sh
+recall eval run                      # every project; add --project KEY to narrow it
+recall eval run --contradictions     # also one claude call per project
+recall eval list
+recall eval show eval_7c2kq9         # the lines, the reasons, the suggested edits
+recall eval apply f2 --eval eval_7c2kq9   # make one edit here, and push it
+```
+
+The admin page's Reports tab asks for one too, and lists what each found
+by kind, file and line; the lines themselves it leaves to `recall eval
+show`. Only the contradiction check calls `claude`, so only it spends your
+Claude usage, and only when asked for.
+
+To have one made by itself, set `RECALL_EVAL_INTERVAL_HOURS` in
+`deploy/.env` (the compose files pass it to the server): 24 makes one a
+day, the first a day after the server starts. Unset, the default, makes
+none. A scheduled report never includes the contradiction check, is
+skipped while no worker is enrolled or another report is still open, and
+is removed with the others 90 days after it came in.
+
+A report's `details`, the quoted lines, are stored in the server's
+database as they are, like the notes themselves. Encrypting them is the
+design's end state, and waits with the rest of encrypted storage.
 
 ### Revoking it, or enrolling it again
 

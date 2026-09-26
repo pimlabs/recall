@@ -574,13 +574,13 @@ fn days(text: &str) -> Option<u32> {
 
 /// `2026-09-23`: the date part of the API's timestamps, which is all a
 /// person needs to know about an expiry or a revocation.
-fn day(stamp: &str) -> String {
+pub(crate) fn day(stamp: &str) -> String {
     stamp.split('T').next().unwrap_or(stamp).to_string()
 }
 
 /// How long ago a timestamp in the API's format was, in the largest unit
 /// that is not zero.
-fn ago(stamp: &str) -> String {
+pub(crate) fn ago(stamp: &str) -> String {
     let Some(age) = crate::doctor::age_of(stamp) else {
         return day(stamp);
     };
@@ -602,7 +602,7 @@ fn minutes(seconds: u64) -> String {
 }
 
 /// Columns padded to their widest cell, the last one left unpadded.
-fn table<const N: usize>(header: &[&str; N], rows: &[[String; N]]) {
+pub(crate) fn table<const N: usize>(header: &[&str; N], rows: &[[String; N]]) {
     let mut width = [0usize; N];
     for (i, h) in header.iter().enumerate() {
         width[i] = h.chars().count();

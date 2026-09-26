@@ -56,6 +56,9 @@ pub mod action {
     pub const JOB_RESULT: &str = "job_result";
     /// A failed job was queued again.
     pub const JOB_RETRY: &str = "job_retry";
+    /// An evaluation was asked for, by the owner or on the schedule
+    /// (`RECALL_EVAL_INTERVAL_HOURS`), and its `evaluate` job queued.
+    pub const EVALUATE: &str = "evaluate";
     /// A passkey was registered for the admin page: the first, with
     /// `RECALL_TOKEN` and the bootstrap code, or another, from a session.
     pub const PASSKEY_ADD: &str = "passkey_add";
@@ -172,7 +175,7 @@ pub struct SignedRequest<'a> {
     pub signature: &'a str,
     /// The request body itself, for the actions whose body is a few bytes
     /// of JSON with no secret in it: `approve`, `deny`, `revoke`,
-    /// `authkey_create` and `authkey_revoke`. [`None`], written `null`, for
+    /// `authkey_create`, `authkey_revoke` and `evaluate`. [`None`], written `null`, for
     /// a push, a delete, a pull and the job actions.
     pub body: Option<&'a str>,
 }
@@ -506,6 +509,23 @@ pub fn subject_authkey_revoke(id: &str, revoke_devices: bool, revoked: &[String]
     m.insert("authkey_id".into(), json!(id));
     m.insert("revoke_devices".into(), json!(revoke_devices));
     m.insert("revoked_devices".into(), json!(revoked));
+    Value::Object(m)
+}
+
+/// `subject` for [`action::EVALUATE`]: the run, the job that makes it,
+/// and what was asked: the projects (empty for every project) and whether
+/// to run the contradiction check. Nothing of what the run will read.
+pub fn subject_evaluate(
+    evaluation_id: &str,
+    job_id: &str,
+    projects: &[String],
+    contradictions: bool,
+) -> Value {
+    let mut m = Map::new();
+    m.insert("evaluation_id".into(), json!(evaluation_id));
+    m.insert("job_id".into(), json!(job_id));
+    m.insert("projects".into(), json!(projects));
+    m.insert("contradictions".into(), json!(contradictions));
     Value::Object(m)
 }
 

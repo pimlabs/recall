@@ -53,6 +53,10 @@ services:
       # The address /admin is opened at, such as https://recall.example.com.
       # Passkeys are bound to it; empty leaves passkey sign-in off.
       RECALL_PUBLIC_URL: ${RECALL_PUBLIC_URL:-}
+      # Hours between evaluation reports the worker makes by itself; empty,
+      # the default, makes none. See "Evaluation reports" in
+      # deploy/README.md.
+      RECALL_EVAL_INTERVAL_HOURS: ${RECALL_EVAL_INTERVAL_HOURS:-}
       # Not cosmetic. Rate limiting keys off this header, and rate limiting
       # runs before auth so a flood of invalid tokens is limited too. Traefik
       # sets x-real-ip to the real client address; leave this as the tunnel's
@@ -114,6 +118,9 @@ services:
       # Its own variable, never RECALL_URL: that one is the client's, and a
       # machine with Recall set up has it pointing at the public server.
       RECALL_WORKER_SERVER: http://recall-server:8787
+      # Days a note naming a path or command goes unchanged before an
+      # evaluation calls it stale; empty is 90.
+      RECALL_EVAL_STALE_DAYS: ${RECALL_EVAL_STALE_DAYS:-}
     volumes:
       - recall-worker-data:/data
     depends_on:

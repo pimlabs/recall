@@ -105,6 +105,7 @@ pub enum ConfigError {
 /// | [`claude_bin`] | `RECALL_CLAUDE_BIN` | `claude` |
 /// | [`claude_status_interval`] | `RECALL_CLAUDE_STATUS_INTERVAL_MS` | 30m |
 /// | [`ephemeral_device_ttl`] | `RECALL_EPHEMERAL_DEVICE_TTL_HOURS` | 24h |
+/// | [`eval_interval`] | `RECALL_EVAL_INTERVAL_HOURS` | off |
 /// | [`public_url`] | `RECALL_PUBLIC_URL` | unset: passkey sign-in off |
 /// | [`tls`] | `RECALL_TLS_CERT`/`RECALL_TLS_KEY`, or `RECALL_TLS_ACME_DOMAINS`/`RECALL_TLS_ACME_EMAIL`/`RECALL_TLS_ACME_DIR`/`RECALL_TLS_ACME_STAGING` | off |
 /// | [`tls_max_connections`] | `RECALL_TLS_MAX_CONNECTIONS` | 512 |
@@ -127,6 +128,7 @@ pub enum ConfigError {
 /// [`claude_bin`]: Config::claude_bin
 /// [`claude_status_interval`]: Config::claude_status_interval
 /// [`ephemeral_device_ttl`]: Config::ephemeral_device_ttl
+/// [`eval_interval`]: Config::eval_interval
 /// [`public_url`]: Config::public_url
 /// [`tls`]: Config::tls
 /// [`tls_max_connections`]: Config::tls_max_connections
@@ -201,6 +203,15 @@ pub struct Config {
     /// not pile up in the device list; and the key a finished session left
     /// in its container stops working within a day of its last use.
     pub ephemeral_device_ttl: Duration,
+
+    /// How often to queue an evaluation of every project by itself, for
+    /// the worker to make; [`None`], the default, never does.
+    ///
+    /// A scheduled run never includes the contradiction check, which asks
+    /// `claude` once per project and so spends the owner's Claude usage:
+    /// that runs only when someone asks for it, with
+    /// `recall eval run --contradictions`. The other checks cost nothing.
+    pub eval_interval: Option<Duration>,
 
     /// The address people reach this server at, such as
     /// `https://recall.example.com`: an origin, with no path.
@@ -295,6 +306,7 @@ impl Default for Config {
             claude_bin: "claude".to_string(),
             claude_status_interval: Duration::from_secs(30 * 60),
             ephemeral_device_ttl: DEFAULT_EPHEMERAL_DEVICE_TTL,
+            eval_interval: None,
             public_url: String::new(),
             tls: TlsMode::Off,
             tls_max_connections: DEFAULT_TLS_MAX_CONNECTIONS,
@@ -450,6 +462,10 @@ impl Config {
             ephemeral_device_ttl: Duration::from_secs(
                 num("RECALL_EPHEMERAL_DEVICE_TTL_HOURS", 24).saturating_mul(3600),
             ),
+            // Unset, empty, 0 or not a number: off.
+            eval_interval: Some(num("RECALL_EVAL_INTERVAL_HOURS", 0))
+                .filter(|h| *h > 0)
+                .map(|h| Duration::from_secs(h.saturating_mul(3600))),
             // Checked when the server starts, not here: a bad value turns
             // passkey sign-in off with the reason on the page, rather than
             // keeping a server that syncs fine from starting.

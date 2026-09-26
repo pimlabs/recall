@@ -16,8 +16,10 @@
 //! minute and a merge starts within a second of the push that queued it.
 //! Every claim also carries the worker's check of its `claude` CLI, which
 //! is how `/health` still reports the CLI once it has left the API process.
-//! A worker whose CLI is not logged in claims with no kinds: it stays
-//! visible, and takes no job it would only fail.
+//! A worker whose CLI is not logged in claims no merges: it stays visible,
+//! and takes no merge it would only fail. It still takes evaluations, whose
+//! checks but one need no CLI; the one that does, the contradiction check,
+//! is then skipped, and the report says why (see [`crate::evaluate`]).
 //!
 //! A refusal no retry will get past (a `4xx` other than `408` and `429`,
 //! or a server with no merge queue) is [`Fatal`]: the worker says what to
@@ -31,17 +33,19 @@ use recall_wire::devices::{
     ACCESS_DENIED, AUTHORIZATION_PENDING, ENROLL_PATH, ENROLL_POLL_PATH, EXPIRED_TOKEN,
     INVALID_GRANT, POLL_INTERVAL_SECONDS, SCOPE_WORKER, SLOW_DOWN,
 };
+use recall_wire::discovery::CAPABILITY_EVALUATION;
 use recall_wire::discovery::CAPABILITY_MERGE_QUEUE;
-use recall_wire::jobs::{self, KIND_MERGE};
+use recall_wire::jobs::{self, KIND_EVALUATE, KIND_MERGE};
 use recall_wire::{
     ClaimRequest, ClaimResponse, ClaudeCliReport, Discovery, EnrollPending, EnrollPollRequest,
-    EnrollPollResponse, EnrollRequest, Job, MergeResult, ResultRequest, ResultResponse,
-    DISCOVERY_PATH,
+    EnrollPollResponse, EnrollRequest, EvaluateResult, Job, MergeResult, ResultRequest,
+    ResultResponse, DISCOVERY_PATH,
 };
 use reqwest::StatusCode;
 
 use crate::api::{Api, ApiError};
 use crate::config::Config;
+use crate::evaluate::{self, Settings, CONTRADICTION_TIMEOUT};
 use crate::identity::Identity;
 use crate::merge::{Merger, Status};
 
@@ -148,6 +152,9 @@ pub struct Worker {
     status_at: Option<Instant>,
     /// The last code the approval instructions were printed for.
     announced: Option<String>,
+    /// Whether the server makes evaluation reports, and so has `evaluate`
+    /// jobs to claim: a server older than 0.4.5 would refuse the kind.
+    evaluations: bool,
 }
 
 fn log(message: &str) {
@@ -219,6 +226,7 @@ impl Worker {
             status: Status::default(),
             status_at: None,
             announced: None,
+            evaluations: false,
         })
     }
 
@@ -348,14 +356,17 @@ impl Worker {
     /// server lists the merge queue. An answer that says this is not such a
     /// server is final; one that says nothing (the server is restarting, or
     /// not up yet) is asked again.
-    pub async fn check_server(&self) -> Result<(), Fatal> {
+    pub async fn check_server(&mut self) -> Result<(), Fatal> {
         let server = &self.cfg.server;
         let mut backoff = Duration::ZERO;
         loop {
             let answer: Result<Discovery, ApiError> =
                 self.api.get(DISCOVERY_PATH, UNSIGNED_TIMEOUT).await;
             match answer {
-                Ok(doc) if doc.can(CAPABILITY_MERGE_QUEUE) => return Ok(()),
+                Ok(doc) if doc.can(CAPABILITY_MERGE_QUEUE) => {
+                    self.evaluations = doc.can(CAPABILITY_EVALUATION);
+                    return Ok(());
+                }
                 Ok(doc) => {
                     return Err(Fatal::NotRecall(format!(
                         "{server} is Recall {}, which has no merge queue, so there is nothing \
@@ -570,15 +581,20 @@ impl Worker {
         }
     }
 
-    /// The claim this worker sends now: every kind it can do, which is
-    /// none while its CLI cannot merge, and that CLI's last check.
+    /// The claim this worker sends now: every kind it can do, and that
+    /// CLI's last check. No merges while its CLI cannot merge; evaluations
+    /// whenever the server makes them, since all their checks but the
+    /// contradiction check run without the CLI.
     pub fn claim_request(&self) -> ClaimRequest {
+        let mut kinds = Vec::new();
+        if self.status.logged_in {
+            kinds.push(KIND_MERGE.to_string());
+        }
+        if self.evaluations {
+            kinds.push(KIND_EVALUATE.to_string());
+        }
         ClaimRequest {
-            kinds: if self.status.logged_in {
-                vec![KIND_MERGE.to_string()]
-            } else {
-                Vec::new()
-            },
+            kinds,
             wait_seconds: self.cfg.wait_seconds,
             lease_seconds: self.cfg.lease_seconds,
             claude_cli: Some(ClaudeCliReport {
@@ -618,6 +634,9 @@ impl Worker {
     /// rather than at the next scheduled check: a CLI that was logged out
     /// under the worker should stop it taking jobs now, not in half an hour.
     pub async fn work(&mut self, job: &Job) -> ResultRequest {
+        if let (KIND_EVALUATE, Some(input)) = (job.kind.as_str(), &job.evaluate) {
+            return self.evaluate(job, input).await;
+        }
         let outcome = match (job.kind.as_str(), &job.merge) {
             (KIND_MERGE, Some(m)) => {
                 if recall_wire::content_sha256(&m.stored.content) != m.stored.sha256
@@ -650,6 +669,7 @@ impl Worker {
                 lease_id: job.lease_id.clone(),
                 merge: Some(MergeResult { content }),
                 error: None,
+                evaluate: None,
             },
             Err(error) => {
                 log(&format!("job {}: {error}", job.id));
@@ -657,8 +677,75 @@ impl Worker {
                     lease_id: job.lease_id.clone(),
                     merge: None,
                     error: Some(error),
+                    evaluate: None,
                 }
             }
+        }
+    }
+
+    /// Makes an evaluation's report. The contradiction check runs only
+    /// when the job asks for it, and only while the CLI is logged in; each
+    /// call it makes must end well before the lease does.
+    async fn evaluate(&mut self, job: &Job, input: &recall_wire::EvaluateInput) -> ResultRequest {
+        log(&format!(
+            "job {}: evaluation {} of {} files{} (attempt {})",
+            job.id,
+            input.evaluation_id,
+            input.files.len(),
+            if input.contradictions {
+                ", with the contradiction check"
+            } else {
+                ""
+            },
+            job.attempt
+        ));
+        let now = time::OffsetDateTime::now_utc();
+        let deadline = time::OffsetDateTime::parse(
+            &job.lease_expires_at,
+            &time::format_description::well_known::Rfc3339,
+        )
+        .ok()
+        .map(|end| {
+            let left = (end - now).max(time::Duration::ZERO);
+            Instant::now() + Duration::try_from(left).unwrap_or_default()
+        });
+        let settings = Settings {
+            now,
+            stale_after: Duration::from_secs(self.cfg.eval_stale_days.saturating_mul(24 * 60 * 60)),
+            deadline,
+            cli_unavailable: (!self.status.logged_in).then(|| {
+                if self.status.error.is_empty() {
+                    "not logged in".to_string()
+                } else {
+                    self.status.error.clone()
+                }
+            }),
+        };
+        let claude = Merger::new(self.cfg.claude_bin.clone(), CONTRADICTION_TIMEOUT);
+        let report = evaluate::evaluate(input, &settings, &claude).await;
+        log(&format!(
+            "job {}: {} findings {:?}{}",
+            job.id,
+            report.findings.len(),
+            evaluate::counts(&report),
+            if report.details.skipped.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    ", {} checks skipped (see the report)",
+                    report.details.skipped.len()
+                )
+            }
+        ));
+        let details = serde_json::to_value(&report.details).unwrap_or_default();
+        ResultRequest {
+            lease_id: job.lease_id.clone(),
+            merge: None,
+            error: None,
+            evaluate: Some(EvaluateResult {
+                findings: report.findings,
+                details,
+            }),
         }
     }
 
@@ -666,14 +753,17 @@ impl Worker {
     /// Posting the same result twice is safe: the server records it once.
     async fn report(&self, job: &Job, result: &ResultRequest) -> Result<Step, ApiError> {
         let device_id = self.id.device_id.clone().unwrap_or_default();
+        let mut result = result.clone();
         let mut wait = Duration::from_secs(1);
         let mut last = None;
-        for _ in 0..RESULT_TRIES {
+        let mut tries = 0;
+        while tries < RESULT_TRIES {
+            tries += 1;
             let posted: Result<ResultResponse, ApiError> = self
                 .api
                 .post_signed(
                     &jobs::result_path(&job.id),
-                    result,
+                    &result,
                     self.id.key(),
                     &device_id,
                     RESULT_TIMEOUT,
@@ -681,11 +771,44 @@ impl Worker {
                 .await;
             match posted {
                 Ok(outcome) => return Ok(Step::Done(outcome)),
+                // A result the server will not take as it is, too large or
+                // not of the shape it takes: asking again would be answered
+                // the same way, and a worker that stopped over one job
+                // would stop merging too. The job gets an error instead,
+                // and is retried later, or fails, as any job does.
+                Err(e)
+                    if result.error.is_none()
+                        && matches!(
+                            e.status(),
+                            Some(StatusCode::PAYLOAD_TOO_LARGE | StatusCode::BAD_REQUEST)
+                        ) =>
+                {
+                    let why = if e.status() == Some(StatusCode::PAYLOAD_TOO_LARGE) {
+                        format!(
+                            "the result came to {} bytes, more than the server takes",
+                            serde_json::to_vec(&result).map_or(0, |b| b.len())
+                        )
+                    } else {
+                        let said: String = e.message().chars().take(200).collect();
+                        format!("the server refused the result: {said}")
+                    };
+                    log(&format!("job {}: {why}; reporting that instead", job.id));
+                    result = ResultRequest {
+                        lease_id: result.lease_id.clone(),
+                        merge: None,
+                        error: Some(why),
+                        evaluate: None,
+                    };
+                    tries = 0;
+                }
                 Err(e)
                     if matches!(
                         e.status(),
                         Some(
-                            StatusCode::CONFLICT | StatusCode::NOT_FOUND | StatusCode::BAD_REQUEST
+                            StatusCode::CONFLICT
+                                | StatusCode::NOT_FOUND
+                                | StatusCode::BAD_REQUEST
+                                | StatusCode::PAYLOAD_TOO_LARGE
                         )
                     ) =>
                 {
@@ -749,6 +872,7 @@ mod tests {
                 stored,
                 incoming,
             }),
+            evaluate: None,
         }
     }
 
@@ -811,6 +935,21 @@ mod tests {
         assert_eq!(claim.claude_cli.unwrap().error, "not logged in");
         w.status.logged_in = true;
         assert_eq!(w.claim_request().kinds, vec![KIND_MERGE.to_string()]);
+    }
+
+    /// A server that makes evaluation reports gets evaluate claims, from a
+    /// worker whose CLI cannot merge as well: every check but the
+    /// contradiction check runs without it.
+    #[test]
+    fn a_worker_takes_evaluations_whenever_the_server_makes_them() {
+        let (_dir, mut w) = worker();
+        w.evaluations = true;
+        assert_eq!(w.claim_request().kinds, vec![KIND_EVALUATE.to_string()]);
+        w.status.logged_in = true;
+        assert_eq!(
+            w.claim_request().kinds,
+            vec![KIND_MERGE.to_string(), KIND_EVALUATE.to_string()]
+        );
     }
 
     /// A merge that fails has the CLI checked again before the next claim.
@@ -953,6 +1092,105 @@ mod tests {
             }
         });
         (url, count)
+    }
+
+    /// A result the server will not take (413, too large) does not stop
+    /// the worker: the job gets an error instead, which it does take.
+    #[tokio::test]
+    async fn a_result_too_large_to_post_becomes_an_error() {
+        use std::sync::{Arc, Mutex};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let bodies: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = bodies.clone();
+        tokio::spawn(async move {
+            while let Ok((mut conn, _)) = listener.accept().await {
+                let seen = seen.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 65536];
+                    let head_end = loop {
+                        let n = conn.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break i + 4;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                    let length = head
+                        .lines()
+                        .find_map(|l| {
+                            let (k, v) = l.split_once(':')?;
+                            k.eq_ignore_ascii_case("content-length")
+                                .then(|| v.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                    while buf.len() < head_end + length {
+                        let n = conn.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
+                    let body = String::from_utf8_lossy(&buf[head_end..]).to_string();
+                    let (status, answer) = if body.contains("\"evaluate\"") {
+                        (413, r#"{"error":"request body too large"}"#.to_string())
+                    } else {
+                        (
+                            200,
+                            r#"{"id":"job_1","state":"queued","applied":false,"follow_up":null}"#
+                                .to_string(),
+                        )
+                    };
+                    seen.lock().unwrap().push(body);
+                    let resp = format!(
+                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    );
+                    let _ = conn.write_all(resp.as_bytes()).await;
+                    let _ = conn.shutdown().await;
+                });
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let w = Worker::new(config(dir.path(), &url)).unwrap();
+        let job = Job {
+            id: "job_1".into(),
+            kind: KIND_EVALUATE.into(),
+            lease_id: "lse_1".into(),
+            lease_expires_at: "2026-10-02T09:16:03.118Z".into(),
+            attempt: 1,
+            merge: None,
+            evaluate: None,
+        };
+        let report = ResultRequest {
+            lease_id: "lse_1".into(),
+            merge: None,
+            error: None,
+            evaluate: Some(EvaluateResult {
+                findings: Vec::new(),
+                details: serde_json::json!({"skipped": [], "findings": {}}),
+            }),
+        };
+        let step = tokio::time::timeout(Duration::from_secs(10), w.report(&job, &report))
+            .await
+            .expect("the worker kept retrying a result the server will never take");
+        assert!(matches!(step, Ok(Step::Done(_))), "{step:?}");
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 2, "{bodies:?}");
+        let error: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap()
+                .contains("more than the server takes"),
+            "{error}"
+        );
+        assert_eq!(error["lease_id"], "lse_1");
     }
 
     fn discovery(capabilities: &str) -> String {

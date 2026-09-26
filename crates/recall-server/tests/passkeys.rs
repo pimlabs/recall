@@ -2085,3 +2085,139 @@ async fn passkey_actions_and_a_sessions_changes_are_in_the_audit_log() {
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("no bootstrap code outstanding"), "{out}");
 }
+
+/// The admin page asks for evaluation reports and shows their findings,
+/// kinds, files and lines, with its passkey session; a report's details,
+/// which quote notes, are never served to the session, only to the
+/// operator and admin devices.
+#[tokio::test]
+async fn a_session_reads_a_reports_findings_but_never_its_details() {
+    let h = harness();
+    h.server.backdate_start(600);
+    let mut phone = phone();
+    h.bootstrap(&mut phone).await;
+    let session = h.sign_in(&mut phone).await;
+    let pushed = h
+        .call(
+            "POST",
+            "/sync",
+            As::Token,
+            Some(json!({"project_key": "acme/app", "file_path": "deploy.md",
+                        "content": "- key: SENTINEL\n", "source_env": "laptop"})),
+        )
+        .await;
+    assert_eq!(pushed.status, StatusCode::OK, "{}", pushed.body);
+    let key = SigningKey::from_bytes(&[13; 32]);
+    let worker = h.device(&key, "worker", "worker").await;
+
+    let asked = h
+        .call(
+            "POST",
+            "/v1/evaluations",
+            session.with_csrf(),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(asked.status, StatusCode::OK, "{}", asked.body);
+    let id = asked.body["id"].as_str().unwrap().to_string();
+    let claimed = h
+        .raw(signed_with(
+            &key,
+            &worker,
+            "POST",
+            "/v1/jobs/claim",
+            "eval-claim",
+            None,
+            Some(&json!({"kinds": ["evaluate"]})),
+        ))
+        .await;
+    assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+    let job = &claimed.body["job"];
+    let reported = h
+        .raw(signed_with(
+            &key,
+            &worker,
+            "POST",
+            &format!("/v1/jobs/{}/result", job["id"].as_str().unwrap()),
+            "eval-result",
+            None,
+            Some(&json!({"lease_id": job["lease_id"], "evaluate": {
+                "findings": [{"id": "f1", "kind": "secret", "severity": "high",
+                              "project_key": "acme/app", "file_path": "deploy.md",
+                              "lines": [1, 1], "related": []}],
+                "details": {"findings": {"f1": {"excerpt": "- key: SENTINEL\n"}}}}})),
+        ))
+        .await;
+    assert_eq!(reported.status, StatusCode::OK, "{}", reported.body);
+
+    let path = format!("/v1/evaluations/{id}");
+    let as_session = h
+        .call("GET", &path, As::Session(&session, None), None)
+        .await;
+    assert_eq!(as_session.status, StatusCode::OK, "{}", as_session.body);
+    assert_eq!(as_session.body["findings"][0]["kind"], "secret");
+    assert_eq!(as_session.body["details"], Value::Null);
+    assert!(!as_session.body.to_string().contains("SENTINEL"));
+    let listed = h
+        .call("GET", "/v1/evaluations", As::Session(&session, None), None)
+        .await;
+    assert_eq!(
+        listed.body["evaluations"][0]["counts"],
+        json!({"secret": 1})
+    );
+    let as_operator = h.call("GET", &path, As::Token, None).await;
+    assert!(as_operator.body["details"].to_string().contains("SENTINEL"));
+
+    // An attempt that fails: the error is the worker's own text, which the
+    // session is not shown either.
+    let asked = h
+        .call(
+            "POST",
+            "/v1/evaluations",
+            session.with_csrf(),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(asked.status, StatusCode::OK, "{}", asked.body);
+    let id = asked.body["id"].as_str().unwrap().to_string();
+    let claimed = h
+        .raw(signed_with(
+            &key,
+            &worker,
+            "POST",
+            "/v1/jobs/claim",
+            "eval-claim-2",
+            None,
+            Some(&json!({"kinds": ["evaluate"]})),
+        ))
+        .await;
+    let job = &claimed.body["job"];
+    let failed = h
+        .raw(signed_with(
+            &key,
+            &worker,
+            "POST",
+            &format!("/v1/jobs/{}/result", job["id"].as_str().unwrap()),
+            "eval-error",
+            None,
+            Some(&json!({"lease_id": job["lease_id"], "error": "could not read SENTINEL"})),
+        ))
+        .await;
+    assert_eq!(failed.status, StatusCode::OK, "{}", failed.body);
+    let path = format!("/v1/evaluations/{id}");
+    let shown = h
+        .call("GET", &path, As::Session(&session, None), None)
+        .await;
+    let listed = h
+        .call("GET", "/v1/evaluations", As::Session(&session, None), None)
+        .await;
+    for body in [&shown.body, &listed.body] {
+        assert!(!body.to_string().contains("SENTINEL"), "{body}");
+    }
+    assert_eq!(
+        shown.body["error"],
+        "the worker reported an error; recall eval show names it"
+    );
+    let as_operator = h.call("GET", &path, As::Token, None).await;
+    assert!(as_operator.body["error"].to_string().contains("SENTINEL"));
+}

@@ -29,8 +29,9 @@ use recall_wire::{
     Authkey, AuthkeyCreated, AuthkeyList, AuthkeyRequest, AuthkeyRevokeRequest, ClaimRequest,
     ClaimResponse, DenyRequest, DenyResponse, Device, DeviceIdentity, DeviceList, Discovery,
     EnrollApproved, EnrollPending, EnrollPollRequest, EnrollPollResponse, EnrollRequest,
-    ErrorResponse, Health, JobList, PendingEnrollment, PushRequest, PushResponse, ResultRequest,
-    ResultResponse, SyncResponse,
+    ErrorResponse, Evaluation, EvaluationCreated, EvaluationList, EvaluationRequest, Health,
+    JobList, PendingEnrollment, PushRequest, PushResponse, ResultRequest, ResultResponse,
+    SyncResponse,
 };
 use serde_json::Value;
 
@@ -126,17 +127,40 @@ fn round_trip(kind: &str, bytes: &[u8]) -> Result<Value, String> {
         // `the_audit_fixtures_check_out_as_the_offline_verifier_checks_them`.
         "audit_leaf_push" | "audit_leaf_approve" | "audit_leaf_enroll" => go::<Value>(bytes),
         "job_claim_request" => go::<ClaimRequest>(bytes),
-        "job_claim_response" | "job_claim_response_empty" => go::<ClaimResponse>(bytes),
-        "job_result_request" | "job_result_request_error" => {
-            let req: ResultRequest = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-            // What the server refuses with a 400: neither, or both.
-            if req.merge.is_some() == req.error.is_some() {
-                return Err("a result carries exactly one of merge and error".to_string());
+        "job_claim_response" | "job_claim_response_empty" | "job_claim_response_evaluate" => {
+            go::<ClaimResponse>(bytes)
+        }
+        "job_result_request" | "job_result_request_error" | "job_result_request_evaluate" => {
+            // What the server refuses with a 400: a finding with any key
+            // but its own, which the typed parse below would drop unread.
+            let raw: Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+            if let Some(findings) = raw["evaluate"]["findings"].as_array() {
+                for finding in findings {
+                    recall_wire::evaluations::check_finding(finding)?;
+                }
+            }
+            let req: ResultRequest = serde_json::from_value(raw).map_err(|e| e.to_string())?;
+            // And one that carries none of its members, or more than one.
+            if req.members() != 1 {
+                return Err("a result carries exactly one of merge, evaluate and error".to_string());
             }
             serde_json::to_value(req).map_err(|e| e.to_string())
         }
         "job_result_response" => go::<ResultResponse>(bytes),
         "job_list_response" => go::<JobList>(bytes),
+        "evaluation_request" => go::<EvaluationRequest>(bytes),
+        "evaluation_created_response" => go::<EvaluationCreated>(bytes),
+        "evaluation_list_response" => go::<EvaluationList>(bytes),
+        "evaluation_response" => {
+            // Its details are a report's: they read as one.
+            let evaluation: Evaluation =
+                serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+            if let Some(details) = &evaluation.details {
+                serde_json::from_value::<recall_wire::Details>(details.clone())
+                    .map_err(|e| format!("details: {e}"))?;
+            }
+            serde_json::to_value(evaluation).map_err(|e| e.to_string())
+        }
         other => Err(format!("no type is known for the fixture kind {other:?}")),
     }
 }
@@ -246,6 +270,12 @@ fn every_kind_has_a_fixture() {
         "job_list_response",
         "push_response_queued",
         "device_approve_request_worker",
+        "evaluation_request",
+        "evaluation_created_response",
+        "evaluation_list_response",
+        "evaluation_response",
+        "job_claim_response_evaluate",
+        "job_result_request_evaluate",
     ] {
         assert!(
             all.iter().any(|(_, k, _)| k == kind),

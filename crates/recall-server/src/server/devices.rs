@@ -65,25 +65,38 @@ const UNTAGGED: &str = "device";
 
 /// Reads a JSON body, answering with the wording `POST /sync` uses for one
 /// that does not parse.
-fn body<T: DeserializeOwned>(bytes: &Bytes) -> Result<T, Refusal> {
+pub(super) fn body<T: DeserializeOwned>(bytes: &Bytes) -> Result<T, Refusal> {
     serde_json::from_slice(bytes)
         .map_err(|_| Refusal::new(StatusCode::BAD_REQUEST, "invalid json body"))
 }
 
 /// A body on the routes with a small limit: one over it is refused in the
 /// usual JSON shape rather than axum's plain text.
-fn small_body(bytes: Result<Bytes, BytesRejection>) -> Result<Bytes, Refusal> {
+pub(super) fn small_body(bytes: Result<Bytes, BytesRejection>) -> Result<Bytes, Refusal> {
     bytes.map_err(|rejection| match rejection.status() {
         StatusCode::PAYLOAD_TOO_LARGE => too_large(),
         status => Refusal::new(status, "could not read the request body"),
     })
 }
 
+/// Whether a body kept in an audit leaf counts as no body at all: nothing
+/// but spaces, tabs, carriage returns and line feeds, exactly what both
+/// offline verifiers (`recall_wire::audit::verify` and
+/// `scripts/audit-verify.py`) strip before reading a kept body as JSON.
+/// Anything else a route took for blank, a form feed or a no-break space,
+/// would be a leaf both verifiers refuse forever as a body that is not
+/// JSON.
+pub(super) fn blank_body(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+}
+
 /// A device-management request's body, as the text its audit leaf keeps
 /// beside the signature (see `leaf::SignedRequest::body`). Any JSON body
 /// is UTF-8 already; this refuses the one route that reads none, revoking
 /// a device, a body that is not.
-fn body_text(bytes: &Bytes) -> Result<&str, Refusal> {
+pub(super) fn body_text(bytes: &Bytes) -> Result<&str, Refusal> {
     std::str::from_utf8(bytes)
         .map_err(|_| Refusal::new(StatusCode::BAD_REQUEST, "the request body must be UTF-8"))
 }
@@ -776,7 +789,7 @@ pub(super) async fn handle_revoke_authkey(
         Ok(bytes) => bytes,
         Err(refused) => return refused.into_response(),
     };
-    let req: AuthkeyRevokeRequest = if bytes.iter().all(u8::is_ascii_whitespace) {
+    let req: AuthkeyRevokeRequest = if blank_body(&bytes) {
         AuthkeyRevokeRequest::default()
     } else {
         match body(&bytes) {

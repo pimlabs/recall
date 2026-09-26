@@ -593,6 +593,13 @@ pub(super) async fn handle_discovery(State(state): State<Arc<AppState>>) -> Resp
         discovery::CAPABILITY_MERGE_QUEUE.to_string(),
         serde_json::json!({}),
     );
+    // Reports on what memory holds, made by a worker: the routes and the
+    // `evaluate` job. Listed whether or not a worker is enrolled, like the
+    // merge queue.
+    capabilities.insert(
+        discovery::CAPABILITY_EVALUATION.to_string(),
+        serde_json::json!({}),
+    );
     capabilities.insert(
         discovery::CAPABILITY_AUDIT.to_string(),
         serde_json::to_value(recall_wire::AuditCapability {

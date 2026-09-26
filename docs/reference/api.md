@@ -3,13 +3,14 @@
 Recall's server exposes six routes for memory and the deployment, and, since
 0.4.1, ten under `/v1` for devices, four for the merge queue, and, since
 0.4.2, eleven under `/admin` for the admin page's passkey sign-in and
-three for the audit log. Two carry memory files, two are for looking at
+three for the audit log, and, since 0.4.5, three for evaluation reports. Two carry memory files, two are for looking at
 the deployment, one says what the server is and speaks, one is a browser
 page, the device routes enrol machines and manage them, the job routes are
 how a worker merges conflicts away from the process that faces the
 internet, the passkey routes let the owner sign in to that page from a
-phone, and the audit routes read the Merkle tree kept over every
-authenticated action.
+phone, the audit routes read the Merkle tree kept over every
+authenticated action, and the evaluation routes ask the worker for a
+report on what memory holds.
 
 This is a **frozen** surface: field names, field order, and the difference
 between `null` and `""` are compatibility guarantees, not style. The shape was
@@ -72,6 +73,9 @@ them that `curl` can reach.
 | [`GET /v1/audit/checkpoint`](#get-v1auditcheckpoint) | any | The audit tree's size and root |
 | [`GET /v1/audit/entries`](#get-v1auditentries) | admin | Leaves `start` to `end - 1` |
 | [`GET /v1/audit/consistency`](#get-v1auditconsistency) | any | The proof that `second` extends `first` |
+| [`POST /v1/evaluations`](#post-v1evaluations) | admin | Ask the worker for a report on what memory holds |
+| [`GET /v1/evaluations`](#get-v1evaluations-and-get-v1evaluationsid) | admin | Reports, newest first, with counts |
+| [`GET /v1/evaluations/{id}`](#get-v1evaluations-and-get-v1evaluationsid) | admin | One report: its findings, and its details |
 
 "yes" is either credential below, except that a `worker` device may not
 use them; "any" is either credential, a worker's included; "admin" is
@@ -83,7 +87,8 @@ approved with the `worker` scope, and nothing else, not even the token;
 within the last five minutes; "token, once" is `RECALL_TOKEN` with the
 one-time bootstrap code, and only until a passkey exists.
 `/admin/stats` was "yes" until 0.4.1, and still is for the token: only a
-`sync` device is refused there.
+`sync` device is refused there. The passkey session is never served an
+evaluation's `details`.
 
 ---
 
@@ -545,6 +550,7 @@ server at all, and what the server can do.
       "max_body_bytes": 5242880,
       "rate_limit": { "max": 60, "window_seconds": 60 }
     },
+    "evaluation": {},
     "merge_base": {},
     "merge_queue": {},
     "scopes": { "kinds": ["project", "global", "machine"] }
@@ -572,6 +578,7 @@ server at all, and what the server can do.
 | `capabilities.devices.code_ttl_seconds` | How long a user code can be approved: 900. |
 | `capabilities.devices.poll_interval_seconds` | How long to wait between polls: 5. |
 | `capabilities.devices.signature_window_seconds` | How far a signature's `created` may be behind the server's clock: 60. Ahead of it, `created` may be only 5 seconds, whatever this says. |
+| `capabilities.evaluation` | From 0.4.5: the server has the [evaluation routes](#evaluations), and `evaluate` jobs for a worker. Listed whether or not a worker is enrolled now. |
 | `capabilities.limits` | `max_body_bytes`, and `rate_limit`'s `max` requests per `window_seconds`. |
 | `capabilities.merge_base` | The server reads `base_sha256` on a push. |
 | `capabilities.merge_queue` | The server can queue a stale push for a [worker](#jobs), and has the job routes. Listed whether or not a worker is enrolled now. |
@@ -629,7 +636,7 @@ stop being merged. These are the fields that make that state visible:
 | `merge.claude_cli.logged_in` | `false` is the common one: run `claude setup-token` on the host. |
 | `merge.last_merge_error` | Non-null means a real merge was attempted and failed. With a worker, it is set when a job runs out of attempts or its result could not be applied, when the queue is full, or when jobs a revoked worker left could not be merged. It names a job, never a project or a file, since this endpoint answers anyone: `merge job job_3m5k7q2x9w4r8t6y failed after 4 attempts; see GET /v1/jobs?state=failed`. [`GET /v1/jobs`](#get-v1jobs-and-post-v1jobsidretry) has the file and the error. |
 | `merge.worker` | Present while a `worker` device is enrolled. `last_claim_at` is when it last asked for a job since the server started, `null` before it has; `agent` is its `User-Agent`, at most 200 bytes. A worker that has stopped shows here as a `last_claim_at` that no longer moves: a running one asks at least every half minute. |
-| `merge.queue` | Present while a worker is enrolled, and whenever the queue holds a job `queued`, `leased` or `failed`, worker or not: jobs `queued`, `leased` and `failed`, and `oldest_queued_at`, `null` when nothing waits. An old `oldest_queued_at` means merges are waiting on a worker that is not taking them; `failed` above 0, merges nothing will retry by itself. |
+| `merge.queue` | Present while a worker is enrolled, and whenever the queue holds a job `queued`, `leased` or `failed`, worker or not: jobs `queued`, `leased` and `failed`, and `oldest_queued_at`, `null` when nothing waits. An old `oldest_queued_at` means merges are waiting on a worker that is not taking them; `failed` above 0, merges nothing will retry by itself. Merge jobs only: an evaluation waiting or failed shows in [`GET /v1/evaluations`](#get-v1evaluations-and-get-v1evaluationsid), not here. |
 
 With a worker enrolled, `merge.claude_cli` is the worker's own check of its
 CLI, sent with each claim, rather than the server's: the merge runs there.
@@ -1040,7 +1047,9 @@ until revoked):
 ```
 
 Revoking one stops it enrolling anything more and answers with the key as it
-now stands. Its body may be empty; with `{"revoke_devices": true}` every
+now stands. Its body may be empty, or only spaces, tabs, carriage returns
+and line feeds (anything else, a form feed among it, is `400`, as it is not
+JSON); with `{"revoke_devices": true}` every
 device the key enrolled is revoked too, which is what to do when a key has
 leaked. Without it they keep working. Since 0.4.2, asking for the devices of
 a key revoked earlier on its own revokes them as well. `404` with
@@ -1120,10 +1129,10 @@ a re-serialization:
 | `v` | The leaf format, `1`. |
 | `seq` | Its index in the tree, from 0. |
 | `at` | When it was appended, taken under the lock the append holds, so it never goes back along `seq`. A push's or delete's `updated_at` is the same moment. |
-| `action` | `push`, `delete`, `pull`, `approve`, `enroll`, `deny`, `revoke`, `sweep`, `authkey_create`, `authkey_revoke`, `start`, `job_claim`, `job_result`, `job_retry`, `passkey_add`, `passkey_remove`, `sessions_end`, `bootstrap_code`, `passkey_reset`, `admin_rename`, `admin_remove`, or `admin_restore`. |
-| `actor` | Who did it, by `kind`: `device`, with its `id`, `name` and `agent`, for a signed request; `operator` for `RECALL_TOKEN`; `session`, with the `credential_id` of the passkey it signed in with (never its cookie), for the admin page; `authkey`, with its `id` and `tag` (never the key), for the device it enrols; `server` for a sweep, for `start`, which the server appends once it is serving, naming the version it started as, for a bootstrap code it issues, and for a job it claims or settles itself: a merge it does with no worker left, a lease that ran out (`job_result` with the job `queued` again or `failed`), a job it fails for want of anything to merge it; `host` for `recall-server reset-passkeys`, and for `recall-server admin`'s renames, removes and restores. |
-| `subject` | What changed, and the hash of what is now stored — never the content. By `action`: for `push` and `delete`, the file's `project_key`, `file_path`, `deleted`, `stored_sha256`, `base_sha256` (lowercase), `merged` (the server merged the push with what it held, so `stored_sha256` is not the hash of what was sent) and `merge_job` (the job queued to merge it with the version it displaced, or `null`); `project_key` for `pull`; for `job_claim`, the `job_id`, `kind`, `attempt`, `lease_expires_at`, and, for a merge, its `project_key` and `file_path` (never the lease id); for `job_result`, the `job_id`, `project_key`, `file_path`, the `state` it is in now (`done`, `queued` for another attempt, or `failed`), `stored_sha256` (what the file became, when this result wrote the merge to it, `null` otherwise) and `follow_up` (the job that merges it again with a newer version, or `null`); for `job_retry`, the `job_id`, `kind`, `project_key` and `file_path`; for `approve` and `enroll`, the device's `device_id`, `name`, `scope`, `public_key`, `fingerprint`, `ephemeral`, `authkey_id` (the key an `enroll` came by) and `user_code` (the code an `approve` decided) — the key a signature it makes is checked with, after the device row is gone too; `device_id`/`name` for `revoke` and `sweep`; `user_code`/`name` for `deny`; `authkey_id`/`tag`/`ephemeral`/`max_devices` for `authkey_create`; `authkey_id`/`revoke_devices`/`revoked_devices` (the ids this revoked) for `authkey_revoke`; `version` for `start`; `credential_id`/`name`/`first` (the first passkey, which the token and the bootstrap code register) for `passkey_add`, and `credential_id`/`name` for `passkey_remove`, never the key; `ended`, how many other sessions, for `sessions_end`; `expires_at` for `bootstrap_code`, and `passkeys_removed`/`expires_at` for `passkey_reset`, never the code nor its hash; for `admin_rename`, `from`, `to` and `rows` (how many moved, tombstones included), for `admin_remove`, `project_key` and `rows`, and for `admin_restore`, `project_key`, `source` (the file name of the backup it restored from), `added`, `overwritten` and `deleted` (live files it turned into tombstones), each then with `jobs_closed` (the ids of the merge jobs it closed, which were open for the rows it touched) and `backup` (the file name of the backup it took first, never where it is or what it holds). No path and no content: the backup holds those. |
-| `request` | For a device's signed request: the SHA-256 of its body as `Content-Digest` carried it, standard base64; the exact RFC 9421 §2.5 signature base the device's signature verified against; the signature, standard base64; and `body`, the request body itself for `approve`, `deny`, `revoke`, `authkey_create` and `authkey_revoke`, whose bodies are a few bytes with no secret in them, `null` for the rest, a job result's merged file among them. `null` for everyone but a device: the operator, a session, an authkey, the server and the host sign nothing. |
+| `action` | `push`, `delete`, `pull`, `approve`, `enroll`, `deny`, `revoke`, `sweep`, `authkey_create`, `authkey_revoke`, `start`, `job_claim`, `job_result`, `job_retry`, `passkey_add`, `passkey_remove`, `sessions_end`, `bootstrap_code`, `passkey_reset`, `admin_rename`, `admin_remove`, `admin_restore`, or, from 0.4.5, `evaluate`. |
+| `actor` | Who did it, by `kind`: `device`, with its `id`, `name` and `agent`, for a signed request; `operator` for `RECALL_TOKEN`; `session`, with the `credential_id` of the passkey it signed in with (never its cookie), for the admin page; `authkey`, with its `id` and `tag` (never the key), for the device it enrols; `server` for a sweep, for `start`, which the server appends once it is serving, naming the version it started as, for a bootstrap code it issues, and for a job it claims or settles itself: a merge it does with no worker left, a lease that ran out (`job_result` with the job `queued` again or `failed`), a job it fails for want of anything to merge it, and an evaluation the schedule asks for; `host` for `recall-server reset-passkeys`, and for `recall-server admin`'s renames, removes and restores. |
+| `subject` | What changed, and the hash of what is now stored — never the content. By `action`: for `push` and `delete`, the file's `project_key`, `file_path`, `deleted`, `stored_sha256`, `base_sha256` (lowercase), `merged` (the server merged the push with what it held, so `stored_sha256` is not the hash of what was sent) and `merge_job` (the job queued to merge it with the version it displaced, or `null`); `project_key` for `pull`; for `job_claim`, the `job_id`, `kind`, `attempt`, `lease_expires_at`, and, for a merge, its `project_key` and `file_path`, `null` for an evaluation (never the lease id); for `job_result`, the `job_id`, `project_key`, `file_path`, the `state` it is in now (`done`, `queued` for another attempt, or `failed`), `stored_sha256` (what the file became, when this result wrote the merge to it, `null` otherwise) and `follow_up` (the job that merges it again with a newer version, or `null`); for `job_retry`, the `job_id`, `kind`, `project_key` and `file_path` (an evaluation's job has none, and these are `""` for it); for `evaluate`, the `evaluation_id`, the `job_id` that makes it, the `projects` asked for (empty for every project) and `contradictions`, never what the report found; for `approve` and `enroll`, the device's `device_id`, `name`, `scope`, `public_key`, `fingerprint`, `ephemeral`, `authkey_id` (the key an `enroll` came by) and `user_code` (the code an `approve` decided) — the key a signature it makes is checked with, after the device row is gone too; `device_id`/`name` for `revoke` and `sweep`; `user_code`/`name` for `deny`; `authkey_id`/`tag`/`ephemeral`/`max_devices` for `authkey_create`; `authkey_id`/`revoke_devices`/`revoked_devices` (the ids this revoked) for `authkey_revoke`; `version` for `start`; `credential_id`/`name`/`first` (the first passkey, which the token and the bootstrap code register) for `passkey_add`, and `credential_id`/`name` for `passkey_remove`, never the key; `ended`, how many other sessions, for `sessions_end`; `expires_at` for `bootstrap_code`, and `passkeys_removed`/`expires_at` for `passkey_reset`, never the code nor its hash; for `admin_rename`, `from`, `to` and `rows` (how many moved, tombstones included), for `admin_remove`, `project_key` and `rows`, and for `admin_restore`, `project_key`, `source` (the file name of the backup it restored from), `added`, `overwritten` and `deleted` (live files it turned into tombstones), each then with `jobs_closed` (the ids of the merge jobs it closed, which were open for the rows it touched) and `backup` (the file name of the backup it took first, never where it is or what it holds). No path and no content: the backup holds those. |
+| `request` | For a device's signed request: the SHA-256 of its body as `Content-Digest` carried it, standard base64; the exact RFC 9421 §2.5 signature base the device's signature verified against; the signature, standard base64; and `body`, the request body itself for `approve`, `deny`, `revoke`, `authkey_create`, `authkey_revoke` and `evaluate`, whose bodies are a few bytes with no secret in them, `null` for the rest, a job result's merged file among them. `null` for everyone but a device: the operator, a session, an authkey, the server and the host sign nothing. |
 
 **What a signature proves.** That the device sent a request with this
 method, path, query and body digest — not what the server did with it. A
@@ -1244,8 +1253,8 @@ build:
 4. What the server enforces holds: no device id approved twice, an admin
    action signed only by an `admin` device, no revoke of a revoked device,
    no enrolment by an authkey never created or already revoked. A job's
-   leaves follow from each other: it was queued by a push or a result
-   that names it, a worker signs its claims and results and nothing else,
+   leaves follow from each other: it was queued by a push, a result or
+   an `evaluate` leaf that names it, a worker signs its claims and results and nothing else,
    a result comes from the worker holding the job, no one claims it while
    a live worker holds it or once it is settled, each claim is the next
    attempt, and only a failed job is retried. A session acts with a
@@ -1392,7 +1401,8 @@ compare-and-swap. Finished jobs are removed after 30 days; failed ones stay
 until retried.
 
 **Without a worker.** When the last worker is revoked, the server drains
-what it left: a job it held is released at once, and every open job is
+the merge jobs it left (an evaluation waits for the next worker, since
+the server does not evaluate): a job it held is released at once, and every open job is
 merged by the server's own `claude` CLI through the same compare-and-swap,
 attributed to the push that queued it, as an inline merge is. When that CLI
 cannot merge, each is marked `failed` instead, and `/health` shows them in
@@ -1422,7 +1432,7 @@ and leases it, waking as soon as a push queues one.
 
 | Field | Notes |
 |---|---|
-| `kinds` | Required. `merge` is the only kind so far. Empty is allowed: the claim then waits and answers with no job, which is how a worker whose CLI cannot merge stays visible without taking jobs it would fail. |
+| `kinds` | Required. `merge`, and from 0.4.5 `evaluate` ([Evaluations](#evaluations)). Empty is allowed: the claim then waits and answers with no job, which is how a worker whose CLI cannot merge stays visible without taking jobs it would fail. |
 | `wait_seconds` | 0 to 30; 0 when left out. |
 | `lease_seconds` | 30 to 600; 120 when left out. |
 | `claude_cli` | Optional. The worker's own check of its CLI, which `/health` then reports, its `error` kept to 500 bytes. |
@@ -1449,6 +1459,39 @@ and leases it, waking as soon as a push queues one.
 counts from 1. `sha256` is the lowercase hex SHA-256 of `content`, as
 `base_sha256` is.
 
+An `evaluate` job carries `evaluate` in place of `merge`: what was asked,
+and the files to read, every live file of the projects asked for (every
+project when none was) and of every global scope, read as the claim is
+made and never stored with the job. It is leased for 600 seconds whatever
+`lease_seconds` asked, since it may call `claude` once for each project:
+
+```json
+{
+  "job": {
+    "id": "job_hwqyy6elq4raxjjk",
+    "kind": "evaluate",
+    "lease_id": "lse_b23dbo3dobhqerw5wpfrsq5rwi",
+    "lease_expires_at": "2026-09-25T23:02:10.016Z",
+    "attempt": 1,
+    "evaluate": {
+      "evaluation_id": "eval_hgv5dgl5wsqve4pc",
+      "projects": ["acme/app"],
+      "contradictions": false,
+      "files": [
+        { "project_key": "acme/app", "file_path": "topics/auth.md", "content": "# Auth
+- tokens live in 1Password
+- rotate them monthly
+", "updated_at": "2026-09-25T22:52:09.929Z" }
+      ]
+    }
+  }
+}
+```
+
+This is how a worker reads memory: only while it holds an evaluation the
+owner asked for, and only what was asked. Its scope stays the job routes;
+`GET /sync` and `GET /admin/stats` refuse it.
+
 | Code | When |
 |:---:|---|
 | `200` | A job, or `null`. |
@@ -1457,8 +1500,9 @@ counts from 1. `sha256` is the lowercase hex SHA-256 of `content`, as
 
 ## `POST /v1/jobs/{id}/result`
 
-Worker only. Hands back a merge, or the error the worker met, under the
-lease the job was claimed with. Exactly one of `merge` and `error`:
+Worker only. Hands back a merge, an evaluation's report, or the error the
+worker met, under the lease the job was claimed with. Exactly one of
+`merge`, `evaluate` and `error`:
 
 ```json
 { "lease_id": "lse_q8w2e4r6t8y0u2i4o6p8a0s2d4", "merge": { "content": "# Auth\n- tokens live in 1Password\n- rotate them monthly\n" } }
@@ -1469,8 +1513,16 @@ lease the job was claimed with. Exactly one of `merge` and `error`:
 ```
 
 ```json
+{ "lease_id": "lse_b23dbo3dobhqerw5wpfrsq5rwi", "evaluate": { "findings": [ { "id": "f1", "kind": "stale", "severity": "low", "project_key": "acme/app", "file_path": "topics/auth.md", "lines": [2, 2], "related": [] } ], "details": { "findings": { "f1": { "excerpt": "- tokens live in 1Password\n", "reasoning": "…", "suggested_edit": null } }, "skipped": [] } } }
+```
+
+```json
 { "id": "job_3m5k7q2x9w4r8t6y", "state": "done", "applied": true, "follow_up": null }
 ```
+
+A report is recorded as its run's, `done`, with `applied: false`: it
+writes no file. See [Evaluations](#evaluations) for what a finding may
+hold; `details` must be an object.
 
 `applied` is whether the merged content was written to the file. An error,
 or an empty merge of two versions that were not both empty, answers with
@@ -1481,7 +1533,7 @@ whose first answer was lost can simply send it again.
 | Code | When |
 |:---:|---|
 | `200` | Recorded. `applied: false` with a `follow_up` job id when the file changed while the job ran. |
-| `400` | Bad JSON; `{"error":"a result carries exactly one of merge and error"}`. |
+| `400` | Bad JSON; `{"error":"a result carries exactly one of merge, evaluate and error"}`; a result of the wrong kind, `{"error":"a merge result for a job that is not a merge"}` or `{"error":"an evaluate result for a job that is not an evaluation"}`; a finding with a key it may not have, such as `{"error":"finding f1 has a key \"excerpt\"; it may have only id, kind, severity, project_key, file_path, lines, related"}`, of another shape, or naming a file the server does not hold (`{"error":"finding f1 names a file this server does not hold"}`); `{"error":"details is not an object"}`. Nothing is recorded. |
 | `401`, `403` | See [Authentication](#authentication). |
 | `404` | `{"error":"no job has that id"}` |
 | `409` | `{"error":"this lease has ended; the job was handed out again"}`: the lease is not the job's current one, or has run out. Nothing was changed. |
@@ -1519,6 +1571,156 @@ answers with the job as listed. A job that failed because the file kept
 changing is queued as a merge of its kept result with the file as it is
 now. `404` with `{"error":"no job has that id"}`; `409` for a job that has
 not failed, such as `{"error":"only a failed job can be retried; this one is leased"}`.
+
+## Evaluations
+
+From 0.4.5 the worker also makes **evaluation reports**: it looks over
+what memory holds and reports what needs the owner's attention. Nothing
+in memory changes; `recall eval apply` makes one finding's suggested edit
+on the owner's machine, and only when run. A run is an `evaluate` job
+([Jobs](#jobs)), asked for here, with `recall eval run`, from the admin
+page, or on a schedule when `RECALL_EVAL_INTERVAL_HOURS` is set (off by
+default; see [`deploy/README.md`](../../deploy/README.md)).
+
+The worker reads the projects asked for, every project when none is
+named, and every global scope beside them, and runs six checks:
+
+| Check | Finds | Severity |
+|---|---|---|
+| `secret` | A private key; a cloud, GitHub, GitLab, Slack, Stripe, Google, OpenAI, Anthropic, npm or Hugging Face token; a Recall authkey or key; a JSON Web Token; a password in a URL; or an AWS secret access key, a password, or a long hex value assigned to a name that says what it is | `high` |
+| `contradiction` | Two notes that cannot both be true now, in a project or between it and the global scope | `medium` |
+| `dead_link` | A `MEMORY.md` line linking to a file that is not in memory | `medium` |
+| `wrong_scope` | A project file whose front matter says `type: user`, which `recall promote` moves to the global scope | `low` |
+| `duplicate` | The same paragraph or list item in two files or two scopes, reported on the copy that is not in the global scope | `low` |
+| `stale` | A file unchanged for `RECALL_EVAL_STALE_DAYS` (90) that names a path or a command | `low` |
+
+Only `contradiction` calls `claude`: one `claude -p` per project, with the
+flags that keep a merge cheap and inert, and only when the request asks
+for it with `"contradictions": true`, since it spends the owner's Claude
+usage. A scheduled run never includes it.
+
+**A report comes in two parts.** `findings` holds, per finding, only its
+`id` (`f1`, `f2`, …), `kind`, `severity`, the file (`project_key`,
+`file_path`), the first and last `lines` it concerns (from 1), and
+`related` files: never a word of a note. The server refuses a result whose
+finding has any other key, an `id` of any other shape, or names a file it
+does not hold. `details` holds everything that quotes a note: per finding
+id, an `excerpt`, the `reasoning`, and a `suggested_edit` when there is one
+(lines of one file, replaced, against the `base_sha256` of the version the
+worker read); and `skipped`, what was not checked, cut or left out, and
+why. Every secret the `secret` check knows is masked wherever `details`
+quotes it, whichever finding does, and every line of a private key's body
+replaced (a key block behind `> ` or a list marker, and a key on one line
+with `\n` escapes, as a service account's JSON holds one, included). A
+mask shows a public prefix, such as `ghp_…`, only for a kind of token that
+has one, and nothing of a password, an AWS secret key, a hex secret, a
+URL's password or a private key. A suggested edit is never masked, since
+it is written into the note as it stands: one whose text holds something
+masked is left out, and `skipped` says so. The contradiction check hands
+`claude` the notes with every secret already masked. A key header is a key
+only when a line of a key's body follows it, so prose about keys is not
+one. A secret shorter than 8 bytes is masked where the check finds it,
+and not in every other text that happens to hold the same letters. `details` is kept under 2 MiB: an excerpt is cut at 4 KiB, a
+reason at 2 KiB, a suggested edit over 16 KiB is left out, and past the
+total the last findings keep no details; `skipped` says so. A result the
+server refuses (`413`, `400`) the worker reports as the job's `error`
+instead. `details` is stored as plain JSON on the server.
+Encrypting it with the content key is the design's end state
+([`part5-plan.md`](../design/part5-plan.md), PR 6); that was parked on
+2026-09-25, and when it returns only how `details` is stored changes.
+
+## `POST /v1/evaluations`
+
+Admin. Asks for a run. Both members may be left out, and so may the body:
+`{}` is every project, without the contradiction check.
+
+```json
+{ "projects": ["acme/app"], "contradictions": false }
+```
+
+```json
+{ "id": "eval_hgv5dgl5wsqve4pc", "state": "queued", "job": "job_hwqyy6elq4raxjjk" }
+```
+
+A project named twice counts once; a body of only spaces, tabs, carriage
+returns and line feeds is `{}`. The run is queued as an `evaluate` job for
+the worker, which a claim picks up within a second. **One run at a time**:
+while another is queued or running, the request is refused, so runs never
+pile up in the job queue that merges share. A worker older
+than 0.4.5 claims merges only, so a run waits, `queued`, until the worker
+is upgraded.
+
+| Code | When |
+|:---:|---|
+| `200` | Queued. |
+| `400` | Bad JSON; a project key that is not one (the [`POST /sync`](#post-sync) rules), `{"error":"no project has the key \"acme/nothing\""}` for one the server holds no file of, or `{"error":"at most 100 projects"}`. |
+| `401`, `403` | See [Authentication](#authentication). |
+| `409` | `{"error":"no worker is enrolled to make an evaluation: run recall-worker and approve it (recall devices approve <code> --worker)"}`; `{"error":"evaluation eval_hgv5dgl5wsqve4pc is still queued or running; ask for another once it is done"}`; or `{"error":"the job queue is full (1000 jobs waiting or held); ask again once the worker has drained it"}`. Nothing is queued. |
+
+## `GET /v1/evaluations` and `GET /v1/evaluations/{id}`
+
+Admin. The listing is newest first, at most 200, and carries counts,
+never findings or details:
+
+```json
+{
+  "evaluations": [
+    {
+      "id": "eval_hgv5dgl5wsqve4pc",
+      "state": "done",
+      "created_at": "2026-09-25T22:52:09.960Z",
+      "finished_at": "2026-09-25T22:52:10.091Z",
+      "counts": { "stale": 1 },
+      "projects": ["acme/app"],
+      "contradictions": false,
+      "error": null
+    }
+  ]
+}
+```
+
+`state` is `queued`, `running` (a worker holds it), `done`, or `failed`
+(out of attempts, as any job is; `error` says why, and a retry of its job
+with [`POST /v1/jobs/{id}/retry`](#get-v1jobs-and-post-v1jobsidretry)
+queues it again). `finished_at` is when the report came in or it failed,
+`null` until then; `counts` has only the kinds it found; `projects` is
+empty for every project; `error` is the last error of an attempt, `null`
+once done.
+
+One run adds its `findings` and `details`, both empty or `null` until it
+is done:
+
+```json
+{
+  "id": "eval_hgv5dgl5wsqve4pc",
+  "state": "done",
+  "created_at": "2026-09-25T22:52:09.960Z",
+  "finished_at": "2026-09-25T22:52:10.091Z",
+  "findings": [
+    { "id": "f1", "kind": "stale", "severity": "low", "project_key": "acme/app",
+      "file_path": "topics/auth.md", "lines": [2, 2], "related": [] }
+  ],
+  "details": {
+    "findings": {
+      "f1": { "excerpt": "- tokens live in 1Password\n", "reasoning": "Unchanged since …", "suggested_edit": null }
+    },
+    "skipped": []
+  },
+  "projects": ["acme/app"],
+  "contradictions": false,
+  "error": null
+}
+```
+
+**`details` is `null` for the admin page's passkey session**, always: the
+page shows kinds, files and lines, and says to run `recall eval show` for
+the rest, so a browser session never holds note text. Nor is it shown the
+worker's own text: a run's `error` reads `the worker reported an error;
+recall eval show names it` to the session, here and in the listing. The
+operator's token and an admin device get both whole. The server's log
+records an evaluation's failure without its error. `404` with
+`{"error":"no evaluation has that id"}`. Reports are removed 90 days after
+they came in.
 
 ---
 

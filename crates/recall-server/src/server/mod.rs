@@ -12,6 +12,7 @@
 //! | `POST /v1/devices/enroll`, `POST /v1/devices/enroll/poll` | none, but rate limited, and small bodies only |
 //! | `GET /admin/stats`, the rest of `/v1/devices`, `/v1/authkeys`, and `GET /v1/audit/entries` | bearer token, an admin device's signature, or the admin page's passkey session (with its CSRF header on a POST); small bodies only |
 //! | `GET /v1/jobs`, `POST /v1/jobs/{id}/retry` | bearer token, or an admin device's signature |
+//! | `POST /v1/evaluations`, `GET /v1/evaluations`, `GET /v1/evaluations/{id}` | bearer token, an admin device's signature, or the admin page's passkey session (with its CSRF header on a POST), which is never served `details`; small bodies only |
 //! | `POST /v1/jobs/claim`, `POST /v1/jobs/{id}/result` | a worker device's signature, and nothing else |
 //! | `GET /admin/session`, `POST /admin/login/start`, `POST /admin/login/finish` | none, but rate limited |
 //! | `POST /admin/bootstrap/register` and `…/finish` | bearer token only, with the one-time bootstrap code, and only while no passkey exists |
@@ -23,7 +24,8 @@
 //! own tests: `middleware.rs` (rate limiting, then the protocol check, then
 //! auth), `auth.rs` (device signatures and the replay cache),
 //! `handlers.rs` (one function per route), `devices.rs` (the device
-//! routes), `jobs.rs` (the merge queue's routes and its drain), `admin.rs`
+//! routes), `jobs.rs` (the merge queue's routes and its drain),
+//! `evaluations.rs` (asking for and reading evaluation reports), `admin.rs`
 //! (the admin page and its session), `passkeys.rs` (the WebAuthn ceremonies
 //! that start a session), `respond.rs` (the JSON shape of every reply,
 //! errors included), `limit.rs` (the per-IP window the middleware consults)
@@ -62,6 +64,7 @@ mod admin;
 mod audit;
 mod auth;
 mod devices;
+mod evaluations;
 mod handlers;
 mod jobs;
 mod limit;
@@ -310,6 +313,19 @@ impl Server {
                 recall_wire::audit::ENTRIES_PATH,
                 get(handle_entries).fallback(not_found),
             )
+            // Evaluation reports. The passkey session may ask for one and
+            // read the findings; `details`, which quotes notes, is never
+            // served to it (see evaluations.rs).
+            .route(
+                recall_wire::evaluations::EVALUATIONS_PATH,
+                get(evaluations::handle_list)
+                    .post(evaluations::handle_request)
+                    .fallback(not_found),
+            )
+            .route(
+                "/v1/evaluations/{id}",
+                get(evaluations::handle_get).fallback(not_found),
+            )
             .route_layer(DefaultBodyLimit::max(ADMIN_BODY_BYTES))
             .route_layer(from_fn(admin_only))
             .route_layer(from_fn_with_state(state.clone(), admin_guard));
@@ -440,6 +456,14 @@ impl Server {
         jobs::drain_without_worker(&self.state).await
     }
 
+    /// Queues the run `RECALL_EVAL_INTERVAL_HOURS` asks for: every project,
+    /// never the contradiction check. Skipped, answering [`None`], while no
+    /// worker is enrolled or another run is open. Run by itself on the
+    /// schedule; exposed so tests need not wait an hour for it.
+    pub fn run_scheduled_evaluation(&self) -> Result<Option<String>> {
+        evaluations::run_scheduled(&self.state)
+    }
+
     /// Writes a backup now. Failure is logged, never propagated: it becomes
     /// visible through `/health`'s `last_backup_at` going stale.
     pub fn run_backup(&self) {
@@ -536,6 +560,28 @@ impl Server {
                         }
                     }
                     tokio::time::sleep(every).await;
+                }
+            }));
+        }
+        if let Some(every) = self.state.cfg.eval_interval {
+            let state = self.state.clone();
+            tasks.push(tokio::spawn(async move {
+                loop {
+                    // The first run one interval after the start, not at
+                    // it: a server restarted a few times in an hour should
+                    // not make a report each time.
+                    tokio::time::sleep(every).await;
+                    let s = state.clone();
+                    match tokio::task::spawn_blocking(move || evaluations::run_scheduled(&s)).await
+                    {
+                        Ok(Ok(Some(id))) => eprintln!("queued the scheduled evaluation {id}"),
+                        Ok(Ok(None)) => eprintln!(
+                            "the scheduled evaluation was skipped: no worker is enrolled, or \
+                             another evaluation is still open"
+                        ),
+                        Ok(Err(e)) => eprintln!("queueing the scheduled evaluation failed: {e:#}"),
+                        Err(_) => {}
+                    }
                 }
             }));
         }

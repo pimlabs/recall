@@ -1012,6 +1012,7 @@ fn post_result(db: &Path, id: &str, lease: &str, merged: &str) -> Settled {
                     content: merged.into(),
                 }),
                 error: None,
+                evaluate: None,
             },
             "worker",
             "job_follow_up",

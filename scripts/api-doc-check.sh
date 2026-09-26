@@ -58,7 +58,7 @@ check "discovery needs no token" "200" \
 check "discovery's top-level keys" 'protocol server min_client auth capabilities' \
   "$(curl -s "$URL/.well-known/recall" | python3 -c '
 import json,sys; print(" ".join(json.load(sys.stdin).keys()))')"
-check "discovery's capabilities" 'audit devices limits merge_base merge_queue scopes' \
+check "discovery's capabilities" 'audit devices evaluation limits merge_base merge_queue scopes' \
   "$(curl -s "$URL/.well-known/recall" | python3 -c '
 import json,sys; print(" ".join(json.load(sys.stdin)["capabilities"].keys()))')"
 check "the audit capability" '{"leaf_version": 1, "max_page": 1000, "max_page_bytes": 2097152}' \
@@ -523,6 +523,26 @@ check "retrying an unknown job is 404" '{"error":"no job has that id"}' \
 check "a scope that does not exist is 400" '{"error":"scope must be sync, admin or worker"}' \
   "$(curl -s -X POST "${auth[@]}" "${json[@]}" -d '{"user_code":"BCDF-GHJK","scope":"root"}' \
      "$URL/v1/devices/approve")"
+
+echo "Evaluations, without a worker"
+# Making one needs a worker's signature to claim it; crates/recall-server/
+# tests/evaluations.rs covers that. What curl can show: who is refused,
+# that nothing is queued with no worker to take it, and the empty listing.
+check "asking for an evaluation needs a token" '401' \
+  "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${json[@]}" -d '{}' "$URL/v1/evaluations")"
+check "with no worker enrolled, no evaluation is queued" \
+  '409 {"error":"no worker is enrolled to make an evaluation: run recall-worker and approve it (recall devices approve <code> --worker)"}' \
+  "$(curl -s -o "$WORK/eval.json" -w '%{http_code}' -X POST "${auth[@]}" "${json[@]}" \
+     -d '{"contradictions":false}' "$URL/v1/evaluations") $(cat "$WORK/eval.json")"
+check "a project the server does not hold is 400" '{"error":"no project has the key \"no/such\""}' \
+  "$(curl -s -X POST "${auth[@]}" "${json[@]}" -d '{"projects":["no/such"]}' "$URL/v1/evaluations")"
+check "a body of a no-break space is not an empty body" '{"error":"invalid json body"}' \
+  "$(printf '\302\240' | curl -s -X POST "${auth[@]}" "${json[@]}" --data-binary @- "$URL/v1/evaluations")"
+check "a body of a form feed is not an empty body" '{"error":"invalid json body"}' \
+  "$(printf '\f' | curl -s -X POST "${auth[@]}" "${json[@]}" --data-binary @- "$URL/v1/authkeys/ak_nothing/revoke")"
+check "no evaluations yet" '{"evaluations":[]}' "$(curl -s "${auth[@]}" "$URL/v1/evaluations")"
+check "an unknown evaluation is 404" '{"error":"no evaluation has that id"}' \
+  "$(curl -s "${auth[@]}" "$URL/v1/evaluations/eval_nothing")"
 
 echo "Jobs, with a worker"
 # Its own server, with merging on and a claude that does not exist: a stale

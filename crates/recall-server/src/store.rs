@@ -19,6 +19,7 @@ use crate::now;
 
 mod audit;
 mod devices;
+mod evaluations;
 mod jobs;
 mod passkeys;
 
@@ -26,6 +27,7 @@ pub use audit::{AuditEntry, ConsistencyError, Outcome};
 pub use devices::{
     plain_name, Created, Decision, Inserted, NewAuthkey, NewDevice, NewEnrollment, Poll, Waiting,
 };
+pub use evaluations::Requested;
 pub use jobs::{
     clip, Failure, Queued, Retried, Settled, Settlement, MAX_ATTEMPTS, MAX_ERROR_BYTES, MAX_LINKS,
     MAX_OPEN_JOBS,
@@ -240,6 +242,7 @@ impl Store {
         // the others for the same reason they are.
         devices::allow_worker_scope(&state.conn)?;
         state.conn.execute_batch(jobs::SCHEMA)?;
+        state.conn.execute_batch(evaluations::SCHEMA)?;
         state.conn.execute_batch(audit::SCHEMA)?;
 
         let loaded = audit::load(&state.conn)?;

@@ -9,8 +9,9 @@ use recall_wire::{
     discovery, ApproveRequest, AuditCheckpoint, AuditConsistencyResponse, AuditEntriesResponse,
     Authkey, AuthkeyCreated, AuthkeyList, AuthkeyRequest, AuthkeyRevokeRequest, Device,
     DeviceIdentity, DeviceList, Discovery, EnrollApproved, EnrollPending, EnrollPollResponse,
-    ErrorResponse, Health, PendingEnrollment, PushRequest, PushResponse, SyncResponse,
-    ValidationError, DISCOVERY_PATH, PROTOCOL, PROTOCOL_HEADER,
+    ErrorResponse, Evaluation, EvaluationCreated, EvaluationList, EvaluationRequest, Health,
+    PendingEnrollment, PushRequest, PushResponse, SyncResponse, ValidationError, DISCOVERY_PATH,
+    PROTOCOL, PROTOCOL_HEADER,
 };
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::de::DeserializeOwned;
@@ -438,6 +439,36 @@ impl Client {
         let path = wire_devices::revoke_authkey_path(id);
         self.send(self.post_json(&path, &AuthkeyRevokeRequest { revoke_devices })?)
             .await
+    }
+
+    /// Asks for an evaluation report, which the server's worker makes.
+    /// Admin.
+    pub async fn request_evaluation(
+        &self,
+        req: &EvaluationRequest,
+    ) -> Result<EvaluationCreated, Error> {
+        self.send(self.post_json(recall_wire::evaluations::EVALUATIONS_PATH, req)?)
+            .await
+    }
+
+    /// Every evaluation report, newest first, with counts. Admin.
+    pub async fn evaluations(&self) -> Result<EvaluationList, Error> {
+        let request = self.http.get(format!(
+            "{}{}",
+            self.base_url,
+            recall_wire::evaluations::EVALUATIONS_PATH
+        ));
+        self.send(request).await
+    }
+
+    /// One evaluation report, with its findings and details. Admin.
+    pub async fn evaluation(&self, id: &str) -> Result<Evaluation, Error> {
+        let request = self.http.get(format!(
+            "{}{}",
+            self.base_url,
+            recall_wire::evaluations::evaluation_path(id)
+        ));
+        self.send(request).await
     }
 
     /// A JSON `POST` to `path`, the body serialized here so it is exactly

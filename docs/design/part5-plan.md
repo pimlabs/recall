@@ -3,7 +3,14 @@
 Status: **plan**, partly built. PR 1 (the audit log) and PR 2 (the merge
 queue and `recall-worker`) shipped in 0.4.2, and PR 1's client half, the
 checkpoints every pull keeps and `recall audit export` and `verify`, after
-it; the worker's own check on each claim, and PR 3 onwards, are not built.
+it. PR 6 (evaluation reports) is built for 0.4.5 **without encryption**:
+its `details` are stored as plain JSON, and nothing else about it waits on
+a key (see [PR 6](#pr-6-evaluation)). **Encryption, PRs 3, 4, 5 and 7, was
+parked on 2026-09-25** while the owner weighs how much harder it makes
+Recall to use (every device holding a key, a phone unable to set up a
+cloud session by itself, a recovery key to keep) against what it protects;
+nothing in this file about it is withdrawn, and none of it is being built.
+The worker's own check on each claim is not built either.
 Part 5 of [`handshake.md`](handshake.md) is the
 design the owner approved on 2026-09-23. This file turns it into pull
 requests that can be built and merged one at a time. Where the design leaves
@@ -208,8 +215,11 @@ Fixtures, captured from a server with a push `openssl` signed:
 | `POST /v1/jobs/{id}/retry` | admin | Queue a failed job again |
 
 `POST /v1/devices/approve` accepts `"scope": "worker"`, and a device's
-`scope` may be `worker`. A worker may use the job routes, the audit routes
-and, from PR 6, `GET /sync` and `GET /admin/stats`; nothing else. A `sync` or
+`scope` may be `worker`. A worker may use the job routes and the audit
+routes; nothing else. (This plan gave it `GET /sync` and `GET /admin/stats`
+from PR 6, for reading what it evaluates. PR 6 hands it the files with the
+evaluate job's claim instead, so the scope never widened; see
+[PR 6](#pr-6-evaluation).) A `sync` or
 `admin` device on a worker route gets `403`, as a worker does on theirs.
 
 The claim:
@@ -473,6 +483,54 @@ Fixtures: `discovery`, `error_protocol`, `sync_response`,
 
 ### PR 6: evaluation
 
+**Shipped, for 0.4.5, without encryption.** Encryption (PRs 3, 4, 5 and 7)
+was parked on 2026-09-25 while the owner reconsiders ease of use against
+security, so PR 6 was built on its own, on today's plaintext storage. What
+changed from the plan below, and why:
+
+- **`details` is stored plain**, as a JSON object in `evaluations.details`,
+  and returned only by `GET /v1/evaluations/{id}`, to the operator and
+  admin devices; the admin page's passkey session gets `null`. The split
+  is kept exactly as planned, so sealing it later changes only how that
+  column is stored: a finding holds only enums, a file the server holds,
+  line numbers and related files, with an id shaped `f<n>`, and the
+  server refuses a result whose finding has any other key.
+- **The worker reads memory from the claim**, not from `GET /sync`: an
+  evaluate job's claim carries `{evaluation_id, projects, contradictions,
+  files}`, the files read as the claim is made and never stored with the
+  job. It is simpler (no scope change, no new leaf a worker may sign, no
+  change to either verifier's worker rule) and narrower: a worker reads
+  memory only while it holds an evaluation the owner asked for, and only
+  the projects asked for. `GET /sync` and `GET /admin/stats` still refuse
+  a worker.
+- **Contradictions are asked for by name.** The request gains
+  `"contradictions": true|false`, false by default, and the claim carries
+  it. A scheduled run (`RECALL_EVAL_INTERVAL_HOURS`, off by default: open
+  decision 5) never includes it; there is no setting that would.
+- **`recall eval apply`** takes a finding id and `--eval <id>` (the newest
+  finished report by default), and refuses unless the local file is still
+  the version the report read (`base_sha256`), checked again after the
+  owner answers, just before the write.
+- **Secrets are masked everywhere in `details`**, not only in the `secret`
+  finding: every excerpt, reason and edit passes one redactor built from
+  every token and private-key line in the files read, in whatever shape
+  a note holds a key; `claude` is handed the notes already masked; a mask
+  shows a public prefix only for a kind of token that has one; and a
+  suggested edit that the masking would change is left out rather than
+  stored masked. `details` is kept under 2 MiB, so a report always fits
+  in a result.
+- **One evaluation at a time**: a request while another is queued or
+  running is a `409`, so evaluations cannot crowd merges out of the queue
+  they share. The passkey session sees neither `details` nor the worker's
+  error text.
+- **The audit log** gains `evaluate`, one leaf per run asked for (the
+  server's own for a scheduled one), keeping an admin device's signed
+  body; the job's claim and result are `job_claim` and `job_result` as for
+  any job, and both verifiers check them.
+
+[`../reference/api.md`](../reference/api.md#evaluations) is the authority
+for what shipped. The plan as written follows.
+
 | Route | Auth | Purpose |
 |---|:---:|---|
 | `POST /v1/evaluations` | admin | Ask for a run, of every project or some |
@@ -576,7 +634,7 @@ it, and an old client does not delete a file for being absent.
 | 3 | `enroll_key_wraps` | `enroll_key_id`, `version`, `wrap` |
 | 4 | `memory_sealed` | `project_key`, `file_path`, `sealed`, `stored_sha256`, `key_version`, `source_env`, `device_id`, `updated_at`, `deleted`; key `(project_key, file_path)` |
 | 4 | `memory_versions` | `stored_sha256 PRIMARY KEY`, `project_key`, `file_path`, `body BLOB` (the exact signed request body), `created_at`; pruned after `RECALL_VERSION_RETENTION_DAYS`, 90 by default |
-| 6 | `evaluations` | `id`, `state`, `projects`, `findings` (JSON), `details` (sealed), `created_at`, `finished_at` |
+| 6 | `evaluations` | `id`, `state`, `projects`, `findings` (JSON), `details` (sealed; as built, plain JSON until encryption returns), `created_at`, `finished_at` |
 | 7 | `settings` | `key`, `value`; holds `strict` |
 
 Invariants, each pinned by a test:
@@ -969,7 +1027,7 @@ durable; that is its job.
 | 3 Keys | Nothing new for notes, since none is encrypted yet. It sets up grants a compromised server cannot forge unnoticed | Key substitution for a device enrolling while an attacker holds the API, beyond what trust on first use and `ck_id` catch |
 | 4 Sealed sync | A leaked database, backup or `sqlite-web` view exposing sealed files; the server moving a body between files or versions | Files still in plaintext; forged deletes, while old clients' unsealed tombstones are still honoured; a server serving an older version of a file (visible in the audit log, not prevented); a server withholding files |
 | 5 Ciphertext only | The internet-facing process and its backups holding any note, once the migration is done and older snapshots have aged out; forged deletes; the API image carrying the CLI or Node | The worker: whoever takes it takes the key. Root on a shared host. Off-box copies made before the migration |
-| 6 Evaluation | Secrets and contradictions sitting unnoticed in memory | It tells the API server which kinds of finding each file has |
+| 6 Evaluation | Secrets and contradictions sitting unnoticed in memory | It tells the API server which kinds of finding each file has. As built without encryption, the server also holds each report's excerpts, as it already holds the notes they quote |
 | 7 Strict | Any server-side process reading what is written after the switch; old ciphertext being readable with the worker's key, once re-encrypted | The owner's own devices: a compromised laptop reads everything. Server-side merge and evaluation stop |
 
 ## Tests
@@ -1049,8 +1107,26 @@ the test fail. A property that no mutation fails is not pinned.
 | A report built from notes containing sentinel strings carries none of them outside `details` | Put an excerpt in a finding |
 | The server refuses a finding with an unknown key | Accept free text |
 | An evaluation changes no memory row | Apply a suggestion |
-| The deterministic checks make no `claude` call, counted by a fake | |
-| The secret check finds every planted token in a fixture set and nothing in a set of ordinary notes | |
+| The deterministic checks make no `claude` call, counted by a fake | Call `claude` from one of them |
+| The secret check finds every planted token in a fixture set and nothing in a set of ordinary notes | Drop a pattern; take any long hex string for a secret |
+| The contradiction check runs only when the request asks for it, and a scheduled run never does (added as built) | Ignore the flag |
+| A token or private-key line another check quotes is masked in `details` too (added after review) | Mask only the `secret` finding's excerpt |
+| `details` stays under 2 MiB, and a result the server refuses is posted as an error rather than stopping the worker (added after review) | Drop the cap; exit on a `413` |
+| The token scan is linear on lines built to make it reread itself (added after review) | Restart each search inside the run just read |
+| `recall eval apply` never writes over an edit made while the owner was asked (added after review) | Write from the read made before asking |
+| A body both verifiers would not read as blank is never kept as one (added after review) | Trim Unicode whitespace on the server |
+| A second evaluation is refused while one is open (added after review) | Queue it |
+| A run whose lease ran out does not hold up the next (added after review) | Ask whether one is open before expiring leases |
+| `claude` is handed no secret, however it rewords what it read (added after review) | Build the prompt from the notes unmasked |
+| A suggested edit never carries a mask into a note (added after review) | Store the edit masked |
+| A key behind `> `, or on one line with `\n` escapes, is found and masked (added after review) | Match a key header only at the start of a line |
+| A mask shows no character of a value that has no public prefix (added after review) | Show the first four characters of any long token |
+| Prose ending with a key header, or a list of headers, is not a key (added after review) | Open a key block on the header alone |
+| Masking the prompts is linear, each file masked once a run, and a prompt too large as it stands is never masked (added after review) | Compare each line with every secret; mask per project; measure only after masking |
+
+As built, these are in `crates/recall-worker/src/evaluate_tests.rs` and
+`crates/recall-server/tests/evaluations.rs`, beside an end-to-end test of
+the real worker against the server.
 
 **PR 7**
 
@@ -1093,7 +1169,9 @@ the test fail. A property that no mutation fails is not pinned.
 5. **Scheduled evaluation.** **Recommendation:** off by default. The
    deterministic checks cost nothing and could run daily, but the
    contradiction check spends the owner's Claude usage, so switching the
-   schedule on is the owner's call.
+   schedule on is the owner's call. **As built:** off by default, and a
+   scheduled run never includes the contradiction check at all; only a
+   request that names it does.
 
 ## References
 

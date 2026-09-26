@@ -14,6 +14,81 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
+## Unreleased
+
+- **Evaluation reports.** The worker can now look over what memory holds
+  and report what needs your attention: secrets (keys and tokens of the
+  common kinds, Recall's own authkeys, passwords in URLs and passwords
+  assigned to a name among them), the same paragraph in
+  two files or scopes, `MEMORY.md` links to files that are not there,
+  project notes about you (`type: user`) that belong in the global scope,
+  and notes naming paths or commands that have not changed in
+  `RECALL_EVAL_STALE_DAYS` (90 by default). With `--contradictions`, it
+  also asks `claude` once per project for notes that contradict each
+  other; nothing else calls `claude`. Nothing in memory changes. New
+  commands: `recall eval run [--project KEY]... [--contradictions]`,
+  `recall eval list`, `recall eval show [<id>]`, and `recall eval apply
+  <finding> [--eval <id>]`, which makes one finding's suggested edit to
+  the local file, only if it is still the version the report read, and
+  pushes it. The admin page has a Reports tab that asks for one and lists
+  what each found by kind, file and line.
+- **The server has three new admin routes**, `POST /v1/evaluations`,
+  `GET /v1/evaluations` and `GET /v1/evaluations/{id}`, a new table,
+  `evaluations`, made when the store opens (an older server ignores it),
+  a new job kind, `evaluate`, and a new capability, `evaluation`, in its
+  discovery document. A report's findings name only kinds, files and
+  lines; the lines themselves, the reasons and the suggested edits are its
+  `details`, which the server stores as plain JSON, like the notes, and
+  serves to the operator and admin devices but never to the admin page's
+  passkey session. Reports are removed 90 days after they came in.
+- **`RECALL_EVAL_INTERVAL_HOURS`**, new, on the server: hours between
+  reports it asks the worker for by itself. Unset, the default, asks for
+  none. A scheduled report never includes the contradiction check. The
+  compose files pass it, and the worker's `RECALL_EVAL_STALE_DAYS`, through
+  from `deploy/.env`.
+- **The worker claims `evaluate` jobs** from a server that lists
+  `evaluation`, whether or not its `claude` CLI is logged in: every check
+  but the contradiction check runs without it, and a report says which
+  checks it skipped and why. An evaluation is leased for 600 seconds. The
+  files it reads come with the job; its scope is unchanged, and `GET
+  /sync` still refuses it.
+- **A job result's 400 for carrying neither or both members** now reads
+  `a result carries exactly one of merge, evaluate and error`.
+  `/health`'s `merge.queue` counts merge jobs only, and the drain that
+  merges a revoked worker's queue leaves evaluations waiting for the next
+  worker.
+- **One evaluation at a time.** `POST /v1/evaluations` answers 409 while
+  another is queued or running (one whose lease ran out no longer counts),
+  so reports never crowd merges out of the job queue they share. The admin page's passkey session is shown a fixed
+  message in place of a report's error, which is the worker's own text,
+  and the server's log leaves that text out.
+- **A secret is masked wherever a report quotes it**, not only in the
+  `secret` finding's own excerpt: a duplicate, a stale note, a note in the
+  wrong scope, a dead link's line or `claude`'s account of a
+  contradiction that quotes a token or a private key's line shows it
+  masked, a key block behind `> ` or a list marker and a key on one
+  line with `\n` escapes (a service account's JSON) included, and the
+  notes the contradiction check hands `claude` are masked first. A mask
+  shows a public prefix such as `ghp_…` only for a kind of token that has
+  one. A suggested edit that would write a mask into a note is left out,
+  and the report says so. Prose that mentions a key's header is not taken
+  for a key, and masking takes time in proportion to the notes, however
+  many secrets they hold. A report's `details` are kept under 2 MiB (an excerpt cut at
+  4 KiB, what was cut said), and a result the server will not take is
+  reported as the job's error rather than stopping the worker.
+- **`recall eval apply` never writes over an edit made meanwhile.** The
+  file is read again after you answer, and the edit made only if it is
+  unchanged since it was shown; `--yes` goes through the same check.
+- **A request body the server reads as empty** is, on `POST
+  /v1/evaluations` and `POST /v1/authkeys/{id}/revoke`, one of only
+  spaces, tabs, carriage returns and line feeds, exactly what the offline
+  verifiers strip. A form feed or a no-break space alone was taken as
+  empty, and then made the audit log fail verification for good; it is
+  now refused with 400.
+- **The audit log** gains an `evaluate` leaf for every report asked for,
+  keeping an admin device's signed body, and `recall audit verify` and
+  `scripts/audit-verify.py` check it and the job it queues.
+
 ## 0.4.4 — 2026-09-24
 
 0.4.3 was tagged but never published: its release build stopped at the new

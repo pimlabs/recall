@@ -22,6 +22,8 @@ newer client keeps reading older servers.
 | `audit_leaf_push`, `audit_leaf_approve`, `audit_leaf_enroll` | Three of those leaves, byte for byte as the entries page holds them: the signed push, the approve that carries its key, and the enrolment the authkey made. `tests/golden.rs` checks them as the offline verifier would: the push's signature against the approve's key, its digest and keyid, and the page's leaves against the checkpoint's root |
 | `push_response_queued`, `job_claim_response`, `job_claim_response_empty`, `job_result_response`, `job_list_response` | The same script: one conflict queued for a worker enrolled on a second scratch server, claimed and merged, each response a real one |
 | `job_claim_request`, `job_result_request`, `job_result_request_error`, `device_approve_request_worker` | Written from recall-wire's `jobs` and `devices` types |
+| `evaluation_created_response`, `job_claim_response_evaluate`, `evaluation_list_response`, `evaluation_response` | The same script, on the queue's server and worker: one evaluation asked for, claimed with the file the conflict wrote, and reported, each response a real one |
+| `evaluation_request`, `job_result_request_evaluate` | Written from recall-wire's `evaluations` and `jobs` types; the report is the one the script posts |
 
 `discovery` exists from the version that introduced `/.well-known/recall`
 onwards; older servers answer 404 and have no file. The device kinds exist
@@ -52,6 +54,12 @@ worker reports), `device_approve_request_worker`, the audit kinds, and
 development build and captured again from the v0.4.2 release archive once
 0.4.2 was out. Its worker, and the push in the audit kinds, sign with the
 same published test key the device kinds use, with `openssl`.
+
+`0.4.5/` holds what evaluation reports add or change: the evaluation
+kinds, the `evaluate` claim and result, and `discovery` (with
+`evaluation`). It was captured from a development build, so its values
+say `-dev`; capture it again from the v0.4.5 release archive once that is
+out.
 
 ## Rules
 

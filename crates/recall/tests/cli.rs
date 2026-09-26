@@ -975,7 +975,8 @@ fn promote_is_loud_about_missing_configuration() {
 /// Every command the CLI offers. A new one added without a line here is a
 /// command the help tests below will not notice is missing from the help.
 const COMMANDS: &[&str] = &[
-    "init", "backfill", "promote", "status", "doctor", "audit", "push", "pull", "version", "help",
+    "init", "backfill", "promote", "status", "doctor", "audit", "eval", "push", "pull", "version",
+    "help",
 ];
 
 #[test]
@@ -4251,4 +4252,120 @@ fn an_export_never_writes_through_a_link_in_its_way() {
     let written = std::fs::read_to_string(&out).unwrap();
     assert!(written.split_once(' ').is_some(), "{written}");
     assert!(!home.path().join("audit.jsonl.partial").exists());
+}
+
+// ---------------------------------------------------------------------------
+// eval
+// ---------------------------------------------------------------------------
+
+/// A finished report, as the worker leaves one, written straight into the
+/// server's database: the command is what is under test here, and the
+/// worker's side has tests of its own
+/// (`crates/recall-server/tests/evaluations.rs`). One finding, a secret on
+/// line 2 of `deploy.md`, whose suggested edit masks it.
+fn plant_report(server: &LiveServer, project_key: &str, content: &str) {
+    let edit = serde_json::json!({"project_key": project_key, "file_path": "deploy.md",
+                      "base_sha256": recall_wire::content_sha256(content),
+                      "lines": [2, 2], "replacement": "- key: [removed]\n"});
+    let findings = serde_json::json!([{"id": "f1", "kind": "secret", "severity": "high",
+                           "project_key": project_key, "file_path": "deploy.md",
+                           "lines": [2, 2], "related": []}]);
+    let details = serde_json::json!({"findings": {"f1": {"excerpt": "- key: abc1… (masked)\n",
+                                             "reasoning": "A key is kept in memory.",
+                                             "suggested_edit": edit}},
+                         "skipped": []});
+    let conn = rusqlite::Connection::open(&server.cfg.db_path).unwrap();
+    conn.execute(
+        "INSERT INTO evaluations (id, state, job_id, projects, contradictions, findings, details,
+                                  created_at, finished_at)
+         VALUES ('eval_cli', 'done', 'job_cli', '[]', 0, ?1, ?2,
+                 '2026-09-25T10:00:00.000Z', '2026-09-25T10:01:00.000Z')",
+        (findings.to_string(), details.to_string()),
+    )
+    .unwrap();
+}
+
+/// `apply` makes a finding's suggested edit to the local file and pushes
+/// it; it refuses once the file is no longer the version the report read,
+/// and a finding that is not there. `list` and `show` say what there is,
+/// and asking for a run with no worker enrolled is the server's refusal.
+#[test]
+fn eval_apply_makes_the_suggested_edit_and_pushes_it() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let home = recall_home_with(&[(&server.url, "right")], &server.url);
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [("RECALL_HOME", home_str.as_str())];
+    let content = "# Deploy\n- key: abc123\n- ship it\n";
+    let pushed = push_memory(&repo, &env, "deploy.md", content);
+    assert_eq!(pushed.code, 0, "{}", pushed.stderr);
+    let key = status_json(repo.path(), &env)["project_key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    plant_report(&server, &key, content);
+
+    let list = run(&["eval", "list"], repo.path(), &env, None);
+    assert_eq!(list.code, 0, "{}", list.stderr);
+    assert!(
+        list.stdout.contains("eval_cli") && list.stdout.contains("1 secret"),
+        "{}",
+        list.stdout
+    );
+    let show = run(&["eval", "show", "eval_cli"], repo.path(), &env, None);
+    assert_eq!(show.code, 0, "{}", show.stderr);
+    for want in [
+        "f1  secret (high)",
+        "deploy.md, line 2",
+        "abc1… (masked)",
+        "recall eval apply f1 --eval eval_cli",
+    ] {
+        assert!(show.stdout.contains(want), "{want:?} in {}", show.stdout);
+    }
+
+    let applied = run(&["eval", "apply", "f1", "--yes"], repo.path(), &env, None);
+    assert_eq!(applied.code, 0, "{}", applied.stderr);
+    let memory_dir = status_json(repo.path(), &env)["memory_dir"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let fixed = "# Deploy\n- key: [removed]\n- ship it\n";
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&memory_dir).join("deploy.md")).unwrap(),
+        fixed
+    );
+    let on_server = stored(&server, &repo, &env);
+    let file = on_server
+        .iter()
+        .find(|f| f.file_path == "deploy.md")
+        .unwrap();
+    assert_eq!(file.content.as_deref(), Some(fixed));
+
+    let again = run(&["eval", "apply", "f1", "--yes"], repo.path(), &env, None);
+    assert_eq!(again.code, 1, "{}", again.stdout);
+    assert!(
+        again.stderr.contains("has changed since"),
+        "{}",
+        again.stderr
+    );
+    let missing = run(
+        &["eval", "apply", "f9", "--eval", "eval_cli", "--yes"],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(missing.code, 1);
+    assert!(
+        missing.stderr.contains("has no finding f9"),
+        "{}",
+        missing.stderr
+    );
+
+    let asked = run(&["eval", "run"], repo.path(), &env, None);
+    assert_eq!(asked.code, 2, "{}", asked.stdout);
+    assert!(
+        asked.stderr.contains("no worker is enrolled"),
+        "{}",
+        asked.stderr
+    );
 }

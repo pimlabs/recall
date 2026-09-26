@@ -41,7 +41,7 @@ is far less likely than a bug in one. It checks:
    device without the admin scope, a device revoked twice, an enrolment
    by an authkey never created or already revoked; a job action signed by
    a device that is not a worker, or a worker signing anything else; a job
-   no push or result queued, claimed while a live worker holds it or once
+   no push, result or evaluation queued, claimed while a live worker holds it or once
    it is settled, settled by a worker that does not hold it, retried
    before it failed, or counted at the wrong attempt; an admin session
    acting with a passkey the log never added or already removed; a first
@@ -376,6 +376,7 @@ SUBJECT_KEYS = {
     "job_claim": ["job_id", "kind", "attempt", "lease_expires_at", "project_key", "file_path"],
     "job_result": ["job_id", "project_key", "file_path", "state", "stored_sha256", "follow_up"],
     "job_retry": ["job_id", "kind", "project_key", "file_path"],
+    "evaluate": ["evaluation_id", "job_id", "projects", "contradictions"],
     "passkey_add": ["credential_id", "name", "first"],
     "passkey_remove": ["credential_id", "name"],
     "sessions_end": ["ended"],
@@ -407,6 +408,8 @@ ACTORS = {
     "job_claim": {"device", "server"},
     "job_result": {"device", "server"},
     "job_retry": {"device", "operator"},
+    # The owner, by any admin credential, or the server on the schedule.
+    "evaluate": {"device", "operator", "session", "server"},
     # The first passkey takes RECALL_TOKEN (and the bootstrap code); every
     # other passkey action, a session.
     "passkey_add": {"operator", "session"},
@@ -419,7 +422,7 @@ ACTORS = {
     "admin_restore": {"host"},
 }
 # The actions whose request body the leaf keeps, and their routes.
-KEEPS_BODY = {"approve", "deny", "revoke", "authkey_create", "authkey_revoke"}
+KEEPS_BODY = {"approve", "deny", "revoke", "authkey_create", "authkey_revoke", "evaluate"}
 ADMIN_ACTIONS = KEEPS_BODY | {"job_retry"}
 # The actions a worker device signs, and the only ones it may.
 WORKER_ACTIONS = {"job_claim", "job_result"}
@@ -565,6 +568,15 @@ def check_shape(leaf, position):
                 raise Invalid("a result wrote the file but the job is not done, or has a follow-up")
         if subject["follow_up"] is not None:
             expect_str(subject["follow_up"], "subject.follow_up")
+    elif action == "evaluate":
+        expect_str(subject["evaluation_id"], "subject.evaluation_id")
+        expect_str(subject["job_id"], "subject.job_id")
+        projects = subject["projects"]
+        if not isinstance(projects, list) or not all(isinstance(p, str) for p in projects):
+            raise Invalid("subject.projects is not a list of project keys")
+        if len(set(projects)) != len(projects):
+            raise Invalid("subject.projects names a project twice")
+        expect_bool(subject["contradictions"], "subject.contradictions")
     elif action in ("passkey_add", "passkey_remove"):
         expect_str(subject["credential_id"], "subject.credential_id")
         expect_str(subject["name"], "subject.name")
@@ -699,6 +711,7 @@ def route_of(action, subject):
         "deny": ("POST", "/v1/devices/deny"),
         "authkey_create": ("POST", "/v1/authkeys"),
         "job_claim": ("POST", "/v1/jobs/claim"),
+        "evaluate": ("POST", "/v1/evaluations"),
     }[action]
 
 
@@ -706,7 +719,7 @@ def check_body(action, subject, body):
     """What the kept body asked for is what the subject says was done."""
     if action == "revoke":
         return  # its id is in the path
-    if action == "authkey_revoke" and body.strip(" \t\r\n") == "":
+    if action in ("authkey_revoke", "evaluate") and body.strip(" \t\r\n") == "":
         asked = {}
     else:
         try:
@@ -735,6 +748,15 @@ def check_body(action, subject, body):
     elif action == "authkey_revoke":
         if asked.get("revoke_devices", False) is not subject["revoke_devices"]:
             raise Invalid("the body asked for another revoke_devices")
+    elif action == "evaluate":
+        projects = asked.get("projects", [])
+        if isinstance(projects, list) and all(isinstance(p, str) for p in projects):
+            # The server keeps the first of any project named twice.
+            projects = list(dict.fromkeys(projects))
+        if projects != subject["projects"]:
+            raise Invalid("the body asked for other projects")
+        if asked.get("contradictions", False) is not subject["contradictions"]:
+            raise Invalid("the body asked for another contradictions")
 
 
 class State:
@@ -853,6 +875,9 @@ def apply(leaf, state):
             queue(state, subject["merge_job"], file)
     elif action in ("job_claim", "job_result", "job_retry"):
         apply_job(leaf, state)
+    elif action == "evaluate":
+        # An evaluation's job names no file: it reads many.
+        queue(state, subject["job_id"], ("", ""))
     elif action in PASSKEY_ACTIONS:
         apply_passkey(leaf, state)
     elif action in HOST_ACTIONS:
@@ -936,7 +961,9 @@ def apply_job(leaf, state):
     job = state.jobs.get(subject["job_id"])
     if job is None:
         raise Invalid(f"a {action} of {subject['job_id']}, which no push or result queued")
-    if (subject["project_key"], subject["file_path"]) != job["file"]:
+    # A claim of a job with no file (an evaluation's) names none: null, read
+    # as the empty key and path the job was queued with.
+    if (subject["project_key"] or "", subject["file_path"] or "") != job["file"]:
         raise Invalid(f"a {action} of {subject['job_id']} names another file than the one it was queued for")
     who = actor.get("id", "server")
     if action == "job_claim":

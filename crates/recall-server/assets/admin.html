@@ -219,6 +219,7 @@
     <nav class="tabs" role="tablist">
       <button type="button" role="tab" data-tab="devices" aria-selected="true">Devices</button>
       <button type="button" role="tab" data-tab="projects" aria-selected="false">Projects</button>
+      <button type="button" role="tab" data-tab="evaluations" aria-selected="false">Reports</button>
       <button type="button" role="tab" data-tab="passkeys" aria-selected="false" id="passkeys-tab">Passkeys</button>
     </nav>
 
@@ -292,6 +293,23 @@
           </table>
         </div>
         <p class="error" id="projects-error" hidden></p>
+      </section>
+    </div>
+
+    <div id="tab-evaluations" data-panel="evaluations" hidden>
+      <section class="card">
+        <h2>Ask for a report</h2>
+        <p class="muted">The worker looks over memory for secrets, duplicates, dead links in MEMORY.md, notes in the wrong scope and stale notes. Nothing in memory changes.</p>
+        <label class="check"><input type="checkbox" id="eval-contradictions"> Also look for contradictions: one claude call per project, which spends your Claude usage</label>
+        <div class="row"><button id="eval-run" type="button">Ask for a report</button></div>
+        <p class="error" id="eval-error" hidden></p>
+        <p class="ok" id="eval-ok" hidden></p>
+      </section>
+      <section class="card">
+        <h2>Reports</h2>
+        <p class="muted">This page shows what was found and where. The lines themselves, the reasons and the suggested edits are shown only by the recall command on your machine.</p>
+        <ul class="items" id="evaluations"></ul>
+        <p class="error" id="evaluations-error" hidden></p>
       </section>
     </div>
 
@@ -605,6 +623,7 @@
     });
     if (name === "devices") { loadDevices(); loadKeys(); }
     if (name === "projects") loadProjects();
+    if (name === "evaluations") loadEvaluations();
     if (name === "passkeys") loadPasskeys();
   }
 
@@ -800,6 +819,86 @@
     });
   }
 
+  // ---- Evaluation reports. Kinds, files and lines only: the server never
+  // gives this page a report's details, which quote notes.
+  function loadEvaluations() {
+    return api("GET", "/v1/evaluations").then(function (r) {
+      if (!r.ok) { say($("evaluations-error"), failure(r)); return; }
+      say($("evaluations-error"), "");
+      var list = $("evaluations");
+      clear(list);
+      var runs = r.data.evaluations || [];
+      if (!runs.length) {
+        list.appendChild(el("li", "muted", "No reports yet."));
+        return;
+      }
+      runs.forEach(function (e) {
+        var li = el("li");
+        var main = el("div", "item-main");
+        var name = el("div", "item-name mono", e.id);
+        name.appendChild(el("span", e.state === "failed" ? "badge gone" : "badge", e.state));
+        if (e.contradictions) name.appendChild(el("span", "badge", "contradictions"));
+        main.appendChild(name);
+        var counts = Object.keys(e.counts || {}).map(function (k) { return e.counts[k] + " " + k; });
+        var found = e.state === "done" ? (counts.length ? counts.join(", ") : "nothing found") : "";
+        main.appendChild(el("div", "item-meta", "Asked " + when(e.created_at) +
+          " · " + ((e.projects && e.projects.length) ? e.projects.join(", ") : "every project") +
+          (found ? " · " + found : "")));
+        if (e.error) main.appendChild(el("div", "item-meta", e.error));
+        var findings = el("div", "scroll");
+        main.appendChild(findings);
+        li.appendChild(main);
+        if (e.state === "done" && counts.length) {
+          var b = el("button", "secondary small", "Findings");
+          b.type = "button";
+          b.addEventListener("click", function () {
+            b.disabled = true;
+            showFindings(e.id, findings);
+          });
+          li.appendChild(b);
+        }
+        list.appendChild(li);
+      });
+    });
+  }
+
+  function showFindings(id, into) {
+    api("GET", "/v1/evaluations/" + encodeURIComponent(id)).then(function (r) {
+      if (!r.ok) { say($("evaluations-error"), failure(r)); return; }
+      clear(into);
+      var table = el("table");
+      var head = el("tr");
+      ["", "Kind", "Severity", "File", "Lines"].forEach(function (h) { head.appendChild(el("th", null, h)); });
+      var thead = el("thead");
+      thead.appendChild(head);
+      table.appendChild(thead);
+      var tbody = el("tbody");
+      (r.data.findings || []).forEach(function (f) {
+        var tr = el("tr");
+        var lines = f.lines[0] === f.lines[1] ? String(f.lines[0]) : f.lines[0] + "-" + f.lines[1];
+        [f.id, f.kind, f.severity, f.project_key + " " + f.file_path, lines]
+          .forEach(function (v) { tr.appendChild(el("td", null, v)); });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      into.appendChild(table);
+      into.appendChild(el("p", "muted", "For the lines, the reasons and the suggested edits, on your machine:"));
+      into.appendChild(el("p", "mono", "recall eval show " + id));
+    });
+  }
+
+  function askEvaluation() {
+    say($("eval-error"), "");
+    say($("eval-ok"), "");
+    $("eval-run").disabled = true;
+    api("POST", "/v1/evaluations", { contradictions: $("eval-contradictions").checked }).then(function (r) {
+      $("eval-run").disabled = false;
+      if (!r.ok) { say($("eval-error"), failure(r)); return; }
+      say($("eval-ok"), "Asked for " + r.data.id + ". The worker makes it in the background; reload the list in a minute.");
+      loadEvaluations();
+    });
+  }
+
   // ---- Passkeys.
   function loadPasskeys() {
     return api("GET", "/admin/passkeys").then(function (r) {
@@ -896,6 +995,7 @@
   $("key-copy").addEventListener("click", copyKey);
   $("key-done").addEventListener("click", forgetKey);
   $("passkey-add").addEventListener("click", addPasskey);
+  $("eval-run").addEventListener("click", askEvaluation);
   $("sign-out-others").addEventListener("click", signOutOthers);
   Array.prototype.forEach.call(document.querySelectorAll("nav.tabs button"), function (b) {
     b.addEventListener("click", function () { selectTab(b.getAttribute("data-tab")); });

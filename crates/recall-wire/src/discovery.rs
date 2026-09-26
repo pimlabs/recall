@@ -140,6 +140,10 @@ pub const CAPABILITY_DEVICES: &str = "devices";
 /// asks for it before enrolling, and works for no server without it.
 pub const CAPABILITY_MERGE_QUEUE: &str = "merge_queue";
 
+/// The capability a server lists when it makes evaluation reports: the
+/// routes in [`crate::evaluations`], and `evaluate` jobs for a worker.
+pub const CAPABILITY_EVALUATION: &str = "evaluation";
+
 /// The capability a server lists when it keeps an audit log (see
 /// [`crate::audit`]); its parameters are a [`crate::AuditCapability`],
 /// which says how large a page of entries may be.
