@@ -18,7 +18,7 @@ on:
 # A pull_request run is keyed by its PR number, so the runs on one PR share a
 # group and supersede one another. Anything else is keyed by `github.run_id`,
 # unique per run, so a push to `main` is alone in its group and always runs
-# to the end: `cut-release.yml` refuses to tag a commit whose CI run did not
+# to the end: `start-release.yml` refuses to tag a commit whose CI run did not
 # finish green in every job, and a cancelled run is not green.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('uncancellable-{0}', github.run_id) }}
@@ -58,8 +58,8 @@ jobs:
   # that needs to know "does this PR touch X" reads its output instead of
   # diffing again itself — a job-level `if` cannot read the diff on its own.
   # It answers two independent questions from the same diff: whether the
-  # server image needs building (`image`), and whether the Windows jobs need
-  # running (`windows`). Both used to be answered separately — one as a step
+  # server image needs building (`build-image`), and whether the Windows jobs
+  # need running (`test-windows`). Both used to be answered separately — one as a step
   # inside the old single `ci` job, one in its own `windows-changes` job —
   # but the fetch-and-diff underneath them is identical, so it happens once
   # here and each question is just its own regex over the same file list.
@@ -67,7 +67,8 @@ jobs:
   # On a push to `main` both outputs are true unconditionally: the two jobs
   # they gate run on every push regardless of what changed, so there is
   # nothing to compute there.
-  changes:
+  plan:
+    name: plan
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.diff.outputs.image }}
@@ -135,9 +136,10 @@ jobs:
   # Seven checks that are plain scripts against files already in the
   # checkout: no Rust toolchain, no compile, a few seconds combined. Its own
   # job so a broken script, doc link, formula, manifest or compose leak fails
-  # in seconds, in parallel with `rust` and `image`, rather than waiting on
+  # in seconds, in parallel with `test-linux` and `build-image`, rather than waiting on
   # several minutes of Rust and Docker work nobody needed to see first.
-  checks:
+  check-scripts:
+    name: check-scripts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -218,14 +220,15 @@ jobs:
   # cargo fmt/clippy/test/doc and everything else that needs the Rust
   # toolchain but is not the Docker image, which has its own job below
   # since it needs Docker rather than cargo and is gated on the diff.
-  rust:
+  test-linux:
+    name: test-linux
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
       # Toolchain (stable, rustfmt + clippy) and Swatinem/rust-cache, saved
       # only from main (see .github/actions/rust-setup for why). shared-key
-      # is set so this job's cache stays its own: `windows` below already
+      # is set so this job's cache stays its own: `test-windows` below already
       # keys by `matrix.os`, and without a key here this job's entries would
       # collide with whatever a same-named job elsewhere in the workflow
       # set saves.
@@ -321,16 +324,16 @@ jobs:
   # #62, #63, #64) changed only documentation, a Homebrew formula, shell
   # scripts and this workflow, and each paid the full 124s. So on a pull
   # request this job runs only when the diff touches something the image is
-  # built from — `changes` above answers that, since a job-level `if` cannot
+  # built from — `plan` above answers that, since a job-level `if` cannot
   # read the diff itself.
   #
   # On a push to main it runs unconditionally, whatever the diff says. That
   # asymmetry is the entire safety argument and is not an oversight: the
-  # list of paths `changes` checks is a guess about what the image depends
+  # list of paths `plan` checks is a guess about what the image depends
   # on, and a guess this cheap will eventually be wrong. `.dockerignore`
   # decides what even reaches the daemon; a future Dockerfile could COPY
   # something nobody thought to list there. When the filter turns out too
-  # narrow, the miss surfaces as a red build on main, which cut-release.yml
+  # narrow, the miss surfaces as a red build on main, which start-release.yml
   # refuses to tag, rather than as a broken image on the server. Skipping on
   # main too would trade that for finding out from production, which is the
   # failure this job exists to prevent.
@@ -341,15 +344,16 @@ jobs:
   #
   # No Rust toolchain or rust-cache here: the Dockerfile's `source` stage
   # compiles recall-server (and recall-worker) from scratch inside its own
-  # rust:1-alpine container, so this job needs nothing from `rust` above —
+  # rust:1-alpine container, so this job needs nothing from `test-linux` above —
   # rebuilding inside Docker is simplest and correct, since the alternative
-  # (uploading `rust`'s target/release binary as an artifact and teaching the
+  # (uploading `test-linux`'s target/release binary as an artifact and teaching the
   # Dockerfile to accept a prebuilt one) is more workflow and image surface
   # for a build Docker already knows how to do itself, without rust-cache's
   # warmth either way.
-  image:
-    needs: changes
-    if: needs.changes.outputs.image == 'true'
+  build-image:
+    name: build-image
+    needs: plan
+    if: needs.plan.outputs.image == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -510,22 +514,28 @@ jobs:
   # Both architectures the release builds. arm64 is here rather than first
   # met at release time because `ring`, under reqwest's TLS, compiles C and
   # assembly for its target: if that fails on windows-11-arm it fails the
-  # release's build matrix, and `publish` waits for every leg, so one
+  # release's build matrix, and `publish-github` waits for every leg, so one
   # architecture would hold back every channel.
   #
   # Skipped on a pull request that touches nothing these jobs test: a
   # Windows runner bills at twice Linux's rate, and the pair cost about as
   # much as the whole Linux job, on docs-only and script-only PRs too. A push
-  # to main always runs them, which is what `cut-release.yml` checks before
-  # it tags. `changes` answers the question on a cheap Linux runner first,
+  # to main always runs them, which is what `start-release.yml` checks before
+  # it tags. `plan` answers the question on a cheap Linux runner first,
   # since a job-level `if` cannot read the diff itself.
-  windows:
-    needs: changes
-    if: needs.changes.outputs.windows == 'true'
+  test-windows:
+    name: test-windows (${{ matrix.arch }})
+    needs: plan
+    if: needs.plan.outputs.windows == 'true'
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, windows-11-arm]
+        include:
+          - os: windows-latest
+            arch: x64
+          - os: windows-11-arm
+            arch: arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5

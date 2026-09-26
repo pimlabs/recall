@@ -2,7 +2,7 @@ name: Rust setup
 description: >-
   Installs the pinned stable Rust toolchain (with whatever components the
   caller's checks need) and restores/saves Swatinem/rust-cache. Shared by
-  ci.yml's `rust` and `windows` jobs so the toolchain-plus-cache steps are
+  ci.yml's `test-linux` and `test-windows` jobs so the toolchain-plus-cache steps are
   written once instead of twice. The caller checks out the repository itself
   first: a local action cannot be loaded before its own checkout.
 

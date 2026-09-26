@@ -1,0 +1,55 @@
+name: Audit
+
+# Checks every dependency actually locked in Cargo.lock against the RustSec
+# advisory database. Nothing here builds the workspace or runs its tests —
+# `cargo audit` reads the lockfile and the advisory database only, so this
+# stays cheap enough to run on a schedule as well as on every change to a
+# manifest.
+#
+# If this ever reports something, the usual fix is upgrading the affected
+# crate to the patched version the advisory names (`cargo update -p <crate>`),
+# as RUSTSEC-2026-0285 in rustls was on 2026-09-26. Only if no fixed version
+# exists and the advisory genuinely doesn't affect Recall, record that with a
+# dated reason in `.cargo/audit.toml`'s `[advisories.ignore]`; otherwise the
+# job stays red until a real fix lands.
+on:
+  schedule:
+    # Mondays, off the hour so this doesn't queue with everyone else's
+    # midnight/on-the-hour cron jobs.
+    - cron: "27 4 * * 1"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/audit.yml"
+
+# Only ever reads the checkout and the advisory database it downloads itself.
+permissions:
+  contents: read
+
+jobs:
+  audit-dependencies:
+    name: audit-dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Prebuilt binary from the project's own GitHub releases, not a
+      # from-source `cargo install` — a few seconds instead of a few
+      # minutes, so there is nothing here worth layering another cache on
+      # top of.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22.2
+
+      - name: cargo audit
+        run: cargo audit

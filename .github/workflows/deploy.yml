@@ -32,8 +32,10 @@ permissions:
   contents: read
 
 jobs:
-  deploy:
+  production:
+    name: production
     runs-on: ubuntu-latest
+    environment: production
     # One deploy at a time, and a deploy that has started always finishes.
     # On 2026-09-22 two deploys rebuilt the same stack at once and the loser
     # failed on a container-name conflict. A newer deploy that arrives while
