@@ -44,22 +44,41 @@ else
   NAME=recall
   SERVE=serve
 fi
-case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64) ASSET=${NAME}_linux_amd64 ;;
-  Linux-aarch64 | Linux-arm64) ASSET=${NAME}_linux_arm64 ;;
-  Darwin-x86_64) ASSET=${NAME}_darwin_amd64 ;;
-  Darwin-arm64) ASSET=${NAME}_darwin_arm64 ;;
-  *) echo "no release archive for $(uname -s)-$(uname -m)" >&2; exit 1 ;;
-esac
+# v0.4.5 is the last release whose archives are named <name>_<os>_<arch>
+# and hold one binary renamed the same way. From 0.4.6 the server's is
+# recall-server-<rust target>.tar.gz, holding a directory of that name with
+# recall-server in it, and only the Linux (musl) targets are built.
+LAST_OLD_STYLE_RELEASE=0.4.5
+if [ "$(printf '%s\n' "$VERSION" "$LAST_OLD_STYLE_RELEASE" | sort -V | tail -1)" = "$LAST_OLD_STYLE_RELEASE" ]; then
+  case "$(uname -s)-$(uname -m)" in
+    Linux-x86_64) ASSET=${NAME}_linux_amd64 ;;
+    Linux-aarch64 | Linux-arm64) ASSET=${NAME}_linux_arm64 ;;
+    Darwin-x86_64) ASSET=${NAME}_darwin_amd64 ;;
+    Darwin-arm64) ASSET=${NAME}_darwin_arm64 ;;
+    *) echo "no release archive for $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+  esac
+  INNER=$ASSET
+else
+  case "$(uname -s)-$(uname -m)" in
+    Linux-x86_64) ASSET=$NAME-x86_64-unknown-linux-musl ;;
+    Linux-aarch64 | Linux-arm64) ASSET=$NAME-aarch64-unknown-linux-musl ;;
+    *) ASSET="" ;;
+  esac
+  INNER=$ASSET/$NAME
+fi
 
 if [ -n "$LOCAL_BIN" ]; then
   BIN="$LOCAL_BIN"
   SERVE=""
 else
+  if [ -z "$ASSET" ]; then
+    echo "no $NAME $VERSION release archive for $(uname -s)-$(uname -m); pass a local binary instead" >&2
+    exit 1
+  fi
   curl -sSfL -o "$WORK/a.tar.gz" \
     "https://github.com/pimlabs/recall/releases/download/v$VERSION/$ASSET.tar.gz" || exit 1
   tar -xzf "$WORK/a.tar.gz" -C "$WORK"
-  BIN="$WORK/$ASSET"
+  BIN="$WORK/$INNER"
 fi
 "$BIN" version
 

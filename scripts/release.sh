@@ -296,20 +296,28 @@ if ! curl -sfI "$release_url/checksums.txt" >/dev/null 2>&1; then
   exit 1
 fi
 
-for asset in recall_darwin_amd64 recall_darwin_arm64 recall_linux_amd64 recall_linux_arm64 \
-             recall-server_linux_amd64 recall-server_linux_arm64 \
-             recall-worker_linux_amd64 recall-worker_linux_arm64; do
-  if curl -sfI "$release_url/$asset.tar.gz" >/dev/null 2>&1; then
-    ok "$asset.tar.gz"
+# v0.4.5 is the last release whose archives are named <name>_<os>_<arch>;
+# every release after it names them <name>-<rust target>. Checked against
+# the version being released, so resuming an old release still works.
+LAST_OLD_STYLE_RELEASE=0.4.5
+if [ "$(printf '%s\n' "$VERSION" "$LAST_OLD_STYLE_RELEASE" | sort -V | tail -1)" = "$LAST_OLD_STYLE_RELEASE" ]; then
+  archives=(recall_darwin_amd64.tar.gz recall_darwin_arm64.tar.gz
+            recall_linux_amd64.tar.gz recall_linux_arm64.tar.gz
+            recall_windows_amd64.zip recall_windows_arm64.zip
+            recall-server_linux_amd64.tar.gz recall-server_linux_arm64.tar.gz
+            recall-worker_linux_amd64.tar.gz recall-worker_linux_arm64.tar.gz)
+else
+  archives=(recall-x86_64-apple-darwin.tar.gz recall-aarch64-apple-darwin.tar.gz
+            recall-x86_64-unknown-linux-gnu.tar.gz recall-aarch64-unknown-linux-gnu.tar.gz
+            recall-x86_64-pc-windows-msvc.zip recall-aarch64-pc-windows-msvc.zip
+            recall-server-x86_64-unknown-linux-musl.tar.gz recall-server-aarch64-unknown-linux-musl.tar.gz
+            recall-worker-x86_64-unknown-linux-musl.tar.gz recall-worker-aarch64-unknown-linux-musl.tar.gz)
+fi
+for archive in "${archives[@]}"; do
+  if curl -sfI "$release_url/$archive" >/dev/null 2>&1; then
+    ok "$archive"
   else
-    die "$asset.tar.gz is missing from the release"
-  fi
-done
-for asset in recall_windows_amd64 recall_windows_arm64; do
-  if curl -sfI "$release_url/$asset.zip" >/dev/null 2>&1; then
-    ok "$asset.zip"
-  else
-    die "$asset.zip is missing from the release"
+    die "$archive is missing from the release"
   fi
 done
 

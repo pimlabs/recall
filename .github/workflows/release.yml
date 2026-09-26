@@ -70,26 +70,20 @@ jobs:
           # "Built for the right architecture" below checks the result.
           - target: x86_64-apple-darwin
             os: macos-15
-            asset: recall_darwin_amd64
           - target: aarch64-apple-darwin
             os: macos-15
-            asset: recall_darwin_arm64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            asset: recall_linux_amd64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-            asset: recall_linux_arm64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            asset: recall_windows_amd64
           # windows-11-arm is GA per actions/runner-images, not a preview
           # label — confirmed 2026-09-23. Client OS rather than Server, the
           # same way the macOS runners above are, and that is fine for a
           # native build+test job.
           - target: aarch64-pc-windows-msvc
             os: windows-11-arm
-            asset: recall_windows_arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -139,7 +133,7 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }} -p recall
 
       # A cross build that silently produced the host's architecture would
-      # ship an arm64 binary as recall_darwin_amd64. lipo reads the Mach-O
+      # ship an arm64 binary as recall-x86_64-apple-darwin. lipo reads the Mach-O
       # header, so this fails before anything is packaged.
       - name: Built for the right architecture
         if: runner.os == 'macOS'
@@ -156,39 +150,49 @@ jobs:
           echo "$TARGET: $got"
           [ "$got" = "$want" ] || { echo "::error::expected $want, the binary is $got"; exit 1; }
 
-      # Unix packaging: a tar.gz containing the binary renamed to the asset
-      # name, which install.sh and npm's installer both expect to find inside
-      # once extracted.
+      # From 0.4.6 every archive is named for its Rust target and holds one
+      # directory of the same name, with the binary under its own name plus
+      # LICENSE and README.md inside: recall-x86_64-apple-darwin.tar.gz holds
+      # recall-x86_64-apple-darwin/recall. install.sh, install.ps1,
+      # npm/install.js, deploy/fetch-release.sh, the Homebrew formula and
+      # cargo-binstall's default templates all expect exactly that.
+      # scripts/package-release.py is the one place both the name and the
+      # layout are made; this passes it only the binary and the target.
+      #
+      # CI's `test-installers` job runs this workflow's own `Package*` steps
+      # (their `run:` text, read from this file, with each matrix entry's
+      # values filled in) against fake binaries, and installs from what they
+      # write. So a step here that names or packs an archive differently
+      # from what the installers expect fails a pull request, not a release.
+      # Keep those steps `shell: bash`; that job runs them with bash. v0.4.5
+      # and older were packed differently and keep their archives; see
+      # docs/reference/releasing.md.
       - name: Package (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist
-          cp "target/${{ matrix.target }}/release/recall" "dist/${{ matrix.asset }}"
-          tar -czf "dist/${{ matrix.asset }}.tar.gz" -C dist "${{ matrix.asset }}"
-          rm "dist/${{ matrix.asset }}"
+          python3 scripts/package-release.py "target/${{ matrix.target }}/release/recall" \
+            "${{ matrix.target }}" dist
 
-      # Windows packaging: a zip containing the bare `recall.exe` — not
-      # renamed, unlike the Unix archives above — which install.ps1 and
-      # npm's installer both expect. A zip rather than a tar.gz because
-      # that is what Windows users actually have a double-click extractor
-      # for; install.ps1 and npm/install.js both extract it with `tar`,
-      # which has shipped as bsdtar (libarchive, zip-capable) on Windows
-      # since Windows 10, so this needs nothing beyond what Package (Unix)
-      # already assumes exists on the machine doing the extracting.
+      # A zip rather than a tar.gz because that is what Windows users
+      # actually have a double-click extractor for; install.ps1 and
+      # npm/install.js both extract it with `tar`, which has shipped as
+      # bsdtar (libarchive, zip-capable) on Windows since Windows 10. The
+      # same script as Package (Unix), so both write the same layout; the
+      # Windows runners call Python `python` (a `python3` there may be the
+      # Microsoft Store's placeholder).
       - name: Package (Windows)
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: bash
         run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/recall.exe" "dist/recall.exe"
-          Compress-Archive -Path "dist/recall.exe" -DestinationPath "dist/${{ matrix.asset }}.zip"
-          Remove-Item "dist/recall.exe"
+          set -euo pipefail
+          python scripts/package-release.py "target/${{ matrix.target }}/release/recall.exe" \
+            "${{ matrix.target }}" dist
 
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.asset }}
+          name: recall-${{ matrix.target }}
           path: |
             dist/*.tar.gz
             dist/*.zip
@@ -271,19 +275,21 @@ jobs:
             echo "::error::$bin was built without passkey sign-in (the passkeys feature)"
             exit 1
           fi
-          mkdir -p dist
+          # recall-server-x86_64-unknown-linux-musl.tar.gz holding
+          # recall-server-x86_64-unknown-linux-musl/recall-server, and the
+          # same for recall-worker: the layout the client archives above
+          # have, from the same script. deploy/fetch-release.sh reads it, and
+          # CI's `test-installers` runs this step as written (with stand-ins
+          # for the binaries, `file` and `readelf`) to prove it does.
           for name in recall-server recall-worker; do
             bin="target/${{ matrix.target }}/release/$name"
-            asset="${name}_linux_${{ matrix.arch }}"
             file "$bin"
             if readelf -lW "$bin" | grep -q 'INTERP' || readelf -dW "$bin" | grep -q '(NEEDED)'; then
               echo "::error::$bin is dynamically linked; the image needs a static one"
               exit 1
             fi
             "$bin" version
-            cp "$bin" "dist/$asset"
-            tar -czf "dist/$asset.tar.gz" -C dist "$asset"
-            rm "dist/$asset"
+            python3 scripts/package-release.py "$bin" "${{ matrix.target }}" dist
           done
 
       - uses: actions/upload-artifact@v7

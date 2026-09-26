@@ -18,20 +18,65 @@ const version = require("./package.json").version;
 const binDir = path.join(__dirname, "bin");
 const binPath = path.join(binDir, process.platform === "win32" ? "recall-bin.exe" : "recall-bin");
 
-// `target` names the release asset (`recall_<target>.<ext>`). `exeName` is
-// the file the archive holds *inside* it: the Unix tar.gz archives rename
-// the binary to `recall_<target>` (see release.yml's Package (Unix) step),
-// while the Windows zip keeps the bare `recall.exe` (Package (Windows)) —
-// two conventions from two packaging steps, so this table carries both
-// rather than assuming one.
+// RECALL_TEST_RELEASES_URL is for this repository's CI and nothing else: it
+// replaces https://github.com/pimlabs/recall/releases, so
+// scripts/installer-test.sh can serve a release from loopback. The checksums
+// come from the same place as the archive, so pointing it anywhere else
+// would verify nothing; anything but plain http to a loopback address and a
+// port is refused rather than used.
+const LOOPBACK = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\]):\d+(\/.*)?$/;
+function releasesUrl() {
+  const test = process.env.RECALL_TEST_RELEASES_URL;
+  if (!test) {
+    return `https://github.com/${REPO}/releases`;
+  }
+  if (!LOOPBACK.test(test)) {
+    fail(
+      `RECALL_TEST_RELEASES_URL is only for this repository's tests, and only ` +
+        `http://127.0.0.1:<port>, http://localhost:<port> or http://[::1]:<port>; ` +
+        `got ${test}. Unset it.`
+    );
+  }
+  return test.replace(/\/+$/, "");
+}
+
+// v0.4.5 is the last release whose archives are named recall_<os>_<arch>
+// and hold a bare binary (renamed like the archive in the tar.gz, plain
+// recall.exe in the zip). Every release after it names them
+// recall-<rust target>, holding a recall-<rust target>/ directory with the
+// binary in it. Each npm version fetches its own version's archive, so this
+// only matters for a package at 0.4.5 or older, and tags never move.
+const LAST_OLD_STYLE_RELEASE = "0.4.5";
+
+// A pre-release counts as the version it leads up to.
+function usesOldArchiveNames(v) {
+  const parts = (s) => s.split(/[-+]/)[0].split(".").map(Number);
+  const [a, b] = [parts(v), parts(LAST_OLD_STYLE_RELEASE)];
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] < b[i];
+  }
+  return true;
+}
+
+// `target` is the Rust target the release builds for this platform, which
+// names the archive; `old` is what v0.4.5 and older called it.
 const PLATFORMS = {
-  "darwin:x64": { target: "darwin_amd64", ext: "tar.gz", exeName: "recall_darwin_amd64" },
-  "darwin:arm64": { target: "darwin_arm64", ext: "tar.gz", exeName: "recall_darwin_arm64" },
-  "linux:x64": { target: "linux_amd64", ext: "tar.gz", exeName: "recall_linux_amd64" },
-  "linux:arm64": { target: "linux_arm64", ext: "tar.gz", exeName: "recall_linux_arm64" },
-  "win32:x64": { target: "windows_amd64", ext: "zip", exeName: "recall.exe" },
-  "win32:arm64": { target: "windows_arm64", ext: "zip", exeName: "recall.exe" },
+  "darwin:x64": { target: "x86_64-apple-darwin", old: "darwin_amd64", ext: "tar.gz" },
+  "darwin:arm64": { target: "aarch64-apple-darwin", old: "darwin_arm64", ext: "tar.gz" },
+  "linux:x64": { target: "x86_64-unknown-linux-gnu", old: "linux_amd64", ext: "tar.gz" },
+  "linux:arm64": { target: "aarch64-unknown-linux-gnu", old: "linux_arm64", ext: "tar.gz" },
+  "win32:x64": { target: "x86_64-pc-windows-msvc", old: "windows_amd64", ext: "zip" },
+  "win32:arm64": { target: "aarch64-pc-windows-msvc", old: "windows_arm64", ext: "zip" },
 };
+
+// The archive to download, and the binary's path inside it once extracted.
+function archiveFor({ target, old, ext }, v) {
+  const exe = ext === "zip" ? "recall.exe" : "recall";
+  if (usesOldArchiveNames(v)) {
+    return { asset: `recall_${old}.${ext}`, inner: ext === "zip" ? exe : `recall_${old}` };
+  }
+  return { asset: `recall-${target}.${ext}`, inner: path.join(`recall-${target}`, exe) };
+}
 
 function fail(message) {
   console.error(`recall: ${message}`);
@@ -46,23 +91,37 @@ async function download(url) {
   return Buffer.from(await res.arrayBuffer());
 }
 
-// Every archive holds exactly one file, tar.gz or zip. Rather than pull in a
-// library for either, shell out to the `tar` every supported platform
-// already has — including Windows, where the built-in tar.exe (bsdtar, via
-// libarchive) has shipped since Windows 10 and reads zip just as well as
-// gzip, auto-detecting the format from the file's own bytes rather than its
-// name.
-function extractSingleFile(archive, destDir, expectedName, ext) {
+// tar.gz or zip. Rather than pull in a library for either, shell out to the
+// `tar` every supported platform already has — including Windows, where the
+// built-in tar.exe (bsdtar, via libarchive) has shipped since Windows 10 and
+// reads zip just as well as gzip, auto-detecting the format from the file's
+// own bytes rather than its name. Unpacked into a directory of its own
+// beside bin/, so the rename out of it never crosses a filesystem, and
+// nothing but the binary is left behind.
+function extractBinary(archive, inner, ext) {
   const isZip = ext === "zip";
-  const archivePath = path.join(destDir, isZip ? "recall.zip" : "recall.tar");
-  fs.writeFileSync(archivePath, isZip ? archive : zlib.gunzipSync(archive));
-  execFileSync("tar", ["-xf", archivePath, "-C", destDir]);
-  fs.unlinkSync(archivePath);
-  const extracted = path.join(destDir, expectedName);
-  if (!fs.existsSync(extracted)) {
-    throw new Error(`archive did not contain ${expectedName}`);
+  const staging = fs.mkdtempSync(path.join(__dirname, ".recall-extract-"));
+  try {
+    const archivePath = path.join(staging, isZip ? "recall.zip" : "recall.tar");
+    fs.writeFileSync(archivePath, isZip ? archive : zlib.gunzipSync(archive));
+    execFileSync("tar", ["-xf", archivePath, "-C", staging]);
+    const extracted = path.join(staging, inner);
+    // lstat, not exists: the entry itself must be a regular file. A symlink
+    // in the archive would otherwise be renamed into bin/ and then
+    // chmod-ed, which follows it and changes whatever it points at.
+    let entry;
+    try {
+      entry = fs.lstatSync(extracted);
+    } catch {
+      throw new Error(`archive did not contain ${inner}`);
+    }
+    if (!entry.isFile()) {
+      throw new Error(`${inner} in the archive is not a regular file`);
+    }
+    fs.renameSync(extracted, binPath);
+  } finally {
+    fs.rmSync(staging, { recursive: true, force: true });
   }
-  return extracted;
 }
 
 // On macOS and Linux, npm's bin link is a symlink to bin/recall, which ships
@@ -96,10 +155,8 @@ async function main() {
         `See https://github.com/${REPO}`
     );
   }
-  const { target, ext, exeName } = platform;
-
-  const asset = `recall_${target}.${ext}`;
-  const base = `https://github.com/${REPO}/releases/download/v${version}`;
+  const { asset, inner } = archiveFor(platform, version);
+  const base = `${releasesUrl()}/download/v${version}`;
 
   try {
     const [archive, checksums] = await Promise.all([
@@ -110,21 +167,22 @@ async function main() {
     // Never make something usable that hasn't been checked against the
     // release's own manifest.
     const actual = crypto.createHash("sha256").update(archive).digest("hex");
-    const line = checksums
+    // The line naming exactly this archive: sha256sum writes `<hash>  <name>`,
+    // or `<hash> *<name>` in binary mode.
+    const expected = checksums
       .toString("utf8")
       .split("\n")
-      .find((l) => l.trim().endsWith(asset));
-    if (!line) {
+      .map((l) => l.trim().split(/\s+/))
+      .find(([, name]) => name === asset || name === `*${asset}`)?.[0];
+    if (!expected) {
       throw new Error(`${asset} is not listed in checksums.txt`);
     }
-    const expected = line.trim().split(/\s+/)[0];
     if (actual !== expected) {
       throw new Error(`checksum mismatch for ${asset}: got ${actual}, expected ${expected}`);
     }
 
     fs.mkdirSync(binDir, { recursive: true });
-    const extracted = extractSingleFile(archive, binDir, exeName, ext);
-    fs.renameSync(extracted, binPath);
+    extractBinary(archive, inner, platform.ext);
     // No mode bits on Windows; chmod there would be a no-op at best.
     let installed = binPath;
     if (process.platform !== "win32") {

@@ -124,12 +124,14 @@ jobs:
 
           # .github/actions/ too: the windows jobs set up Rust through the
           # local rust-setup action, so a change there is only proven on
-          # Windows by running them.
-          if printf '%s\n' "$changed" | grep -Eq '^(crates/|Cargo\.(toml|lock)$|install\.ps1$|\.github/workflows/ci\.yml$|\.github/actions/)'; then
+          # Windows by running them. And what the Windows installer test
+          # runs: install.ps1, its own script, the packer release.yml uses
+          # and the stand-in release server.
+          if printf '%s\n' "$changed" | grep -Eq '^(crates/|Cargo\.(toml|lock)$|install\.ps1$|npm/install\.js$|scripts/(installer-test\.ps1|package-release\.py|fake-release-server\.py)$|\.github/workflows/(ci|release)\.yml$|\.github/actions/)'; then
             echo "windows=true" >> "$GITHUB_OUTPUT"
           else
             echo "windows=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Nothing under crates/, .github/actions/, Cargo.toml, Cargo.lock, install.ps1 or this workflow changed, so the Windows jobs were skipped. They run unconditionally on every push to main."
+            echo "::notice::Nothing under crates/, .github/actions/, Cargo.toml, Cargo.lock, install.ps1, npm/install.js, the installer test's scripts, release.yml or this workflow changed, so the Windows jobs were skipped. They run unconditionally on every push to main."
           fi
 
   # Seven checks that are plain scripts against files already in the
@@ -188,6 +190,7 @@ jobs:
           bash -n scripts/push-tap.sh
           bash -n scripts/update-formula-check.sh
           bash -n scripts/capture-wire-fixtures.sh
+          bash -n scripts/installer-test.sh
           sh -n deploy/fetch-release.sh
 
       # The formula rewrite runs once per release, from CI or from a laptop,
@@ -214,6 +217,37 @@ jobs:
       # look identical from here.
       - name: Off-box backup never asks rclone to delete
         run: ./scripts/backup-offbox-check.sh
+
+  # A release's archive names are a contract between release.yml and every
+  # installer, and until this job a mistake in it showed only at the next
+  # real release (0.4.3 failed that way, on a different step). So each pull
+  # request builds a release here by running release.yml's own Package
+  # steps, as that file has them, for every matrix entry, against tiny fake
+  # binaries (scripts/run-package-steps.py), and checks that what they wrote
+  # is exactly the set of names scripts/package-release.py --name gives. A
+  # checksums.txt is made the way release.yml makes it, and one more release
+  # in the layout v0.4.5 and older have. It serves both on 127.0.0.1
+  # (scripts/fake-release-server.py, python3's http.server plus GitHub's
+  # /releases/latest redirect), then runs install.sh, npm/install.js and
+  # deploy/fetch-release.sh against them, for "latest" and pinned versions
+  # on both sides of the cutoff, and runs what each installed. A wrong
+  # checksum, a symlinked binary and a non-loopback RECALL_TEST_RELEASES_URL
+  # must install nothing. install.ps1, and npm/install.js's zip path, get
+  # the same on both Windows architectures, in the `windows` job below.
+  #
+  # Not gated on the diff: it needs no Rust toolchain and takes seconds,
+  # and what it protects is spread across install.sh, npm/, deploy/,
+  # scripts/ and two workflows, a list a path filter would get wrong.
+  test-installers:
+    name: test-installers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Installers against a local release, new names and old
+        run: |
+          pip install --quiet --disable-pip-version-check PyYAML
+          ./scripts/installer-test.sh
 
   # cargo fmt/clippy/test/doc and everything else that needs the Rust
   # toolchain but is not the Docker image, which has its own job below
@@ -435,7 +469,13 @@ jobs:
             --cache-from type=gha,scope=recall-docker-source $cache_to \
             -f deploy/Dockerfile --target worker --build-arg RECALL_SOURCE=source -t recall-worker-ci .
 
-          rel="$RUNNER_TEMP/releases/v0.0.0-ci"
+          # A version after v0.4.5, so deploy/fetch-release.sh asks for the
+          # archive names and layout every release since has: packed by
+          # scripts/package-release.py, as release.yml packs them.
+          # (The names v0.4.5 and older have are fetched in
+          # `test-installers`.)
+          ci_version=9.9.9-ci
+          rel="$RUNNER_TEMP/releases/v$ci_version"
           mkdir -p "$rel"
           # source-worker holds both binaries, as a release does. Its layers
           # are already in the two builds above (the worker one reaches
@@ -446,9 +486,10 @@ jobs:
             -f deploy/Dockerfile --target source-worker -t recall-server-bin .
           id=$(docker create recall-server-bin)
           for name in recall-server recall-worker; do
-            docker cp "$id:/out/$name" "$rel/${name}_linux_amd64"
-            tar -czf "$rel/${name}_linux_amd64.tar.gz" -C "$rel" "${name}_linux_amd64"
-            rm "$rel/${name}_linux_amd64"
+            mkdir -p "$RUNNER_TEMP/bin"
+            docker cp "$id:/out/$name" "$RUNNER_TEMP/bin/$name"
+            python3 scripts/package-release.py "$RUNNER_TEMP/bin/$name" \
+              x86_64-unknown-linux-musl "$rel"
           done
           docker rm "$id"
           (cd "$rel" && sha256sum *.tar.gz > checksums.txt)
@@ -456,12 +497,12 @@ jobs:
           sleep 1
 
           docker build -f deploy/Dockerfile --network host \
-            --build-arg RECALL_VERSION=0.0.0-ci \
+            --build-arg RECALL_VERSION="$ci_version" \
             --build-arg RECALL_RELEASES_URL=http://127.0.0.1:8765 \
             -t recall-server-rel .
           docker run --rm --entrypoint recall-server recall-server-rel version
           docker build -f deploy/Dockerfile --network host --target worker \
-            --build-arg RECALL_VERSION=0.0.0-ci \
+            --build-arg RECALL_VERSION="$ci_version" \
             --build-arg RECALL_RELEASES_URL=http://127.0.0.1:8765 \
             -t recall-worker-rel .
           docker run --rm --entrypoint recall-worker recall-worker-rel version
@@ -472,7 +513,7 @@ jobs:
           sed -i 's/^[0-9a-f]*/'"$(printf '0%.0s' $(seq 64))"'/' "$rel/checksums.txt"
           cat "$rel/checksums.txt"
           if docker build -f deploy/Dockerfile --network host --no-cache-filter release \
-               --build-arg RECALL_VERSION=0.0.0-ci \
+               --build-arg RECALL_VERSION="$ci_version" \
                --build-arg RECALL_RELEASES_URL=http://127.0.0.1:8765 \
                -t recall-server-bad . ; then
             echo "::error::the image built from an archive that does not match its checksum"
@@ -483,7 +524,7 @@ jobs:
           # nothing about it.
           if docker build -f deploy/Dockerfile --network host --target worker \
                --no-cache-filter release-worker \
-               --build-arg RECALL_VERSION=0.0.0-ci \
+               --build-arg RECALL_VERSION="$ci_version" \
                --build-arg RECALL_RELEASES_URL=http://127.0.0.1:8765 \
                -t recall-worker-bad . ; then
             echo "::error::the worker image built from an archive that does not match its checksum"
@@ -565,3 +606,17 @@ jobs:
             $errors | ForEach-Object { Write-Error $_ }
             exit 1
           }
+
+      # And run: against a release built here around the recall.exe
+      # `cargo test` just built, served from 127.0.0.1, in the archive
+      # layout of every release after v0.4.5 and in v0.4.5's own, for
+      # "latest" and pinned versions on both sides of that cutoff. Under
+      # Windows PowerShell 5.1 (`shell: powershell`), which is what the
+      # script is written for. Then npm/install.js against the same release,
+      # the one place its Windows zip path runs before a real release. The
+      # Windows half of `test-installers`; see scripts/installer-test.ps1.
+      - name: install.ps1 installs from a local release, new names and old
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts\installer-test.ps1 target\debug\recall.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
