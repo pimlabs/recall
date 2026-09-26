@@ -18,13 +18,23 @@
 # it replaces https://github.com/pimlabs/recall/releases, so
 # scripts/installer-test.sh can serve a release from loopback. The checksums
 # come from the same place as the archive, so pointing it anywhere else
-# verifies nothing. Leave it unset.
+# would verify nothing: anything but plain http to a loopback address and a
+# port is refused. Leave it unset.
 set -euo pipefail
 
 REPO="pimlabs/recall"
 RELEASES="${RECALL_TEST_RELEASES_URL:-https://github.com/$REPO/releases}"
 BIN_DIR="${RECALL_BIN_DIR:-$HOME/.local/bin}"
 VERSION="${RECALL_VERSION:-latest}"
+
+loopback='^http://(127\.0\.0\.1|localhost|\[::1\]):[0-9]+(/.*)?$'
+if [ -n "${RECALL_TEST_RELEASES_URL:-}" ] && ! [[ "$RECALL_TEST_RELEASES_URL" =~ $loopback ]]; then
+  echo "install: RECALL_TEST_RELEASES_URL is only for this repository's tests, and only" >&2
+  echo "  http://127.0.0.1:<port>, http://localhost:<port> or http://[::1]:<port>;" >&2
+  echo "  got $RECALL_TEST_RELEASES_URL. Unset it." >&2
+  exit 1
+fi
+RELEASES="${RELEASES%/}"
 
 # v0.4.5 is the last release whose archives are named recall_<os>_<arch>
 # and hold one binary renamed the same way. Every release after it names
@@ -138,8 +148,11 @@ fi
   || die "checksum mismatch for $asset: got $actual, checksums.txt says $expected. The download may be corrupt or tampered with; nothing was installed."
 
 tar -xzf "$tmp/$asset" -C "$tmp"
-[ -f "$tmp/$inner" ] \
-  || die "$asset did not contain $inner; please report it at https://github.com/$REPO/issues"
+# A regular file, not a symlink to one: `install` would copy whatever a link
+# points at.
+if [ ! -f "$tmp/$inner" ] || [ -L "$tmp/$inner" ]; then
+  die "$asset did not contain $inner as a regular file; please report it at https://github.com/$REPO/issues"
+fi
 mkdir -p "$BIN_DIR"
 install -m 0755 "$tmp/$inner" "$BIN_DIR/recall"
 

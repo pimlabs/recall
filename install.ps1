@@ -34,14 +34,26 @@
     else: it replaces https://github.com/pimlabs/recall/releases, so
     scripts/installer-test.ps1 can serve a release from loopback. The
     checksums come from the same place as the archive, so pointing it
-    anywhere else verifies nothing. Leave it unset.
+    anywhere else would verify nothing; anything but plain http to a
+    loopback address and a port is refused. Leave it unset.
 #>
 
 $ErrorActionPreference = "Stop"
 
 $Repo = "pimlabs/recall"
 $Releases = $env:RECALL_TEST_RELEASES_URL
-if (-not $Releases) { $Releases = "https://github.com/$Repo/releases" }
+if ($Releases) {
+    # Anything but plain http to a loopback address and a port is refused:
+    # the checksums come from the same place as the archive, so any other
+    # value would verify nothing. `throw`, as Stop-WithError below does,
+    # since that is not defined yet.
+    if ($Releases -notmatch '^http://(127\.0\.0\.1|localhost|\[::1\]):\d+(/.*)?$') {
+        throw "install.ps1: RECALL_TEST_RELEASES_URL is only for this repository's tests, and only http://127.0.0.1:<port>, http://localhost:<port> or http://[::1]:<port>; got $Releases. Unset it."
+    }
+    $Releases = $Releases.TrimEnd('/')
+} else {
+    $Releases = "https://github.com/$Repo/releases"
+}
 
 # v0.4.5 is the last release whose Windows archives are named
 # recall_windows_<arch>.zip and hold a bare recall.exe. Every release after

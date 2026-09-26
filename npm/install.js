@@ -18,11 +18,27 @@ const version = require("./package.json").version;
 const binDir = path.join(__dirname, "bin");
 const binPath = path.join(binDir, process.platform === "win32" ? "recall-bin.exe" : "recall-bin");
 
-// For this repository's CI and nothing else: replaces
-// https://github.com/pimlabs/recall/releases, so scripts/installer-test.sh
-// can serve a release from loopback. The checksums come from the same
-// place as the archive, so pointing it anywhere else verifies nothing.
-const RELEASES = process.env.RECALL_TEST_RELEASES_URL || `https://github.com/${REPO}/releases`;
+// RECALL_TEST_RELEASES_URL is for this repository's CI and nothing else: it
+// replaces https://github.com/pimlabs/recall/releases, so
+// scripts/installer-test.sh can serve a release from loopback. The checksums
+// come from the same place as the archive, so pointing it anywhere else
+// would verify nothing; anything but plain http to a loopback address and a
+// port is refused rather than used.
+const LOOPBACK = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\]):\d+(\/.*)?$/;
+function releasesUrl() {
+  const test = process.env.RECALL_TEST_RELEASES_URL;
+  if (!test) {
+    return `https://github.com/${REPO}/releases`;
+  }
+  if (!LOOPBACK.test(test)) {
+    fail(
+      `RECALL_TEST_RELEASES_URL is only for this repository's tests, and only ` +
+        `http://127.0.0.1:<port>, http://localhost:<port> or http://[::1]:<port>; ` +
+        `got ${test}. Unset it.`
+    );
+  }
+  return test.replace(/\/+$/, "");
+}
 
 // v0.4.5 is the last release whose archives are named recall_<os>_<arch>
 // and hold a bare binary (renamed like the archive in the tar.gz, plain
@@ -90,8 +106,17 @@ function extractBinary(archive, inner, ext) {
     fs.writeFileSync(archivePath, isZip ? archive : zlib.gunzipSync(archive));
     execFileSync("tar", ["-xf", archivePath, "-C", staging]);
     const extracted = path.join(staging, inner);
-    if (!fs.existsSync(extracted)) {
+    // lstat, not exists: the entry itself must be a regular file. A symlink
+    // in the archive would otherwise be renamed into bin/ and then
+    // chmod-ed, which follows it and changes whatever it points at.
+    let entry;
+    try {
+      entry = fs.lstatSync(extracted);
+    } catch {
       throw new Error(`archive did not contain ${inner}`);
+    }
+    if (!entry.isFile()) {
+      throw new Error(`${inner} in the archive is not a regular file`);
     }
     fs.renameSync(extracted, binPath);
   } finally {
@@ -131,7 +156,7 @@ async function main() {
     );
   }
   const { asset, inner } = archiveFor(platform, version);
-  const base = `${RELEASES}/download/v${version}`;
+  const base = `${releasesUrl()}/download/v${version}`;
 
   try {
     const [archive, checksums] = await Promise.all([

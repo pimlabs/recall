@@ -83,7 +83,11 @@ fi
 (cd "$work" && echo "$line" | sha256sum -c -)
 
 tar -xzf "$work/$asset.tar.gz" -C "$work"
-[ -f "$work/$inner" ] || die "$asset.tar.gz did not contain $inner"
+# A regular file, not a symlink: `chmod` below would follow one and change
+# whatever it points at.
+if [ ! -f "$work/$inner" ] || [ -h "$work/$inner" ]; then
+  die "$asset.tar.gz did not contain $inner as a regular file"
+fi
 mkdir -p "$(dirname "$dest")"
 mv "$work/$inner" "$dest"
 chmod 755 "$dest"
