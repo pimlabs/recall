@@ -634,18 +634,17 @@ fn tokens_in(line: &str) -> Vec<(usize, usize, &'static str)> {
             .rfind("-----BEGIN ")
             .map_or(from, |i| from + i);
         from = header_end;
+        let key_text = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'\\');
+        let body_end = run(header_end, key_text);
         let end = match last_end.filter(|e| *e >= header_end) {
-            Some(_) => {
-                let e = header_end + line[header_end..].find("-----END ").unwrap_or(0);
-                line[e + 9..]
-                    .find("-----")
-                    .map_or(bytes.len(), |i| e + 9 + i + 5)
-            }
-            None => run(header_end, |b| {
-                b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'\\')
-            }),
+            // The body runs, key text and nothing else, up to the `-----END`:
+            // prose that names both markers on one line is not a key.
+            Some(_) if line[body_end..].starts_with("-----END ") => line[body_end + 9..]
+                .find("-----")
+                .map_or(bytes.len(), |i| body_end + 9 + i + 5),
+            _ => body_end,
         };
-        if end >= header_end + 16 {
+        if body_end >= header_end + 16 {
             out.push((at, end, KEY_WHAT));
             from = end;
         }
@@ -764,31 +763,59 @@ fn key_body(line: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
 }
 
+/// The shortest string [`Redactor`] masks wherever it appears: a token
+/// found as a secret in one place is masked in any other text only if it
+/// is at least this long, since a shorter one (a one-letter password in a
+/// URL) would be masked in every word that holds it. It is still masked
+/// wherever [`tokens_in`] finds it in its own right.
+const MIN_KNOWN_BYTES: usize = 8;
+
+/// The longest prefix a known secret is looked up by.
+const ANCHOR_BYTES: usize = 16;
+
 /// What masks every secret in memory wherever a report quotes it, not
 /// only in the `secret` finding that names it: a duplicate, a stale note,
 /// a note in the wrong scope or a contradiction may quote the same line.
 ///
 /// Built from every file an evaluation reads: each token [`tokens_in`]
 /// finds, and each line of a private key's body. Every string that goes
-/// into `details` passes through [`Redactor::text`], which replaces each of
-/// them, and any token it finds itself, with a mask.
+/// into `details`, and every note handed to `claude`, passes through
+/// [`Redactor::text`], which replaces each of them, and any token it finds
+/// itself, with a mask.
+///
+/// Near-linear in the text, however many secrets it knows: each is looked
+/// up by its first [`ANCHOR_BYTES`] bytes (all of it, when shorter), so
+/// each position of the text costs a few hash lookups rather than one
+/// comparison per secret. The longest secret starting at a position wins.
 #[derive(Debug, Default)]
 pub(crate) struct Redactor {
-    tokens: Vec<(String, &'static str)>,
-    key_lines: HashSet<String>,
+    /// Every known secret with what it becomes, by the prefix it is looked
+    /// up by; within a prefix, longest first.
+    known: HashMap<Vec<u8>, Vec<(String, String)>>,
+    /// The prefix lengths in `known`, longest first.
+    anchors: Vec<usize>,
+    /// Bytes of notes masked for the contradiction prompt, so a test can
+    /// hold that to once per file per run.
+    pub(crate) prompt_bytes: std::sync::atomic::AtomicUsize,
 }
+
+/// What a line of a private key's body becomes.
+const KEY_LINE_MASK: &str = "[a line of a private key, masked]";
 
 impl Redactor {
     pub(crate) fn new(files: &[EvaluateFile]) -> Self {
-        let mut tokens = HashSet::new();
-        let mut key_lines = HashSet::new();
+        let mut found: HashMap<String, String> = HashMap::new();
         for file in files {
+            let lines: Vec<&str> = file.content.lines().collect();
             let mut in_key = false;
-            for line in file.content.lines() {
+            for (n, line) in lines.iter().enumerate() {
                 for (start, end, what) in tokens_in(line) {
-                    tokens.insert((line[start..end].to_string(), what));
+                    let token = &line[start..end];
+                    found
+                        .entry(token.to_string())
+                        .or_insert_with(|| mask(token, what));
                 }
-                if opens_key(line) {
+                if opens_key_block(&lines, n) {
                     in_key = true;
                     continue;
                 }
@@ -796,47 +823,101 @@ impl Redactor {
                     if closes_key(line) || !key_body(line) {
                         in_key = false;
                     } else {
-                        key_lines.insert(unquoted(line).trim().to_string());
+                        found.insert(unquoted(line).trim().to_string(), KEY_LINE_MASK.into());
                     }
                 }
             }
         }
-        let mut tokens: Vec<(String, &'static str)> = tokens.into_iter().collect();
-        // Longest first, so a token inside another is never masked first
-        // and the longer left half shown.
-        tokens.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.cmp(b)));
-        Self { tokens, key_lines }
+        let mut known: HashMap<Vec<u8>, Vec<(String, String)>> = HashMap::new();
+        for (secret, masked) in found {
+            if secret.len() < MIN_KNOWN_BYTES {
+                continue;
+            }
+            let anchor = secret.as_bytes()[..secret.len().min(ANCHOR_BYTES)].to_vec();
+            known.entry(anchor).or_default().push((secret, masked));
+        }
+        for bucket in known.values_mut() {
+            bucket.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.cmp(b)));
+        }
+        let mut anchors: Vec<usize> = known.keys().map(Vec::len).collect();
+        anchors.sort_unstable_by(|a, b| b.cmp(a));
+        anchors.dedup();
+        Self {
+            known,
+            anchors,
+            prompt_bytes: Default::default(),
+        }
+    }
+
+    /// The longest known secret at the start of `bytes`: its length and
+    /// what it becomes.
+    fn known_at(&self, bytes: &[u8]) -> Option<(usize, &str)> {
+        let mut best: Option<(usize, &str)> = None;
+        for &anchor in &self.anchors {
+            let Some(prefix) = bytes.get(..anchor) else {
+                continue;
+            };
+            let Some(bucket) = self.known.get(prefix) else {
+                continue;
+            };
+            if let Some((secret, masked)) = bucket
+                .iter()
+                .find(|(secret, _)| bytes.starts_with(secret.as_bytes()))
+            {
+                if best.is_none_or(|(len, _)| secret.len() > len) {
+                    best = Some((secret.len(), masked));
+                }
+            }
+        }
+        best
     }
 
     /// `text` with every secret this knows of, and every token it finds,
     /// masked, and every line of a private key's body replaced.
     pub(crate) fn text(&self, text: &str) -> String {
-        let mut out = String::with_capacity(text.len());
-        for line in text.split_inclusive('\n') {
+        // Every known secret, in one pass.
+        let bytes = text.as_bytes();
+        let mut known = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            // A secret is text, so starts where a character does.
+            if text.is_char_boundary(i) {
+                if let Some((len, masked)) = self.known_at(&bytes[i..]) {
+                    known.extend_from_slice(masked.as_bytes());
+                    i += len;
+                    continue;
+                }
+            }
+            known.push(bytes[i]);
+            i += 1;
+        }
+        let known = String::from_utf8(known).expect("whole secrets replaced by text");
+        // Then any token of its own on each line.
+        let mut out = String::with_capacity(known.len());
+        for line in known.split_inclusive('\n') {
             let body = line.trim_end_matches(['\n', '\r']);
             let ending = &line[body.len()..];
-            if self.key_lines.contains(unquoted(body).trim()) {
-                out.push_str("[a line of a private key, masked]");
-                out.push_str(ending);
-                continue;
-            }
-            let mut body = body.to_string();
-            for key_line in &self.key_lines {
-                if body.contains(key_line.as_str()) {
-                    body = body.replace(key_line.as_str(), "[a line of a private key, masked]");
-                }
-            }
-            for (token, what) in &self.tokens {
-                if body.contains(token.as_str()) {
-                    body = body.replace(token.as_str(), &mask(token, what));
-                }
-            }
-            let found = tokens_in(&body);
-            out.push_str(&replace_tokens(&body, &found, mask));
+            let found = tokens_in(body);
+            out.push_str(&replace_tokens(body, &found, mask));
             out.push_str(ending);
         }
         out
     }
+
+    /// A note's content as the contradiction prompt holds it: masked, and
+    /// counted.
+    fn prompt_text(&self, content: &str) -> String {
+        self.prompt_bytes
+            .fetch_add(content.len(), std::sync::atomic::Ordering::Relaxed);
+        self.text(content)
+    }
+}
+
+/// Whether line `n` of `lines` opens a private key block: a key header
+/// with nothing after it, and the next line a line of a key's body. Prose
+/// that ends with a header, or a list of headers, is not a key.
+fn opens_key_block(lines: &[&str], n: usize) -> bool {
+    opens_key(lines[n]) && lines.get(n + 1).is_some_and(|next| key_body(next))
 }
 
 fn secrets(file: &EvaluateFile) -> Vec<Found> {
@@ -858,7 +939,7 @@ fn secrets(file: &EvaluateFile) -> Vec<Found> {
         let line = lines[n];
         let number = n as u32 + 1;
         let tokens = tokens_in(line);
-        if tokens.is_empty() && opens_key(line) {
+        if tokens.is_empty() && opens_key_block(&lines, n) {
             let end = (n..lines.len())
                 .find(|&i| closes_key(lines[i]))
                 .unwrap_or(n);
@@ -1367,12 +1448,30 @@ pub const CONTRADICTION_PROMPT: &str = concat!(
 struct Numbered<'a> {
     label: String,
     file: &'a EvaluateFile,
+    /// What the prompt shows of the file: masked, but for the size check
+    /// made before anything is masked.
+    content: &'a str,
 }
 
-/// The prompt: each file numbered, and every line of it numbered, with
-/// every secret masked first. `claude` is handed no secret, so nothing it
-/// says back, however it words or splits one, can hold one.
-fn contradiction_prompt(numbered: &[Numbered<'_>], redactor: &Redactor) -> String {
+/// `files`, labelled F1, F2, … in order, each showing `contents`.
+fn numbered<'a>(files: &[&'a EvaluateFile], contents: Vec<&'a str>) -> Vec<Numbered<'a>> {
+    files
+        .iter()
+        .zip(contents)
+        .enumerate()
+        .map(|(i, (file, content))| Numbered {
+            label: format!("F{}", i + 1),
+            file,
+            content,
+        })
+        .collect()
+}
+
+/// The prompt: each file numbered, and every line of it numbered, from
+/// the content each [`Numbered`] holds: the notes with every secret masked,
+/// so `claude` is handed no secret, and nothing it says back, however it
+/// words or splits one, can hold one.
+fn contradiction_prompt(numbered: &[Numbered<'_>]) -> String {
     let mut out = String::new();
     for n in numbered {
         let scope = if n.file.project_key.starts_with(GLOBAL_PREFIX) {
@@ -1384,7 +1483,7 @@ fn contradiction_prompt(numbered: &[Numbered<'_>], redactor: &Redactor) -> Strin
             "=== {}: {} {}, {} ===\n",
             n.label, scope, n.file.project_key, n.file.file_path
         ));
-        for (i, line) in redactor.text(&n.file.content).lines().enumerate() {
+        for (i, line) in n.content.lines().enumerate() {
             out.push_str(&format!("{}| {line}\n", i + 1));
         }
         out.push('\n');
@@ -1449,6 +1548,15 @@ async fn contradictions(
         project_key: project.to_string(),
         reason,
     };
+    // Each file masked once a run, however many projects' prompts hold it:
+    // the global scope is in every one.
+    let mut masked: HashMap<(&str, &str), String> = HashMap::new();
+    let too_large = |bytes: usize| {
+        format!(
+            "{bytes} bytes of notes with the global scope, more than one call is handed \
+             ({MAX_PROMPT_BYTES})"
+        )
+    };
     for project in projects {
         if let Some(why) = &settings.cli_unavailable {
             skipped.push(skip(
@@ -1468,27 +1576,35 @@ async fn contradictions(
                 continue;
             }
         }
-        let numbered: Vec<Numbered<'_>> = input
+        let files: Vec<&EvaluateFile> = input
             .files
             .iter()
             .filter(|f| f.project_key == project)
             .chain(globals.iter().copied())
-            .enumerate()
-            .map(|(i, file)| Numbered {
-                label: format!("F{}", i + 1),
-                file,
-            })
             .collect();
-        let prompt = contradiction_prompt(&numbered, redactor);
+        // Too large as it stands is too large masked: say so before
+        // spending the time masking it.
+        let unmasked = contradiction_prompt(&numbered(
+            &files,
+            files.iter().map(|f| f.content.as_str()).collect(),
+        ));
+        if unmasked.len() > MAX_PROMPT_BYTES {
+            skipped.push(skip(project, too_large(unmasked.len())));
+            continue;
+        }
+        for file in &files {
+            masked
+                .entry((file.project_key.as_str(), file.file_path.as_str()))
+                .or_insert_with(|| redactor.prompt_text(&file.content));
+        }
+        let contents: Vec<&str> = files
+            .iter()
+            .map(|f| masked[&(f.project_key.as_str(), f.file_path.as_str())].as_str())
+            .collect();
+        let numbered = numbered(&files, contents);
+        let prompt = contradiction_prompt(&numbered);
         if prompt.len() > MAX_PROMPT_BYTES {
-            skipped.push(skip(
-                project,
-                format!(
-                    "{} bytes of notes with the global scope, more than one call is handed \
-                     ({MAX_PROMPT_BYTES})",
-                    prompt.len()
-                ),
-            ));
+            skipped.push(skip(project, too_large(prompt.len())));
             continue;
         }
         let answer = match claude.ask(CONTRADICTION_PROMPT, &prompt).await {

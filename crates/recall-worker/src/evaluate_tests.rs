@@ -462,6 +462,11 @@ fn the_secret_check_finds_every_planted_token_and_nothing_in_ordinary_notes() {
         "- postgres://app:${PGPASSWORD}@db:5432/app is the URL shape\n",
         "- hf_hub_download fetches the weights; npm_config_cache is the cache\n",
         "- secret_access_key: in the vault, never here\n",
+        // Prose about keys, and lists of their headers, are not keys.
+        "A PEM file opens with -----BEGIN PRIVATE KEY-----\nThen comes the base64 body.\n\
+         It closes with -----END PRIVATE KEY-----\n",
+        "- -----BEGIN RSA PRIVATE KEY-----\n- -----BEGIN EC PRIVATE KEY-----\n",
+        "Markers: -----BEGIN PRIVATE KEY----- and -----END PRIVATE KEY----- wrap a key.\n",
     ];
     for note in ordinary {
         let found = secrets(&file(P, "note.md", note));
@@ -1005,4 +1010,51 @@ fn a_mask_shows_only_a_public_prefix() {
         assert!(!masked.contains(&value[..4]), "{masked} shows {value}");
         assert!(masked.contains("masked"), "{masked}");
     }
+}
+
+/// Masking the notes for the contradiction prompts is linear in them,
+/// however many secrets they hold, and each file is masked once a run,
+/// though the global scope is in every project's prompt. A project too
+/// large for one call is skipped before it is masked at all.
+#[tokio::test]
+async fn masking_the_prompts_is_linear_and_once_per_file() {
+    let global: String = (0..4_000)
+        .map(|i| format!("- password: Gx{i:05}!kq\n"))
+        .collect();
+    let small = "- deploys go out on Fridays\n";
+    let big: String = (0..30_000)
+        .map(|i| format!("- password: Bq{i:05}#zz\n"))
+        .collect();
+    let mut files = vec![file(G, "creds.md", &global)];
+    for n in 0..40 {
+        files.push(file(&format!("acme/p{n:02}"), "a.md", small));
+    }
+    files.push(file("acme/big", "a.md", &big));
+    let claude = FakeClaude::new(r#"{"contradictions":[]}"#);
+
+    let started = Instant::now();
+    let redactor = Redactor::new(&files);
+    let (_, skipped) = contradictions(
+        &input(files.clone(), true),
+        &settings(),
+        &claude.merger(),
+        &redactor,
+    )
+    .await;
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(10), "took {took:?}");
+    assert_eq!(claude.calls(), 40);
+    assert!(
+        skipped
+            .iter()
+            .any(|s| s.project_key == "acme/big" && s.reason.contains("more than one call")),
+        "{skipped:?}"
+    );
+    assert_eq!(
+        redactor
+            .prompt_bytes
+            .load(std::sync::atomic::Ordering::Relaxed),
+        global.len() + 40 * small.len(),
+        "each file masked once, and the one too large not at all"
+    );
 }
