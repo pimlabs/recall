@@ -73,7 +73,11 @@ curl -fsSL https://recall.pimlabs.id/install | bash
 
 Installs to `~/.local/bin/recall`. Override with `RECALL_BIN_DIR`, or pin a
 version with `RECALL_VERSION=v0.1.0`. It will tell you if that directory
-isn't on your `PATH`.
+isn't on your `PATH`. Like the npm installer, it checks the download's
+SHA-256 against the release's `checksums.txt` before anything is unpacked.
+(`RECALL_TEST_RELEASES_URL`, which this script, `install.ps1` and the npm
+installer also read, exists only so this repository's CI can serve them a
+release from loopback; leave it unset.)
 
 That URL is a Cloudflare Worker that fetches `install.sh` from `main` on
 every request, so what runs is whatever this repository says right now —
@@ -939,9 +943,11 @@ typing that now says where it went:
 RECALL_TOKEN=... RECALL_DB_PATH=/data/recall.db recall-server
 ```
 
-Each release publishes it for Linux, amd64 and arm64, as
-`recall-server_linux_<arch>.tar.gz`; `cargo install recall-server` builds it
-anywhere else.
+Each release publishes it for Linux, x86_64 and aarch64, as
+`recall-server-<target>.tar.gz` (`recall-server-x86_64-unknown-linux-musl.tar.gz`,
+holding `recall-server-x86_64-unknown-linux-musl/recall-server`); 0.4.5 and
+older published it as `recall-server_linux_<arch>.tar.gz`, holding a single
+file of that name. `cargo install recall-server` builds it anywhere else.
 
 `RECALL_DB_PATH` has to be on a local filesystem, never NFS or SMB: the
 server keeps the database in SQLite's WAL mode, with `recall.db-wal` and
@@ -972,9 +978,34 @@ shows.
 
 Binaries are published by a GitHub Actions workflow when a `v*` tag is
 pushed: six client archives (macOS, Linux and Windows, x64 and arm64 —
-Windows as `.zip`, the rest as `.tar.gz`), two server archives (Linux, x64
-and arm64), and a `checksums.txt` that npm's installer and the server image
-both verify against. `v0.1.0` was the first, on 2026-09-14.
+Windows as `.zip`, the rest as `.tar.gz`), server and worker archives (Linux,
+x64 and arm64), and a `checksums.txt` that every installer and the server
+image verify against. `v0.1.0` was the first, on 2026-09-14.
+
+From 0.4.6 each archive is named for its binary and Rust target, with no
+version in the name, and holds one directory of the same name with the
+binary, `LICENSE` and `README.md` in it:
+
+```
+recall-x86_64-apple-darwin.tar.gz          recall-aarch64-apple-darwin.tar.gz
+recall-x86_64-unknown-linux-gnu.tar.gz     recall-aarch64-unknown-linux-gnu.tar.gz
+recall-x86_64-pc-windows-msvc.zip          recall-aarch64-pc-windows-msvc.zip
+recall-server-x86_64-unknown-linux-musl.tar.gz
+recall-server-aarch64-unknown-linux-musl.tar.gz
+recall-worker-x86_64-unknown-linux-musl.tar.gz
+recall-worker-aarch64-unknown-linux-musl.tar.gz
+checksums.txt
+```
+
+So the newest release's are always at
+`https://github.com/pimlabs/recall/releases/latest/download/<name>`, and
+`cargo binstall recall` finds them with its default settings. 0.4.5 and
+older keep the names they shipped with — `recall_<os>_<arch>.tar.gz` (or
+`.zip` on Windows), holding a single binary renamed the same way (a bare
+`recall.exe` in the zips) — and every installer here still installs them
+when asked for one of those versions. A script that downloads an archive by
+a hard-coded URL has to use the name for the version it asks for;
+[`releasing.md`](releasing.md) has the whole table.
 
 npm, `install.sh` and `install.ps1` download those archives, so all three are
 tied to a released version; npm's `postinstall` looks for a release named

@@ -14,6 +14,31 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
+## Unreleased
+
+- **Release archives are named for their Rust target from 0.4.6, and hold
+  a directory.** `recall_darwin_arm64.tar.gz` becomes
+  `recall-aarch64-apple-darwin.tar.gz`, `recall_windows_amd64.zip` becomes
+  `recall-x86_64-pc-windows-msvc.zip`, `recall-server_linux_amd64.tar.gz`
+  becomes `recall-server-x86_64-unknown-linux-musl.tar.gz`, and so on for
+  every archive (the full list is in `docs/reference/install.md`). Each now
+  holds one directory named like the archive, with the binary under its
+  own name (`recall`, `recall.exe`, `recall-server`, `recall-worker`),
+  `LICENSE` and `README.md` inside, rather than a bare binary renamed after
+  the archive. There is still no version in the names, so
+  `releases/latest/download/<name>` stays a stable URL, and `cargo binstall
+  recall` now finds the prebuilt binary without building. **0.4.5 and
+  older keep their archives exactly as they were**: `install.sh`,
+  `install.ps1`, npm, the Homebrew formula, the server image and a Deploy
+  rollback all pick the old or new name from the version they fetch. A
+  script of your own that downloads an archive by a hard-coded URL has to
+  change to the new name for 0.4.6 and later. This is a **patch** under
+  `docs/reference/releasing.md`'s Versioning rules: archive names are not
+  on its list of breaking changes, and every install channel keeps working.
+- **`install.sh` checks what it downloads.** The archive's SHA-256 is
+  compared with the release's `checksums.txt` before anything is unpacked,
+  as `install.ps1` and npm already did; a mismatch installs nothing.
+
 ## 0.4.5 — 2026-09-26
 
 - **Evaluation reports.** The worker can now look over what memory holds

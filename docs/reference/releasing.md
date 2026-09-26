@@ -233,18 +233,68 @@ Mac architectures — then writes
 
 | Asset | Runner |
 |---|---|
-| `recall_darwin_amd64.tar.gz` | `macos-15` (cross-built, checked with `lipo`) |
-| `recall_darwin_arm64.tar.gz` | `macos-15` |
-| `recall_linux_amd64.tar.gz` | `ubuntu-latest` |
-| `recall_linux_arm64.tar.gz` | `ubuntu-24.04-arm` |
-| `recall_windows_amd64.zip` | `windows-latest` |
-| `recall_windows_arm64.zip` | `windows-11-arm` |
+| `recall-x86_64-apple-darwin.tar.gz` | `macos-15` (cross-built, checked with `lipo`) |
+| `recall-aarch64-apple-darwin.tar.gz` | `macos-15` |
+| `recall-x86_64-unknown-linux-gnu.tar.gz` | `ubuntu-latest` |
+| `recall-aarch64-unknown-linux-gnu.tar.gz` | `ubuntu-24.04-arm` |
+| `recall-x86_64-pc-windows-msvc.zip` | `windows-latest` |
+| `recall-aarch64-pc-windows-msvc.zip` | `windows-11-arm` |
+| `recall-server-x86_64-unknown-linux-musl.tar.gz`, `recall-worker-x86_64-unknown-linux-musl.tar.gz` | `ubuntu-latest` |
+| `recall-server-aarch64-unknown-linux-musl.tar.gz`, `recall-worker-aarch64-unknown-linux-musl.tar.gz` | `ubuntu-24.04-arm` |
 
-Those names are a contract: `install.sh`/`install.ps1` and `npm/install.js`
-all construct them from `uname` / `PROCESSOR_ARCHITECTURE` / `process.platform`.
-Don't rename them without changing all three. The Windows pair is `.zip`, not
-`.tar.gz` — the same `checksums.txt` covers both shapes, and everything that
-verifies against it filters by exact filename, not extension.
+Each is named `<binary>-<Rust target>`, with no version in the name, so
+`releases/latest/download/<name>` stays a stable URL. Each holds one
+directory named like the archive without its extension, and in it the
+binary under its real name plus `LICENSE` and `README.md`, the way uv and
+ripgrep ship theirs:
+
+```
+recall-x86_64-apple-darwin/recall
+recall-x86_64-apple-darwin/LICENSE
+recall-x86_64-apple-darwin/README.md
+```
+
+`recall.exe` in the Windows zips, `recall-server` or `recall-worker` in the
+server's. `scripts/package-release.py` is the one place that layout is
+written, for every runner.
+
+**v0.4.5 and older are different, and stay that way** — tags never move, so
+their archives are never rebuilt. They are `recall_{darwin,linux}_{amd64,arm64}.tar.gz`
+holding a single file renamed the same way (`recall_darwin_amd64`, say),
+`recall_windows_{amd64,arm64}.zip` holding a bare `recall.exe`, and
+`recall-server_linux_{amd64,arm64}.tar.gz` / `recall-worker_linux_{amd64,arm64}.tar.gz`
+holding `recall-server_linux_amd64` and so on. Everything that downloads a
+release decides which scheme to use from the version it is about to
+download, with v0.4.5 as the last old-style release written down once per
+script: `install.sh` and `install.ps1` (which resolve "latest" to a tag
+first, since until 0.4.6 ships latest *is* 0.4.5), `npm/install.js`,
+`deploy/fetch-release.sh` (so a Deploy rollback to 0.4.5 still works),
+`scripts/update-formula.py`, `scripts/capture-wire-fixtures.sh`,
+`scripts/release.sh` and `packaging/winget/generate_manifest.py`.
+
+Those names are a contract, and CI holds everyone to it before a release
+does. The `test-installers` job builds a release on every pull request:
+the names from this workflow's own matrix, packed by
+`scripts/package-release.py`, with tiny fake binaries and a `checksums.txt`
+made the way `publish` makes it, plus one in v0.4.5's layout. It serves
+them on 127.0.0.1 and runs `install.sh`, `npm/install.js` and
+`deploy/fetch-release.sh` against them, for "latest" and pinned versions on
+both sides of the cutoff, and runs what each installed; the `windows` job
+does the same for `install.ps1` on both Windows architectures
+(`scripts/installer-test.sh`, `scripts/installer-test.ps1`). The installers
+reach that local release through `RECALL_TEST_RELEASES_URL`, which replaces
+`https://github.com/pimlabs/recall/releases` and exists for this test
+alone: the checksums come from the same place as the archive, so pointed
+anywhere else it verifies nothing. `deploy/fetch-release.sh` takes the URL
+as its fourth argument instead. The Windows pair is `.zip`, not `.tar.gz` —
+the same `checksums.txt` covers both shapes, and everything that verifies
+against it filters by exact filename, not extension.
+
+`cargo binstall recall` finds these archives with no configuration: its
+default templates include `{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }`
+(trying `.tar.gz` and `.zip` among others), and look for the binary in a
+`{ name }-{ target }/` directory. It finds nothing for 0.4.5 and older, and
+falls back to building from source, as it always has.
 
 ### When a build job never starts
 
@@ -350,6 +400,12 @@ that file, rewrites `Formula/recall.rb` in place, and pairs each hash with
 the archive named on the `url` line above it. Pairing matters: hashes written
 positionally would hand a platform another platform's digest, and Homebrew
 would report a corrupt download rather than a mistake in this repository.
+It also writes each `url` line's archive name, and the `bin.install` line,
+for the version it is given — the first release after v0.4.5 is the one that
+moves the committed formula to the new names and layout (Homebrew changes
+into an archive's only directory before `install` runs, so the new stanza is
+just `bin.install "recall"`). `scripts/update-formula-check.sh` checks both
+directions.
 
 Then it pushes the result to **`pimlabs/homebrew-tap`**, which is where
 `brew install pimlabs/tap/recall` looks. That push is the step a release
@@ -511,8 +567,11 @@ This is a few one-time steps, done once total, not once per release:
 
    `komac new` asks for the package version, then an installer URL at a
    time — give it both archive URLs from the release
-   (`https://github.com/pimlabs/recall/releases/download/v0.4.1/recall_windows_amd64.zip`
-   and the `arm64` one), and check what it infers against the generated
+   (`https://github.com/pimlabs/recall/releases/download/v0.4.6/recall-x86_64-pc-windows-msvc.zip`
+   and the `aarch64` one — `recall_windows_amd64.zip` and its `arm64` pair
+   for v0.4.5 and older, whose zips hold a bare `recall.exe` rather than a
+   directory, so `NestedInstallerFiles` differs too; the generated manifest
+   has whichever the version needs), and check what it infers against the generated
    manifest above before accepting: installer type `zip`, nested installer
    type `portable`, and a command alias of `recall`. Fill in the metadata
    fields (publisher, license, moniker, description — the generated
