@@ -6,10 +6,12 @@ name: Audit
 # stays cheap enough to run on a schedule as well as on every change to a
 # manifest.
 #
-# If this ever reports something: do not bump a dependency to silence it.
-# Either the advisory genuinely doesn't affect Recall — record that with a
-# dated reason in `.cargo/audit.toml`'s `[advisories.ignore]` — or it does,
-# and the job should stay red until a real fix lands.
+# If this ever reports something, the usual fix is upgrading the affected
+# crate to the patched version the advisory names (`cargo update -p <crate>`),
+# as RUSTSEC-2026-0285 in rustls was on 2026-09-26. Only if no fixed version
+# exists and the advisory genuinely doesn't affect Recall, record that with a
+# dated reason in `.cargo/audit.toml`'s `[advisories.ignore]`; otherwise the
+# job stays red until a real fix lands.
 on:
   schedule:
     # Mondays, off the hour so this doesn't queue with everyone else's
