@@ -57,9 +57,9 @@ same published test key the device kinds use, with `openssl`.
 
 `0.4.5/` holds what evaluation reports add or change: the evaluation
 kinds, the `evaluate` claim and result, and `discovery` (with
-`evaluation`). It was captured from a development build, so its values
-say `-dev`; capture it again from the v0.4.5 release archive once that is
-out.
+`evaluation`). It was first captured from a development build and
+captured again from the v0.4.5 release archive once 0.4.5 was out, so
+`discovery` also carries the `created` stamp a release build reports.
 
 ## Rules
 
