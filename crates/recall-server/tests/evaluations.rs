@@ -223,6 +223,11 @@ impl Harness {
         ok(self.call("GET", &evaluation_path(id), None).await)
     }
 
+    fn sql(&self, statement: &str) {
+        let conn = rusqlite::Connection::open(self.dir.path().join("recall.db")).unwrap();
+        conn.execute(statement, []).unwrap();
+    }
+
     /// Every row of memory, every column, in order.
     fn memory(&self) -> Vec<Vec<String>> {
         let conn = rusqlite::Connection::open(self.dir.path().join("recall.db")).unwrap();
@@ -571,6 +576,32 @@ async fn a_second_evaluation_waits_for_the_first() {
     assert_ne!(second.id, first.id);
     let listed: EvaluationList = ok(h.call("GET", EVALUATIONS_PATH, None).await);
     assert_eq!(listed.evaluations.len(), 2);
+}
+
+/// A run whose last lease ran out is failed as the next is asked for, not
+/// only once someone lists the runs: it does not keep refusing the next,
+/// by request or on the schedule.
+#[tokio::test]
+async fn a_run_whose_lease_ran_out_does_not_hold_up_the_next() {
+    let h = harness();
+    h.seed().await;
+    let w = h.worker().await;
+    let run_out = |h: &Harness| {
+        h.sql(
+            "UPDATE jobs SET attempt = 4, lease_expires_at = '2000-01-01T00:00:00.000Z' \
+             WHERE kind = 'evaluate' AND state = 'leased'",
+        )
+    };
+    let first = h.request(json!({})).await;
+    h.claim(&w).await;
+    run_out(&h);
+    let second = h.request(json!({})).await;
+    assert_eq!(h.evaluation(&first.id).await.state, "failed");
+    h.claim(&w).await;
+    run_out(&h);
+    let scheduled = h.server.run_scheduled_evaluation().unwrap();
+    assert!(scheduled.is_some(), "the schedule was held up");
+    assert_eq!(h.evaluation(&second.id).await.state, "failed");
 }
 
 /// Who may ask and read: an admin device and the operator; not a sync

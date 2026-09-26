@@ -131,6 +131,10 @@ fn request_evaluation(
     if state.store.enrolled_worker()?.is_none() {
         return Ok(Asked::NoWorker);
     }
+    // A run whose lease ran out is queued again, or failed, before anyone
+    // asks whether one is open: until then a failed run would still read
+    // as running, and refuse the next.
+    super::jobs::expire_leases(state)?;
     let id = new_id("eval_", 10)?;
     let job = new_id("job_", 10)?;
     let requested = state.store.request_evaluation_audited(
@@ -169,6 +173,7 @@ fn request_evaluation(
 /// is enrolled, and while another run is waiting or being made. Answers
 /// the run it queued.
 pub(super) fn run_scheduled(state: &AppState) -> anyhow::Result<Option<String>> {
+    super::jobs::expire_leases(state)?;
     if state.store.evaluation_open()? {
         return Ok(None);
     }

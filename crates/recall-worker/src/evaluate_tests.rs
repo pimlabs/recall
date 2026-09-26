@@ -98,6 +98,47 @@ impl FakeClaude {
         }
     }
 
+    /// A stand-in that answers with one contradiction whose explanation is
+    /// what it was handed on stdin, reversed and stripped to letters,
+    /// digits and a few marks: `claude` rewording what it read, in a way
+    /// no literal masking of its answer could catch.
+    fn echoing() -> Self {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let calls = dir.path().join("calls");
+        let path = dir.path().join("claude");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "#!/bin/sh").unwrap();
+        writeln!(
+            f,
+            r#"if [ "$1" = auth ]; then printf '%s' '{{"loggedIn":true}}'; exit 0; fi"#
+        )
+        .unwrap();
+        writeln!(f, "echo call >> '{}'", calls.display()).unwrap();
+        writeln!(f, "body=$(tr -cd 'A-Za-z0-9_ .:=/+-' | rev)").unwrap();
+        writeln!(
+            f,
+            r#"printf '{{"is_error":false,"result":"{{\"contradictions\":[{{\"file\":\"F1\",\"lines\":[1,1],\"explanation\":\"%s\"}}]}}"}}' "$body""#
+        )
+        .unwrap();
+        drop(f);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for _ in 0..200 {
+            match std::process::Command::new(&path).arg("auth").output() {
+                Err(e) if e.raw_os_error() == Some(26) => {
+                    std::thread::sleep(Duration::from_millis(5))
+                }
+                _ => break,
+            }
+        }
+        Self {
+            bin: path.to_str().unwrap().to_string(),
+            _dir: dir,
+            calls,
+        }
+    }
+
     fn merger(&self) -> Merger {
         Merger::new(self.bin.clone(), Duration::from_secs(20))
     }
@@ -194,6 +235,23 @@ fn planted() -> Vec<(&'static str, String)> {
     ]
 }
 
+/// A fake private key's body, as a service account's JSON holds it, on one
+/// line.
+const SA_KEY_BODY: &str = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7fakefakefake";
+
+/// A fake key block quoted into a note: each line behind `> `.
+fn quoted_key() -> (String, &'static str) {
+    let body = "MIIEowIBAAKCAQEAq9quotedfakekeyfakekey0123456789";
+    (
+        format!(
+            "> {}\n> {body}\n> {}\n",
+            ["-----BEGIN RSA ", "PRIVATE KEY-----"].concat(),
+            ["-----END RSA ", "PRIVATE KEY-----"].concat()
+        ),
+        body,
+    )
+}
+
 /// Secrets that sit inside other text on their line: the text the line
 /// holds, and the secret in it.
 fn planted_in_text() -> Vec<(&'static str, String, String)> {
@@ -206,6 +264,16 @@ fn planted_in_text() -> Vec<(&'static str, String, String)> {
         ),
         // The first `token` on the line is not the one assigned a secret.
         ("second token", format!("none yet, token = {hex}"), hex),
+        (
+            "service account",
+            format!(
+                r#"{{"type": "service_account", "private_key": "{}\n{}\n{}\n"}}"#,
+                ["-----BEGIN ", "PRIVATE KEY-----"].concat(),
+                SA_KEY_BODY,
+                ["-----END ", "PRIVATE KEY-----"].concat()
+            ),
+            SA_KEY_BODY.to_string(),
+        ),
         (
             "config",
             format!(
@@ -336,6 +404,8 @@ fn the_secret_check_finds_every_planted_token_and_nothing_in_ordinary_notes() {
         ["-----END RSA ", "PRIVATE KEY-----"].concat()
     );
     content.push_str(&key);
+    let (quoted, quoted_body) = quoted_key();
+    content.push_str(&quoted);
     let f = file(P, "creds.md", &content);
     let found = secrets(&f);
     let lines: Vec<u32> = found.iter().map(|f| f.lines[0]).collect();
@@ -349,18 +419,20 @@ fn the_secret_check_finds_every_planted_token_and_nothing_in_ordinary_notes() {
             .map(|f| (&f.lines, &f.detail.excerpt))
             .collect::<Vec<_>>()
     );
-    let pem = found.last().unwrap();
+    let blocks: Vec<[u32; 2]> = found[expected.len()..].iter().map(|f| f.lines).collect();
+    let first = expected.len() as u32 + 3;
     assert_eq!(
-        pem.lines,
-        [expected.len() as u32 + 3, expected.len() as u32 + 6]
+        blocks,
+        [[first, first + 3], [first + 4, first + 6]],
+        "the key block, and the quoted one"
     );
-    assert_eq!(found.len(), expected.len() + 1);
     for f in &found {
         let detail = serde_json::to_string(&f.detail).unwrap();
         for (_, token) in &planted {
             assert!(!detail.contains(token.as_str()), "{token} kept in {detail}");
         }
         assert!(!detail.contains("MIIEpAIBAAKCAQEA"), "{detail}");
+        assert!(!detail.contains(quoted_body), "{detail}");
         let edit = f.detail.suggested_edit.as_ref().unwrap();
         let fixed = edit.apply_to(&content).unwrap();
         let line = fixed.lines().nth(f.lines[0] as usize - 1).unwrap_or("");
@@ -588,8 +660,13 @@ async fn a_contradiction_is_read_from_claudes_answer_and_checked() {
          {\"file\":\"F2\",\"lines\":[1,1],\"other_file\":\"F3\",\"other_lines\":[1,2],\"explanation\":\"both global\"}\
          ]}\n```",
     );
-    let (found, skipped) =
-        contradictions(&input(files.clone(), true), &settings(), &claude.merger()).await;
+    let (found, skipped) = contradictions(
+        &input(files.clone(), true),
+        &settings(),
+        &claude.merger(),
+        &Redactor::default(),
+    )
+    .await;
     assert!(skipped.is_empty(), "{skipped:?}");
     assert_eq!(found.len(), 1, "{found:#?}");
     assert_eq!(found[0].file, file_ref(&files[0]), "on the project's side");
@@ -605,20 +682,44 @@ async fn contradictions_are_skipped_and_said_so_when_they_cannot_run() {
 
     let mut s = settings();
     s.cli_unavailable = Some("not logged in".into());
-    let (_, skipped) = contradictions(&input(files.clone(), true), &s, &claude.merger()).await;
+    let (_, skipped) = contradictions(
+        &input(files.clone(), true),
+        &s,
+        &claude.merger(),
+        &Redactor::default(),
+    )
+    .await;
     assert!(skipped[0].reason.contains("not logged in"), "{skipped:?}");
 
     let mut s = settings();
     s.deadline = Some(Instant::now() + Duration::from_secs(5));
-    let (_, skipped) = contradictions(&input(files.clone(), true), &s, &claude.merger()).await;
+    let (_, skipped) = contradictions(
+        &input(files.clone(), true),
+        &s,
+        &claude.merger(),
+        &Redactor::default(),
+    )
+    .await;
     assert!(skipped[0].reason.contains("lease"), "{skipped:?}");
 
     let big = vec![file(P, "a.md", &"x".repeat(MAX_PROMPT_BYTES))];
-    let (_, skipped) = contradictions(&input(big, true), &settings(), &claude.merger()).await;
+    let (_, skipped) = contradictions(
+        &input(big, true),
+        &settings(),
+        &claude.merger(),
+        &Redactor::default(),
+    )
+    .await;
     assert!(skipped[0].reason.contains("bytes"), "{skipped:?}");
 
     let junk = FakeClaude::new("I found nothing worth mentioning.");
-    let (_, skipped) = contradictions(&input(files, true), &settings(), &junk.merger()).await;
+    let (_, skipped) = contradictions(
+        &input(files, true),
+        &settings(),
+        &junk.merger(),
+        &Redactor::default(),
+    )
+    .await;
     assert!(skipped[0].reason.contains("not the JSON"), "{skipped:?}");
     assert_eq!(claude.calls(), 0);
 }
@@ -638,6 +739,12 @@ async fn a_secret_is_masked_wherever_a_report_quotes_it() {
         ["-----BEGIN RSA ", "PRIVATE KEY-----"].concat(),
         ["-----END RSA ", "PRIVATE KEY-----"].concat()
     );
+    let sa = format!(
+        r#"{{"private_key": "{}\n{SA_KEY_BODY}\n{}\n"}}"#,
+        ["-----BEGIN ", "PRIVATE KEY-----"].concat(),
+        ["-----END ", "PRIVATE KEY-----"].concat()
+    );
+    let (quoted, quoted_body) = quoted_key();
     let mut old = file(
         P,
         "old.md",
@@ -649,12 +756,12 @@ async fn a_secret_is_masked_wherever_a_report_quotes_it() {
         file(
             P,
             "a.md",
-            &format!("- the deploy token is {token} for now\n"),
+            &format!("- the deploy token is {token} for now\n\n{sa}\n\n{quoted}"),
         ),
         file(
             P,
             "b.md",
-            &format!("- the deploy token is {token} for now\n"),
+            &format!("- the deploy token is {token} for now\n\n{sa}\n\n{quoted}"),
         ),
         file(
             P,
@@ -683,7 +790,13 @@ async fn a_secret_is_masked_wherever_a_report_quotes_it() {
         serde_json::to_string(&report.findings).unwrap(),
         serde_json::to_string(&report.details).unwrap()
     );
-    for secret in [token.as_str(), aws.as_str(), key_line] {
+    for secret in [
+        token.as_str(),
+        aws.as_str(),
+        key_line,
+        SA_KEY_BODY,
+        quoted_body,
+    ] {
         assert!(!all.contains(secret), "{secret} is in {all}");
     }
     assert!(all.contains("masked"), "{all}");
@@ -774,4 +887,122 @@ fn a_report_is_held_to_a_size_the_server_takes() {
         }),
     };
     assert!(serde_json::to_vec(&result).unwrap().len() < 5 << 20);
+}
+
+/// `claude` is handed no secret: the notes are masked before the prompt is
+/// built, so however it words or splits what it read (here, reversed), its
+/// answer carries none of them.
+#[tokio::test]
+async fn claude_is_handed_no_secret() {
+    let token = fake(&["gh", "p_"].concat(), ALNUM, 36);
+    let aws_secret = fake("", "wJalrXUtnFEMI/K7MDENG+bPxRfiCY", 40);
+    let files = vec![
+        file(
+            P,
+            "a.md",
+            &format!(
+                "- token {token}\n- aws_secret_access_key = {aws_secret}\n- password: Zq8!wLr2vXp\n\
+                 - {{\"private_key\": \"{}\\n{SA_KEY_BODY}\\n{}\\n\"}}\n",
+                ["-----BEGIN ", "PRIVATE KEY-----"].concat(),
+                ["-----END ", "PRIVATE KEY-----"].concat()
+            ),
+        ),
+        file(G, "tools.md", "- I use vim\n"),
+    ];
+    let claude = FakeClaude::echoing();
+    let report = evaluate(&input(files, true), &settings(), &claude.merger()).await;
+    assert_eq!(claude.calls(), 1);
+    let all = format!(
+        "{}{}",
+        serde_json::to_string(&report.findings).unwrap(),
+        serde_json::to_string(&report.details).unwrap()
+    );
+    // What it was handed did come back, reversed, in its explanation.
+    assert!(
+        all.contains("I use vim".chars().rev().collect::<String>().as_str()),
+        "{all}"
+    );
+    for secret in [
+        token.as_str(),
+        aws_secret.as_str(),
+        "Zq8!wLr2vXp",
+        SA_KEY_BODY,
+    ] {
+        let kept: String = secret
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || "_ .:=/+-".contains(*c))
+            .collect();
+        let reversed: String = kept.chars().rev().collect();
+        assert!(!all.contains(&reversed), "{secret}, reversed, is in {all}");
+        assert!(!all.contains(secret), "{secret} is in {all}");
+    }
+}
+
+/// A suggested edit is written into a note as it stands, so it is never
+/// masked: one whose text holds something masked as a secret elsewhere is
+/// left out, and the report says so. Here `release-2024x` is a password in
+/// one note and a branch name in another.
+#[test]
+fn an_edit_that_would_write_a_mask_is_left_out() {
+    let token = fake(&["gh", "p_"].concat(), ALNUM, 36);
+    let files = vec![
+        file(P, "a.md", "password: release-2024x\n"),
+        file(P, "b.md", &format!("branch release-2024x uses {token}\n")),
+    ];
+    let report = assemble(
+        deterministic(&input(files.clone(), false), &settings()),
+        Vec::new(),
+        &Redactor::new(&files),
+    );
+    let edit_of = |path: &str| {
+        let f = report
+            .findings
+            .iter()
+            .find(|f| f.file_path == path && f.kind == KIND_SECRET)
+            .unwrap();
+        report.details.findings[&f.id].suggested_edit.clone()
+    };
+    assert_eq!(
+        edit_of("a.md").unwrap().replacement,
+        "password: [removed: see recall eval]\n"
+    );
+    assert_eq!(edit_of("b.md"), None, "an edit that would write a mask");
+    assert!(report
+        .details
+        .skipped
+        .iter()
+        .any(|s| s.reason.contains("holds something masked")));
+    for d in report.details.findings.values() {
+        if let Some(e) = &d.suggested_edit {
+            assert!(!e.replacement.contains("masked"), "{e:?}");
+        }
+    }
+}
+
+/// A mask shows a public prefix only for a kind of token that has one;
+/// a password, an AWS secret key, a hex secret, a URL's password and a
+/// private key are masked from their first character.
+#[test]
+fn a_mask_shows_only_a_public_prefix() {
+    let ghp = fake(&["gh", "p_"].concat(), ALNUM, 36);
+    assert!(mask(&ghp, "GitHub token").starts_with("ghp_…"));
+    let proj = fake(&["sk", "-proj-"].concat(), ALNUM, 48);
+    assert!(mask(&proj, "OpenAI API key").starts_with("sk-proj-…"));
+    for (value, what) in [
+        (
+            fake("", "wJalrXUtnFEMI/K7MDENG+bPxRfiCY", 40),
+            "AWS secret access key",
+        ),
+        ("Zq8!wLr2vXpQq8!wLr2vXpQq8!w".to_string(), "password"),
+        (fake("", HEX, 64), "secret value"),
+        (
+            "Tq4wLp9Rz2Tq4wLp9Rz2Tq4wLp9Rz2".to_string(),
+            "password in a URL",
+        ),
+        (SA_KEY_BODY.to_string(), "private key"),
+    ] {
+        let masked = mask(&value, what);
+        assert!(!masked.contains(&value[..4]), "{masked} shows {value}");
+        assert!(masked.contains("masked"), "{masked}");
+    }
 }

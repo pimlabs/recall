@@ -97,14 +97,15 @@ struct Found {
 /// always run; the contradiction check runs, through `claude`, only when
 /// `input.contradictions` asks for it.
 pub async fn evaluate(input: &EvaluateInput, settings: &Settings, claude: &Merger) -> Report {
+    let redactor = Redactor::new(&input.files);
     let mut found = deterministic(input, settings);
     let mut skipped = Vec::new();
     if input.contradictions {
-        let (more, missed) = contradictions(input, settings, claude).await;
+        let (more, missed) = contradictions(input, settings, claude, &redactor).await;
         found.extend(more);
         skipped.extend(missed);
     }
-    assemble(found, skipped, &Redactor::new(&input.files))
+    assemble(found, skipped, &redactor)
 }
 
 /// The five checks that read the files and nothing else. No `claude`.
@@ -183,6 +184,7 @@ fn assemble(mut found: Vec<Found>, mut skipped: Vec<Skipped>, redactor: &Redacto
         ..Report::default()
     };
     let (mut cut_excerpts, mut dropped_edits, mut without_details) = (0, 0, 0);
+    let mut masked_edits = 0;
     let mut size = 0usize;
     for s in &mut report.details.skipped {
         s.reason = redactor.text(&s.reason);
@@ -202,12 +204,25 @@ fn assemble(mut found: Vec<Found>, mut skipped: Vec<Skipped>, redactor: &Redacto
         if let Some(shorter) = cut(&detail.reasoning, MAX_REASON_BYTES) {
             detail.reasoning = shorter;
         }
-        if let Some(edit) = &mut detail.suggested_edit {
-            edit.replacement = redactor.text(&edit.replacement);
-            if edit.replacement.len() > MAX_EDIT_BYTES {
-                detail.suggested_edit = None;
-                dropped_edits += 1;
-            }
+        // An edit is written into a note as it stands, so it is never
+        // masked: one whose text holds something masked as a secret (found
+        // as one here or in another file) is left out instead, since
+        // applying it would write the mask where the note had words.
+        let masked_edit = detail
+            .suggested_edit
+            .as_ref()
+            .is_some_and(|e| redactor.text(&e.replacement) != e.replacement);
+        if masked_edit {
+            detail.suggested_edit = None;
+            masked_edits += 1;
+        }
+        if detail
+            .suggested_edit
+            .as_ref()
+            .is_some_and(|e| e.replacement.len() > MAX_EDIT_BYTES)
+        {
+            detail.suggested_edit = None;
+            dropped_edits += 1;
         }
         let bytes = serde_json::to_string(&detail).map_or(0, |d| d.len()) + id.len() + 4;
         if size + bytes <= MAX_DETAILS_BYTES {
@@ -239,6 +254,12 @@ fn assemble(mut found: Vec<Found>, mut skipped: Vec<Skipped>, redactor: &Redacto
     if dropped_edits > 0 {
         report.details.skipped.push(note(format!(
             "{dropped_edits} suggested edits were left out, each larger than {MAX_EDIT_BYTES} bytes"
+        )));
+    }
+    if masked_edits > 0 {
+        report.details.skipped.push(note(format!(
+            "{masked_edits} suggested edits were left out: their text holds something masked \
+             as a secret, which applying them would write into the note"
         )));
     }
     if without_details > 0 {
@@ -602,6 +623,33 @@ fn tokens_in(line: &str) -> Vec<(usize, usize, &'static str)> {
             out.push((colon + 1, end, "password in a URL"));
         }
     }
+    // A private key on one line: its `-----BEGIN … PRIVATE KEY-----`
+    // header with the body after it on the same line, its line breaks
+    // written `\n` as a JSON string holds them (a cloud service account's
+    // `"private_key"`), up to its `-----END …-----` or the end of the body.
+    let last_end = line.rfind("-----END ");
+    let mut from = 0;
+    while let Some(header_end) = key_header_end(&line[from..]).map(|e| from + e) {
+        let at = line[from..header_end]
+            .rfind("-----BEGIN ")
+            .map_or(from, |i| from + i);
+        from = header_end;
+        let end = match last_end.filter(|e| *e >= header_end) {
+            Some(_) => {
+                let e = header_end + line[header_end..].find("-----END ").unwrap_or(0);
+                line[e + 9..]
+                    .find("-----")
+                    .map_or(bytes.len(), |i| e + 9 + i + 5)
+            }
+            None => run(header_end, |b| {
+                b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'\\')
+            }),
+        };
+        if end >= header_end + 16 {
+            out.push((at, end, KEY_WHAT));
+            from = end;
+        }
+    }
     out.sort();
     // Overlaps, such as `sk-proj-` inside a match of `sk-`, count once.
     let mut kept: Vec<(usize, usize, &'static str)> = Vec::new();
@@ -614,51 +662,103 @@ fn tokens_in(line: &str) -> Vec<(usize, usize, &'static str)> {
     kept
 }
 
-/// `token`, masked: its length, and its first four characters when it is
-/// long enough that they are a prefix rather than a part of the secret.
-fn mask(token: &str) -> String {
+/// What a private key is called, as a token and as a finding.
+const KEY_WHAT: &str = "private key";
+
+/// The public prefix a token of `what` starts with, when its kind has one
+/// (`ghp_`, `sk-proj-`, `AKIA`, `eyJ`): the longest that fits. [`None`]
+/// for a value that is secret from its first character: a password, an
+/// AWS secret access key, a hex secret, a URL's password, a private key.
+fn public_prefix(token: &str, what: &str) -> Option<&'static str> {
+    if what == "JSON Web Token" {
+        return Some("eyJ");
+    }
+    PATTERNS
+        .iter()
+        .filter(|p| p.what == what && token.starts_with(p.prefix))
+        .map(|p| p.prefix)
+        .max_by_key(|prefix| prefix.len())
+}
+
+/// `token`, a `what`, masked: its length, and its public prefix when its
+/// kind has one. Nothing of the secret itself.
+fn mask(token: &str, what: &str) -> String {
     let count = token.chars().count();
-    if count >= 24 {
-        let shown: String = token.chars().take(4).collect();
-        format!("{shown}… ({count} characters, masked)")
-    } else {
-        format!("[{count} characters, masked]")
+    match public_prefix(token, what) {
+        Some(prefix) => format!("{prefix}… ({count} characters, masked)"),
+        None => format!("[{what}, {count} characters, masked]"),
     }
 }
 
-/// `line` with each token replaced by `with(token)`.
+/// `line` with each token replaced by `with(token, what)`.
 fn replace_tokens(
     line: &str,
     tokens: &[(usize, usize, &str)],
-    with: impl Fn(&str) -> String,
+    with: impl Fn(&str, &str) -> String,
 ) -> String {
     let mut out = String::with_capacity(line.len());
     let mut at = 0;
-    for (start, end, _) in tokens {
+    for (start, end, what) in tokens {
         out.push_str(&line[at..*start]);
-        out.push_str(&with(&line[*start..*end]));
+        out.push_str(&with(&line[*start..*end], what));
         at = *end;
     }
     out.push_str(&line[at..]);
     out
 }
 
-/// Whether `line` opens a private key block.
+/// Where the first `-----BEGIN … PRIVATE KEY-----` header in `text` ends,
+/// wherever on the line it is: after a `> ` or a list marker, inside a
+/// JSON string.
+fn key_header_end(text: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(at) = text[from..].find("-----BEGIN ").map(|i| from + i) {
+        let name = at + 11;
+        let close = text[name..].find("-----").map(|i| name + i)?;
+        if text[name..close].ends_with("PRIVATE KEY") {
+            return Some(close + 5);
+        }
+        from = close;
+    }
+    None
+}
+
+/// `line` without the quote markers and list marker before its text.
+fn unquoted(line: &str) -> &str {
+    let mut t = line.trim_start();
+    while let Some(rest) = t.strip_prefix('>') {
+        t = rest.trim_start();
+    }
+    for marker in ["- ", "* ", "+ "] {
+        if let Some(rest) = t.strip_prefix(marker) {
+            return rest.trim_start();
+        }
+    }
+    t
+}
+
+/// Whether `line` opens a private key block: a `-----BEGIN … PRIVATE
+/// KEY-----` header anywhere on it, with nothing but quoting after it (a
+/// key on one line is a token instead: see [`tokens_in`]).
 fn opens_key(line: &str) -> bool {
-    let t = line.trim();
-    t.starts_with("-----BEGIN ") && t.contains("PRIVATE KEY")
+    key_header_end(line).is_some_and(|end| {
+        line[end..]
+            .trim()
+            .trim_matches(['"', '\'', ',', '`'])
+            .is_empty()
+    })
 }
 
 /// Whether `line` closes one.
 fn closes_key(line: &str) -> bool {
-    let t = line.trim();
-    t.starts_with("-----END ") && t.contains("PRIVATE KEY")
+    line.contains("-----END ") && line.contains("PRIVATE KEY")
 }
 
 /// Whether `line` could be a line of a key block's body: base64 and
-/// nothing else, long enough not to be a word.
+/// nothing else, once its quote or list marker is off, long enough not to
+/// be a word.
 fn key_body(line: &str) -> bool {
-    let t = line.trim();
+    let t = unquoted(line).trim();
     t.len() >= 16
         && t.bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
@@ -674,7 +774,7 @@ fn key_body(line: &str) -> bool {
 /// them, and any token it finds itself, with a mask.
 #[derive(Debug, Default)]
 pub(crate) struct Redactor {
-    tokens: Vec<String>,
+    tokens: Vec<(String, &'static str)>,
     key_lines: HashSet<String>,
 }
 
@@ -685,6 +785,9 @@ impl Redactor {
         for file in files {
             let mut in_key = false;
             for line in file.content.lines() {
+                for (start, end, what) in tokens_in(line) {
+                    tokens.insert((line[start..end].to_string(), what));
+                }
                 if opens_key(line) {
                     in_key = true;
                     continue;
@@ -693,19 +796,15 @@ impl Redactor {
                     if closes_key(line) || !key_body(line) {
                         in_key = false;
                     } else {
-                        key_lines.insert(line.trim().to_string());
-                        continue;
+                        key_lines.insert(unquoted(line).trim().to_string());
                     }
-                }
-                for (start, end, _) in tokens_in(line) {
-                    tokens.insert(line[start..end].to_string());
                 }
             }
         }
-        let mut tokens: Vec<String> = tokens.into_iter().collect();
+        let mut tokens: Vec<(String, &'static str)> = tokens.into_iter().collect();
         // Longest first, so a token inside another is never masked first
         // and the longer left half shown.
-        tokens.sort_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b)));
+        tokens.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.cmp(b)));
         Self { tokens, key_lines }
     }
 
@@ -716,7 +815,7 @@ impl Redactor {
         for line in text.split_inclusive('\n') {
             let body = line.trim_end_matches(['\n', '\r']);
             let ending = &line[body.len()..];
-            if self.key_lines.contains(body.trim()) {
+            if self.key_lines.contains(unquoted(body).trim()) {
                 out.push_str("[a line of a private key, masked]");
                 out.push_str(ending);
                 continue;
@@ -727,9 +826,9 @@ impl Redactor {
                     body = body.replace(key_line.as_str(), "[a line of a private key, masked]");
                 }
             }
-            for token in &self.tokens {
+            for (token, what) in &self.tokens {
                 if body.contains(token.as_str()) {
-                    body = body.replace(token.as_str(), &mask(token));
+                    body = body.replace(token.as_str(), &mask(token, what));
                 }
             }
             let found = tokens_in(&body);
@@ -758,7 +857,8 @@ fn secrets(file: &EvaluateFile) -> Vec<Found> {
     while n < lines.len() {
         let line = lines[n];
         let number = n as u32 + 1;
-        if opens_key(line) {
+        let tokens = tokens_in(line);
+        if tokens.is_empty() && opens_key(line) {
             let end = (n..lines.len())
                 .find(|&i| closes_key(lines[i]))
                 .unwrap_or(n);
@@ -772,7 +872,7 @@ fn secrets(file: &EvaluateFile) -> Vec<Found> {
                 detail: FindingDetail {
                     excerpt: format!(
                         "{}[{} lines of a private key, masked]\n",
-                        line,
+                        line.trim_end(),
                         last - number
                     ),
                     reasoning: reasoning("private key"),
@@ -788,7 +888,6 @@ fn secrets(file: &EvaluateFile) -> Vec<Found> {
             n = end + 1;
             continue;
         }
-        let tokens = tokens_in(line);
         if let Some((_, _, what)) = tokens.first() {
             found.push(Found {
                 kind: KIND_SECRET,
@@ -804,7 +903,7 @@ fn secrets(file: &EvaluateFile) -> Vec<Found> {
                         file_path: file.file_path.clone(),
                         base_sha256: base.clone(),
                         lines: [number, number],
-                        replacement: replace_tokens(line, &tokens, |_| {
+                        replacement: replace_tokens(line, &tokens, |_, _| {
                             "[removed: see recall eval]".to_string()
                         }),
                     }),
@@ -1270,7 +1369,10 @@ struct Numbered<'a> {
     file: &'a EvaluateFile,
 }
 
-fn contradiction_prompt(numbered: &[Numbered<'_>]) -> String {
+/// The prompt: each file numbered, and every line of it numbered, with
+/// every secret masked first. `claude` is handed no secret, so nothing it
+/// says back, however it words or splits one, can hold one.
+fn contradiction_prompt(numbered: &[Numbered<'_>], redactor: &Redactor) -> String {
     let mut out = String::new();
     for n in numbered {
         let scope = if n.file.project_key.starts_with(GLOBAL_PREFIX) {
@@ -1282,7 +1384,7 @@ fn contradiction_prompt(numbered: &[Numbered<'_>]) -> String {
             "=== {}: {} {}, {} ===\n",
             n.label, scope, n.file.project_key, n.file.file_path
         ));
-        for (i, line) in n.file.content.lines().enumerate() {
+        for (i, line) in redactor.text(&n.file.content).lines().enumerate() {
             out.push_str(&format!("{}| {line}\n", i + 1));
         }
         out.push('\n');
@@ -1325,6 +1427,7 @@ async fn contradictions(
     input: &EvaluateInput,
     settings: &Settings,
     claude: &Merger,
+    redactor: &Redactor,
 ) -> (Vec<Found>, Vec<Skipped>) {
     let globals: Vec<&EvaluateFile> = input
         .files
@@ -1376,7 +1479,7 @@ async fn contradictions(
                 file,
             })
             .collect();
-        let prompt = contradiction_prompt(&numbered);
+        let prompt = contradiction_prompt(&numbered, redactor);
         if prompt.len() > MAX_PROMPT_BYTES {
             skipped.push(skip(
                 project,
