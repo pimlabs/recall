@@ -29,11 +29,33 @@
     Everything the script defines has to be defined before it is used: `iex`
     evaluates this text top to bottom, so a function declared below its
     caller does not exist yet when the caller runs.
+
+    $env:RECALL_TEST_RELEASES_URL is for this repository's own CI and nothing
+    else: it replaces https://github.com/pimlabs/recall/releases, so
+    scripts/installer-test.ps1 can serve a release from loopback. The
+    checksums come from the same place as the archive, so pointing it
+    anywhere else verifies nothing. Leave it unset.
 #>
 
 $ErrorActionPreference = "Stop"
 
 $Repo = "pimlabs/recall"
+$Releases = $env:RECALL_TEST_RELEASES_URL
+if (-not $Releases) { $Releases = "https://github.com/$Repo/releases" }
+
+# v0.4.5 is the last release whose Windows archives are named
+# recall_windows_<arch>.zip and hold a bare recall.exe. Every release after
+# it names them recall-<rust target>.zip, holding a recall-<rust target>\
+# directory with recall.exe in it. Tags never move, so both stay true for
+# good.
+$LastOldStyleRelease = [version]"0.4.5"
+
+function Test-OldStyleArchive {
+    # A pre-release counts as the version it leads up to.
+    param([string]$Version)
+    $core = ($Version.TrimStart('v') -split '[-+]')[0]
+    return ([version]$core -le $LastOldStyleRelease)
+}
 
 function Write-Info {
     param([string]$Message)
@@ -175,8 +197,8 @@ $archRaw = $env:PROCESSOR_ARCHITEW6432
 if (-not $archRaw) { $archRaw = $env:PROCESSOR_ARCHITECTURE }
 
 switch ($archRaw) {
-    "AMD64" { $arch = "amd64" }
-    "ARM64" { $arch = "arm64" }
+    "AMD64" { $arch = "amd64"; $target = "x86_64-pc-windows-msvc" }
+    "ARM64" { $arch = "arm64"; $target = "aarch64-pc-windows-msvc" }
     default {
         Stop-WithError "this script does not support the architecture '$archRaw'. recall ships amd64 and arm64 builds for Windows; build from source instead: see docs/reference/install.md."
     }
@@ -184,18 +206,47 @@ switch ($archRaw) {
 
 # --- version and download URL --------------------------------------------
 # The same two forms install.sh uses: the latest release by default, or a
-# pinned tag, via GitHub's own redirect rather than the API — one request
-# fewer, and nothing to rate-limit against.
+# pinned tag. "latest" is resolved to a tag first, because the archive's
+# name depends on which release it is: GitHub answers /releases/latest with
+# a redirect to /releases/tag/<tag>, and that last path segment is the
+# version. One HEAD request, via that redirect rather than the API, so
+# there is nothing to rate-limit against.
 $version = $env:RECALL_VERSION
-if ($version) {
-    $baseUrl = "https://github.com/$Repo/releases/download/$version"
+if (-not $version) {
+    try {
+        $response = Invoke-WebRequest -Uri "$Releases/latest" -Method Head -UseBasicParsing
+    } catch {
+        Stop-WithError "could not look up the latest release at $Releases/latest: $($_.Exception.Message)"
+    }
+    # Where the redirect ended: HttpWebResponse.ResponseUri on Windows
+    # PowerShell 5.1, the final request's URI on PowerShell 7.
+    $final = $null
+    if ($response.BaseResponse.ResponseUri) {
+        $final = $response.BaseResponse.ResponseUri.AbsoluteUri
+    } elseif ($response.BaseResponse.RequestMessage) {
+        $final = $response.BaseResponse.RequestMessage.RequestUri.AbsoluteUri
+    }
+    if ($final) { $version = ($final.TrimEnd('/') -split '/')[-1] }
+    if (-not $version) {
+        Stop-WithError "could not tell which release is the latest from $Releases/latest. Pin one with `$env:RECALL_VERSION instead."
+    }
+    Write-Info "the latest release is $version"
+}
+$version = "v" + $version.TrimStart('v')
+if ($version -notmatch '^v\d+\.\d+\.\d+') {
+    Stop-WithError "not a release version: $version (expected something like v0.4.6)"
+}
+$baseUrl = "$Releases/download/$version"
+
+if (Test-OldStyleArchive $version) {
+    $archiveName = "recall_windows_${arch}.zip"
+    $exeInArchive = "recall.exe"
 } else {
-    $baseUrl = "https://github.com/$Repo/releases/latest/download"
+    $archiveName = "recall-$target.zip"
+    $exeInArchive = "recall-$target\recall.exe"
 }
 
-$archiveName = "recall_windows_${arch}.zip"
-
-Write-Info "downloading $archiveName ($(if ($version) { $version } else { 'latest' }))..."
+Write-Info "downloading $archiveName ($version)..."
 
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("recall-install-" + [System.Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $tmp -Force | Out-Null
@@ -238,9 +289,9 @@ try {
     # --- unpack ------------------------------------------------------------
     $unpacked = Join-Path $tmp "unpacked"
     Expand-Archive -Path $archivePath -DestinationPath $unpacked -Force
-    $exeSource = Join-Path $unpacked "recall.exe"
+    $exeSource = Join-Path $unpacked $exeInArchive
     if (-not (Test-Path $exeSource)) {
-        Stop-WithError "the archive did not contain recall.exe. Please report it at https://github.com/$Repo/issues."
+        Stop-WithError "the archive did not contain $exeInArchive. Please report it at https://github.com/$Repo/issues."
     }
 
     # --- choose the install directory ---------------------------------------

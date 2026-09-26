@@ -32,6 +32,7 @@ the vendored JSON schemas came from, and packaging/winget/test_manifest.py
 for the check that this script's output still satisfies them.
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -47,23 +48,51 @@ REPO = "https://github.com/pimlabs/recall"
 SHORT_DESCRIPTION = "Sync Claude Code's auto memory across machines and cloud sessions"
 TAGS = ["claude", "claude-code", "cli", "memory", "sync"]
 
-# One installer per architecture, each a zip holding a bare recall.exe — the
-# same archives .github/workflows/release.yml's `build` job publishes (see
-# its "Package (Windows)" step) and the same names docs/reference/install.md
-# documents. Keep this in step with both if either ever changes.
-ARCHIVES = {
-    "x64": "recall_windows_amd64.zip",
-    "arm64": "recall_windows_arm64.zip",
+# One installer per architecture, each a zip — the same archives
+# .github/workflows/release.yml's `build` job publishes (its "Package
+# (Windows)" step) and docs/reference/releasing.md documents. Keep this in
+# step with both if either ever changes.
+#
+# v0.4.5 is the last release whose zips are named recall_windows_<arch>.zip
+# and hold a bare recall.exe. Every release after it names them
+# recall-<rust target>.zip, holding a recall-<rust target>\ directory with
+# recall.exe in it. Tags never move, so both stay true for good.
+LAST_OLD_STYLE_RELEASE = (0, 4, 5)
+
+# winget architecture -> (old archive stem, Rust target).
+PLATFORMS = {
+    "x64": ("recall_windows_amd64", "x86_64-pc-windows-msvc"),
+    "arm64": ("recall_windows_arm64", "aarch64-pc-windows-msvc"),
 }
 
 
-def parse_checksums(text):
+def old_style(version):
+    """True for a version released with the old names; a pre-release counts
+    as the version it leads up to."""
+    core = re.split(r"[-+]", version.lstrip("v"))[0]
+    parts = tuple(int(p) for p in core.split("."))
+    if len(parts) != 3:
+        sys.exit(f"not a release version: {version}")
+    return parts <= LAST_OLD_STYLE_RELEASE
+
+
+def archives(version):
+    """winget architecture -> (archive name, recall.exe's path inside it)."""
+    if old_style(version):
+        return {arch: (f"{old}.zip", "recall.exe") for arch, (old, _) in PLATFORMS.items()}
+    return {
+        arch: (f"recall-{target}.zip", f"recall-{target}\\recall.exe")
+        for arch, (_, target) in PLATFORMS.items()
+    }
+
+
+def parse_checksums(text, version):
     """The two Windows archives' hashes from a release's checksums.txt.
 
     Mirrors scripts/update-formula.py's `rewrite`: refuse rather than write a
     manifest that is silently missing an architecture.
     """
-    want = dict.fromkeys(ARCHIVES.values())
+    want = dict.fromkeys(name for name, _ in archives(version).values())
     for line in text.splitlines():
         parts = line.split()
         if len(parts) == 2 and parts[1] in want:
@@ -86,26 +115,44 @@ def version_dict(version):
 
 
 def installer_dict(version, digests):
-    return {
+    """The installer manifest.
+
+    recall.exe's path inside the zip is the same for both architectures in
+    the old layout, so it is said once, for every installer. In the new one
+    it names the architecture's own directory, so each installer carries
+    its own NestedInstallerFiles, which the schema allows per installer.
+    """
+    per_arch = archives(version)
+    shared = len({inner for _, inner in per_arch.values()}) == 1
+
+    def nested(inner):
+        return [{"RelativeFilePath": inner, "PortableCommandAlias": "recall"}]
+
+    manifest = {
         "PackageIdentifier": IDENTIFIER,
         "PackageVersion": version,
         "InstallerType": "zip",
         "NestedInstallerType": "portable",
-        "NestedInstallerFiles": [
-            {"RelativeFilePath": "recall.exe", "PortableCommandAlias": "recall"},
-        ],
-        "Commands": ["recall"],
-        "Installers": [
-            {
-                "Architecture": arch,
-                "InstallerUrl": f"{REPO}/releases/download/v{version}/{archive}",
-                "InstallerSha256": digests[archive].upper(),
-            }
-            for arch, archive in ARCHIVES.items()
-        ],
-        "ManifestType": "installer",
-        "ManifestVersion": SCHEMA_VERSION,
     }
+    if shared:
+        manifest["NestedInstallerFiles"] = nested(next(iter(per_arch.values()))[1])
+    installers = []
+    for arch, (archive, inner) in per_arch.items():
+        installer = {"Architecture": arch}
+        if not shared:
+            installer["NestedInstallerFiles"] = nested(inner)
+        installer["InstallerUrl"] = f"{REPO}/releases/download/v{version}/{archive}"
+        installer["InstallerSha256"] = digests[archive].upper()
+        installers.append(installer)
+    manifest.update(
+        {
+            "Commands": ["recall"],
+            "Installers": installers,
+            "ManifestType": "installer",
+            "ManifestVersion": SCHEMA_VERSION,
+        }
+    )
+    return manifest
 
 
 def default_locale_dict(version):
@@ -132,36 +179,50 @@ def render_yaml(manifest, schema_name):
     """A manifest dict as winget-pkgs' own manifests are formatted.
 
     Deliberately not a general-purpose YAML dumper — just enough to render
-    the fixed, known-safe shape the three manifests above produce: a flat
-    dict of strings, lists of strings, and one-level lists of dicts, none of
-    which need quoting. Driven straight from the dict, rather than a
-    separately hand-written template, so rendered text and validated data
-    cannot drift apart — packaging/winget/test_manifest.py still round-trips
-    the output through a real YAML parser to catch anything that slips past
-    that assumption.
+    the fixed, known-safe shape the three manifests above produce: dicts of
+    strings, lists of strings, and lists of dicts (an installer's own
+    NestedInstallerFiles is one inside another), none of which need
+    quoting. Driven straight from the dict, rather than a separately
+    hand-written template, so rendered text and validated data cannot drift
+    apart — packaging/winget/test_manifest.py still round-trips the output
+    through a real YAML parser to catch anything that slips past that
+    assumption.
     """
     lines = [
         f"# yaml-language-server: $schema=https://aka.ms/winget-manifest.{schema_name}.{SCHEMA_VERSION}.schema.json",
         "",
     ]
-    for key, value in manifest.items():
-        if isinstance(value, list):
-            lines.append(f"{key}:")
-            for item in value:
-                if isinstance(item, dict):
-                    first = True
-                    for k2, v2 in item.items():
-                        lines.append(f"{'- ' if first else '  '}{k2}: {v2}")
-                        first = False
-                else:
-                    lines.append(f"- {item}")
-        else:
-            lines.append(f"{key}: {value}")
+    lines += _mapping(manifest, "")
     return "\n".join(lines) + "\n"
 
 
+def _mapping(mapping, pad):
+    lines = []
+    for key, value in mapping.items():
+        if isinstance(value, list):
+            lines.append(f"{pad}{key}:")
+            lines += _sequence(value, pad)
+        else:
+            lines.append(f"{pad}{key}: {value}")
+    return lines
+
+
+def _sequence(items, pad):
+    lines = []
+    for item in items:
+        if isinstance(item, dict):
+            # A dict item is a mapping two spaces in, whose first line
+            # carries the dash.
+            inner = _mapping(item, pad + "  ")
+            inner[0] = f"{pad}- {inner[0][len(pad) + 2:]}"
+            lines += inner
+        else:
+            lines.append(f"{pad}- {item}")
+    return lines
+
+
 def write_manifests(version, checksums_text, out_dir):
-    digests = parse_checksums(checksums_text)
+    digests = parse_checksums(checksums_text, version)
     first_letter, publisher_segment = IDENTIFIER[0].lower(), IDENTIFIER.split(".")[0]
     target = out_dir / "manifests" / first_letter / publisher_segment / PACKAGE_NAME / version
     target.mkdir(parents=True, exist_ok=True)
