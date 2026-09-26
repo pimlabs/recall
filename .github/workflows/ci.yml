@@ -127,11 +127,11 @@ jobs:
           # Windows by running them. And what the Windows installer test
           # runs: install.ps1, its own script, the packer release.yml uses
           # and the stand-in release server.
-          if printf '%s\n' "$changed" | grep -Eq '^(crates/|Cargo\.(toml|lock)$|install\.ps1$|scripts/(installer-test\.ps1|package-release\.py|fake-release-server\.py)$|\.github/workflows/(ci|release)\.yml$|\.github/actions/)'; then
+          if printf '%s\n' "$changed" | grep -Eq '^(crates/|Cargo\.(toml|lock)$|install\.ps1$|npm/install\.js$|scripts/(installer-test\.ps1|package-release\.py|fake-release-server\.py)$|\.github/workflows/(ci|release)\.yml$|\.github/actions/)'; then
             echo "windows=true" >> "$GITHUB_OUTPUT"
           else
             echo "windows=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Nothing under crates/, .github/actions/, Cargo.toml, Cargo.lock, install.ps1, the installer test's scripts, release.yml or this workflow changed, so the Windows jobs were skipped. They run unconditionally on every push to main."
+            echo "::notice::Nothing under crates/, .github/actions/, Cargo.toml, Cargo.lock, install.ps1, npm/install.js, the installer test's scripts, release.yml or this workflow changed, so the Windows jobs were skipped. They run unconditionally on every push to main."
           fi
 
   # Seven checks that are plain scripts against files already in the
@@ -221,16 +221,19 @@ jobs:
   # A release's archive names are a contract between release.yml and every
   # installer, and until this job a mistake in it showed only at the next
   # real release (0.4.3 failed that way, on a different step). So each pull
-  # request builds a release here: the names from release.yml's own matrix,
-  # packed by scripts/package-release.py, the script release.yml runs, with
-  # tiny fake binaries and a checksums.txt made the way release.yml makes
-  # it, and one more in the layout v0.4.5 and older have. It serves both on
-  # 127.0.0.1 (scripts/fake-release-server.py, python3's http.server plus
-  # GitHub's /releases/latest redirect), then runs install.sh,
-  # npm/install.js and deploy/fetch-release.sh against them, for "latest"
-  # and pinned versions on both sides of the cutoff, and runs what each
-  # installed. A wrong checksum must install nothing. install.ps1 gets the
-  # same on both Windows architectures, in the `windows` job below.
+  # request builds a release here by running release.yml's own Package
+  # steps, as that file has them, for every matrix entry, against tiny fake
+  # binaries (scripts/run-package-steps.py), and checks that what they wrote
+  # is exactly the set of names scripts/package-release.py --name gives. A
+  # checksums.txt is made the way release.yml makes it, and one more release
+  # in the layout v0.4.5 and older have. It serves both on 127.0.0.1
+  # (scripts/fake-release-server.py, python3's http.server plus GitHub's
+  # /releases/latest redirect), then runs install.sh, npm/install.js and
+  # deploy/fetch-release.sh against them, for "latest" and pinned versions
+  # on both sides of the cutoff, and runs what each installed. A wrong
+  # checksum, a symlinked binary and a non-loopback RECALL_TEST_RELEASES_URL
+  # must install nothing. install.ps1, and npm/install.js's zip path, get
+  # the same on both Windows architectures, in the `windows` job below.
   #
   # Not gated on the diff: it needs no Rust toolchain and takes seconds,
   # and what it protects is spread across install.sh, npm/, deploy/,
@@ -486,7 +489,7 @@ jobs:
             mkdir -p "$RUNNER_TEMP/bin"
             docker cp "$id:/out/$name" "$RUNNER_TEMP/bin/$name"
             python3 scripts/package-release.py "$RUNNER_TEMP/bin/$name" \
-              "$name-x86_64-unknown-linux-musl.tar.gz" "$rel"
+              x86_64-unknown-linux-musl "$rel"
           done
           docker rm "$id"
           (cd "$rel" && sha256sum *.tar.gz > checksums.txt)
@@ -609,8 +612,9 @@ jobs:
       # layout of every release after v0.4.5 and in v0.4.5's own, for
       # "latest" and pinned versions on both sides of that cutoff. Under
       # Windows PowerShell 5.1 (`shell: powershell`), which is what the
-      # script is written for. The Windows half of `test-installers`; see
-      # scripts/installer-test.ps1.
+      # script is written for. Then npm/install.js against the same release,
+      # the one place its Windows zip path runs before a real release. The
+      # Windows half of `test-installers`; see scripts/installer-test.ps1.
       - name: install.ps1 installs from a local release, new names and old
         shell: powershell
         run: |

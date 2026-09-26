@@ -11,9 +11,10 @@
 # formula and the winget manifest. A mismatch used to surface only at the
 # next real release. So this builds two releases the way release.yml does:
 #
-#   v0.4.6  the names and layout every release after v0.4.5 has, packed by
-#           scripts/package-release.py, the script release.yml itself runs,
-#           under the names release.yml's own matrix gives
+#   v0.4.6  the names and layout every release after v0.4.5 has, written
+#           by release.yml's own Package steps, run as release.yml has them
+#           (scripts/run-package-steps.py), for every matrix entry, and
+#           checked against the names scripts/package-release.py --name gives
 #   v0.4.5  the names and layout v0.4.5 and older have, packed the way
 #           release.yml packed them then
 #
@@ -25,11 +26,15 @@
 # then asked for "latest" and for pinned versions on both sides of the
 # cutoff. Every install is checked by running what it installed, and by
 # what that binary says: the right archive for this machine, from the right
-# release. Then the refusals: a wrong checksum, and a release whose
-# checksums.txt does not list the archive.
+# release. Then the refusals: a wrong checksum, a release whose
+# checksums.txt does not list the archive, an archive whose binary is a
+# symlink (which must not change the mode of what it points at), and
+# RECALL_TEST_RELEASES_URL set to anything but a loopback address. Each
+# consumer's own per-platform names are also checked against the release,
+# with the number found, so a pattern that stops matching cannot pass.
 #
-# Needs bash, python3 (with PyYAML), node, curl, tar and sha256sum. No
-# network beyond 127.0.0.1, no Rust toolchain.
+# Needs bash 4, python3 (with PyYAML), node, curl, tar and GNU coreutils
+# (sha256sum, stat -c). No network beyond 127.0.0.1, no Rust toolchain.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -87,46 +92,49 @@ fake() { # path, what it prints
   printf '#!/bin/sh\necho "%s"\n' "$2" >"$1"
   chmod 755 "$1"
 }
+# first_line <command...>: the first line the command prints. The server's
+# fakes also print the `features:` line release.yml's Package step checks.
+first_line() { "$@" | head -1; }
 
-# What release.yml publishes, read from release.yml: its client matrix
-# (asset, and whether the runner is Windows) and its server targets.
-python3 - .github/workflows/release.yml >"$WORK/release-names" <<'PY'
-import sys, yaml
-jobs = yaml.safe_load(open(sys.argv[1]))["jobs"]
-for e in jobs["build"]["strategy"]["matrix"]["include"]:
-    ext = "zip" if e["os"].startswith("windows") else "tar.gz"
-    print("client", e["target"], e["asset"], ext)
-for e in jobs["build-server"]["strategy"]["matrix"]["include"]:
-    print("server", e["target"], "-", "tar.gz")
-PY
-
-echo "== the release names, from release.yml"
-# Every consumer builds a name as recall-<target>; the matrix must agree.
-while read -r kind target asset _; do
-  if [ "$kind" = client ]; then
-    check "release.yml names $target's archive recall-$target" test "$asset" = "recall-$target"
-  fi
-done <"$WORK/release-names"
-
-# ---- v0.4.6: packed by the script release.yml runs --------------------------
+# ---- v0.4.6: packed by release.yml's own Package steps ----------------------
+# Not a copy of them: scripts/run-package-steps.py reads each step's `run:`
+# from release.yml and runs it, per matrix entry, against fake binaries.
+# Whatever those steps name or pack is what the installers are given.
 rel_new="$WORK/root/releases/download/v$NEW"
 mkdir -p "$rel_new"
-while read -r kind target asset ext; do
-  if [ "$kind" = client ]; then
-    exe=recall
-    [ "$ext" = zip ] && exe=recall.exe
-    fake "$WORK/build/$target/$exe" "recall $NEW $target"
-    python3 scripts/package-release.py "$WORK/build/$target/$exe" "$asset.$ext" "$rel_new" >/dev/null
-  else
-    for name in recall-server recall-worker; do
-      fake "$WORK/build/$target/$name" "$name $NEW $target"
-      python3 scripts/package-release.py "$WORK/build/$target/$name" "$name-$target.tar.gz" "$rel_new" >/dev/null
-    done
-  fi
-done <"$WORK/release-names"
+package_steps() {
+  python3 scripts/run-package-steps.py .github/workflows/release.yml "$WORK/build" "$NEW" "$rel_new" \
+    >"$WORK/packed"
+}
+echo "== release.yml's Package steps"
+check "run for every matrix entry" package_steps
 # The same command release.yml's publish job runs.
 # shellcheck disable=SC2035 # every name here starts with "recall"
 (cd "$rel_new" && sha256sum *.tar.gz *.zip >checksums.txt)
+
+# What should have been published: one archive per binary per matrix
+# target, each named by package-release.py --name, the one place a name is
+# made.
+python3 - .github/workflows/release.yml >"$WORK/expected-targets" <<'PY'
+import sys, yaml
+jobs = yaml.safe_load(open(sys.argv[1]))["jobs"]
+for e in jobs["build"]["strategy"]["matrix"]["include"]:
+    print("recall.exe" if e["os"].startswith("windows") else "recall", e["target"])
+for e in jobs["build-server"]["strategy"]["matrix"]["include"]:
+    print("recall-server", e["target"])
+    print("recall-worker", e["target"])
+PY
+while read -r binary target; do
+  python3 scripts/package-release.py --name "$binary" "$target"
+done <"$WORK/expected-targets" | sort >"$WORK/expected"
+awk '{ print $3 }' "$WORK/packed" | sort >"$WORK/published"
+
+check "exactly the archives package-release.py names, one per binary and target" \
+  cmp -s "$WORK/expected" "$WORK/published"
+cmp -s "$WORK/expected" "$WORK/published" || diff "$WORK/expected" "$WORK/published" || true
+check "  ... ten of them" test "$(wc -l <"$WORK/published")" -eq 10
+check "  ... each named <binary>-<rust target>" \
+  test -z "$(grep -Ev '^recall(-server|-worker)?-[a-z0-9_]+(-[a-z0-9_]+){2,3}\.(tar\.gz|zip)$' "$WORK/published")"
 
 echo "== the v$NEW layout"
 check "checksums.txt lists all ten archives" test "$(wc -l <"$rel_new/checksums.txt")" -eq 10
@@ -160,9 +168,16 @@ for who, names in wanted.items():
     missing = sorted(names - published)
     print(who, len(names), " ".join(missing) or "-")
 PY
+# How many names each should have yielded, so a pattern that stops
+# matching (and so finds nothing missing) fails rather than passes: four
+# client targets in install.sh, two Windows ones in install.ps1, all six in
+# npm, and two server targets times two binaries in fetch-release.sh.
+declare -A want_count=([install.sh]=4 [install.ps1]=2 [npm/install.js]=6 [deploy/fetch-release.sh]=4)
 while read -r who count missing; do
-  check "$who: its $count archive names are all in the release" test "$missing" = "-"
+  check "$who: ${want_count[$who]} archive names found" test "$count" = "${want_count[$who]}"
+  check "$who: all of them are in the release" test "$missing" = "-"
 done <"$WORK/consumers"
+check "every consumer was checked" test "$(wc -l <"$WORK/consumers")" -eq "${#want_count[@]}"
 
 # ---- v0.4.5: packed the way release.yml packed it then ----------------------
 rel_old="$WORK/root/releases/download/v$OLD"
@@ -197,7 +212,33 @@ for v in 0.4.7 0.4.8; do
 done
 sed 's/^[0-9a-f]*/'"$(printf '0%.0s' $(seq 64))"'/' "$rel_new/checksums.txt" \
   >"$WORK/root/releases/download/v0.4.7/checksums.txt"
-grep -v ' recall-[xa]' "$rel_new/checksums.txt" >"$WORK/root/releases/download/v0.4.8/checksums.txt"
+# `|| true`: when release.yml's steps are broken there may be nothing left,
+# and the checks above have already said so; carry on to say what else.
+grep -v ' recall-[xa]' "$rel_new/checksums.txt" >"$WORK/root/releases/download/v0.4.8/checksums.txt" || true
+
+# v0.4.9: the new layout, checksums that match, and each binary a symlink
+# to a file outside the archive. Installing must refuse it and leave that
+# file's mode alone; following the link would chmod it 0755.
+victim="$WORK/victim"
+echo "not recall" >"$victim"
+chmod 644 "$victim"
+rel_link="$WORK/root/releases/download/v0.4.9"
+mkdir -p "$rel_link"
+python3 - "$rel_link" "$victim" "$HOST" <<'PY'
+import sys, tarfile
+out, victim, host = sys.argv[1:]
+for top, binary in ((f"recall-{host}", "recall"),
+                    ("recall-server-x86_64-unknown-linux-musl", "recall-server")):
+    with tarfile.open(f"{out}/{top}.tar.gz", "w:gz") as tar:
+        d = tarfile.TarInfo(top)
+        d.type, d.mode = tarfile.DIRTYPE, 0o755
+        tar.addfile(d)
+        link = tarfile.TarInfo(f"{top}/{binary}")
+        link.type, link.linkname, link.mode = tarfile.SYMTYPE, victim, 0o777
+        tar.addfile(link)
+PY
+# shellcheck disable=SC2035
+(cd "$rel_link" && sha256sum *.tar.gz >checksums.txt)
 
 # ---- serve it ---------------------------------------------------------------
 echo "$NEW" >"$WORK/root/LATEST"
@@ -252,6 +293,22 @@ check "  ... and installs nothing" test ! -e "$WORK/sh-bad/recall"
 check "an archive checksums.txt does not list is refused" fails install_sh "$WORK/sh-unlisted" v0.4.8
 check "  ... saying so" grep -q 'checksums.txt has no line for' "$WORK/sh-unlisted.log"
 check "  ... and installs nothing" test ! -e "$WORK/sh-unlisted/recall"
+check "a symlink where the binary should be is refused" fails install_sh "$WORK/sh-link" v0.4.9
+check "  ... saying so" grep -q 'as a regular file' "$WORK/sh-link.log"
+check "  ... and installs nothing" test ! -e "$WORK/sh-link/recall"
+check "  ... and leaves what it points at alone" test "$(stat -c %a "$victim")" = 644
+
+# not_loopback <dir> <url>: install.sh with the test override set to <url>.
+not_loopback() {
+  RECALL_TEST_RELEASES_URL="$2" RECALL_BIN_DIR="$1" bash install.sh >"$1.log" 2>&1
+}
+for url in http://example.invalid:8080/releases https://127.0.0.1:8080/releases \
+  http://127.0.0.1.example.invalid:8080/releases http://localhost/releases; do
+  dir="$WORK/sh-remote-$(printf '%s' "$url" | tr -c 'a-z0-9' '_')"
+  check "RECALL_TEST_RELEASES_URL=$url is refused" fails not_loopback "$dir" "$url"
+  check "  ... saying it is only for tests" grep -q "only for this repository's tests" "$dir.log"
+  check "  ... before any download" bash -c "! grep -q downloading '$dir.log'"
+done
 
 # ---- npm/install.js -----------------------------------------------------------
 # npm_install <dir> <version>: a copy of npm/ at <version>, its postinstall run.
@@ -274,6 +331,15 @@ check "npm at $OLD: bin/recall is recall_$OLD_HOST's binary" \
 check "npm with a wrong checksum is refused" fails npm_install "$WORK/npm-bad" 0.4.7
 check "  ... saying so" grep -q 'checksum mismatch' "$WORK/npm-bad.log"
 check "  ... and leaves the shim, not a binary" grep -q '^#!/usr/bin/env node' "$WORK/npm-bad/bin/recall"
+check "npm with a symlink where the binary should be is refused" fails npm_install "$WORK/npm-link" 0.4.9
+check "  ... saying so" grep -q 'is not a regular file' "$WORK/npm-link.log"
+check "  ... and leaves the shim, not a link" \
+  bash -c "[ ! -L '$WORK/npm-link/bin/recall' ] && [ ! -e '$WORK/npm-link/bin/recall-bin' ] && grep -q '^#!/usr/bin/env node' '$WORK/npm-link/bin/recall'"
+check "  ... and leaves what it points at alone" test "$(stat -c %a "$victim")" = 644
+check "  ... and nothing from unpacking" test -z "$(find "$WORK/npm-link" -name '.recall-extract-*' | head -1)"
+check "npm with RECALL_TEST_RELEASES_URL off loopback is refused" \
+  bash -c "! (cd '$WORK/npm-new' && RECALL_TEST_RELEASES_URL=http://example.invalid:8080/releases node install.js >'$WORK/npm-remote.log' 2>&1)"
+check "  ... saying it is only for tests" grep -q "only for this repository's tests" "$WORK/npm-remote.log"
 
 # ---- deploy/fetch-release.sh --------------------------------------------------
 # fetch <version> <arch> <binary>: what deploy/Dockerfile's release stages
@@ -292,7 +358,7 @@ for arch in amd64 arm64; do
   for name in recall-server recall-worker; do
     check "$name $NEW for $arch: fetched and checked" fetch "$NEW" "$arch" "$name"
     check "$name $NEW for $arch: it is $name-$musl's" \
-      says "$name $NEW $musl" "$WORK/fetch/$NEW-$arch/$name" version
+      says "$name $NEW $musl" first_line "$WORK/fetch/$NEW-$arch/$name" version
     check "$name $OLD for $arch (a rollback): fetched and checked" fetch "$OLD" "$arch" "$name"
     check "$name $OLD for $arch: it is ${name}_linux_$arch's" \
       says "$name $OLD linux_$arch" "$WORK/fetch/$OLD-$arch/$name" version
@@ -302,6 +368,10 @@ check "a wrong checksum is refused" fails fetch 0.4.7 amd64 recall-server
 check "  ... and installs nothing" test ! -e "$WORK/fetch/0.4.7-amd64/recall-server"
 check "a version that is not one is refused" fails fetch latest amd64 recall-server
 check "  ... saying so" grep -q 'latest is not a release version' "$WORK/fetch-latest-amd64-recall-server.log"
+check "a symlink where the binary should be is refused" fails fetch 0.4.9 amd64 recall-server
+check "  ... saying so" grep -q 'as a regular file' "$WORK/fetch-0.4.9-amd64-recall-server.log"
+check "  ... and installs nothing" test ! -e "$WORK/fetch/0.4.9-amd64/recall-server"
+check "  ... and leaves what it points at alone" test "$(stat -c %a "$victim")" = 644
 
 echo "passed $pass, failed $fail"
 if [ "$fail" -ne 0 ]; then

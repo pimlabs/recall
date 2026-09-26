@@ -20,7 +20,10 @@
     install.ps1 is pointed there with RECALL_TEST_RELEASES_URL, then asked
     for "latest" on each side of the cutoff and for each version pinned.
     Each install is checked by the archive it says it downloaded and by
-    running what it installed; the wrong checksum must install nothing.
+    running what it installed; the wrong checksum must install nothing, and
+    RECALL_TEST_RELEASES_URL pointing anywhere but loopback must be refused.
+    Then npm/install.js, at v0.4.6 and v0.4.5, which is the only place its
+    Windows zip path runs before a release.
 
     Loopback only, nothing written outside a temporary directory, and PATH
     left alone (RECALL_NO_PATH).
@@ -51,7 +54,9 @@ switch ($archRaw) {
     "ARM64" { $target = "aarch64-pc-windows-msvc"; $oldArch = "arm64" }
     default { throw "installer-test.ps1: no Windows release archive for $archRaw" }
 }
-$newZip = "recall-$target.zip"
+# The name package-release.py gives it, the one place a name is made.
+$newZip = (& python $packer --name recall.exe $target | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or -not $newZip) { throw "package-release.py --name failed" }
 $oldZip = "recall_windows_$oldArch.zip"
 
 $script:pass = 0
@@ -85,7 +90,7 @@ try {
     # ---- v0.4.6, packed by the script release.yml runs ----------------------
     $relNew = Join-Path $root "releases\download\v$new"
     New-Item -ItemType Directory -Force -Path $relNew | Out-Null
-    & python $packer $Binary $newZip $relNew
+    & python $packer $Binary $target $relNew
     if ($LASTEXITCODE -ne 0) { throw "package-release.py failed" }
     Write-Checksums $relNew
 
@@ -117,8 +122,8 @@ try {
     # Install-Recall <name> [version]: install.ps1 in a fresh powershell.exe,
     # into $work\<name>. Returns its exit code; its output is $work\<name>.log.
     function Install-Recall {
-        param([string]$Name, [string]$Version)
-        $env:RECALL_TEST_RELEASES_URL = $releases
+        param([string]$Name, [string]$Version, [string]$Url)
+        if ($Url) { $env:RECALL_TEST_RELEASES_URL = $Url } else { $env:RECALL_TEST_RELEASES_URL = $releases }
         $env:RECALL_BIN_DIR = Join-Path $work $Name
         $env:RECALL_NO_PATH = "1"
         if ($Version) { $env:RECALL_VERSION = $Version } else { Remove-Item env:RECALL_VERSION -ErrorAction SilentlyContinue }
@@ -172,6 +177,48 @@ try {
     Check "a wrong checksum is refused" ((Install-Recall "bad" "v0.4.7") -ne 0)
     Check "  ... saying so" (Test-Log "bad" "checksum verification failed")
     Check "  ... and installs nothing" (-not (Test-Path (Join-Path (Join-Path $work "bad") "recall.exe")))
+
+    # The override is for loopback alone; anything else stops the install
+    # before a request is made.
+    Check "RECALL_TEST_RELEASES_URL off loopback is refused" ((Install-Recall "remote" "v$new" "http://example.invalid:8080/releases") -ne 0)
+    Check "  ... saying it is only for tests" (Test-Log "remote" "RECALL_TEST_RELEASES_URL is only")
+    Check "  ... and installs nothing" (-not (Test-Path (Join-Path (Join-Path $work "remote") "recall.exe")))
+
+    # npm/install.js on Windows: the zip path, which the Linux job cannot
+    # take. A copy of npm/ at the version under test, its postinstall run;
+    # on Windows the binary stays at bin\recall-bin.exe behind the Node shim.
+    function Install-Npm {
+        param([string]$Name, [string]$Version)
+        $dir = Join-Path $work $Name
+        Copy-Item -Path (Join-Path $repo "npm") -Destination $dir -Recurse
+        $manifest = Join-Path $dir "package.json"
+        $text = (Get-Content $manifest -Raw) -replace '"version": "[^"]*"', ('"version": "' + $Version + '"')
+        [System.IO.File]::WriteAllText($manifest, $text)
+        $env:RECALL_TEST_RELEASES_URL = $releases
+        $saved = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        Push-Location $dir
+        & node install.js *> (Join-Path $work "$Name.log")
+        $code = $LASTEXITCODE
+        Pop-Location
+        $ErrorActionPreference = $saved
+        return $code
+    }
+    function Test-NpmInstalled {
+        param([string]$Name)
+        $exe = Join-Path (Join-Path (Join-Path $work $Name) "bin") "recall-bin.exe"
+        if (-not (Test-Path $exe)) { return $false }
+        $out = & $exe version
+        return ($LASTEXITCODE -eq 0 -and ($out -join "`n") -match '^recall \d+\.\d+\.\d+')
+    }
+
+    Write-Host "== npm/install.js"
+    Check "npm at ${new}: installs" ((Install-Npm "npm-new" $new) -eq 0)
+    Check "npm at ${new}: recall-bin.exe runs" (Test-NpmInstalled "npm-new")
+    Check "npm at ${old}: installs" ((Install-Npm "npm-old" $old) -eq 0)
+    Check "npm at ${old}: recall-bin.exe runs" (Test-NpmInstalled "npm-old")
+    Check "npm with a wrong checksum is refused" ((Install-Npm "npm-bad" "0.4.7") -ne 0)
+    Check "  ... and installs nothing" (-not (Test-Path (Join-Path (Join-Path (Join-Path $work "npm-bad") "bin") "recall-bin.exe")))
 } finally {
     if ($server) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
     Write-Host "passed $script:pass, failed $script:fail"
