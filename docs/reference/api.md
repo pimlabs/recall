@@ -1617,7 +1617,10 @@ has one, and nothing of a password, an AWS secret key, a hex secret, a
 URL's password or a private key. A suggested edit is never masked, since
 it is written into the note as it stands: one whose text holds something
 masked is left out, and `skipped` says so. The contradiction check hands
-`claude` the notes with every secret already masked. `details` is kept under 2 MiB: an excerpt is cut at 4 KiB, a
+`claude` the notes with every secret already masked. A key header is a key
+only when a line of a key's body follows it, so prose about keys is not
+one. A secret shorter than 8 bytes is masked where the check finds it,
+and not in every other text that happens to hold the same letters. `details` is kept under 2 MiB: an excerpt is cut at 4 KiB, a
 reason at 2 KiB, a suggested edit over 16 KiB is left out, and past the
 total the last findings keep no details; `skipped` says so. A result the
 server refuses (`413`, `400`) the worker reports as the job's `error`

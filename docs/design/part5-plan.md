@@ -1121,6 +1121,8 @@ the test fail. A property that no mutation fails is not pinned.
 | A suggested edit never carries a mask into a note (added after review) | Store the edit masked |
 | A key behind `> `, or on one line with `\n` escapes, is found and masked (added after review) | Match a key header only at the start of a line |
 | A mask shows no character of a value that has no public prefix (added after review) | Show the first four characters of any long token |
+| Prose ending with a key header, or a list of headers, is not a key (added after review) | Open a key block on the header alone |
+| Masking the prompts is linear, each file masked once a run, and a prompt too large as it stands is never masked (added after review) | Compare each line with every secret; mask per project; measure only after masking |
 
 As built, these are in `crates/recall-worker/src/evaluate_tests.rs` and
 `crates/recall-server/tests/evaluations.rs`, beside an end-to-end test of

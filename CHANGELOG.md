@@ -71,7 +71,9 @@ break will be described here in full rather than smoothed over.
   notes the contradiction check hands `claude` are masked first. A mask
   shows a public prefix such as `ghp_…` only for a kind of token that has
   one. A suggested edit that would write a mask into a note is left out,
-  and the report says so. A report's `details` are kept under 2 MiB (an excerpt cut at
+  and the report says so. Prose that mentions a key's header is not taken
+  for a key, and masking takes time in proportion to the notes, however
+  many secrets they hold. A report's `details` are kept under 2 MiB (an excerpt cut at
   4 KiB, what was cut said), and a result the server will not take is
   reported as the job's error rather than stopping the worker.
 - **`recall eval apply` never writes over an edit made meanwhile.** The
