@@ -70,26 +70,20 @@ jobs:
           # "Built for the right architecture" below checks the result.
           - target: x86_64-apple-darwin
             os: macos-15
-            asset: recall-x86_64-apple-darwin
           - target: aarch64-apple-darwin
             os: macos-15
-            asset: recall-aarch64-apple-darwin
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            asset: recall-x86_64-unknown-linux-gnu
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-            asset: recall-aarch64-unknown-linux-gnu
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            asset: recall-x86_64-pc-windows-msvc
           # windows-11-arm is GA per actions/runner-images, not a preview
           # label — confirmed 2026-09-23. Client OS rather than Server, the
           # same way the macOS runners above are, and that is fine for a
           # native build+test job.
           - target: aarch64-pc-windows-msvc
             os: windows-11-arm
-            asset: recall-aarch64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -161,19 +155,25 @@ jobs:
       # LICENSE and README.md inside: recall-x86_64-apple-darwin.tar.gz holds
       # recall-x86_64-apple-darwin/recall. install.sh, install.ps1,
       # npm/install.js, deploy/fetch-release.sh, the Homebrew formula and
-      # cargo-binstall's default templates all expect exactly that, and
-      # scripts/package-release.py is the one place it is written: CI's
-      # `test-installers` job packs its test release with the same script and
-      # installs from it, so a change here that the installers do not follow
-      # fails a pull request, not a release. v0.4.5 and older were packed
-      # differently and keep their archives; see docs/reference/releasing.md.
+      # cargo-binstall's default templates all expect exactly that.
+      # scripts/package-release.py is the one place both the name and the
+      # layout are made; this passes it only the binary and the target.
+      #
+      # CI's `test-installers` job runs this workflow's own `Package*` steps
+      # (their `run:` text, read from this file, with each matrix entry's
+      # values filled in) against fake binaries, and installs from what they
+      # write. So a step here that names or packs an archive differently
+      # from what the installers expect fails a pull request, not a release.
+      # Keep those steps `shell: bash`; that job runs them with bash. v0.4.5
+      # and older were packed differently and keep their archives; see
+      # docs/reference/releasing.md.
       - name: Package (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
           python3 scripts/package-release.py "target/${{ matrix.target }}/release/recall" \
-            "${{ matrix.asset }}.tar.gz" dist
+            "${{ matrix.target }}" dist
 
       # A zip rather than a tar.gz because that is what Windows users
       # actually have a double-click extractor for; install.ps1 and
@@ -188,11 +188,11 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/package-release.py "target/${{ matrix.target }}/release/recall.exe" \
-            "${{ matrix.asset }}.zip" dist
+            "${{ matrix.target }}" dist
 
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.asset }}
+          name: recall-${{ matrix.target }}
           path: |
             dist/*.tar.gz
             dist/*.zip
@@ -278,7 +278,9 @@ jobs:
           # recall-server-x86_64-unknown-linux-musl.tar.gz holding
           # recall-server-x86_64-unknown-linux-musl/recall-server, and the
           # same for recall-worker: the layout the client archives above
-          # have, from the same script. deploy/fetch-release.sh reads it.
+          # have, from the same script. deploy/fetch-release.sh reads it, and
+          # CI's `test-installers` runs this step as written (with stand-ins
+          # for the binaries, `file` and `readelf`) to prove it does.
           for name in recall-server recall-worker; do
             bin="target/${{ matrix.target }}/release/$name"
             file "$bin"
@@ -287,7 +289,7 @@ jobs:
               exit 1
             fi
             "$bin" version
-            python3 scripts/package-release.py "$bin" "$name-${{ matrix.target }}.tar.gz" dist
+            python3 scripts/package-release.py "$bin" "${{ matrix.target }}" dist
           done
 
       - uses: actions/upload-artifact@v7
