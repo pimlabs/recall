@@ -1610,7 +1610,14 @@ id, an `excerpt`, the `reasoning`, and a `suggested_edit` when there is one
 worker read); and `skipped`, what was not checked, cut or left out, and
 why. Every secret the `secret` check knows is masked wherever `details`
 quotes it, whichever finding does, and every line of a private key's body
-replaced. `details` is kept under 2 MiB: an excerpt is cut at 4 KiB, a
+replaced (a key block behind `> ` or a list marker, and a key on one line
+with `\n` escapes, as a service account's JSON holds one, included). A
+mask shows a public prefix, such as `ghp_…`, only for a kind of token that
+has one, and nothing of a password, an AWS secret key, a hex secret, a
+URL's password or a private key. A suggested edit is never masked, since
+it is written into the note as it stands: one whose text holds something
+masked is left out, and `skipped` says so. The contradiction check hands
+`claude` the notes with every secret already masked. `details` is kept under 2 MiB: an excerpt is cut at 4 KiB, a
 reason at 2 KiB, a suggested edit over 16 KiB is left out, and past the
 total the last findings keep no details; `skipped` says so. A result the
 server refuses (`413`, `400`) the worker reports as the job's `error`

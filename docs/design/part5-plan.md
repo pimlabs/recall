@@ -513,8 +513,12 @@ changed from the plan below, and why:
   owner answers, just before the write.
 - **Secrets are masked everywhere in `details`**, not only in the `secret`
   finding: every excerpt, reason and edit passes one redactor built from
-  every token and private-key line in the files read. `details` is kept
-  under 2 MiB, so a report always fits in a result.
+  every token and private-key line in the files read, in whatever shape
+  a note holds a key; `claude` is handed the notes already masked; a mask
+  shows a public prefix only for a kind of token that has one; and a
+  suggested edit that the masking would change is left out rather than
+  stored masked. `details` is kept under 2 MiB, so a report always fits
+  in a result.
 - **One evaluation at a time**: a request while another is queued or
   running is a `409`, so evaluations cannot crowd merges out of the queue
   they share. The passkey session sees neither `details` nor the worker's
@@ -1112,6 +1116,11 @@ the test fail. A property that no mutation fails is not pinned.
 | `recall eval apply` never writes over an edit made while the owner was asked (added after review) | Write from the read made before asking |
 | A body both verifiers would not read as blank is never kept as one (added after review) | Trim Unicode whitespace on the server |
 | A second evaluation is refused while one is open (added after review) | Queue it |
+| A run whose lease ran out does not hold up the next (added after review) | Ask whether one is open before expiring leases |
+| `claude` is handed no secret, however it rewords what it read (added after review) | Build the prompt from the notes unmasked |
+| A suggested edit never carries a mask into a note (added after review) | Store the edit masked |
+| A key behind `> `, or on one line with `\n` escapes, is found and masked (added after review) | Match a key header only at the start of a line |
+| A mask shows no character of a value that has no public prefix (added after review) | Show the first four characters of any long token |
 
 As built, these are in `crates/recall-worker/src/evaluate_tests.rs` and
 `crates/recall-server/tests/evaluations.rs`, beside an end-to-end test of

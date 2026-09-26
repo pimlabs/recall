@@ -58,15 +58,20 @@ break will be described here in full rather than smoothed over.
   merges a revoked worker's queue leaves evaluations waiting for the next
   worker.
 - **One evaluation at a time.** `POST /v1/evaluations` answers 409 while
-  another is queued or running, so reports never crowd merges out of the
-  job queue they share. The admin page's passkey session is shown a fixed
+  another is queued or running (one whose lease ran out no longer counts),
+  so reports never crowd merges out of the job queue they share. The admin page's passkey session is shown a fixed
   message in place of a report's error, which is the worker's own text,
   and the server's log leaves that text out.
 - **A secret is masked wherever a report quotes it**, not only in the
   `secret` finding's own excerpt: a duplicate, a stale note, a note in the
   wrong scope, a dead link's line or `claude`'s account of a
   contradiction that quotes a token or a private key's line shows it
-  masked. A report's `details` are kept under 2 MiB (an excerpt cut at
+  masked, a key block behind `> ` or a list marker and a key on one
+  line with `\n` escapes (a service account's JSON) included, and the
+  notes the contradiction check hands `claude` are masked first. A mask
+  shows a public prefix such as `ghp_…` only for a kind of token that has
+  one. A suggested edit that would write a mask into a note is left out,
+  and the report says so. A report's `details` are kept under 2 MiB (an excerpt cut at
   4 KiB, what was cut said), and a result the server will not take is
   reported as the job's error rather than stopping the worker.
 - **`recall eval apply` never writes over an edit made meanwhile.** The
