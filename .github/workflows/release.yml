@@ -29,7 +29,8 @@ jobs:
   # release named after the package's *own* version, so a tag that disagrees
   # with npm/package.json ships a package that installs nothing — and it would
   # otherwise be discovered after twenty minutes of runner time.
-  versions:
+  check-versions:
+    name: check-versions
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.agree.outputs.version }}
@@ -50,8 +51,9 @@ jobs:
           [ "$npm_v" = "$want" ]   || { echo "::error::npm/package.json says $npm_v, the tag says $want"; exit 1; }
           echo "version=$want" >> "$GITHUB_OUTPUT"
 
-  build:
-    needs: versions
+  build-client:
+    name: build-client (${{ matrix.target }})
+    needs: check-versions
     strategy:
       fail-fast: false
       matrix:
@@ -59,14 +61,14 @@ jobs:
         # can't silently change what a released binary was built against.
         # The cost is that a retired label stops being served rather than
         # failing: v0.1.0's macos-13 job sat queued with no runner assigned
-        # and no error, and since `publish` waits for all four, the release
+        # and no error, and since `publish-github` waits for all four, the release
         # never appeared. If a build job never starts, check the label here
         # against actions/runner-images before looking anywhere else.
         include:
           # Built on the arm64 runner, not macos-15-intel: Apple's toolchain
           # targets x86_64 from Apple Silicon out of the box (cc-rs passes
           # `-arch x86_64`, and the SDK carries both), and the Intel runner
-          # was the slowest leg every release, the one `publish` waited on.
+          # was the slowest leg every release, the one `publish-github` waited on.
           # "Built for the right architecture" below checks the result.
           - target: x86_64-apple-darwin
             os: macos-15
@@ -96,7 +98,7 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      # Not .github/actions/rust-setup (ci.yml's `rust`/`windows` jobs):
+      # Not .github/actions/rust-setup (ci.yml's `test-linux`/`test-windows` jobs):
       # that composite bakes in rustfmt+clippy components and a main-only
       # save-if, and this job needs neither, wanting a cross-compile target
       # instead of components, and a cache that always saves, since a
@@ -199,7 +201,8 @@ jobs:
   # deploy/Dockerfile assembles and on any other Linux too. The client's
   # archives above contain neither.
   build-server:
-    needs: versions
+    name: build-server (${{ matrix.target }})
+    needs: check-versions
     strategy:
       fail-fast: false
       matrix:
@@ -291,8 +294,9 @@ jobs:
           name: recall-server-and-worker_linux_${{ matrix.arch }}
           path: dist/*.tar.gz
 
-  publish:
-    needs: [build, build-server]
+  publish-github:
+    name: publish-github
+    needs: [build-client, build-server]
     runs-on: ubuntu-latest
     # The one job here that writes anything: softprops/action-gh-release
     # below needs contents: write to create the Release and upload its
@@ -322,8 +326,9 @@ jobs:
   # unpublished. Each skips a version its registry already has, so re-running
   # a failed job is always safe.
 
-  npm:
-    needs: publish
+  publish-npm:
+    name: publish-npm
+    needs: publish-github
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -356,8 +361,9 @@ jobs:
           # automatically under trusted publishing.
           npm publish --access public
 
-  crates:
-    needs: publish
+  publish-crates:
+    name: publish-crates
+    needs: publish-github
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -397,8 +403,9 @@ jobs:
             [ "$i" -eq $(( ${#crates[@]} - 1 )) ] || sleep 20
           done
 
-  homebrew:
-    needs: publish
+  publish-homebrew:
+    name: publish-homebrew
+    needs: publish-github
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -467,8 +474,9 @@ jobs:
   # a fork of it. That fork, and at least one version of the package already
   # present in winget-pkgs, are both one-time setup done by hand; this job
   # cannot create either. See docs/reference/releasing.md.
-  winget:
-    needs: publish
+  publish-winget:
+    name: publish-winget
+    needs: publish-github
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -493,7 +501,7 @@ jobs:
             echo "::warning::WINGET_TOKEN is not set on the release environment, so winget-pkgs was not updated. See docs/reference/releasing.md."
           fi
       # The default installers-regex only matches .exe/.msi/.msix/.appx —
-      # release.yml's Windows archives are .zip (see the `build` job's
+      # release.yml's Windows archives are .zip (see the `build-client` job's
       # "Package (Windows)" step), so it has to be widened or the action
       # finds no installers to publish at all.
       - name: Publish to winget-pkgs
@@ -511,8 +519,8 @@ jobs:
   # version (Actions → Deploy), which a registry publish cannot. Skips, and
   # says so, where no server is configured.
   deploy:
-    needs: [versions, publish]
+    needs: [check-versions, publish-github]
     uses: ./.github/workflows/deploy.yml
     with:
-      version: ${{ needs.versions.outputs.version }}
+      version: ${{ needs.check-versions.outputs.version }}
     secrets: inherit
