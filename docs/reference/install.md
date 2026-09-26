@@ -77,7 +77,7 @@ isn't on your `PATH`. Like the npm installer, it checks the download's
 SHA-256 against the release's `checksums.txt` before anything is unpacked.
 (`RECALL_TEST_RELEASES_URL`, which this script, `install.ps1` and the npm
 installer also read, exists only so this repository's CI can serve them a
-release from loopback; leave it unset.)
+release from loopback. They refuse any other address; leave it unset.)
 
 That URL is a Cloudflare Worker that fetches `install.sh` from `main` on
 every request, so what runs is whatever this repository says right now —

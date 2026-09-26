@@ -38,6 +38,10 @@ break will be described here in full rather than smoothed over.
 - **`install.sh` checks what it downloads.** The archive's SHA-256 is
   compared with the release's `checksums.txt` before anything is unpacked,
   as `install.ps1` and npm already did; a mismatch installs nothing.
+- **An archive whose binary is a symlink is refused** by the npm installer,
+  `install.sh` and the server image's fetch, rather than followed. The npm
+  installer used to rename such a link into place and `chmod` it, which
+  changed the mode of whatever it pointed at.
 
 ## 0.4.5 — 2026-09-26
 

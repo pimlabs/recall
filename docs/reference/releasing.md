@@ -255,8 +255,10 @@ recall-x86_64-apple-darwin/README.md
 ```
 
 `recall.exe` in the Windows zips, `recall-server` or `recall-worker` in the
-server's. `scripts/package-release.py` is the one place that layout is
-written, for every runner.
+server's. `scripts/package-release.py` is the one place both the name and
+the layout are made, for every runner: the workflow passes it only the
+binary and the target, and `package-release.py --name <binary> <target>`
+prints the name without packing anything.
 
 **v0.4.5 and older are different, and stay that way** — tags never move, so
 their archives are never rebuilt. They are `recall_{darwin,linux}_{amd64,arm64}.tar.gz`
@@ -273,20 +275,27 @@ first, since until 0.4.6 ships latest *is* 0.4.5), `npm/install.js`,
 `scripts/release.sh` and `packaging/winget/generate_manifest.py`.
 
 Those names are a contract, and CI holds everyone to it before a release
-does. The `test-installers` job builds a release on every pull request:
-the names from this workflow's own matrix, packed by
-`scripts/package-release.py`, with tiny fake binaries and a `checksums.txt`
-made the way `publish` makes it, plus one in v0.4.5's layout. It serves
-them on 127.0.0.1 and runs `install.sh`, `npm/install.js` and
-`deploy/fetch-release.sh` against them, for "latest" and pinned versions on
-both sides of the cutoff, and runs what each installed; the `windows` job
-does the same for `install.ps1` on both Windows architectures
-(`scripts/installer-test.sh`, `scripts/installer-test.ps1`). The installers
-reach that local release through `RECALL_TEST_RELEASES_URL`, which replaces
-`https://github.com/pimlabs/recall/releases` and exists for this test
-alone: the checksums come from the same place as the archive, so pointed
-anywhere else it verifies nothing. `deploy/fetch-release.sh` takes the URL
-as its fourth argument instead. The Windows pair is `.zip`, not `.tar.gz` —
+does. The `test-installers` job builds a release on every pull request by
+running this workflow's own `Package` steps, as written here, for every
+matrix entry, against tiny fake binaries (`scripts/run-package-steps.py`),
+and checks that they wrote exactly the names `package-release.py --name`
+gives; then a `checksums.txt` made the way `publish` makes it, and one more
+release in v0.4.5's layout. It serves them on 127.0.0.1 and runs
+`install.sh`, `npm/install.js` and `deploy/fetch-release.sh` against them,
+for "latest" and pinned versions on both sides of the cutoff, and runs what
+each installed; a wrong checksum or a binary that is a symlink installs
+nothing. The `windows` job does the same for `install.ps1`, and for
+`npm/install.js`'s zip path, on both Windows architectures
+(`scripts/installer-test.sh`, `scripts/installer-test.ps1`). Keep the
+`Package` steps `shell: bash`, which is how the test runs them.
+
+The installers reach that local release through `RECALL_TEST_RELEASES_URL`,
+which replaces `https://github.com/pimlabs/recall/releases` and exists for
+this test alone. The checksums come from the same place as the archive, so
+pointed anywhere else it would verify nothing: `install.sh`, `install.ps1`
+and `npm/install.js` refuse any value but `http://127.0.0.1:<port>`,
+`http://localhost:<port>` or `http://[::1]:<port>`.
+`deploy/fetch-release.sh` takes the URL as its fourth argument instead. The Windows pair is `.zip`, not `.tar.gz` —
 the same `checksums.txt` covers both shapes, and everything that verifies
 against it filters by exact filename, not extension.
 
