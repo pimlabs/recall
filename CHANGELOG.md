@@ -42,6 +42,11 @@ break will be described here in full rather than smoothed over.
   `install.sh` and the server image's fetch, rather than followed. The npm
   installer used to rename such a link into place and `chmod` it, which
   changed the mode of whatever it pointed at.
+- **rustls 0.23.45** (was 0.23.43), for
+  [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285):
+  TLS 1.3 handshake messages were accepted across encryption-level
+  boundaries. It reaches the server's direct-TLS listener and every HTTP
+  client in the workspace. Lockfile only; no code changes.
 
 ## 0.4.5 — 2026-09-26
 

@@ -37,7 +37,7 @@ import yaml
 REPO = Path(__file__).resolve().parent.parent
 # What each job's `cargo build -p` makes, and so what a Package step finds.
 BINARIES = {
-    "build": ("recall",),
+    "build-client": ("recall",),
     "build-server": ("recall-server", "recall-worker"),
 }
 STAND_INS = """\

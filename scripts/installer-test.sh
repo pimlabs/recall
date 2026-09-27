@@ -118,7 +118,7 @@ check "run for every matrix entry" package_steps
 python3 - .github/workflows/release.yml >"$WORK/expected-targets" <<'PY'
 import sys, yaml
 jobs = yaml.safe_load(open(sys.argv[1]))["jobs"]
-for e in jobs["build"]["strategy"]["matrix"]["include"]:
+for e in jobs["build-client"]["strategy"]["matrix"]["include"]:
     print("recall.exe" if e["os"].startswith("windows") else "recall", e["target"])
 for e in jobs["build-server"]["strategy"]["matrix"]["include"]:
     print("recall-server", e["target"])

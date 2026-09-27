@@ -882,7 +882,7 @@ See `docs/design/handshake.md` for the reasoning.
 - [ ] winget publishing for the Windows client. **Shelved on 2026-09-24:** the
       one-time `winget-pkgs` setup (fork ownership, manual first submission,
       moderation) was too much friction for a single-owner tool. Windows
-      installs with `install.ps1` or npm instead. The `winget` job stays in
+      installs with `install.ps1` or npm instead. The `publish-winget` job stays in
       `release.yml` and skips while `WINGET_TOKEN` is unset on the `release`
       environment.
 - [x] Optional direct TLS in `recall-server` (certificate files or ACME), for

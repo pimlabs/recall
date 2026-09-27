@@ -1,6 +1,6 @@
-name: Cut a release
+name: Start a release
 
-# One tap from the GitHub mobile app: Actions → Cut a release → Run workflow.
+# One tap from the GitHub mobile app: Actions → Start a release → Run workflow.
 #
 # It exists because a tag is the one step of a release that needed a laptop.
 # This reads the version from main, creates `v<version>` there, and starts
@@ -22,11 +22,12 @@ on:
 
 # One at a time: two taps must not race to create the same tag.
 concurrency:
-  group: cut-release
+  group: start-release
   cancel-in-progress: false
 
 jobs:
-  cut:
+  create-tag:
+    name: create-tag
     runs-on: ubuntu-latest
     permissions:
       contents: write # push the tag
@@ -68,7 +69,7 @@ jobs:
             exit 1
           fi
           # The whole run, not any one job: ci.yml splits its checks across
-          # several jobs (`checks`, `rust`, `image`, `windows`), and the
+          # several jobs (`check-scripts`, `test-linux`, `build-image`, `test-windows`), and the
           # Windows jobs test the client the release ships for Windows, so a
           # red one blocks a release as much as a red Linux one. On a push to
           # main every job runs; a run is `success` only when each of them

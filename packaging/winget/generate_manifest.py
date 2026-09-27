@@ -4,7 +4,7 @@
 Usage: generate_manifest.py <version> <checksums.txt> [<output dir>]
 
 winget-pkgs wants a package's *first* version submitted by hand — the
-`winget` job in .github/workflows/release.yml (vedantmgoyal9/winget-releaser)
+`publish-winget` job in .github/workflows/release.yml (vedantmgoyal9/winget-releaser)
 only updates a package that already exists there, it does not create one.
 This script exists for that one-time submission, and for anyone who wants to
 inspect or hand-edit what a release's manifest will look like without
@@ -49,8 +49,8 @@ SHORT_DESCRIPTION = "Sync Claude Code's auto memory across machines and cloud se
 TAGS = ["claude", "claude-code", "cli", "memory", "sync"]
 
 # One installer per architecture, each a zip — the same archives
-# .github/workflows/release.yml's `build` job publishes (its "Package
-# (Windows)" step) and docs/reference/releasing.md documents. Keep this in
+# .github/workflows/release.yml's `build-client` job publishes (its
+# "Package (Windows)" step) and docs/reference/releasing.md documents. Keep this in
 # step with both if either ever changes.
 #
 # v0.4.5 is the last release whose zips are named recall_windows_<arch>.zip
