@@ -54,7 +54,7 @@ Two consequences worth stating, because both have already been got wrong:
 Merge a PR that bumps the version in `Cargo.toml` and `npm/package.json`.
 Then either, from anywhere including the GitHub mobile app:
 
-> **Actions → Cut a release → Run workflow** (on `main`)
+> **Actions → Start a release → Run workflow** (on `main`)
 
 or, from a machine with a checkout:
 
@@ -62,8 +62,8 @@ or, from a machine with a checkout:
 git tag -a v0.3.1 -m "recall 0.3.1" && git push origin v0.3.1
 ```
 
-Both end in the same place. *Cut a release*
-(`.github/workflows/cut-release.yml`) reads the version from `main`, refuses
+Both end in the same place. *Start a release*
+(`.github/workflows/start-release.yml`) reads the version from `main`, refuses
 if any CI job (Linux or Windows) did not pass on that commit or if the tag
 already exists somewhere else, creates the tag, and starts the Release workflow on it. It dispatches
 Release explicitly because a tag pushed with the workflow's own token starts
@@ -78,10 +78,10 @@ either refuses or resumes; it never moves a tag.
 2. **Build** the client's targets on native runners, then **create the
    GitHub Release** with `checksums.txt`. `install.sh` (and, on Windows,
    `install.ps1`) work from this moment.
-3. **Stop and wait for you.** The `npm`, `crates`, `homebrew` and `winget`
-   jobs run in the `release` environment, whose required reviewer is the
-   owner. GitHub notifies you; *Review deployments → Approve* releases all
-   four.
+3. **Stop and wait for you.** The `publish-npm`, `publish-crates`,
+   `publish-homebrew` and `publish-winget` jobs run in the `release`
+   environment, whose required reviewer is the owner. GitHub notifies you;
+   *Review deployments → Approve* releases all four.
 4. **npm** and **crates.io** publish through *trusted publishing*: each
    registry trusts this workflow's OIDC identity and issues a credential that
    lasts for the job. No npm or crates.io token is stored anywhere — not in
@@ -94,11 +94,12 @@ either refuses or resumes; it never moves a tag.
    version's manifest. Needs a one-time first submission by hand before it
    does anything — see [winget](#5-winget-first-submission-only) below.
 
-The `npm`, `crates` and `homebrew` jobs are independent — one failing does
-not stop the others — and each skips a version its registry already has, so
-**re-running a failed job is always safe**. `winget` is independent of the
-other three the same way, but is not its own idempotency check the way they
-are: re-running it after it already opened a pull request for this version
+The `publish-npm`, `publish-crates` and `publish-homebrew` jobs are
+independent — one failing does not stop the others — and each skips a
+version its registry already has, so **re-running a failed job is always
+safe**. `publish-winget` is independent of the other three the same way, but
+is not its own idempotency check the way they are: re-running it after it
+already opened a pull request for this version
 asks winget-pkgs to open another one, which is a mess to untangle rather than
 a safe no-op. If it fails partway, check whether a pull request exists at
 [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs/pulls) before
@@ -135,16 +136,16 @@ Done once per repository; nothing here needs repeating per release.
 4. **Homebrew tap** — a fine-grained personal access token with *Contents:
    read and write* on `pimlabs/homebrew-tap` **only**, saved as the secret
    `HOMEBREW_TAP_TOKEN` on the `release` environment (not the repository),
-   so only an approved job can read it. Without it the `homebrew` job warns
-   and skips; everything else still publishes.
+   so only an approved job can read it. Without it the `publish-homebrew`
+   job warns and skips; everything else still publishes.
 5. **winget** — a *classic* personal access token with the `public_repo` and
    `workflow` scopes (the second so a workflow-file change upstream in
    `microsoft/winget-pkgs` doesn't fail the job intermittently — a fine-grained
    token is not accepted here), saved as the secret `WINGET_TOKEN` on the
-   `release` environment. Without it the `winget` job warns and skips;
+   `release` environment. Without it the `publish-winget` job warns and skips;
    everything else still publishes. This alone is not enough to make the
-   `winget` job do anything, though — it also needs the fork and the first
-   submission below, done once, by hand.
+   `publish-winget` job do anything, though — it also needs the fork and the
+   first submission below, done once, by hand.
 
 Once the first CI release has published cleanly, the old npm and crates.io
 tokens on any laptop can be revoked.
@@ -249,11 +250,11 @@ verifies against it filters by exact filename, not extension.
 ### When a build job never starts
 
 A retired runner label does not fail — it is simply never served. The job
-sits `queued` with no runner assigned and no error, and because `publish`
-waits for every leg of the matrix, no release is created at all. This
-happened on the first real tag: `macos-13` had been retired, the job queued
-indefinitely, and `release.sh` timed out at step 6 with the other builds
-green and nothing to show for them.
+sits `queued` with no runner assigned and no error, and because
+`publish-github` waits for every leg of the matrix, no release is created at
+all. This happened on the first real tag: `macos-13` had been retired, the
+job queued indefinitely, and `release.sh` timed out at step 6 with the other
+builds green and nothing to show for them.
 
 The recovery does **not** involve moving the tag. `workflow_dispatch` takes
 the workflow file from `main` but checks out the ref you name, so fixing the
@@ -449,7 +450,7 @@ step is deliberate rather than automated.
 ## 5. winget (first submission only)
 
 Package identifier `PimLabs.Recall`, publisher `pimlabs`, license `MIT`,
-moniker `recall`. The `winget` job in `.github/workflows/release.yml`
+moniker `recall`. The `publish-winget` job in `.github/workflows/release.yml`
 (`vedantmgoyal9/winget-releaser`, which drives
 [komac](https://github.com/russellbanks/Komac) under the hood) keeps this up
 to date automatically from then on — **but it updates an existing package,
@@ -496,7 +497,7 @@ This is a few one-time steps, done once total, not once per release:
    wizard's prompts rather than guessing at them.
 
    **Recommended: [komac](https://github.com/russellbanks/Komac).** It is
-   the tool the automated `winget` job itself uses, it runs on macOS and
+   the tool the automated `publish-winget` job itself uses, it runs on macOS and
    Linux as well as Windows, and it is the only one of the two that does —
    so the whole submission can be done from the same non-Windows machine
    `scripts/release.sh` already runs on, with nothing installed beyond komac
