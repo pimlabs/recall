@@ -108,7 +108,11 @@ FROM source AS source-worker
 RUN cargo build --release --locked -p recall-worker \
  && cp target/release/recall-worker /out/recall-worker
 
-# ---- release: fetch the published binary.
+# ---- release: fetch the published binary. Which archive that is, by name
+# and layout, is fetch-release.sh's to decide from the version: v0.4.5 and
+# older publish recall-server_linux_<arch>.tar.gz, every later release
+# recall-server-<rust target>.tar.gz. So a deploy of any version, a rollback
+# included, finds its own release's archive.
 FROM alpine:3 AS release
 RUN apk add --no-cache curl
 ARG RECALL_VERSION=

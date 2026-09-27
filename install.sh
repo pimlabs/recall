@@ -10,20 +10,55 @@
 # below is exactly what a stale copy would be missing.
 #
 # Downloads the prebuilt binary for this platform from the latest GitHub
-# release. Installs to ~/.local/bin/recall; override with RECALL_BIN_DIR,
-# or pin a version with RECALL_VERSION=v0.1.0.
+# release, checks it against that release's checksums.txt, and installs it
+# to ~/.local/bin/recall; override with RECALL_BIN_DIR, or pin a version
+# with RECALL_VERSION=v0.1.0.
+#
+# RECALL_TEST_RELEASES_URL is for this repository's own CI and nothing else:
+# it replaces https://github.com/pimlabs/recall/releases, so
+# scripts/installer-test.sh can serve a release from loopback. The checksums
+# come from the same place as the archive, so pointing it anywhere else
+# would verify nothing: anything but plain http to a loopback address and a
+# port is refused. Leave it unset.
 set -euo pipefail
 
 REPO="pimlabs/recall"
+RELEASES="${RECALL_TEST_RELEASES_URL:-https://github.com/$REPO/releases}"
 BIN_DIR="${RECALL_BIN_DIR:-$HOME/.local/bin}"
 VERSION="${RECALL_VERSION:-latest}"
+
+loopback='^http://(127\.0\.0\.1|localhost|\[::1\]):[0-9]+(/.*)?$'
+if [ -n "${RECALL_TEST_RELEASES_URL:-}" ] && ! [[ "$RECALL_TEST_RELEASES_URL" =~ $loopback ]]; then
+  echo "install: RECALL_TEST_RELEASES_URL is only for this repository's tests, and only" >&2
+  echo "  http://127.0.0.1:<port>, http://localhost:<port> or http://[::1]:<port>;" >&2
+  echo "  got $RECALL_TEST_RELEASES_URL. Unset it." >&2
+  exit 1
+fi
+RELEASES="${RELEASES%/}"
+
+# v0.4.5 is the last release whose archives are named recall_<os>_<arch>
+# and hold one binary renamed the same way. Every release after it names
+# them recall-<rust target>, holding a recall-<rust target>/ directory with
+# `recall` in it. Tags never move, so both stay true for good.
+LAST_OLD_STYLE_RELEASE=0.4.5
 
 die() {
   echo "install: $*" >&2
   exit 1
 }
 
-for dep in curl tar uname; do
+# True when $1 (v0.4.5, 0.4.5, v0.4.6-rc.1, ...) was released with the old
+# archive names. A pre-release counts as the version it leads up to.
+old_style_archives() {
+  local v a b c x y z
+  v="${1#v}"
+  v="${v%%[-+]*}"
+  IFS=. read -r a b c <<<"$v"
+  IFS=. read -r x y z <<<"$LAST_OLD_STYLE_RELEASE"
+  ((10#$a < 10#$x || (10#$a == 10#$x && (10#$b < 10#$y || (10#$b == 10#$y && 10#$c <= 10#$z)))))
+}
+
+for dep in curl tar uname awk; do
   command -v "$dep" >/dev/null || die "$dep is required but not installed"
 done
 
@@ -48,29 +83,78 @@ case "$arch" in
   *) die "unsupported architecture: $arch" ;;
 esac
 
-asset="recall_${os}_${arch}.tar.gz"
+case "$os-$arch" in
+  darwin-amd64) target="x86_64-apple-darwin" ;;
+  darwin-arm64) target="aarch64-apple-darwin" ;;
+  linux-amd64) target="x86_64-unknown-linux-gnu" ;;
+  linux-arm64) target="aarch64-unknown-linux-gnu" ;;
+esac
+
+build_hint="If no release exists yet, build from source instead:
+      git clone https://github.com/$REPO && cd recall
+      cargo build --release -p recall   # binary at target/release/recall
+    Or, without a Rust toolchain of your own:
+      brew install --HEAD pimlabs/tap/recall"
+
+# "latest" is resolved to a tag first, because the archive's name depends
+# on which release it is. GitHub answers /releases/latest with a redirect to
+# /releases/tag/<tag>, and that last path segment is the version: one HEAD
+# request, and no API rate limit to run into.
 if [[ "$VERSION" == "latest" ]]; then
-  url="https://github.com/$REPO/releases/latest/download/$asset"
-else
-  url="https://github.com/$REPO/releases/download/$VERSION/$asset"
+  resolved="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$RELEASES/latest")" \
+    || die "could not look up the latest release at $RELEASES/latest
+    $build_hint"
+  resolved="${resolved%/}"
+  VERSION="${resolved##*/}"
+  echo "install: the latest release is $VERSION"
 fi
+VERSION="v${VERSION#v}"
+[[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]] \
+  || die "not a release version: $VERSION (expected something like v0.4.6)"
+
+if old_style_archives "$VERSION"; then
+  asset="recall_${os}_${arch}.tar.gz"
+  inner="recall_${os}_${arch}"
+else
+  asset="recall-$target.tar.gz"
+  inner="recall-$target/recall"
+fi
+base="$RELEASES/download/$VERSION"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 echo "install: downloading $asset ($VERSION)..."
-if ! curl -fsSL "$url" -o "$tmp/$asset"; then
-  die "could not download $url
-    If no release exists yet, build from source instead:
-      git clone https://github.com/$REPO && cd recall
-      cargo build --release -p recall   # binary at target/release/recall
-    Or, without a Rust toolchain of your own:
-      brew install --HEAD pimlabs/tap/recall"
+if ! curl -fsSL "$base/$asset" -o "$tmp/$asset"; then
+  die "could not download $base/$asset
+    $build_hint"
 fi
+curl -fsSL "$base/checksums.txt" -o "$tmp/checksums.txt" \
+  || die "could not download $base/checksums.txt"
+
+# checksums.txt lists every archive in the release; only the line naming
+# this one counts. Nothing is unpacked, let alone made executable, before it
+# matches.
+expected="$(awk -v f="$asset" '$2 == f || $2 == "*" f { print $1; exit }' "$tmp/checksums.txt")"
+[ -n "$expected" ] || die "checksums.txt has no line for $asset; the release may be incomplete"
+if command -v sha256sum >/dev/null; then
+  actual="$(sha256sum "$tmp/$asset" | awk '{ print $1 }')"
+elif command -v shasum >/dev/null; then
+  actual="$(shasum -a 256 "$tmp/$asset" | awk '{ print $1 }')"
+else
+  die "need sha256sum or shasum to check the download, and found neither"
+fi
+[ "$actual" = "$expected" ] \
+  || die "checksum mismatch for $asset: got $actual, checksums.txt says $expected. The download may be corrupt or tampered with; nothing was installed."
 
 tar -xzf "$tmp/$asset" -C "$tmp"
+# A regular file, not a symlink to one: `install` would copy whatever a link
+# points at.
+if [ ! -f "$tmp/$inner" ] || [ -L "$tmp/$inner" ]; then
+  die "$asset did not contain $inner as a regular file; please report it at https://github.com/$REPO/issues"
+fi
 mkdir -p "$BIN_DIR"
-install -m 0755 "$tmp/recall_${os}_${arch}" "$BIN_DIR/recall"
+install -m 0755 "$tmp/$inner" "$BIN_DIR/recall"
 
 echo "install: installed $BIN_DIR/recall"
 "$BIN_DIR/recall" version

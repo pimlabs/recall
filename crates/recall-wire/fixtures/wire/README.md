@@ -74,7 +74,10 @@ captured again from the v0.4.5 release archive once 0.4.5 was out, so
   ```
 
   The script keeps any file that already exists. Write the request fixtures
-  by hand if `PushRequest` changed.
+  by hand if `PushRequest` changed. It downloads the archive under the name
+  that version was released with: `recall-server_linux_<arch>.tar.gz` up to
+  0.4.5, `recall-server-<target>.tar.gz` (Linux only) from 0.4.6, and the
+  client's own archive before 0.4.0.
 - **A new kind of request or response gets a fixture** and an arm in
   `round_trip` in `tests/golden.rs`. A file whose kind that function does
   not know fails the test, so a fixture cannot be added and never read.
