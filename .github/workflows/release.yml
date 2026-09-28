@@ -522,7 +522,7 @@ jobs:
   # The server runs the release that was just published: its image holds
   # the recall-server above, checked against checksums.txt. Not behind the
   # `release` environment: a deploy can be undone by deploying the previous
-  # version (Actions → Deploy), which a registry publish cannot. Skips, and
+  # version (Actions → Deploy a release), which a registry publish cannot. Skips, and
   # says so, where no server is configured.
   deploy:
     needs: [check-versions, publish-github]

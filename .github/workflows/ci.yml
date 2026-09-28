@@ -67,6 +67,13 @@ jobs:
   # On a push to `main` both outputs are true unconditionally: the two jobs
   # they gate run on every push regardless of what changed, so there is
   # nothing to compute there.
+  #
+  # The same holds while the repository is public. GitHub-hosted runners
+  # cost nothing for a public repository, Windows included, so skipping
+  # buys nothing but a pull request tested less than main will be. The
+  # diff only decides anything for a private repository, where Windows
+  # minutes are billed double, and it starts deciding by itself the day the
+  # repository's visibility changes: `github.event.repository.private`.
   plan:
     name: plan
     runs-on: ubuntu-latest
@@ -81,6 +88,12 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" != "pull_request" ]; then
             echo "Not a pull request — the image and the Windows jobs run unconditionally."
+            echo "image=true" >> "$GITHUB_OUTPUT"
+            echo "windows=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "${{ github.event.repository.private }}" != "true" ]; then
+            echo "Public repository: runners are free, so the image and the Windows jobs run on every pull request."
             echo "image=true" >> "$GITHUB_OUTPUT"
             echo "windows=true" >> "$GITHUB_OUTPUT"
             exit 0
@@ -630,3 +643,27 @@ jobs:
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts\installer-test.ps1 target\debug\recall.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  # One check that stands for the whole run: green when every job above
+  # succeeded or was deliberately skipped by `plan`, red otherwise. It is
+  # the one name to require if main ever gets branch protection, so a job
+  # `plan` skips (private repository, docs-only change) never leaves a
+  # required check waiting, and adding a job never means editing the
+  # protection rule. `always()` so it reports even when something it waits
+  # on failed or was cancelled.
+  ci-passed:
+    name: ci-passed
+    if: always()
+    needs: [plan, check-scripts, test-installers, test-linux, build-image, test-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job succeeded or was skipped on purpose
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          bad=$(echo "$RESULTS" | jq -r '[to_entries[] | select(.value.result != "success" and .value.result != "skipped") | .key] | join(", ")')
+          if [ -n "$bad" ]; then
+            echo "::error::Not green: $bad"
+            exit 1
+          fi
