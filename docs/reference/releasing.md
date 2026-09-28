@@ -82,8 +82,9 @@ either refuses or resumes; it never moves a tag.
    `publish-image`): `ghcr.io/pimlabs/recall-server:<version>` and
    `recall-worker:<version>`, for amd64 and arm64, built from the Release's
    own binaries, each architecture on a native runner (never emulated), with
-   no `latest` tag. Then **deploy** them: the production server pulls the image
-   rather than building it (`deploy.yml`; see
+   no `latest` tag, and attested (`actions/attest`). Then **deploy** them:
+   the deploy verifies each tag's digest against that attestation, and the
+   production server pulls that digest rather than building it (`deploy.yml`; see
    [`github-actions-deploy.md`](github-actions-deploy.md)). Neither waits for
    an approval, deliberately: the image holds nothing the Release did not
    already make public, a package version can be deleted, and a deploy is

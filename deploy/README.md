@@ -625,9 +625,14 @@ docker compose pull recall-server   # with your -f files; add recall-worker if y
 docker compose up -d --no-build     # with your -f files
 ```
 
-The automatic deploy does this, and also tags what it pulled as `:local`,
-so a later `docker compose up -d` without `RECALL_VERSION` runs the same
-version rather than building one. 0.4.6 and older have no published image
+The automatic deploy does this more carefully: it pulls each image by the
+digest its tag named when the deploy checked it, after verifying that
+digest's attestation from this repository's Release workflow, and tags it
+as the version and as `:local`, so a later `docker compose up -d` without
+`RECALL_VERSION` runs the same version rather than building one. Once the
+new version is healthy it removes older version tags of the two images,
+keeping the one before it for a rollback (see
+[`github-actions-deploy.md`](../docs/reference/github-actions-deploy.md#the-image-published-by-the-release-pulled-by-the-server)). 0.4.6 and older have no published image
 and are only ever built, which is how a rollback to them is deployed; such a
 rollback leaves `:local` on the last version pulled, so after one, name
 `RECALL_VERSION` or pass `--build` in commands you type (see

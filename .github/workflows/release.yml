@@ -516,7 +516,9 @@ jobs:
       # own provenance to each architecture's image too (--provenance
       # mode=max). A tag an earlier run made is attested again, so a run
       # whose attestation failed after its tag was made is finished by
-      # re-running it.
+      # re-running it. deploy.yml verifies it, by digest and with this
+      # workflow as the signer, before a server pulls anything, so an
+      # image without one is never deployed.
       - name: Attest the server image
         if: steps.push.outputs.server_digest != ''
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
@@ -753,11 +755,18 @@ jobs:
   #
   # Its `if` is spelled out because publish-image runs after build-image was
   # skipped, and a job's default `success()` counts that skip against it.
+  #
+  # Its permissions are the most deploy.yml can have when called from here:
+  # attestations: read, for the deploy to verify the attestation
+  # `publish-image` made before the server pulls anything.
   deploy:
     needs: [check-versions, publish-image]
     if: >-
       !cancelled() && needs.check-versions.result == 'success'
       && needs.publish-image.result == 'success'
+    permissions:
+      contents: read
+      attestations: read
     uses: ./.github/workflows/deploy.yml
     with:
       version: ${{ needs.check-versions.outputs.version }}
