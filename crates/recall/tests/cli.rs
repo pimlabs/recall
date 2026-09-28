@@ -5496,3 +5496,78 @@ fn a_claim_holding_a_secret_gets_no_rewrite() {
     assert_eq!(claim["verdict"], "stale", "{claim}");
     assert!(claim["suggested_edit"].is_null(), "{claim}");
 }
+
+/// `.recall-review.json` decides nothing about which bytes change: the
+/// report's `suggested_edit` is rebuilt, not trusted, and a stored rewrite
+/// is held to the rules again. Without a terminal to ask on and without
+/// `--yes`, nothing is changed.
+#[cfg(unix)]
+#[test]
+fn review_apply_builds_the_edit_again_and_trusts_no_stored_one() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let home = recall_home_with(&[(&server.url, "right")], &server.url);
+    let home_str = home.path().to_string_lossy().to_string();
+    let (_fake, path) = fake_claude(C1_STALE_REWRITTEN);
+    let env = [("RECALL_HOME", home_str.as_str()), ("PATH", path.as_str())];
+    let content = "# Deploy\n\nThe deploy happens on Tuesdays. It used to happen on Mondays.\n";
+    assert_eq!(push_memory(&repo, &env, "deploy.md", content).code, 0);
+    let r = run(
+        &["review", "run", "--claude", "--json"],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    let id = claim_containing(&report["claims"], "Tuesdays")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let memory_dir = PathBuf::from(
+        status_json(repo.path(), &env)["memory_dir"]
+            .as_str()
+            .unwrap(),
+    );
+    let note = memory_dir.join("deploy.md");
+    let state_file = memory_dir.parent().unwrap().join(".recall-review.json");
+    let original = std::fs::read_to_string(&state_file).unwrap();
+
+    // No terminal, no --yes: refused, nothing changed.
+    let asked = run(&["review", "apply", &id], repo.path(), &env, None);
+    assert_eq!(asked.code, 1, "{}", asked.stdout);
+    assert!(
+        asked.stderr.contains("needs a terminal"),
+        "{}",
+        asked.stderr
+    );
+    assert_eq!(std::fs::read_to_string(&note).unwrap(), content);
+
+    // A stored rewrite that is no record is held to the rules again.
+    let mut state: serde_json::Value = serde_json::from_str(&original).unwrap();
+    state["files"]["deploy.md"]["claude"]["decided"][0]["rewrite"] =
+        "The deploy happens on Wednesdays.".into();
+    std::fs::write(&state_file, state.to_string()).unwrap();
+    let r = run(&["review", "apply", &id, "--yes"], repo.path(), &env, None);
+    assert_eq!(r.code, 1, "{}", r.stdout);
+    assert!(r.stderr.contains("has no edit to make"), "{}", r.stderr);
+    assert_eq!(std::fs::read_to_string(&note).unwrap(), content);
+
+    // A report whose suggested_edit was rewritten by hand: what is made is
+    // the edit built from the file and the stored rewrite, nothing else.
+    let mut state: serde_json::Value = serde_json::from_str(&original).unwrap();
+    for claim in state["report"]["claims"].as_array_mut().unwrap() {
+        if claim["id"] == id.as_str() {
+            claim["suggested_edit"]["replacement"] = "HACKED\n".into();
+            claim["suggested_edit"]["lines"] = serde_json::json!([1, 3]);
+        }
+    }
+    std::fs::write(&state_file, state.to_string()).unwrap();
+    let r = run(&["review", "apply", &id, "--yes"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(
+        std::fs::read_to_string(&note).unwrap(),
+        "# Deploy\n\nUntil 2026-09 the deploy happened on Tuesdays; it now happens on \
+         Wednesdays. It used to happen on Mondays.\n"
+    );
+}

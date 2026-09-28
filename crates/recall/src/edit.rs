@@ -48,6 +48,22 @@ pub(crate) fn lines(f: &[u32; 2]) -> String {
     }
 }
 
+/// `s` made safe to write to a terminal: a control character (other than
+/// a tab or a newline) becomes a space, so text from a note, a server or
+/// `claude` cannot move the cursor or rewrite what came before it, the edit
+/// being confirmed included.
+pub(crate) fn printable(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() && c != '\t' && c != '\n' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 /// `text`, each line indented to sit under a label.
 pub(crate) fn indented(text: &str) -> String {
     text.lines()
@@ -155,7 +171,7 @@ pub(crate) fn make_edit(
         format!(
             "Edit   {} become:\n{}",
             lines(&edit.lines),
-            indented(&edit.replacement)
+            indented(&printable(&edit.replacement))
         )
     };
     if !confirm(&shown)? {

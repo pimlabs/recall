@@ -86,10 +86,11 @@ break will be described here in full rather than smoothed over.
   `recall review apply t3` makes it the way `recall eval apply` makes a
   finding's, through the same code, now shared: refused unless the file is
   still the version the review read, checked again after you answer, and
-  pushed. Only the claim's words change; the edit is refused if its lines
-  hold another claim (a record, a claim still true, a rule) that the
-  replacement does not keep word for word, and a claim holding a secret is
-  never rewritten. **Patch**: a new subcommand and a new optional `--json`
+  pushed. Only the claim's words change, every other byte on its lines
+  kept; the edit is refused if it would reach into another claim (a record,
+  a claim still true, a rule), a fenced block or a claim holding a secret is
+  never rewritten, and the edit is built again at apply time rather than
+  taken from the stored report. **Patch**: a new subcommand and a new optional `--json`
   field.
 
 ## 0.4.8 — 2026-09-28

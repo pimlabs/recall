@@ -742,7 +742,7 @@ fn apply_decided(
             c.evidence.push(d.evidence);
             c.suggested_edit = match (&d.rewrite, &base.target) {
                 (Some(rewrite), Some((key, path))) => {
-                    apply::edit_for(c, base.content, key, path, rewrite)
+                    apply::build(base.content, c.lines, &c.text, (key, path), rewrite).ok()
                 }
                 _ => None,
             };
@@ -2036,9 +2036,7 @@ fn lines_desc(l: &[u32; 2]) -> String {
 /// came before it. Never applied to the stored or `--json` text — only to
 /// what actually reaches a terminal.
 fn sanitize_for_terminal(s: &str) -> String {
-    s.chars()
-        .map(|c| if c.is_control() && c != '\t' { ' ' } else { c })
-        .collect()
+    crate::edit::printable(s).replace('\n', " ")
 }
 
 fn print_text(rep: &Report) {

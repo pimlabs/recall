@@ -146,7 +146,8 @@ impl Decided {
     pub fn checked(&self) -> Decided {
         let mut d = self.clone();
         // Only a stale claim is rewritten, and only into a record.
-        d.rewrite = d.rewrite.filter(|r| rewrite_ok(r));
+        let text = d.text.clone();
+        d.rewrite = d.rewrite.take().filter(|r| rewrite_ok(&text, r));
         match d.class {
             Class::Record => {
                 d.verdict = None;
@@ -177,12 +178,20 @@ impl Decided {
     }
 }
 
-/// Whether `rewrite` can stand in for a stale claim: one line, not empty,
-/// and itself a record of what changed, never a bare replacement that
-/// would lose the history (the design's "a rewrite into a record, not a
-/// deletion").
-pub(super) fn rewrite_ok(rewrite: &str) -> bool {
-    !rewrite.trim().is_empty() && !rewrite.contains('\n') && super::looks_like_record(rewrite)
+/// Whether `rewrite` can stand in for the stale claim `claim`: one line of
+/// printable text, not empty, holding no mask, itself a record of what
+/// changed, and keeping every anchor of the claim (the path, host, version
+/// or name it was about), so the history is kept rather than replaced (the
+/// design's "a rewrite into a record, not a deletion").
+pub(super) fn rewrite_ok(claim: &str, rewrite: &str) -> bool {
+    !rewrite.trim().is_empty()
+        && !rewrite.chars().any(char::is_control)
+        && !rewrite.contains("masked]")
+        && !rewrite.contains("masked)")
+        && super::looks_like_record(rewrite)
+        && super::anchors(claim)
+            .iter()
+            .all(|a| rewrite.contains(a.value.as_str()))
 }
 
 /// `facts` in order, each once.
@@ -387,7 +396,7 @@ pub(super) fn decide(answer: &str, asked: &[Asked], facts: &[String]) -> Option<
                     ),
                 };
                 let rewrite = Some(one_line(&a.rewrite))
-                    .filter(|r| verdict == Verdict::Stale && rewrite_ok(r));
+                    .filter(|r| verdict == Verdict::Stale && rewrite_ok(&claim.text, r));
                 Decided {
                     lines: claim.lines,
                     text: claim.text.clone(),
@@ -687,6 +696,16 @@ mod tests {
         assert_eq!(d[0].rewrite, None, "not stale");
         let d = decide(&answer("stale", ""), &a, &facts()).unwrap();
         assert_eq!(d[0].rewrite, None, "empty");
+        // The reviewer's cases: history dropped behind "is now", a control
+        // character, a mask copied from a fact.
+        for bad in [
+            "The server is now at recall-server.pimlabs.id.",
+            "Until 2026-09 the server was at recall.pimlabs.id\\u001b[2K; it is now elsewhere.",
+            "Until 2026-09 the server was at recall.pimlabs.id; the key is [GitHub token, 40 characters, masked].",
+        ] {
+            let d = decide(&answer("stale", bad), &a, &facts()).unwrap();
+            assert_eq!(d[0].rewrite, None, "{bad}");
+        }
     }
 
     #[test]

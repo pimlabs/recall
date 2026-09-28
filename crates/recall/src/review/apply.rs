@@ -4,20 +4,27 @@
 //! Only a `stale` claim `claude` was asked about (layer 3) carries a
 //! suggestion, and the suggestion is always the claim rewritten as a
 //! record of what changed, never a deletion (see
-//! [`super::claude::rewrite_ok`]). The edit replaces the claim's own words
-//! in the lines it occupies and keeps every other word on those lines, so a
-//! sentence sharing a line with it is untouched.
+//! [`super::claude::rewrite_ok`]). The edit replaces the claim's own words,
+//! found once in the lines it occupies, and keeps every other byte, so a
+//! sentence sharing or wrapping onto its lines is untouched.
 //!
-//! Before any of [`crate::edit`]'s checks, the edit is refused if its lines
-//! hold another claim the replacement does not keep word for word: a
-//! record, a claim still true, a rule, anything. The design names records
-//! and `still_true` claims; nothing else on those lines is this edit's to
-//! change either.
+//! **Built, never trusted.** The report's `suggested_edit` is for reading.
+//! `apply` builds the edit again from the file as it is, the claim, and the
+//! rewrite `.recall-review.json` holds for it, and holds that rewrite to the
+//! rules again ([`build`]): a file anyone on this machine can edit decides
+//! nothing about which bytes change. The edit is refused when:
+//!
+//! - the claim is a fenced block, or spans more than its words (only prose
+//!   is rewritten);
+//! - it holds a secret (`claude` saw it masked, so its rewrite would put the
+//!   mask in the note);
+//! - its words are not in its lines exactly once;
+//! - another claim on those lines (a record, a claim still true, a rule,
+//!   anything) cannot be found, or would lose a byte.
 
-use recall_hooks::exit;
 use recall_wire::SuggestedEdit;
 
-use super::{load_state, Claim, Verdict};
+use super::{claude, extract_claims, load_state, Verdict};
 use crate::edit::{self, refused, Hints};
 use crate::project as proj;
 
@@ -28,106 +35,124 @@ const HINTS: Hints = Hints {
     again: "recall review apply",
 };
 
-/// `text`'s words, whatever whitespace separates them.
-fn words(text: &str) -> Vec<&str> {
-    text.split_whitespace().collect()
+/// The byte offset each line of `content` starts at, and one past the end.
+fn line_starts(content: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    starts.extend(content.match_indices('\n').map(|(i, _)| i + 1));
+    if *starts.last().unwrap() != content.len() {
+        starts.push(content.len());
+    }
+    starts
 }
 
-/// The lines `lines` of `content` with `claim`'s words replaced by
-/// `rewrite`, every other byte kept: [`None`] when the claim's words are
-/// not found there in order (the report and the file disagree).
-pub(super) fn substitute(
-    content: &str,
-    lines: [u32; 2],
-    claim: &str,
-    rewrite: &str,
-) -> Option<String> {
-    let all: Vec<&str> = content.split_inclusive('\n').collect();
-    let block: String = all
-        .get(lines[0].checked_sub(1)? as usize..lines[1] as usize)?
-        .concat();
-    let wanted = words(claim);
+/// The bytes of `content` that lines `lines` (1-based, inclusive) occupy.
+fn block_of(content: &str, lines: [u32; 2]) -> Option<(usize, usize)> {
+    let starts = line_starts(content);
+    let first = lines[0].checked_sub(1)? as usize;
+    let last = lines[1] as usize;
+    if first >= last || last >= starts.len() {
+        return None;
+    }
+    Some((starts[first], starts[last]))
+}
+
+/// Where `text`'s words are in `content`, within lines `lines`, whatever
+/// whitespace separates them: a byte range of `content`, when they occur
+/// there exactly once.
+pub(super) fn span_of(content: &str, lines: [u32; 2], text: &str) -> Option<(usize, usize)> {
+    let (start, end) = block_of(content, lines)?;
+    let block = &content[start..end];
+    let wanted: Vec<&str> = text.split_whitespace().collect();
     if wanted.is_empty() {
         return None;
     }
-    // Every run of non-whitespace in the block, with where it is.
     let mut spans: Vec<(usize, usize)> = Vec::new();
-    let mut start = None;
+    let mut at = None;
     for (i, c) in block.char_indices() {
-        match (c.is_whitespace(), start) {
+        match (c.is_whitespace(), at) {
             (true, Some(s)) => {
                 spans.push((s, i));
-                start = None;
+                at = None;
             }
-            (false, None) => start = Some(i),
+            (false, None) => at = Some(i),
             _ => {}
         }
     }
-    if let Some(s) = start {
+    if let Some(s) = at {
         spans.push((s, block.len()));
     }
-    let at = (0..spans.len().checked_sub(wanted.len() - 1)?).find(|&i| {
+    let mut found = (0..(spans.len() + 1).saturating_sub(wanted.len())).filter(|&i| {
         wanted
             .iter()
             .zip(&spans[i..])
             .all(|(w, &(a, b))| &block[a..b] == *w)
-    })?;
-    let (from, to) = (spans[at].0, spans[at + wanted.len() - 1].1);
-    Some(format!("{}{rewrite}{}", &block[..from], &block[to..]))
+    });
+    let i = found.next()?;
+    if found.next().is_some() {
+        return None;
+    }
+    Some((start + spans[i].0, start + spans[i + wanted.len() - 1].1))
 }
 
-/// The edit that puts `rewrite` in place of `claim` in `content` (the file
-/// `file_path` in the scope `project_key`), when the claim is found there.
-pub(super) fn edit_for(
-    claim: &Claim,
+/// The edit that puts `rewrite` in place of the claim at `lines` saying
+/// `text`, in `content` (the file `file_path` of the scope `project_key`),
+/// or why there is none. Everything the module doc lists is checked here,
+/// both when the review offers an edit and again when `apply` makes it.
+pub(super) fn build(
     content: &str,
-    project_key: &str,
-    file_path: &str,
+    lines: [u32; 2],
+    text: &str,
+    (project_key, file_path): (&str, &str),
     rewrite: &str,
-) -> Option<SuggestedEdit> {
-    Some(SuggestedEdit {
+) -> Result<SuggestedEdit, String> {
+    let fence = text.trim_start();
+    if text.contains('\n') || fence.starts_with("```") || fence.starts_with("~~~") {
+        return Err("it is a block, and only prose is rewritten".into());
+    }
+    if !claude::rewrite_ok(text, rewrite) {
+        return Err("its rewrite is not a one-line record of what changed".into());
+    }
+    let redactor = recall_worker::Redactor::new(&[recall_wire::EvaluateFile {
+        file_path: file_path.to_string(),
+        content: content.to_string(),
+        ..Default::default()
+    }]);
+    if redactor.text(text) != text {
+        return Err("it holds a secret, which claude only saw masked".into());
+    }
+    let (from, to) =
+        span_of(content, lines, text).ok_or("its words are not in its lines exactly once")?;
+    for other in extract_claims(content) {
+        let overlaps = other.lines[0] <= lines[1] && other.lines[1] >= lines[0];
+        if !overlaps || (other.lines == lines && other.text == text) {
+            continue;
+        }
+        match span_of(content, other.lines, &other.text) {
+            Some((a, b)) if b <= from || a >= to => {}
+            _ => {
+                return Err(format!(
+                    "it would touch another claim on its lines ({}: \"{}\")",
+                    edit::lines(&other.lines),
+                    edit::printable(&other.text)
+                ))
+            }
+        }
+    }
+    let (start, end) = block_of(content, lines).ok_or("its lines are not in the file")?;
+    Ok(SuggestedEdit {
         project_key: project_key.to_string(),
         file_path: file_path.to_string(),
         base_sha256: recall_wire::content_sha256(content),
-        lines: claim.lines,
-        replacement: substitute(content, claim.lines, &claim.text, rewrite)?,
+        lines,
+        replacement: format!("{}{rewrite}{}", &content[start..from], &content[to..end]),
     })
-}
-
-/// Why `edit`, made for `target`, may not be made: another claim of the
-/// same file on the lines it replaces that the replacement does not keep
-/// word for word. `claims` is the report the edit came from.
-pub(super) fn guard(claims: &[Claim], target: &Claim, edit: &SuggestedEdit) -> Result<(), String> {
-    let kept = words(&edit.replacement).join(" ");
-    let [first, last] = edit.lines;
-    for c in claims.iter().filter(|c| {
-        c.file == target.file && c.id != target.id && c.lines[0] <= last && c.lines[1] >= first
-    }) {
-        if !kept.contains(&words(&c.text).join(" ")) {
-            let what = match (c.class, c.verdict) {
-                (super::Class::Record, _) => "a record",
-                (_, Some(Verdict::StillTrue)) => "a claim still true",
-                (super::Class::Rule, _) => "a rule",
-                _ => "another claim",
-            };
-            return Err(format!(
-                "the edit to {} would change {what} it does not rewrite ({}, {})",
-                target.file,
-                c.id,
-                edit::lines(&c.lines)
-            ));
-        }
-    }
-    if edit.replacement.trim().is_empty() {
-        return Err("the edit would delete the claim; a review only rewrites".to_string());
-    }
-    Ok(())
 }
 
 /// `recall review apply <id>`.
 pub(super) async fn run(id: &str, yes: bool) -> anyhow::Result<i32> {
     let here = proj::resolve();
-    let Some(report) = load_state(&here.review_file()).report else {
+    let saved = load_state(&here.review_file());
+    let Some(report) = &saved.report else {
         return Ok(edit::said(
             COMMAND,
             refused("there is no review yet.", "recall review run makes one."),
@@ -142,13 +167,13 @@ pub(super) async fn run(id: &str, yes: bool) -> anyhow::Result<i32> {
             ),
         ));
     };
-    let Some(suggested) = &claim.suggested_edit else {
+    let no_edit = || {
         let then = if claim.verdict == Some(Verdict::Stale) {
             "recall review run --claude asks for one."
         } else {
             ""
         };
-        return Ok(edit::said(
+        Ok(edit::said(
             COMMAND,
             refused(
                 format!(
@@ -157,20 +182,73 @@ pub(super) async fn run(id: &str, yes: bool) -> anyhow::Result<i32> {
                 ),
                 then,
             ),
-        ));
+        ))
     };
-    if let Err(why) = guard(&report.claims, claim, suggested) {
+    if claim.suggested_edit.is_none() {
+        return no_edit();
+    }
+    // The rewrite as `.recall-review.json` keeps it, held to the rules again.
+    let state = saved.files.get(&claim.file);
+    let Some(rewrite) = state
+        .and_then(|s| s.claude.as_ref())
+        .and_then(|r| {
+            r.decided
+                .iter()
+                .find(|d| d.lines == claim.lines && d.text == claim.text)
+        })
+        .map(claude::Decided::checked)
+        .and_then(|d| d.rewrite)
+    else {
+        return no_edit();
+    };
+    let ctx = match here.hook_context() {
+        Ok(ctx) => ctx,
+        Err(e) => return Ok(edit::said(COMMAND, refused(format!("{e:#}"), ""))),
+    };
+    let Some((scope, path)) = recall_hooks::scope::route(&ctx.scopes, &claim.file) else {
         return Ok(edit::said(
             COMMAND,
             refused(
-                format!("{why}, so it was not made."),
-                "Edit the file yourself, or run recall review run --claude --all for a new one.",
+                format!("{} is not in a scope that is on here.", claim.file),
+                "",
+            ),
+        ));
+    };
+    let local = super::join_relative(&ctx.memory_dir, &claim.file);
+    let content = std::fs::read_to_string(&local).unwrap_or_default();
+    if state.map(|s| s.content_sha256.as_str()) != Some(&recall_wire::content_sha256(&content)) {
+        return Ok(edit::said(
+            COMMAND,
+            refused(
+                format!(
+                    "{} has changed since the review read it, so {id} may no longer fit.",
+                    claim.file
+                ),
+                format!("Make a new review: {}", HINTS.rerun),
             ),
         ));
     }
+    let suggested = match build(
+        &content,
+        claim.lines,
+        &claim.text,
+        (&scope.key, &path),
+        &rewrite,
+    ) {
+        Ok(edit) => edit,
+        Err(why) => {
+            return Ok(edit::said(
+                COMMAND,
+                refused(
+                    format!("{id} was not rewritten: {why}."),
+                    "Edit the file yourself if it needs it.",
+                ),
+            ))
+        }
+    };
     let heading = format!("{id} stale  {}, {}", claim.file, edit::lines(&claim.lines));
-    let code = edit::apply_and_push(COMMAND, id, &heading, suggested, HINTS, yes).await;
-    if code == exit::OK {
+    let code = edit::apply_and_push(COMMAND, id, &heading, &suggested, HINTS, yes).await;
+    if code == recall_hooks::exit::OK {
         println!("recall review run checks it again.");
     }
     Ok(code)
@@ -178,116 +256,103 @@ pub(super) async fn run(id: &str, yes: bool) -> anyhow::Result<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Class, Evidence};
     use super::*;
 
-    fn claim(
-        id: &str,
-        lines: [u32; 2],
-        class: Class,
-        verdict: Option<Verdict>,
-        text: &str,
-    ) -> Claim {
-        Claim {
-            id: id.into(),
-            file: "deploy.md".into(),
-            lines,
-            class,
-            text: text.into(),
-            verdict,
-            layer: Some(3),
-            evidence: Vec::<Evidence>::new(),
-            suggested_edit: None,
-        }
-    }
+    const AT: (&str, &str) = ("acme/app", "deploy.md");
+    const REWRITE: &str = "Until 2026-09 the server was at `a.example`; it is now at `b.example`.";
 
     #[test]
     fn only_the_claims_words_are_replaced() {
-        let content = "# Deploy\n- The server is at `a.example`.\nIt runs Traefik. The server\nlives on homer.\n";
+        let content = "# Deploy\n- The server is at `a.example`.\n";
+        let edit = build(
+            content,
+            [2, 2],
+            "The server is at `a.example`.",
+            AT,
+            REWRITE,
+        )
+        .unwrap();
+        assert_eq!(edit.replacement, format!("- {REWRITE}\n"));
+        assert_eq!(edit.lines, [2, 2]);
+        assert_eq!(edit.base_sha256, recall_wire::content_sha256(content));
         assert_eq!(
-            substitute(
-                content,
-                [2, 2],
-                "The server is at `a.example`.",
-                "Until 2026-09 the server was at `a.example`; it is now at `b.example`."
+            edit.apply_to(content).unwrap(),
+            format!("# Deploy\n- {REWRITE}\n")
+        );
+    }
+
+    /// A neighbour sentence wrapping onto the claim's line, or sharing it,
+    /// keeps every byte: the reviewer's hard-wrapped paragraph.
+    #[test]
+    fn a_wrapped_neighbour_is_kept_not_refused() {
+        let content = "The server runs Traefik on\nthe box. The server is at `a.example`. It used to\nbe at `z.example`.\n";
+        let edit = build(
+            content,
+            [2, 2],
+            "The server is at `a.example`.",
+            AT,
+            REWRITE,
+        )
+        .unwrap();
+        assert_eq!(
+            edit.apply_to(content).unwrap(),
+            format!(
+                "The server runs Traefik on\nthe box. {REWRITE} It used to\nbe at `z.example`.\n"
             )
-            .unwrap(),
-            "- Until 2026-09 the server was at `a.example`; it is now at `b.example`.\n"
         );
-        // A sentence wrapped over two lines, beside another on the first.
-        assert_eq!(
-            substitute(content, [3, 4], "The server lives on homer.", "X.").unwrap(),
-            "It runs Traefik. X.\n"
-        );
-        assert!(substitute(content, [3, 4], "Not in the file.", "X.").is_none());
-        assert!(substitute(content, [9, 9], "Anything.", "X.").is_none());
     }
 
     /// The design's "An edit over a `record` or `still_true` line is
-    /// refused": a replacement that drops another claim on its lines.
+    /// refused", at the level it can happen: the bytes the edit replaces
+    /// would reach into another claim.
     #[test]
-    fn an_edit_over_a_record_or_a_true_claim_is_refused() {
-        let target = claim(
-            "t2",
-            [3, 3],
-            Class::Present,
-            Some(Verdict::Stale),
-            "It is at A.",
-        );
-        for other in [
-            claim("t3", [3, 3], Class::Record, None, "It used to be at Z."),
-            claim(
-                "t3",
-                [3, 4],
-                Class::Present,
-                Some(Verdict::StillTrue),
-                "It runs Traefik.",
-            ),
-        ] {
-            let claims = vec![target.clone(), other.clone()];
-            let content = "a\nb\nIt is at A. It used to be at Z.\nIt runs Traefik.\n";
-            let dropped = SuggestedEdit {
-                file_path: "deploy.md".into(),
-                base_sha256: recall_wire::content_sha256(content),
-                lines: [3, 4],
-                replacement: "Until 2026 it was at A; it is now at B.\n".into(),
-                ..Default::default()
-            };
-            let err = guard(&claims, &target, &dropped).unwrap_err();
-            assert!(err.contains("t3"), "{err}");
-            let kept = SuggestedEdit {
-                replacement: format!("Until 2026 it was at A; it is now at B. {}\n", other.text),
-                ..dropped
-            };
-            assert_eq!(guard(&claims, &target, &kept), Ok(()), "{other:?}");
-        }
+    fn an_edit_that_would_touch_another_claim_is_refused() {
+        // The target's words, as the report holds them, run into the
+        // record beside it: only a tampered or stale report says that.
+        let content = "The server is at `a.example`. It used to be at `z.example`.\n";
+        let err = build(
+            content,
+            [1, 1],
+            "The server is at `a.example`. It used to",
+            AT,
+            REWRITE,
+        )
+        .unwrap_err();
+        assert!(err.contains("another claim"), "{err}");
+    }
+
+    /// The reviewer's first finding: a fenced block is one claim, and is
+    /// never swapped for a line of prose.
+    #[test]
+    fn a_fenced_block_is_never_rewritten() {
+        let content = "```\nssh deploy@old # server is at `a.example`\n```\n";
+        let text = "```\nssh deploy@old # server is at `a.example`\n```";
+        assert!(build(content, [1, 3], text, AT, REWRITE).is_err());
+        assert!(build(content, [1, 3], "``` ssh deploy@old", AT, REWRITE).is_err());
     }
 
     #[test]
-    fn a_claim_on_other_lines_or_in_another_file_is_not_in_the_way() {
-        let target = claim(
-            "t1",
-            [2, 2],
-            Class::Present,
-            Some(Verdict::Stale),
-            "It is at A.",
-        );
-        let mut elsewhere = claim("t2", [2, 2], Class::Record, None, "It used to be at Z.");
-        elsewhere.file = "other.md".into();
-        let below = claim("t3", [3, 3], Class::Record, None, "It used to be at Y.");
-        let edit = SuggestedEdit {
-            lines: [2, 2],
-            replacement: "Until 2026 it was at A; it is now at B.\n".into(),
-            ..Default::default()
-        };
-        assert_eq!(
-            guard(&[target.clone(), elsewhere, below], &target, &edit),
-            Ok(())
-        );
-        let empty = SuggestedEdit {
-            replacement: "\n".into(),
-            ..edit
-        };
-        assert!(guard(std::slice::from_ref(&target), &target, &empty).is_err());
+    fn words_found_twice_or_not_at_all_are_refused() {
+        let twice = "It is at `a.example`. It is at `a.example`.\n";
+        assert!(build(twice, [1, 1], "It is at `a.example`.", AT, REWRITE).is_err());
+        let content = "- The server is at `a.example`.\n";
+        assert!(build(content, [1, 1], "Not in the file.", AT, REWRITE).is_err());
+        assert!(build(
+            content,
+            [5, 5],
+            "The server is at `a.example`.",
+            AT,
+            REWRITE
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_claim_holding_a_secret_is_never_rewritten() {
+        let token = format!("ghp_{}", "a1B2c3D4e5".repeat(4));
+        let text = format!("The key is {token} on `a.example`.");
+        let content = format!("- {text}\n");
+        let err = build(&content, [1, 1], &text, AT, REWRITE).unwrap_err();
+        assert!(err.contains("secret"), "{err}");
     }
 }

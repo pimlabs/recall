@@ -958,11 +958,16 @@ It takes the same path as `recall eval apply`: the edit is refused unless
 the file is still exactly the version the review read, the file is read
 again after you answer and left alone if a session changed it meanwhile,
 and the edit is pushed the way the hook pushes any edit. Only the claim's
-own words are replaced; every other word on its lines stays, and the edit
-is refused outright if its lines hold another claim (a record, a claim
-still true, a rule) that the replacement would not keep word for word. A
-claim holding a secret is never given a rewrite, since `claude` only ever
-saw it masked. After an edit, `recall review run` checks the file again.
+own words are replaced, found exactly once in its lines; every other byte
+stays, so a sentence sharing or wrapping onto its lines is untouched, and
+the edit is refused if it would reach into another claim (a record, a claim
+still true, a rule). A fenced block is never rewritten, a rewrite must keep
+every path, host, version or name the claim named and hold no control
+character or masked secret, and a claim holding a secret is never given
+one, since `claude` only ever saw it masked. The edit is built again from
+the file and the stored rewrite when you apply it, so hand-editing
+`.recall-review.json` changes nothing about which bytes are written. After
+an edit, `recall review run` checks the file again.
 
 `recall review run [FILE]...` restricts the review to the files named,
 relative to the memory directory (as `recall status` prints it); naming one
