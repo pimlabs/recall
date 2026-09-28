@@ -20,28 +20,28 @@
 class Recall < Formula
   desc "Sync Claude Code's auto memory across machines and cloud sessions"
   homepage "https://github.com/pimlabs/recall"
-  version "0.4.5"
+  version "0.4.6"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/pimlabs/recall/releases/download/v#{version}/recall_darwin_arm64.tar.gz"
-      sha256 "43ce1e3d8705018e282e0950b2579f6c35987ac277c1f0d177676b2082c5064a"
+      url "https://github.com/pimlabs/recall/releases/download/v#{version}/recall-aarch64-apple-darwin.tar.gz"
+      sha256 "5824f26a417abb62766b186e93322066f47805543da2e76b53990112f8cc14ae"
     end
     on_intel do
-      url "https://github.com/pimlabs/recall/releases/download/v#{version}/recall_darwin_amd64.tar.gz"
-      sha256 "3204ca3154f5a53a94099fe413f030f7449e5ea9ebca66260e881f45a442faba"
+      url "https://github.com/pimlabs/recall/releases/download/v#{version}/recall-x86_64-apple-darwin.tar.gz"
+      sha256 "7cf21053a05f02f54522fef9d257028a888d41c7e5265748b8a4337bd79d94ab"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/pimlabs/recall/releases/download/v#{version}/recall_linux_arm64.tar.gz"
-      sha256 "d0813484161e1b92a037b4a010524b8f9f5103d20681895f1826af44994f90fb"
+      url "https://github.com/pimlabs/recall/releases/download/v#{version}/recall-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "e4d4c81014c1693303afde6b7cbb742d78246b75fa5416f04b3f6b8e584718d3"
     end
     on_intel do
-      url "https://github.com/pimlabs/recall/releases/download/v#{version}/recall_linux_amd64.tar.gz"
-      sha256 "412a7d6fc83757bd2866f0c951d5050ef7a28ef0139a3fcbba4d5baa3625f792"
+      url "https://github.com/pimlabs/recall/releases/download/v#{version}/recall-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "fe7e1bd9d09053c7675c8fab4128110c074cd17e5b15b9fd7e41b8c39060e0c0"
     end
   end
 
@@ -54,9 +54,10 @@ class Recall < Formula
     if build.head?
       system "cargo", "install", *std_cargo_args(path: "crates/recall")
     else
-      # Each archive holds a single file named for its platform —
-      # recall_darwin_arm64 and so on. install.sh renames it the same way.
-      bin.install Dir["recall_*"].first => "recall"
+      # Each archive holds one directory named for its Rust target —
+      # recall-aarch64-apple-darwin/ and so on — with `recall` in it.
+      # Homebrew changes into an archive's only directory before this runs.
+      bin.install "recall"
     end
   end
 

@@ -43,7 +43,9 @@ python3 scripts/update-formula.py "$version" "$WORK/shuffled.txt" "$WORK/again.r
 check cmp -s "$WORK/again.rb" Formula/recall.rb
 
 # A platform missing: refused, and the formula untouched.
-grep -v linux_arm64 "$WORK/checksums.txt" >"$WORK/short.txt"
+# Whichever naming the committed formula uses, drop the Linux arm64 line.
+grep -v -e linux_arm64 -e aarch64-unknown-linux-gnu "$WORK/checksums.txt" >"$WORK/short.txt"
+check test "$(wc -l <"$WORK/short.txt")" -eq 3
 cp Formula/recall.rb "$WORK/keep.rb"
 check bash -c "! python3 scripts/update-formula.py '$version' '$WORK/short.txt' '$WORK/keep.rb' 2>/dev/null"
 check cmp -s "$WORK/keep.rb" Formula/recall.rb
@@ -88,9 +90,13 @@ python3 scripts/update-formula.py "$version" "$WORK/checksums.txt" "$WORK/new.rb
 check cmp -s "$WORK/new.rb" Formula/recall.rb
 
 # A 0.4.6 checksums.txt with only the old names is a release that did not
-# rename its archives: refused, naming a new one.
+# rename its archives: refused, naming a new one. Built here rather than
+# from the committed formula, which carries the new names from 0.4.6 on.
+for n in recall_darwin_arm64 recall_darwin_amd64 recall_linux_arm64 recall_linux_amd64; do
+  printf '%064d  %s.tar.gz\n' 0 "$n"
+done >"$WORK/old-names.txt"
 cp Formula/recall.rb "$WORK/keep.rb"
-check bash -c "python3 scripts/update-formula.py 0.4.6 '$WORK/checksums.txt' '$WORK/keep.rb' 2>&1 | grep -q recall-aarch64-apple-darwin.tar.gz"
+check bash -c "python3 scripts/update-formula.py 0.4.6 '$WORK/old-names.txt' '$WORK/keep.rb' 2>&1 | grep -q recall-aarch64-apple-darwin.tar.gz"
 check cmp -s "$WORK/keep.rb" Formula/recall.rb
 
 echo "passed $pass, failed $fail"
