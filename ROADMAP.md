@@ -895,6 +895,8 @@ arriving new**, and **it has to stay cheap**.
       not the repository or the running system, so it can say a note is
       old, not that it is wrong.
 
+      **Design proposed (2026-09-28):** [`docs/design/memory-truth.md`](docs/design/memory-truth.md).
+
 ## Agreed 2026-09-23: versions, devices, two binaries, encryption
 
 See `docs/design/handshake.md` for the reasoning.
