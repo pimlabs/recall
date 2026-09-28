@@ -39,8 +39,9 @@ Two workflows are involved:
   release deploys itself**. It can also be run by hand, **Actions → Deploy a release
   → Run workflow** with a version such as `0.4.0`, from anywhere including
   the GitHub mobile app: that is how to roll back, or retry a deploy that
-  failed. It SSHes into the server, checks out the release's tag, pulls
-  that release's images from GHCR and restarts the stack on them, the same
+  failed. It verifies the release's images on the runner, SSHes into the
+  server, checks out the release's tag, pulls those images from GHCR by
+  the digests it verified and restarts the stack on them, much the same
   thing `deploy/README.md`'s "Updating" section does by hand. Nothing is
   built on the server, except for a version of 0.4.6 or older, which has no
   published image and is built there as it always was.
@@ -179,9 +180,11 @@ here on.
 ## Optional hardening: restrict what the key can do
 
 The deploy runs a short script over SSH: fetch the release's tag, check it
-out, `docker pull` the release's images, `docker compose up -d --no-build`
-(or `up -d --build` for 0.4.6 and older), then ask the container for its
-health. The account it logs in as needs nothing beyond that: a dedicated
+out, `docker pull` the release's images by the digests the runner
+verified, tag them, `docker compose up -d --no-build --pull missing` (or
+`up -d --build` for 0.4.6 and older), ask the container for its health, and
+remove older version tags of the two images. The account it logs in as
+needs nothing beyond that: a dedicated
 user that owns the clone and is in the `docker` group, with no `sudo`, and
 no `docker login`: the images are public.
 
@@ -308,10 +311,61 @@ gh attestation verify oci://ghcr.io/pimlabs/recall-server:<version> --repo pimla
 The deploy then pulls, and builds nothing. Before it touches the server, it
 asks GHCR from the runner, with no credentials, whether the server image can
 be pulled, and stops there, with production still on its old version, if it
-cannot. On the server it pulls every image of ours the stack runs (the
-worker's only when `COMPOSE_PROFILES` turns the worker on), all before
-anything is stopped, and then runs `docker compose up -d --no-build`. The
-compose files name the image by `RECALL_VERSION`, which the deploy sets.
+cannot.
+
+**The server runs the bytes that were verified, not whatever the tag
+says.** A tag is a name anyone who can push to the package could point
+elsewhere; that ours never move is this repository's rule, not the
+registry's. So, still on the runner (**Is it the image the release
+built?**), each image's tag is resolved to the digest of the index it
+names, hashed from the index's own bytes, and two things are checked of
+that digest by `scripts/verify-release-image.sh`. The index's
+`org.opencontainers.image.version` annotation, which `release-image.sh`
+writes and the digest covers, must be the version being deployed, so a
+tag pointed at an older release's image, which is attested too, does not
+pass. And
+
+```sh
+gh attestation verify oci://ghcr.io/pimlabs/recall-server@sha256:<digest> \
+  --repo pimlabs/recall \
+  --cert-identity https://github.com/pimlabs/recall/.github/workflows/release.yml@refs/tags/v<version>
+```
+
+must pass: the image was attested by this repository's Release workflow,
+running on that version's own tag, which is the only way a release runs
+(`start-release.yml` dispatches it with `--ref` set to the tag). Either
+failing stops the deploy before the server is touched. ci.yml's
+`check-release-image` runs the same script on a real runner against the
+newest release, and once more with a version the image does not claim,
+which must fail, whenever a pull request changes the script or the
+workflows it depends on. The worker's image is checked whether or not the server
+runs it, since the runner cannot see `COMPOSE_PROFILES`; one that cannot be
+read at all only warns, and the server then refuses to deploy a stack that
+runs the worker. The job needs `attestations: read` for this, beside
+`contents: read`, and release.yml's `deploy` job grants both.
+
+On the server it pulls every image of ours the stack runs (the worker's
+only when `COMPOSE_PROFILES` turns the worker on) **by that digest**,
+`docker pull ghcr.io/pimlabs/recall-server@sha256:<digest>`, all before
+anything is stopped. Docker checks what it receives against the digest.
+Then it tags the digest as `:<version>`, the name the compose files use
+(they name the image by `RECALL_VERSION`, which the deploy sets), and as
+`:local`, and runs `docker compose up -d --no-build --pull missing`.
+Compose pulls only an image it does not have, and it has ours under the
+tags just made, so it runs exactly those bytes without asking the registry
+what the tags name; someone else's image a fresh host lacks (sqlite-web,
+cloudflared) is still fetched.
+
+**The server keeps two versions of each image.** Every deploy pulls a new
+version and the old one stays tagged, which `docker image prune` never
+reclaims. So once a pull deploy is up and healthy, it removes the older
+version tags of `ghcr.io/pimlabs/recall-server` and `recall-worker`,
+keeping the version just deployed, the newest one older than it by `sort
+-V` (the rollback target, which a rollback then finds without pulling),
+any newer version a rollback left, and `:local`. It prints each tag it
+removes. It never forces: an image a container still uses is kept, and the
+log says so. Nothing outside those two repositories is touched, and never
+a volume. A build deploy (0.4.6 and older) removes nothing.
 
 **A version without an image is built on the server, as before.** 0.4.6 is
 the last release with no published image, and `LAST_BUILT_ON_SERVER` in
@@ -352,7 +406,9 @@ leaves `:local` alone: deploy 0.4.7, roll back to 0.4.6, then check out a
 later tag by hand and run `docker compose up -d`, and that runs 0.4.7, not
 the tag checked out. So on the server, name the version in commands you
 type, `RECALL_VERSION=<version> docker compose ... up -d`, which runs the
-image that version's deploy pulled; or add `--build`, which builds the
+image that version's deploy pulled, if the server still has it (it keeps
+two versions; for any other, compose pulls the tag itself, unverified); or
+add `--build`, which builds the
 checked-out version under `:local`; or move between versions with **Deploy
 a release** rather than by hand. `docker compose ... ps` shows which image
 each container was started from.
@@ -373,6 +429,23 @@ published it, which re-running them fixes. A `docker pull` that is denied
 on the server while that step passed usually means the server holds a
 `docker login ghcr.io` with a token that has expired: `docker logout
 ghcr.io` there, since a public image needs none.
+
+A failure at **Is it the image the release built?** means the image
+could not be verified, and the log says which check failed. An index that
+names another version means the tag was pointed at a different image,
+which by this repository's rule never happens; find out how before
+deploying anything. An attestation that could not be verified (`gh`'s
+reason is in the log) is one of two things:
+
+- the image has no attestation from that release's run, usually because
+  the release's attest step did not finish: re-run that Release run's
+  `publish-image` job, which attests the image it already pushed, then
+  deploy again;
+- GitHub's attestations API or Sigstore could not be reached: re-run the
+  deploy later. To deploy during such an outage anyway, pull by hand on
+  the server as [`deploy/README.md`](../../deploy/README.md#updating)'s
+  Updating section shows, which trusts the tag rather than a verified
+  digest.
 
 For 0.4.6 and older, built on the server, a failure at the build step with a
 checksum error means the downloaded archive is not the one the release

@@ -8,6 +8,13 @@ name: Deploy a release
 # no published image, and the server builds theirs for itself, as it always
 # did. LAST_BUILT_ON_SERVER below is where the two meet.
 #
+# A pulled image is trusted for its bytes, not its tag: the runner resolves
+# each tag to a digest, checks that digest's attestation says release.yml
+# built it, and the server pulls that digest and nothing else. After a
+# pull deploy the server keeps the version it runs and the one before it,
+# and removes older tags of our two images, so disk does not fill with
+# every version ever deployed.
+#
 # Two ways in:
 #
 #   - release.yml calls it once the GitHub Release and its images exist,
@@ -33,8 +40,13 @@ on:
         description: "Release to deploy again, e.g. 0.4.5 to roll back (its tag v0.4.5 must exist)"
         required: true
 
+# attestations: read is for `gh attestation verify` below, which reads this
+# repository's attestations through the API. release.yml's `deploy` job
+# grants the same two, since a called workflow gets no more than its
+# caller's job has.
 permissions:
   contents: read
+  attestations: read
 
 jobs:
   production:
@@ -136,6 +148,34 @@ jobs:
             echo "::warning::ghcr.io/pimlabs/recall-worker:$VERSION cannot be pulled without credentials. A server that runs the worker (COMPOSE_PROFILES=worker) will fail to deploy until it can; make that package public too (https://github.com/orgs/pimlabs/packages/container/recall-worker/settings)."
           fi
 
+      # A tag is a name, and anyone who can push to the package can point it
+      # at other bytes; "tags never move" is this repository's rule, not the
+      # registry's. A digest cannot be pointed anywhere: it is the hash of
+      # the bytes. So each tag is resolved here, once, to a digest, and that
+      # digest is checked and is the only thing the server pulls: its index
+      # must say it is this version, and its attestation must verify as
+      # made by release.yml on the tag v$VERSION.
+      # scripts/verify-release-image.sh does both, and says how; ci.yml's
+      # check-release-image runs it on a real runner against the newest
+      # release, so a change to it is proven before a deploy depends on it.
+      #
+      # The worker is checked whether or not the server runs it, since this
+      # runner cannot see COMPOSE_PROFILES. A worker tag that cannot be read
+      # only warns, like the step above, and the server then refuses to
+      # deploy a stack that runs the worker; one that is read and fails
+      # either check stops the deploy here. Before the server is touched,
+      # either way.
+      - name: Is it the image the release built?
+        id: verify
+        if: steps.secrets.outputs.configured == 'true' && steps.how.outputs.mode == 'pull'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! scripts/verify-release-image.sh "$VERSION"; then
+            echo "::error::$VERSION's images were not verified (the reason is above), so nothing was deployed and production is still on the version it was on. If GitHub's attestations API or Sigstore was down, re-run this job later; to deploy during such an outage anyway, pull by hand as deploy/README.md's Updating section shows, which trusts the tag."
+            exit 1
+          fi
+
       - name: Deploy over SSH
         if: steps.secrets.outputs.configured == 'true'
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
@@ -179,24 +219,64 @@ jobs:
                 echo "The compose files at v$VERSION name no ghcr.io/pimlabs image, so there is nothing to pull." >&2
                 exit 1
               fi
+              # The digest the runner resolved and verified for an image of
+              # ours ("Is it the image the release built?"), or nothing.
+              verified() {
+                case "$1" in
+                  ghcr.io/pimlabs/recall-server) printf '%s' "$SERVER_DIGEST" ;;
+                  ghcr.io/pimlabs/recall-worker) printf '%s' "$WORKER_DIGEST" ;;
+                esac
+              }
+              # Every image is asked about before any is pulled: the compose
+              # files must name it by this version, which is the tag made
+              # below, and the runner must have verified a digest for it.
+              # A stack that runs the worker when the runner could not
+              # verify the worker's image stops here.
               for image in $images; do
-                if ! docker pull "$image"; then
-                  echo "Could not pull $image, so nothing was changed: the running containers are as they were." >&2
+                repo="${image%:*}"
+                if [ "$image" != "$repo:$VERSION" ]; then
+                  echo "The compose files at v$VERSION name $image, not $repo:$VERSION, so they would not run the image this deploy verified. Nothing was changed." >&2
+                  exit 1
+                fi
+                if ! verified "$repo" | grep -Eqx 'sha256:[0-9a-f]{64}'; then
+                  echo "This deploy has no verified digest for $repo (the runner's step 'Is it the image the release built?' says why), so nothing was changed: the running containers are as they were." >&2
+                  exit 1
+                fi
+              done
+              # Pulled by digest, never by tag: docker checks the bytes it
+              # receives against the digest, so what arrives is what the
+              # runner verified, whatever the tag names by now.
+              for image in $images; do
+                repo="${image%:*}"
+                if ! docker pull "$repo@$(verified "$repo")"; then
+                  echo "Could not pull $repo@$(verified "$repo"), so nothing was changed: the running containers are as they were." >&2
                   echo "If the pull was denied, the package is private. Make it public once in its package settings (Change visibility), then deploy again; see docs/reference/github-actions-deploy.md." >&2
                   exit 1
                 fi
               done
-              # Once every pull has worked: the same bytes under `:local`,
-              # the name the compose files fall back to when RECALL_VERSION
-              # is unset. A `docker compose up -d` typed on this machine
-              # later then runs the version deployed here, rather than
-              # building one or finding an older `:local`.
+              # Once every pull has worked: the verified bytes under the
+              # version's tag, which is what the compose files name, and
+              # under `:local`, the name they fall back to when
+              # RECALL_VERSION is unset. Tagging replaces whatever either
+              # name held before, a tag an older deploy pulled included. A
+              # `docker compose up -d` typed on this machine later then
+              # runs the version deployed here, rather than building one
+              # or finding an older `:local`.
               for image in $images; do
-                docker tag "$image" "${image%:*}:local"
+                repo="${image%:*}"
+                docker tag "$repo@$(verified "$repo")" "$repo:$VERSION"
+                docker tag "$repo@$(verified "$repo")" "$repo:local"
               done
               # --no-build: every image is here now, and one that is not
               # should fail this deploy, not be built on the server.
-              docker compose $COMPOSE_FILES up -d --no-build
+              # --pull missing: compose pulls only an image it does not
+              # have. Ours it has, under the tags just made, so it runs
+              # those and never asks the registry what they name; someone
+              # else's image (sqlite-web, cloudflared) that a fresh host has
+              # not got yet is still fetched, as it always was. It is
+              # compose's default, spelled out so that no flag or setting
+              # added later can quietly make it pull our tags.
+              docker compose $COMPOSE_FILES up -d --no-build --pull missing
             elif [ "$DEPLOY_MODE" = build ]; then
               docker compose $COMPOSE_FILES up -d --build
             else
@@ -210,11 +290,70 @@ jobs:
             sleep 5
             docker compose $COMPOSE_FILES exec -T recall-server \
               wget -qO- http://127.0.0.1:8787/health
-          envs: DEPLOY_PATH,COMPOSE_FILES,VERSION,DEPLOY_MODE
+
+            # Every pull deploy leaves the version it replaced tagged, so
+            # `docker image prune` never reclaims it, and a VPS that deploys
+            # a few times a week fills its disk with every version it ever
+            # ran. Once a pull deploy is up and healthy, each of our two
+            # images keeps the version just deployed, the newest one older
+            # than it (by sort -V, so 0.4.10 is after 0.4.9): the rollback
+            # target, which a rollback then finds without pulling. It also
+            # keeps any version newer than the one deployed, which only a
+            # rollback leaves, and `:local`. Older version tags are removed.
+            # Nothing is forced: an image a container still uses is kept,
+            # and says so. Only ghcr.io/pimlabs/recall-server and
+            # recall-worker, only tags shaped like a version, never a
+            # volume. A build deploy (0.4.6 and older) removes nothing.
+            if [ "$DEPLOY_MODE" = pull ]; then
+              older() {
+                [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" = "$1" ]
+              }
+              for repo in ghcr.io/pimlabs/recall-server ghcr.io/pimlabs/recall-worker; do
+                tags=$(docker image ls --format '{{.Tag}}' "$repo" | grep -Ex '[0-9]+\.[0-9]+\.[0-9]+' | sort -u -V || true)
+                previous=""
+                for tag in $tags; do
+                  if older "$tag" "$VERSION"; then
+                    previous="$tag"
+                  fi
+                done
+                kept=""
+                for tag in $tags; do
+                  if ! older "$tag" "$VERSION" || [ "$tag" = "$previous" ]; then
+                    kept="$kept $tag"
+                    continue
+                  fi
+                  # A pull by digest can leave the digest's own name behind
+                  # too (Docker's containerd image store keeps it as an
+                  # image of its own), so that goes as well, once no tag
+                  # names those bytes.
+                  digests=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$repo:$tag" 2>/dev/null | grep -F "$repo@" || true)
+                  if docker image rm "$repo:$tag" >/dev/null; then
+                    echo "Removed $repo:$tag"
+                    for d in $digests; do
+                      if left=$(docker image inspect --format '{{join .RepoTags " "}}' "$d" 2>/dev/null) && [ -z "$left" ]; then
+                        if docker image rm "$d" >/dev/null; then
+                          echo "Removed $d"
+                        fi
+                      fi
+                    done
+                  else
+                    kept="$kept $tag"
+                    echo "Kept $repo:$tag: docker would not remove it (its reason is above), most likely because a container still uses it."
+                  fi
+                done
+                echo "$repo keeps the versions:${kept:- none}, and local"
+              done
+            fi
+          envs: DEPLOY_PATH,COMPOSE_FILES,VERSION,DEPLOY_MODE,SERVER_DIGEST,WORKER_DIGEST
         env:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           COMPOSE_FILES: ${{ vars.DEPLOY_COMPOSE_FILES }}
           DEPLOY_MODE: ${{ steps.how.outputs.mode }}
+          # Empty for a build deploy, and for a worker image the runner
+          # could not read; the server refuses an image of ours it has no
+          # digest for.
+          SERVER_DIGEST: ${{ steps.verify.outputs.server_digest }}
+          WORKER_DIGEST: ${{ steps.verify.outputs.worker_digest }}
 
       # Whichever way the steps above went, say what production is actually
       # running, on the run's summary page, where it is read. A green tick

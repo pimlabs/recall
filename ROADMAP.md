@@ -642,7 +642,7 @@ arriving new**, and **it has to stay cheap**.
       and older (`LAST_BUILT_ON_SERVER`) still build on the server; the clone
       stays, for the compose files and those older tags.
 
-- [ ] **The server runs whatever the image tag holds, and keeps every image
+- [x] **The server runs whatever the image tag holds, and keeps every image
       it ever pulled.** Two follow-ups left out of the pull deploy (#145) on
       purpose, so it stayed reviewable.
 
@@ -662,6 +662,21 @@ arriving new**, and **it has to stay cheap**.
 
       Neither is urgent on a VPS that deploys a few times a week; both
       belong after the first real release has proved the pull path.
+
+      Done after 0.4.7 proved it. *Trust:* `deploy.yml`'s "Is it the image
+      the release built?" hashes each tag's index to a digest, requires
+      the index's `org.opencontainers.image.version` to be the version
+      deployed (a tag pointed at an older, also attested, release fails)
+      and `gh attestation verify --repo pimlabs/recall --cert-identity
+      .../release.yml@refs/tags/v<version>` on it
+      (`scripts/verify-release-image.sh`, which ci.yml's
+      `check-release-image` runs on a real runner), and the server pulls
+      that digest, tags it `:<version>` and `:local`, and runs `up
+      --no-build --pull missing`. *Disk:* after a healthy pull deploy the
+      server removes older version tags of the two images, keeping the
+      deployed version, the one before it by `sort -V`, anything newer a
+      rollback left, and `:local`, without forcing. Build deploys (0.4.6
+      and older) do neither.
 
 - [x] **Setting up the off-box backup is eight manual steps and a trap.**
       Two `rclone config` invocations, a crypt password that must be stored

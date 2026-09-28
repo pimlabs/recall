@@ -14,6 +14,30 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
+## Unreleased
+
+- **The automatic deploy runs the image the release attested, and cleans
+  up after itself.** Until now the server pulled
+  `ghcr.io/pimlabs/recall-server:<version>` by its tag and ran whatever
+  the tag named. The deploy now resolves each tag to its digest on the
+  runner, checks that digest's GitHub attestation was made by this
+  repository's Release workflow and that the image says it is that
+  version, and the server pulls that digest and tags it itself; a deploy
+  that fails either check stops before the server is touched. After a
+  successful pull deploy the server removes older
+  `ghcr.io/pimlabs/recall-server` and `recall-worker` version tags, so its
+  disk no longer fills with every version it ever pulled. It keeps the
+  version it runs; the newest older version tag the server has (the
+  rollback target); after a rollback, the versions newer than the one it
+  rolled back to, until a later deploy passes them; and `:local`.
+  Deploys of 0.4.6 and older, which build on the server, are unchanged,
+  and every release that can be pulled (0.4.7 on) is attested,
+  so a rollback to any of them still works. This is a **patch** under
+  `docs/reference/releasing.md`'s Versioning rules: nothing on its list of
+  breaking changes, and no setting to change. The only thing that stops
+  working is deploying an image the release did not make, which is the
+  point.
+
 ## 0.4.7 — 2026-09-28
 
 - **Each release publishes the server's image, and a deploy pulls it.**
