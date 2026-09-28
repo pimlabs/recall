@@ -4374,9 +4374,14 @@ fn eval_apply_makes_the_suggested_edit_and_pushes_it() {
 // recall review
 // ---------------------------------------------------------------------------
 
-/// A fixture modelled on `docs/design/memory-truth.md`'s "Why": a git
-/// repository that once had `lib.sh` and `hooks/recall-pull`, deleted them
-/// in a later commit (the Rust rewrite), and still tracks `docs/plan.md`.
+/// A fixture modelled on `docs/design/memory-truth.md`'s "Why", and on this
+/// repository's own history (`git log --diff-filter=D -- '*lib.sh'`, commit
+/// `5b828c1`): a git repository that once had `hooks/lib.sh` and
+/// `hooks/recall-pull`, deleted both in a later commit (the Rust rewrite),
+/// and still tracks `docs/plan.md`. `lib.sh` lives under `hooks/`, not at
+/// the root — the real file did too — so a note that names it by its bare
+/// filename, the way people actually write, still has to be found by a
+/// glob, not a root-only lookup.
 fn review_repo() -> Repo {
     let repo = git_repo();
     let git = |args: &[&str]| {
@@ -4389,14 +4394,19 @@ fn review_repo() -> Repo {
     };
     git(&["config", "user.email", "t@example.com"]);
     git(&["config", "user.name", "Test"]);
-    std::fs::write(repo.path().join("lib.sh"), "echo hi\n").unwrap();
     std::fs::create_dir_all(repo.path().join("hooks")).unwrap();
+    std::fs::write(repo.path().join("hooks").join("lib.sh"), "echo hi\n").unwrap();
     std::fs::write(repo.path().join("hooks").join("recall-pull"), "echo pull\n").unwrap();
     std::fs::create_dir_all(repo.path().join("docs")).unwrap();
     std::fs::write(repo.path().join("docs").join("plan.md"), "# Plan\n").unwrap();
     git(&["add", "-A"]);
-    git(&["commit", "-q", "-m", "add lib.sh and hooks/recall-pull"]);
-    git(&["rm", "-q", "lib.sh"]);
+    git(&[
+        "commit",
+        "-q",
+        "-m",
+        "add hooks/lib.sh and hooks/recall-pull",
+    ]);
+    git(&["rm", "-q", "hooks/lib.sh"]);
     git(&["rm", "-q", "hooks/recall-pull"]);
     git(&["commit", "-q", "-m", "remove the old hooks (Rust rewrite)"]);
     repo
@@ -4621,4 +4631,100 @@ fn review_never_needs_a_server() {
     let r = run(&["review", "run"], repo.path(), &env, None);
     assert_eq!(r.code, 0, "{}", r.stderr);
     assert!(!r.stderr.contains("RECALL_URL"), "{}", r.stderr);
+}
+
+/// Naming a `[FILE]` that is not a memory file in any scope that is on is
+/// the one usage mistake this command refuses, per its own module doc.
+#[test]
+fn a_named_file_that_is_not_memory_errors() {
+    let repo = review_repo();
+    let env: Vec<(&str, &str)> = vec![];
+    write_memory(
+        repo.path(),
+        &env,
+        "a.md",
+        "- The plan lives in `docs/plan.md`.\n",
+    );
+    let r = run(&["review", "run", "nope.md"], repo.path(), &env, None);
+    assert_ne!(r.code, 0, "{}", r.stdout);
+    assert!(r.stderr.contains("nope.md"), "{}", r.stderr);
+}
+
+/// A `[FILE]`-restricted run must not make other files' claims disappear
+/// from the stored report: `show` (and a future `--all`) still need them.
+#[test]
+fn a_restricted_run_merges_into_the_stored_report_instead_of_replacing_it() {
+    let repo = review_repo();
+    let env: Vec<(&str, &str)> = vec![];
+    write_memory(
+        repo.path(),
+        &env,
+        "a.md",
+        "- The plan lives in `docs/plan.md`.\n",
+    );
+    write_memory(repo.path(), &env, "b.md", "- Run `lib.sh` to start it.\n");
+
+    let full = run(&["review", "run", "--json"], repo.path(), &env, None);
+    assert_eq!(full.code, 0, "{}", full.stderr);
+
+    // A second run restricted to a.md alone must still leave b.md's claim
+    // in the stored report.
+    let restricted = run(
+        &["review", "run", "a.md", "--json"],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(restricted.code, 0, "{}", restricted.stderr);
+    let report: serde_json::Value = serde_json::from_str(&restricted.stdout).unwrap();
+    let files: std::collections::HashSet<&str> = report["claims"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        files,
+        std::collections::HashSet::from(["a.md", "b.md"]),
+        "b.md's claim from the earlier run must survive a run restricted to a.md: {report}"
+    );
+
+    let shown = run(&["review", "show", "--json"], repo.path(), &env, None);
+    let shown_report: serde_json::Value = serde_json::from_str(&shown.stdout).unwrap();
+    assert_eq!(
+        shown_report["claims"].as_array().unwrap().len(),
+        report["claims"].as_array().unwrap().len()
+    );
+}
+
+/// The corrected version of a note — every claim about the old paths now
+/// phrased as history — gets no `stale` claim anywhere, mirroring the
+/// design's own test table (row 2).
+#[test]
+fn the_corrected_note_gets_no_stale_claim() {
+    let repo = review_repo();
+    let env: Vec<(&str, &str)> = vec![];
+    write_memory(
+        repo.path(),
+        &env,
+        "project_phase1_deploy.md",
+        "---\nname: project-phase1-deploy\n---\n\n\
+         The server is at `recall-server.pimlabs.id`, behind Traefik on a VPS.\n\
+         \n\
+         ## History\n\
+         \n\
+         - Not the old `hooks/recall-*` scripts, and not `lib.sh`; both were deleted \
+           in the Rust rewrite.\n",
+    );
+    let r = run(&["review", "run", "--json"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    for claim in report["claims"].as_array().unwrap() {
+        assert_ne!(
+            claim["verdict"], "stale",
+            "a corrected file must get no stale claim: {claim}"
+        );
+    }
+    let history = claim_containing(&report["claims"], "Not the old");
+    assert_eq!(history["class"], "record");
 }
