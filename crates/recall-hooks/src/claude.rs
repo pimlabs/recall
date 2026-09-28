@@ -125,6 +125,13 @@ impl Env {
         self.project_dir(project_root).join(".recall-state.json")
     }
 
+    /// `recall review`'s per-machine record of what it last found: beside
+    /// [`Env::state_file`], for the same reason — recall's own bookkeeping,
+    /// never a memory file, and never pushed.
+    pub fn review_file(&self, project_root: &str) -> PathBuf {
+        self.project_dir(project_root).join(".recall-review.json")
+    }
+
     fn project_dir(&self, project_root: &str) -> PathBuf {
         self.memory_root().join("projects").join(slug(project_root))
     }
@@ -397,6 +404,27 @@ mod tests {
         let state = env.state_file(root);
         assert_ne!(state.parent(), Some(env.memory_dir(root).as_path()));
         assert_eq!(state.parent(), env.memory_dir(root).parent());
+    }
+
+    /// `recall review`'s state sits beside `.recall-state.json`, for the same
+    /// reason: never inside the memory directory, so it is never mistaken
+    /// for a memory file and pushed.
+    #[test]
+    fn review_file_is_beside_the_state_file() {
+        let env = Env {
+            home: Some("/home/user".into()),
+            ..Default::default()
+        };
+        let root = "/home/user/recall";
+
+        assert_eq!(
+            env.review_file(root),
+            Path::new("/home/user/.claude/projects/-home-user-recall/.recall-review.json")
+        );
+        assert_eq!(
+            env.review_file(root).parent(),
+            env.state_file(root).parent()
+        );
     }
 
     #[test]
