@@ -14,6 +14,24 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
+## Unreleased
+
+- **Each release publishes the server's image, and a deploy pulls it.**
+  `ghcr.io/pimlabs/recall-server:<version>` and
+  `ghcr.io/pimlabs/recall-worker:<version>`, for amd64 and arm64, built once
+  by the Release workflow from the release's own binaries, the way a server
+  built them for itself until now. The automatic deploy pulls them and
+  builds nothing on the server; 0.4.6 and older have no image and are still
+  built there, so a rollback to them works as before. The compose files now
+  name the image (`image:` beside the `build:` they had), tagged by
+  `RECALL_VERSION` and `:local` without it, so `docker compose up -d
+  --build` from a checkout builds exactly as before, and `RECALL_VERSION=<version>
+  docker compose pull` fetches a release's image instead. There is no
+  `latest` tag. The first release to publish images needs its two packages
+  made public once; see `docs/reference/releasing.md`. This is a **patch**
+  under that file's Versioning rules: nothing on its list of breaking
+  changes, and every existing way of running a server keeps working.
+
 ## 0.4.6 — 2026-09-27
 
 - **Release archives are named for their Rust target from 0.4.6, and hold

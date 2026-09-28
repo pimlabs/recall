@@ -4,7 +4,9 @@ A server runs **releases**, not `main`. Since 0.4.0 the image holds the
 `recall-server` binary a GitHub Release published, checked against that
 release's `checksums.txt` (`deploy/Dockerfile`), so what production runs is
 the exact file every other channel shipped, and a version number says what
-it is.
+it is. Every release after 0.4.6 also publishes that image, finished, to
+GHCR, and the server pulls it rather than assembling it itself; see
+[The image](#the-image-published-by-the-release-pulled-by-the-server).
 
 Two workflows are involved:
 
@@ -14,16 +16,19 @@ Two workflows are involved:
   `docs/reference/api.md` against a running server), a syntax check of the
   shipped shell scripts, and a `docker build` of `deploy/Dockerfile` both
   ways: from source, and from a release it assembles locally, including a
-  tampered checksum that must stop the build. Nothing is pushed anywhere and
-  no secrets are needed. It deploys nothing.
+  tampered checksum that must stop the build. A second job,
+  `check-publish-image`, builds the images the release will publish exactly
+  as its `publish-image` job does (`scripts/release-image.sh`, both
+  platforms, under the same QEMU), from the newest release's binaries.
+  Nothing is pushed anywhere and no secrets are needed. It deploys nothing.
 
-  The image build is the expensive part, so it runs as its own job
-  (`build-image`). While the repository is public it runs on every pull
-  request, since GitHub-hosted runners cost nothing there. If the
-  repository is ever made private, it starts being skipped on a **pull
-  request** whose diff does not touch `crates/`, `Cargo.toml`,
-  `Cargo.lock` or `deploy/` (the Windows jobs likewise), with no edit to
-  the workflow. On a **push to `main`** it always runs, whatever changed,
+  The image builds are the expensive part, so they run as jobs of their
+  own (`build-image`, `check-publish-image`). While the repository is
+  public they run on every pull request, since GitHub-hosted runners cost
+  nothing there. If the repository is ever made private, they start being
+  skipped on a **pull request** whose diff does not touch `crates/`,
+  `Cargo.toml`, `Cargo.lock`, `deploy/` or `scripts/release-image.sh` (the
+  Windows jobs likewise), with no edit to the workflow. On a **push to `main`** it always runs, whatever changed,
   and `start-release.yml` refuses to tag a commit whose CI run is not
   green in every job. One job, `ci-passed`, stands for the whole run: it
   is green when every other job succeeded or was deliberately skipped, and
@@ -33,9 +38,11 @@ Two workflows are involved:
   release deploys itself**. It can also be run by hand, **Actions → Deploy a release
   → Run workflow** with a version such as `0.4.0`, from anywhere including
   the GitHub mobile app: that is how to roll back, or retry a deploy that
-  failed. It SSHes into the server, checks out the release's tag, and
-  rebuilds the stack, the same thing `deploy/README.md`'s "Updating" section
-  does by hand.
+  failed. It SSHes into the server, checks out the release's tag, pulls
+  that release's images from GHCR and restarts the stack on them, the same
+  thing `deploy/README.md`'s "Updating" section does by hand. Nothing is
+  built on the server, except for a version of 0.4.6 or older, which has no
+  published image and is built there as it always was.
 
   **Without the secrets it skips, and says so, rather than failing.** A
   repository with no server wired up is a normal state, and a workflow that
@@ -171,9 +178,11 @@ here on.
 ## Optional hardening: restrict what the key can do
 
 The deploy runs a short script over SSH: fetch the release's tag, check it
-out, `docker compose up -d --build`, then ask the container for its health.
-The account it logs in as needs nothing beyond that: a dedicated user that
-owns the clone and is in the `docker` group, with no `sudo`.
+out, `docker pull` the release's images, `docker compose up -d --no-build`
+(or `up -d --build` for 0.4.6 and older), then ask the container for its
+health. The account it logs in as needs nothing beyond that: a dedicated
+user that owns the clone and is in the `docker` group, with no `sudo`, and
+no `docker login`: the images are public.
 
 An earlier version of this page suggested a forced `command=` in
 `authorized_keys` that pulled `main` and rebuilt. **Remove it if you set it
@@ -260,6 +269,69 @@ A server older than the discovery document (before 0.4.0) answers 404 there;
 the summary then gives `/health`'s commit instead. Both need no
 authentication, which is why this works without the deploy secrets.
 
+## The image: published by the release, pulled by the server
+
+The Release workflow's `publish-image` job builds the server's image once,
+from the release's own `recall-server` and `recall-worker` (downloaded from
+the GitHub Release and checked against its `checksums.txt`, exactly as a
+server built it for itself before), and pushes it:
+
+| Image | Built from |
+|---|---|
+| `ghcr.io/pimlabs/recall-server:<version>` | `deploy/Dockerfile`, target `server` |
+| `ghcr.io/pimlabs/recall-worker:<version>` | `deploy/Dockerfile`, target `worker` |
+
+Each is one multi-platform image, `linux/amd64` and `linux/arm64`. There is
+no `latest`: a deploy names the version it wants, and a tag that moves by
+itself would be a deploy nobody asked for. A version's tag is pushed once;
+re-running the job leaves one that is already there alone. Each carries
+provenance, from buildx and as a GitHub attestation, which anyone can check:
+
+```sh
+gh attestation verify oci://ghcr.io/pimlabs/recall-server:<version> --repo pimlabs/recall
+```
+
+The deploy then pulls, and builds nothing. Before it touches the server, it
+asks GHCR from the runner, with no credentials, whether the server image can
+be pulled, and stops there, with production still on its old version, if it
+cannot. On the server it pulls every image of ours the stack runs (the
+worker's only when `COMPOSE_PROFILES` turns the worker on), all before
+anything is stopped, and then runs `docker compose up -d --no-build`. The
+compose files name the image by `RECALL_VERSION`, which the deploy sets.
+
+**A version without an image is built on the server, as before.** 0.4.6 is
+the last release with no published image, and `LAST_BUILT_ON_SERVER` in
+`deploy.yml` says so, in one place. Deploying it or anything older, a
+rollback included, checks out that tag and runs `docker compose up -d
+--build`, exactly as that release was always deployed. Tags never move, so
+the line never does.
+
+**The one-time step: make both packages public.** A package the workflow
+creates is private, whatever the repository's visibility, and GitHub offers
+no API to change that. So the first release that publishes images stops at
+the end of `publish-image`, with an error naming the package, and before
+`deploy`, so the server is untouched. Then, once per package:
+
+1. Open `https://github.com/orgs/pimlabs/packages/container/recall-server/settings`.
+2. **Danger Zone → Change visibility → Public**, and confirm with the
+   package's name. A public package cannot be made private again.
+3. The same for `recall-worker`.
+4. Re-run the failed jobs of that Release run. `publish-image` finds its
+   images already pushed, checks again that they can be pulled, and the
+   deploy follows it.
+
+Every later release's packages are already public. The deploy asks the same
+question of its own, so a deploy started by hand (**Actions → Deploy a
+release**) of a version whose image cannot be pulled fails the same way,
+before the server is touched.
+
+**Commands typed on the server.** The deploy exports `RECALL_VERSION` for
+its own commands only. A `docker compose up -d` typed there later has no
+`RECALL_VERSION`, so the compose files name the image `:local`; the deploy
+tags what it pulled as `:local` too, so that runs the version deployed
+(recreating the container once, as the name it was started under changed)
+rather than building one or finding an older `:local`.
+
 ## Verifying it works
 
 Run **Actions → Deploy a release** with the version production should already be on,
@@ -267,6 +339,17 @@ and watch the log. A failure at the `git checkout` step usually means the
 server's clone has local changes to tracked files, or is not at
 `DEPLOY_PATH`; a failure at the SSH connection step usually means the public
 key didn't make it into `authorized_keys`, or `DEPLOY_PORT`/`DEPLOY_HOST`
-doesn't match how you normally connect. A failure at the build step with a
+doesn't match how you normally connect.
+
+A failure at **Can the server pull the image?** means GHCR will not hand
+that version's image to a machine with no credentials: the package is still
+private (see the one-time step above), or that version's `publish-image`
+never pushed it, which re-running it fixes. A `docker pull` that is denied
+on the server while that step passed usually means the server holds a
+`docker login ghcr.io` with a token that has expired: `docker logout
+ghcr.io` there, since a public image needs none.
+
+For 0.4.6 and older, built on the server, a failure at the build step with a
 checksum error means the downloaded archive is not the one the release
-published, and the image was rightly not built.
+published, and the image was rightly not built. For later versions the same
+check runs in the release's `publish-image` job instead.

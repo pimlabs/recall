@@ -614,7 +614,7 @@ arriving new**, and **it has to stay cheap**.
       Recall has no such consumer, and a command that puts a secret in
       scrollback is a new leak path for no gain.
 
-- [ ] **Deploy builds the server image on the machine serving traffic, and CI
+- [x] **Deploy builds the server image on the machine serving traffic, and CI
       builds the same image first and throws it away.** The evidence is one
       run: `ci · Server image builds — 2m38s`, then `deploy · Deploy over SSH
       — 3m25s`, the second rebuilding from scratch what the first had just
@@ -635,6 +635,12 @@ arriving new**, and **it has to stay cheap**.
       --build` on the VPS itself, so the image is still assembled there on
       every deploy; nothing publishes a finished image from CI for the VPS
       to pull instead.
+
+      Done 2026-09-28, from the release after 0.4.6: `release.yml`'s
+      `publish-image` pushes `ghcr.io/pimlabs/recall-server` and
+      `recall-worker` per version and `deploy.yml` pulls them, while 0.4.6
+      and older (`LAST_BUILT_ON_SERVER`) still build on the server; the clone
+      stays, for the compose files and those older tags.
 
 - [x] **Setting up the off-box backup is eight manual steps and a trap.**
       Two `rclone config` invocations, a crypt password that must be stored
