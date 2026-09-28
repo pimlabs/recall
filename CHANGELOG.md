@@ -42,6 +42,24 @@ break will be described here in full rather than smoothed over.
   `.recall-state.json`, and never pushed.
   This is a **patch** under `docs/reference/releasing.md`'s Versioning
   rules: a new command and a new local file, nothing on the breaking list.
+- **`recall review` reads the server, the compose files and the
+  environment too, not only git.** A note that puts the server where it
+  used to be (`recall.pimlabs.id` beside the configured
+  `recall-server.pimlabs.id`) is now `stale`, with where the server is and
+  that `/health` answers there as the evidence; the configured host is
+  `still_true`. The review asks the configured server only `GET /health`
+  and `GET /.well-known/recall` (no pull, no enrolment or audit check), and
+  a host a note names only with the new `--probe-hosts` flag, then only for
+  its discovery document and with no credential. `deploy/docker-compose*.yml`
+  are read as YAML, so a service, image or ingress a note names is confirmed
+  by the file that runs it. A variable's value is compared only for `HOME`,
+  `CLAUDE_CODE_REMOTE` and `CLAUDE_CODE_REMOTE_MEMORY_DIR`, and only on the
+  kind of machine the claim is about (a cloud variable is `cant_tell` on a
+  laptop); any other variable, a token included, is judged by name and its
+  value never read. `--json`'s `evidence` gains `server_version`,
+  `server_commit`, `compose_files` and `probed`, and names the server,
+  compose and probe sources when they could not be read. **Patch**: a new
+  flag and new `--json` fields.
 
 ## 0.4.8 — 2026-09-28
 

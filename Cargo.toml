@@ -30,6 +30,11 @@ recall-worker = { path = "crates/recall-worker", version = "0.4.8", default-feat
 
 anyhow = "1"
 thiserror = "2"
+# `recall review` reads deploy/docker-compose*.yml as YAML rather than by
+# pattern, per docs/design/memory-truth.md: which services, images, labels
+# and variables the project's compose files carry. Pure Rust and maintained,
+# unlike serde_yaml; no serde needed for reading four kinds of key.
+yaml-rust2 = "0.13"
 serde = { version = "1", features = ["derive"] }
 # preserve_order keeps a user's .claude/settings.json key order intact when
 # `recall init` edits it — that file is committed and reviewed, so silently
