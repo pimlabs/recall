@@ -127,13 +127,13 @@ jobs:
 
           # This workflow itself counts for both: a change to either gate
           # below, or to the jobs it feeds, is only proven by running them.
-          if printf '%s\n' "$changed" | grep -Eq '^(crates/|deploy/|Cargo\.(toml|lock)$|\.github/workflows/ci\.yml$)'; then
+          if printf '%s\n' "$changed" | grep -Eq '^(crates/|deploy/|Cargo\.(toml|lock)$|scripts/release-image\.sh$|\.github/workflows/ci\.yml$)'; then
             echo "image=true" >> "$GITHUB_OUTPUT"
           else
             echo "image=false" >> "$GITHUB_OUTPUT"
             # One line on purpose: a `\` continuation inside a quoted
             # string keeps the next line's indentation in the annotation.
-            echo "::notice::Nothing under crates/, deploy/, Cargo.toml, Cargo.lock or this workflow changed, so the server image build was skipped. It runs unconditionally on every push to main."
+            echo "::notice::Nothing under crates/, deploy/, Cargo.toml, Cargo.lock, scripts/release-image.sh or this workflow changed, so the server image builds were skipped. They run unconditionally on every push to main."
           fi
 
           # .github/actions/ too: the windows jobs set up Rust through the
@@ -206,6 +206,8 @@ jobs:
           bash -n scripts/update-formula-check.sh
           bash -n scripts/capture-wire-fixtures.sh
           bash -n scripts/installer-test.sh
+          bash -n scripts/release-image.sh
+          bash -n scripts/image-pullable.sh
           sh -n deploy/fetch-release.sh
 
       # The formula rewrite runs once per release, from CI or from a laptop,
@@ -556,6 +558,41 @@ jobs:
           # impossible without anyone noticing.
           docker run --rm --entrypoint sh recall-server-rel -c 'command -v wget'
 
+  # The images release.yml's `publish-image` job pushes, built here the way
+  # it builds them: the same script, the same Dockerfile targets, build
+  # arguments, annotations and provenance, for linux/amd64 and linux/arm64,
+  # with push=false. `build-image` above proves the Dockerfile builds; this
+  # proves the multi-platform build the release depends on does, under the
+  # same QEMU, before a release finds out. Nothing is pushed and no
+  # credential is used.
+  #
+  # From the newest published release's binaries, since an unmerged change
+  # has no release: the Dockerfile and fetch-release.sh under test, the
+  # binaries from the newest release, as `releases/latest` names it.
+  # Gated on the same diff as `build-image`.
+  check-publish-image:
+    name: check-publish-image
+    needs: plan
+    if: needs.plan.outputs.image == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: The release's images build, for both platforms
+        run: |
+          set -eu
+          latest=$(curl -fsS -o /dev/null -w '%{redirect_url}' \
+            https://github.com/pimlabs/recall/releases/latest)
+          version="${latest##*/v}"
+          echo "Newest release: $version ($latest)"
+          scripts/release-image.sh check "$version" "$(git rev-parse --short HEAD)"
+
   # The client only — recall-server and recall-worker are Linux-only by
   # design (see deploy/Dockerfile and their own crate docs), so they are
   # excluded rather than tested and ignored. `recall`'s own integration tests still pull it in as
@@ -654,7 +691,7 @@ jobs:
   ci-passed:
     name: ci-passed
     if: always()
-    needs: [plan, check-scripts, test-installers, test-linux, build-image, test-windows]
+    needs: [plan, check-scripts, test-installers, test-linux, build-image, check-publish-image, test-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Every job succeeded or was skipped on purpose

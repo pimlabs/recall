@@ -324,6 +324,115 @@ jobs:
           files: dist/*
           generate_release_notes: true
 
+  # The images a server runs, published so a deploy pulls them instead of
+  # building them on the machine serving traffic: ghcr.io/pimlabs/
+  # recall-server:<version> and recall-worker:<version>, for linux/amd64 and
+  # linux/arm64. Built from the release's own binaries, downloaded from the
+  # GitHub Release above and checked against its checksums.txt, exactly as
+  # `docker compose up -d --build` on a server built them for itself up to
+  # 0.4.6: the same Dockerfile, target and build arguments
+  # (scripts/release-image.sh, which ci.yml's `check-publish-image` runs on
+  # every pull request with push=false). Only a version tag, never `latest`:
+  # a deploy names the version it wants, and a tag that moves by itself is
+  # a deploy nobody asked for.
+  #
+  # Not behind the `release` environment, deliberately. The image holds
+  # nothing that is not already public and unapproved in the GitHub Release,
+  # a package version can be deleted (npm and crates.io cannot be undone),
+  # and `deploy` below needs it: gating it would make every deploy wait for
+  # the approval that deploys were deliberately kept out of.
+  #
+  # The only job with `packages: write`, and GITHUB_TOKEN is its only
+  # credential. A package it creates is private whatever this repository's
+  # visibility, and GitHub has no API to change that, so the last step asks
+  # GHCR the way a server will, with no credentials, and fails here, before
+  # `deploy`, until the owner has made each package public once; see
+  # docs/reference/releasing.md. A version already in the registry is not
+  # rebuilt, so re-running this job after that is safe.
+  publish-image:
+    name: publish-image
+    needs: [check-versions, publish-github]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      # The provenance attestations: a Sigstore certificate from the job's
+      # OIDC identity, and the attestation stored against this repository.
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.check-versions.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      # The arm64 half's RUN steps (apk, npm, and `recall-server version` on
+      # the downloaded binary) run under emulation on this amd64 runner.
+      # Nothing is compiled, so that costs minutes, not an hour.
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # A tag from before images were published (a run dispatched by hand
+      # for 0.4.6 or older) has no script to publish one with, and is
+      # deployed by building on the server instead (deploy.yml's
+      # LAST_BUILT_ON_SERVER), so there is nothing to do here.
+      - name: Build and push
+        id: push
+        run: |
+          if [ ! -f scripts/release-image.sh ]; then
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::v$VERSION predates published images: it is deployed by building on the server, so nothing is published here."
+            exit 0
+          fi
+          scripts/release-image.sh push "$VERSION" "$(git rev-parse --short HEAD)"
+
+      # SLSA provenance signed for this workflow run, stored beside each
+      # image in GHCR: `gh attestation verify oci://ghcr.io/pimlabs/
+      # recall-server:<version> --repo pimlabs/recall`. buildx attaches its
+      # own provenance too (--provenance mode=max). Only for an image this
+      # run pushed; one that was already there was attested when it was.
+      - name: Attest the server image
+        if: steps.push.outputs.server_digest != ''
+        uses: actions/attest@v4
+        with:
+          subject-name: ghcr.io/pimlabs/recall-server
+          subject-digest: ${{ steps.push.outputs.server_digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest the worker image
+        if: steps.push.outputs.worker_digest != ''
+        uses: actions/attest@v4
+        with:
+          subject-name: ghcr.io/pimlabs/recall-worker
+          subject-digest: ${{ steps.push.outputs.worker_digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Can a server pull them without credentials?
+        if: steps.push.outputs.skipped != 'true'
+        run: |
+          failed=""
+          for name in recall-server recall-worker; do
+            scripts/image-pullable.sh "ghcr.io/pimlabs/$name:$VERSION" || failed="$failed $name"
+          done
+          if [ -n "$failed" ]; then
+            for name in $failed; do
+              echo "::error::ghcr.io/pimlabs/$name:$VERSION is published, but a server cannot pull it without credentials. Make the package public once: https://github.com/orgs/pimlabs/packages/container/$name/settings (Danger Zone, Change visibility, Public). Then re-run this job; it will not rebuild what is already there, and the deploy follows it."
+            done
+            exit 1
+          fi
+
   # ---- The registries. Each waits for the GitHub Release, because npm's
   # postinstall and the Homebrew formula both download its archives, and each
   # waits for the `release` environment's approval. They are separate jobs
@@ -519,13 +628,14 @@ jobs:
           release-tag: ${{ github.event.inputs.tag || github.ref_name }}
           token: ${{ secrets.WINGET_TOKEN }}
 
-  # The server runs the release that was just published: its image holds
-  # the recall-server above, checked against checksums.txt. Not behind the
-  # `release` environment: a deploy can be undone by deploying the previous
-  # version (Actions → Deploy a release), which a registry publish cannot. Skips, and
-  # says so, where no server is configured.
+  # The server runs the release that was just published: it pulls the
+  # images `publish-image` pushed, which hold the recall-server above,
+  # checked against checksums.txt. Not behind the `release` environment: a
+  # deploy can be undone by deploying the previous version (Actions → Deploy
+  # a release), which a registry publish cannot. Skips, and says so, where
+  # no server is configured.
   deploy:
-    needs: [check-versions, publish-github]
+    needs: [check-versions, publish-image]
     uses: ./.github/workflows/deploy.yml
     with:
       version: ${{ needs.check-versions.outputs.version }}
