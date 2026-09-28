@@ -327,10 +327,21 @@ before the server is touched.
 
 **Commands typed on the server.** The deploy exports `RECALL_VERSION` for
 its own commands only. A `docker compose up -d` typed there later has no
-`RECALL_VERSION`, so the compose files name the image `:local`; the deploy
-tags what it pulled as `:local` too, so that runs the version deployed
-(recreating the container once, as the name it was started under changed)
-rather than building one or finding an older `:local`.
+`RECALL_VERSION`, so the compose files name the image `:local`. A pull
+deploy tags what it pulled as `:local` too, so straight after one that runs
+the version deployed (recreating the container once, as the name it was
+started under changed) rather than building one.
+
+`:local` is only as new as the last deploy that **pulled**, though. A
+rollback to 0.4.6 or older builds its own image under another name and
+leaves `:local` alone: deploy 0.4.7, roll back to 0.4.6, then check out a
+later tag by hand and run `docker compose up -d`, and that runs 0.4.7, not
+the tag checked out. So on the server, name the version in commands you
+type, `RECALL_VERSION=<version> docker compose ... up -d`, which runs the
+image that version's deploy pulled; or add `--build`, which builds the
+checked-out version under `:local`; or move between versions with **Deploy
+a release** rather than by hand. `docker compose ... ps` shows which image
+each container was started from.
 
 ## Verifying it works
 

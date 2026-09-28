@@ -628,7 +628,10 @@ docker compose up -d --no-build     # with your -f files
 The automatic deploy does this, and also tags what it pulled as `:local`,
 so a later `docker compose up -d` without `RECALL_VERSION` runs the same
 version rather than building one. 0.4.6 and older have no published image
-and are only ever built, which is how a rollback to them is deployed.
+and are only ever built, which is how a rollback to them is deployed; such a
+rollback leaves `:local` on the last version pulled, so after one, name
+`RECALL_VERSION` or pass `--build` in commands you type (see
+[`github-actions-deploy.md`](../docs/reference/github-actions-deploy.md#the-image-published-by-the-release-pulled-by-the-server)).
 
 This can run automatically instead: every release deploys itself, and a
 chosen version can be deployed from the Actions tab (phone included). See

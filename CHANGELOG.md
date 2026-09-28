@@ -24,9 +24,13 @@ break will be described here in full rather than smoothed over.
   builds nothing on the server; 0.4.6 and older have no image and are still
   built there, so a rollback to them works as before. The compose files now
   name the image (`image:` beside the `build:` they had), tagged by
-  `RECALL_VERSION` and `:local` without it, so `docker compose up -d
-  --build` from a checkout builds exactly as before, and `RECALL_VERSION=<version>
-  docker compose pull` fetches a release's image instead. There is no
+  `RECALL_VERSION` and `:local` without it. `docker compose up -d --build`
+  from a checkout still builds the same image from the same Dockerfile, but
+  names it `ghcr.io/pimlabs/recall-server:local` (and
+  `recall-worker:local`) rather than `recall-recall-server`; the old image
+  is left behind, and only a rollback to 0.4.6 or older, which builds it
+  again, uses it. `RECALL_VERSION=<version> docker compose pull` fetches a
+  release's image instead. There is no
   `latest` tag. The first release to publish images needs its two packages
   made public once; see `docs/reference/releasing.md`. This is a **patch**
   under that file's Versioning rules: nothing on its list of breaking
