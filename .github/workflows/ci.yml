@@ -127,13 +127,13 @@ jobs:
 
           # This workflow itself counts for both: a change to either gate
           # below, or to the jobs it feeds, is only proven by running them.
-          if printf '%s\n' "$changed" | grep -Eq '^(crates/|deploy/|Cargo\.(toml|lock)$|\.github/workflows/ci\.yml$)'; then
+          if printf '%s\n' "$changed" | grep -Eq '^(crates/|deploy/|Cargo\.(toml|lock)$|scripts/(release-image|image-pullable)\.sh$|\.github/workflows/(ci|release)\.yml$)'; then
             echo "image=true" >> "$GITHUB_OUTPUT"
           else
             echo "image=false" >> "$GITHUB_OUTPUT"
             # One line on purpose: a `\` continuation inside a quoted
             # string keeps the next line's indentation in the annotation.
-            echo "::notice::Nothing under crates/, deploy/, Cargo.toml, Cargo.lock or this workflow changed, so the server image build was skipped. It runs unconditionally on every push to main."
+            echo "::notice::Nothing under crates/, deploy/, Cargo.toml, Cargo.lock, scripts/release-image.sh, scripts/image-pullable.sh, release.yml or this workflow changed, so the server image builds were skipped. They run unconditionally on every push to main."
           fi
 
           # .github/actions/ too: the windows jobs set up Rust through the
@@ -214,6 +214,8 @@ jobs:
           bash -n scripts/update-formula-check.sh
           bash -n scripts/capture-wire-fixtures.sh
           bash -n scripts/installer-test.sh
+          bash -n scripts/release-image.sh
+          bash -n scripts/image-pullable.sh
           sh -n deploy/fetch-release.sh
 
       # The formula rewrite runs once per release, from CI or from a laptop,
@@ -564,6 +566,51 @@ jobs:
           # impossible without anyone noticing.
           docker run --rm --entrypoint sh recall-server-rel -c 'command -v wget'
 
+  # The images release.yml publishes, built here the way its `build-image`
+  # legs build them: the same script, Dockerfile targets, build arguments
+  # and provenance, one leg per architecture on a runner of that
+  # architecture, with push=false, then each image's claude CLI and binary
+  # run on that runner. `build-image` above proves the Dockerfile builds;
+  # this proves the release's per-architecture builds do, before a release
+  # finds out. Never under emulation: under QEMU the arm64 npm install of
+  # the claude CLI died with an illegal instruction and the build hung for
+  # the job's whole timeout. Nothing is pushed and no credential is used.
+  #
+  # From the newest published release's binaries, since an unmerged change
+  # has no release: the Dockerfile and fetch-release.sh under test, the
+  # binaries from the newest release, as `releases/latest` names it.
+  # Gated on the same diff as `build-image`.
+  check-publish-image:
+    name: check-publish-image (${{ matrix.arch }})
+    needs: plan
+    if: needs.plan.outputs.image == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            os: ubuntu-latest
+          - arch: arm64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: The release's image builds and runs on this architecture
+        timeout-minutes: 20
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -eu
+          latest=$(curl -fsS -o /dev/null -w '%{redirect_url}' \
+            https://github.com/pimlabs/recall/releases/latest)
+          version="${latest##*/v}"
+          echo "Newest release: $version ($latest)"
+          scripts/release-image.sh build "$version" "$(git rev-parse --short HEAD)" "$ARCH" check
+
   # The client only — recall-server and recall-worker are Linux-only by
   # design (see deploy/Dockerfile and their own crate docs), so they are
   # excluded rather than tested and ignored. `recall`'s own integration tests still pull it in as
@@ -662,7 +709,7 @@ jobs:
   ci-passed:
     name: ci-passed
     if: always()
-    needs: [plan, check-scripts, test-installers, test-linux, build-image, test-windows]
+    needs: [plan, check-scripts, test-installers, test-linux, build-image, check-publish-image, test-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Every job succeeded or was skipped on purpose

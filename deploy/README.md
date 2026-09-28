@@ -85,6 +85,12 @@ All three need:
   names one explicitly instead. Servers before 0.4.0 were built from source,
   and so are those tags.
 
+  Every release after 0.4.6 also publishes the finished image, for amd64
+  and arm64, as `ghcr.io/pimlabs/recall-server:<version>` (and
+  `recall-worker:<version>`), which is what an automatic deploy pulls. The
+  clone is still where the compose files come from; see
+  [Updating](#updating) for pulling instead of building by hand.
+
 - **Linux on amd64 or arm64.** Those are the two server builds a release
   publishes. Anything else can still build from source with
   `RECALL_SOURCE=source`, which compiles Rust and SQLite's C amalgamation in
@@ -606,6 +612,27 @@ curl -sf https://recall.yourdomain.com/.well-known/recall   # server.version
 channel `release`. `GET /health` reports the commit the binary was built
 from. Rolling back is the same, with an older tag.
 
+For a release after 0.4.6 the image is already built: name the version, and
+compose pulls the release's own image instead of assembling one here.
+`RECALL_VERSION` picks the image's tag, and without it the compose files
+fall back to a local `:local` image, which is what `--build` builds:
+
+```sh
+git checkout v0.4.7
+cd deploy
+export RECALL_VERSION=0.4.7
+docker compose pull recall-server   # with your -f files; add recall-worker if you run it
+docker compose up -d --no-build     # with your -f files
+```
+
+The automatic deploy does this, and also tags what it pulled as `:local`,
+so a later `docker compose up -d` without `RECALL_VERSION` runs the same
+version rather than building one. 0.4.6 and older have no published image
+and are only ever built, which is how a rollback to them is deployed; such a
+rollback leaves `:local` on the last version pulled, so after one, name
+`RECALL_VERSION` or pass `--build` in commands you type (see
+[`github-actions-deploy.md`](../docs/reference/github-actions-deploy.md#the-image-published-by-the-release-pulled-by-the-server)).
+
 This can run automatically instead: every release deploys itself, and a
 chosen version can be deployed from the Actions tab (phone included). See
 [`docs/reference/github-actions-deploy.md`](../docs/reference/github-actions-deploy.md)
@@ -613,8 +640,9 @@ for wiring `.github/workflows/deploy.yml` to this machine.
 
 To try an unreleased branch on a server, build it from the checkout:
 `RECALL_SOURCE=source GIT_COMMIT=$(git rev-parse --short HEAD) docker compose
-up -d --build` (with your `-f` files). The discovery document then says
-`dev`, which is the point.
+up -d --build` (with your `-f` files), with `RECALL_VERSION` unset, so the
+result is the `:local` image and never takes a release's name. The discovery
+document then says `dev`, which is the point.
 
 The SQLite file lives in the named `recall-data` volume, so it survives
 rebuilds/restarts. `docker compose down -v` would delete it — don't run

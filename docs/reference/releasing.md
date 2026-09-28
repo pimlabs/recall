@@ -78,18 +78,28 @@ either refuses or resumes; it never moves a tag.
 2. **Build** the client's targets on native runners, then **create the
    GitHub Release** with `checksums.txt`. `install.sh` (and, on Windows,
    `install.ps1`) work from this moment.
-3. **Stop and wait for you.** The `publish-npm`, `publish-crates`,
+3. **Publish the server's images** (`check-image`, `build-image`,
+   `publish-image`): `ghcr.io/pimlabs/recall-server:<version>` and
+   `recall-worker:<version>`, for amd64 and arm64, built from the Release's
+   own binaries, each architecture on a native runner (never emulated), with
+   no `latest` tag. Then **deploy** them: the production server pulls the image
+   rather than building it (`deploy.yml`; see
+   [`github-actions-deploy.md`](github-actions-deploy.md)). Neither waits for
+   an approval, deliberately: the image holds nothing the Release did not
+   already make public, a package version can be deleted, and a deploy is
+   undone by deploying the previous version.
+4. **Stop and wait for you.** The `publish-npm`, `publish-crates`,
    `publish-homebrew` and `publish-winget` jobs run in the `release`
    environment, whose required reviewer is the owner. GitHub notifies you;
    *Review deployments → Approve* releases all four.
-4. **npm** and **crates.io** publish through *trusted publishing*: each
+5. **npm** and **crates.io** publish through *trusted publishing*: each
    registry trusts this workflow's OIDC identity and issues a credential that
    lasts for the job. No npm or crates.io token is stored anywhere — not in
    the repository, not in a cloud environment, not on a laptop.
-5. **Homebrew**: the formula is rewritten from the release's own checksums
+6. **Homebrew**: the formula is rewritten from the release's own checksums
    and pushed to `pimlabs/homebrew-tap`. The rewritten file is attached to the
    run; it lands in this repository through a PR like every other change.
-6. **winget**: [`vedantmgoyal9/winget-releaser`](https://github.com/vedantmgoyal9/winget-releaser)
+7. **winget**: [`vedantmgoyal9/winget-releaser`](https://github.com/vedantmgoyal9/winget-releaser)
    opens a pull request against `microsoft/winget-pkgs` with the new
    version's manifest. Needs a one-time first submission by hand before it
    does anything — see [winget](#5-winget-first-submission-only) below.
@@ -146,6 +156,16 @@ Done once per repository; nothing here needs repeating per release.
    everything else still publishes. This alone is not enough to make the
    `publish-winget` job do anything, though — it also needs the fork and the
    first submission below, done once, by hand.
+6. **GHCR packages, after the first release that publishes images** (the one
+   after 0.4.6). `publish-image` creates `recall-server` and `recall-worker`
+   under the `pimlabs` organization with `GITHUB_TOKEN`, and a new package is
+   private whatever the repository is, with no API to change that. The job
+   checks, anonymously, that a server can pull what it pushed, and fails,
+   before the deploy, until it can. Make each package public once, at
+   `https://github.com/orgs/pimlabs/packages/container/<name>/settings`
+   (*Danger Zone → Change visibility → Public*), then re-run the failed
+   jobs: a tag that is already there is not rebuilt, and the deploy follows
+   `publish-image`. Nothing needs doing for any release after that.
 
 Once the first CI release has published cleanly, the old npm and crates.io
 tokens on any laptop can be revoked.
