@@ -1,17 +1,22 @@
 name: Deploy a release
 
-# Puts a release on the server. A server runs releases, not `main`: the
-# image it builds holds the recall-server that release published, checked
-# against the release's own checksums (deploy/Dockerfile).
+# Puts a release on the server. A server runs releases, not `main`: its
+# image holds the recall-server that release published, checked against the
+# release's own checksums (deploy/Dockerfile). Every release after 0.4.6
+# builds that image once, in the Release workflow, and publishes it to GHCR
+# (release.yml's `publish-image`); the server pulls it. 0.4.6 and older have
+# no published image, and the server builds theirs for itself, as it always
+# did. LAST_BUILT_ON_SERVER below is where the two meet.
 #
 # Two ways in:
 #
-#   - release.yml calls it once the GitHub Release exists, with that
-#     release's version. Every release deploys itself.
+#   - release.yml calls it once the GitHub Release and its images exist,
+#     with that release's version. Every release deploys itself.
 #   - Actions → Deploy a release → Run workflow, with a version. For a rollback, or to
 #     retry a deploy that failed, from anywhere including the GitHub mobile
-#     app. An older tag deploys the way that tag did: before 0.4.0 its image
-#     built the server from source.
+#     app. An older tag deploys the way that tag did: 0.4.6 and older build
+#     their image on the server, and before 0.4.0 that image compiled the
+#     server from source.
 #
 # Needs DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY as repo secrets and
 # DEPLOY_COMPOSE_FILES as a variable; see docs/reference/github-actions-deploy.md.
@@ -46,6 +51,13 @@ jobs:
       cancel-in-progress: false
     env:
       VERSION: ${{ inputs.version }}
+      # The last release with no image in GHCR, deployed by building its
+      # image on the server (`docker compose up -d --build`). Every release
+      # after it publishes ghcr.io/pimlabs/recall-server:<version> and
+      # recall-worker:<version>, and is deployed by pulling them. Tags never
+      # move, so this never changes: a rollback to 0.4.6 or older builds, as
+      # those releases always did.
+      LAST_BUILT_ON_SERVER: 0.4.6
     steps:
       - uses: actions/checkout@v5
 
@@ -61,6 +73,20 @@ jobs:
           if ! git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null; then
             echo "::error::There is no tag v$VERSION. Deploy a version that has been released."
             exit 1
+          fi
+
+      # Pulled or built, decided here and nowhere else, from the version
+      # alone: see LAST_BUILT_ON_SERVER above.
+      - name: Pulled or built on the server?
+        id: how
+        run: |
+          newer=$(printf '%s\n%s\n' "$LAST_BUILT_ON_SERVER" "$VERSION" | sort -V | tail -n 1)
+          if [ "$VERSION" != "$LAST_BUILT_ON_SERVER" ] && [ "$newer" = "$VERSION" ]; then
+            echo "mode=pull" >> "$GITHUB_OUTPUT"
+            echo "$VERSION is after $LAST_BUILT_ON_SERVER: the server pulls its published image."
+          else
+            echo "mode=build" >> "$GITHUB_OUTPUT"
+            echo "$VERSION is $LAST_BUILT_ON_SERVER or older: it has no published image, so the server builds it, as that release did."
           fi
 
       # Not having the deploy secrets is a normal state, not a failure: a
@@ -92,6 +118,24 @@ jobs:
             exit 1
           fi
 
+      # Asked from here, before the server is touched, and asked the way the
+      # server will ask: with no credentials. A package the release created
+      # starts private, so the first release to publish one stops here
+      # until it is made public, with the server still on the version it
+      # was on. The worker's image only warns: the server pulls it only if
+      # it runs the worker, which this runner cannot see, and the pull on
+      # the server fails loudly by itself if it does.
+      - name: Can the server pull the image?
+        if: steps.secrets.outputs.configured == 'true' && steps.how.outputs.mode == 'pull'
+        run: |
+          if ! scripts/image-pullable.sh "ghcr.io/pimlabs/recall-server:$VERSION"; then
+            echo "::error::The server cannot pull ghcr.io/pimlabs/recall-server:$VERSION without credentials, so nothing was deployed and production is still on the version it was on. If the package is private, make it public once (https://github.com/orgs/pimlabs/packages/container/recall-server/settings, Change visibility), then re-run this job. If the tag is missing, re-run the release's publish-image job first. See docs/reference/github-actions-deploy.md."
+            exit 1
+          fi
+          if ! scripts/image-pullable.sh "ghcr.io/pimlabs/recall-worker:$VERSION"; then
+            echo "::warning::ghcr.io/pimlabs/recall-worker:$VERSION cannot be pulled without credentials. A server that runs the worker (COMPOSE_PROFILES=worker) will fail to deploy until it can; make that package public too (https://github.com/orgs/pimlabs/packages/container/recall-worker/settings)."
+          fi
+
       - name: Deploy over SSH
         if: steps.secrets.outputs.configured == 'true'
         uses: appleboy/ssh-action@v1
@@ -103,17 +147,52 @@ jobs:
           script: |
             set -e
             cd "${DEPLOY_PATH:-$HOME/recall}"
-            # The compose files and the Dockerfile come from the release's
-            # own tag, so a deploy of 0.4.0 is built exactly the way 0.4.0
-            # says. A checkout with local changes to tracked files refuses
-            # to move, which is a signal to go and look, not something this
-            # workflow should overwrite. Untracked files, such as a local
-            # compose override, are left where they are.
+            # The compose files (and, for a build, the Dockerfile) come
+            # from the release's own tag, so a deploy of 0.4.0 runs exactly
+            # the way 0.4.0 says. A checkout with local changes to tracked
+            # files refuses to move, which is a signal to go and look, not
+            # something this workflow should overwrite. Untracked files,
+            # such as a local compose override, are left where they are.
             git fetch --no-tags origin "refs/tags/v$VERSION:refs/tags/v$VERSION"
             git checkout --detach "v$VERSION"
             cd deploy
-            RECALL_VERSION="$VERSION" GIT_COMMIT=$(git rev-parse --short HEAD) \
+            # The tag's compose files name the images by this version.
+            export RECALL_VERSION="$VERSION"
+            GIT_COMMIT=$(git rev-parse --short HEAD)
+            export GIT_COMMIT
+
+            if [ "$DEPLOY_MODE" = pull ]; then
+              # Each image of ours this stack runs, as the tag's compose
+              # files name it: the server's, and the worker's where
+              # COMPOSE_PROFILES in .env turns the worker on. Pulled one by
+              # one before anything is stopped, so a pull that fails leaves
+              # every running container as it was.
+              images=$(docker compose $COMPOSE_FILES config --images | grep '^ghcr\.io/pimlabs/' || true)
+              if [ -z "$images" ]; then
+                echo "The compose files at v$VERSION name no ghcr.io/pimlabs image, so there is nothing to pull." >&2
+                exit 1
+              fi
+              for image in $images; do
+                if ! docker pull "$image"; then
+                  echo "Could not pull $image, so nothing was changed: the running containers are as they were." >&2
+                  echo "If the pull was denied, the package is private. Make it public once in its package settings (Change visibility), then deploy again; see docs/reference/github-actions-deploy.md." >&2
+                  exit 1
+                fi
+              done
+              # Once every pull has worked: the same bytes under `:local`,
+              # the name the compose files fall back to when RECALL_VERSION
+              # is unset. A `docker compose up -d` typed on this machine
+              # later then runs the version deployed here, rather than
+              # building one or finding an older `:local`.
+              for image in $images; do
+                docker tag "$image" "${image%:*}:local"
+              done
+              # --no-build: every image is here now, and one that is not
+              # should fail this deploy, not be built on the server.
+              docker compose $COMPOSE_FILES up -d --no-build
+            else
               docker compose $COMPOSE_FILES up -d --build
+            fi
 
             # Asked from inside the container, because neither compose file
             # publishes 8787 to the host: both use `expose`, deliberately,
@@ -121,10 +200,11 @@ jobs:
             sleep 5
             docker compose $COMPOSE_FILES exec -T recall-server \
               wget -qO- http://127.0.0.1:8787/health
-          envs: DEPLOY_PATH,COMPOSE_FILES,VERSION
+          envs: DEPLOY_PATH,COMPOSE_FILES,VERSION,DEPLOY_MODE
         env:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           COMPOSE_FILES: ${{ vars.DEPLOY_COMPOSE_FILES }}
+          DEPLOY_MODE: ${{ steps.how.outputs.mode }}
 
       # Whichever way the steps above went, say what production is actually
       # running, on the run's summary page, where it is read. A green tick

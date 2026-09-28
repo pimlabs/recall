@@ -24,6 +24,13 @@ default of 10. `recall-worker` keeps the container name `recall-worker` too,
 in whichever of the two files defines it, since deploy/README.md's worker
 procedures stop, restart and read its logs by that name the same way.
 
+And the image each of those two services runs: the name release.yml's
+`publish-image` pushes (scripts/release-image.sh), tagged by RECALL_VERSION,
+which is what deploy.yml pulls, and `:local` without it; with a `build:`
+beside it, so `docker compose up -d --build` still builds it from the
+checkout for anyone running the files by hand, and for a rollback's older
+tag.
+
 The checks are also run against copies of each file with one of those lines
 added, and each copy must fail: a check that can never fail is not one.
 
@@ -65,6 +72,11 @@ CONTAINER_NAMES = {SERVER: 'recall-server', SQLITE_WEB: 'recall-sqlite-web'}
 # no worker service, so it has nothing to name here.
 WORKER_CONTAINER_NAME = 'recall-worker'
 GRACE_SECONDS = 60
+# The images release.yml publishes, as the compose files must name them.
+IMAGES = {
+    SERVER: 'ghcr.io/pimlabs/recall-server:${RECALL_VERSION:-local}',
+    WORKER: 'ghcr.io/pimlabs/recall-worker:${RECALL_VERSION:-local}',
+}
 PROFILE = 'worker'
 # Each of these reaches past the worker's own container.
 ESCAPES = ('privileged', 'pid', 'ipc', 'network_mode', 'cap_add', 'devices')
@@ -207,6 +219,16 @@ def server_problems(doc):
         if got != WORKER_CONTAINER_NAME:
             found.append(f'{WORKER} is container_name: {WORKER_CONTAINER_NAME}, which '
                          f'deploy/README.md logs, restarts and stops it by, not {got!r}')
+    for service, image in IMAGES.items():
+        if service not in services:
+            continue
+        got = services[service].get('image')
+        if got != image:
+            found.append(f'{service} is image: {image}, the name release.yml publishes '
+                         f'and deploy.yml pulls, not {got!r}')
+        if not services[service].get('build'):
+            found.append(f'{service} keeps its build:, so --build still builds it from '
+                         'the checkout')
     return found
 
 
@@ -224,10 +246,16 @@ def server_mutations(doc):
         changed('a renamed server container', SERVER,
                 lambda s: s.__setitem__('container_name', 'recall-recall-server-1')),
         changed('no sqlite-web container name', SQLITE_WEB, lambda s: s.pop('container_name')),
+        changed('no server image', SERVER, lambda s: s.pop('image')),
+        changed('a server image that is always latest', SERVER,
+                lambda s: s.__setitem__('image', 'ghcr.io/pimlabs/recall-server:latest')),
+        changed('a server image that must be pulled', SERVER, lambda s: s.pop('build')),
     ]
     if WORKER in (doc.get('services') or {}):
         muts.append(changed('a renamed worker container', WORKER,
                              lambda s: s.__setitem__('container_name', 'recall-recall-worker-1')))
+        muts.append(changed('the worker under the server\'s image', WORKER,
+                             lambda s: s.__setitem__('image', IMAGES[SERVER])))
     return muts
 
 
@@ -363,7 +391,7 @@ def main():
         for p in found:
             print(f'  FAIL {path}: {p}')
         if not found:
-            print(f'  ok   {path}: container names and stop_grace_period')
+            print(f'  ok   {path}: container names, stop_grace_period and images')
         fails += len(found)
         for label, bad in server_mutations(doc):
             if server_problems(bad):

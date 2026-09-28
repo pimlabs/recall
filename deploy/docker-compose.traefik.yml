@@ -25,6 +25,13 @@ name: recall
 
 services:
   recall-server:
+    # The image the release published for RECALL_VERSION, which a deploy
+    # (.github/workflows/deploy.yml) pulls rather than builds. With
+    # RECALL_VERSION unset, as a checkout run by hand leaves it, the name
+    # is `:local`, and `--build` builds it here from the Dockerfile, as
+    # every server did for itself up to 0.4.6. scripts/compose-check.py
+    # asserts the name.
+    image: ghcr.io/pimlabs/recall-server:${RECALL_VERSION:-local}
     build:
       context: ..
       dockerfile: deploy/Dockerfile
@@ -101,6 +108,8 @@ services:
   # the server merges inline, exactly as before.
   recall-worker:
     profiles: ["worker"]
+    # Published beside the server's image, and named the same way.
+    image: ghcr.io/pimlabs/recall-worker:${RECALL_VERSION:-local}
     build:
       context: ..
       dockerfile: deploy/Dockerfile
