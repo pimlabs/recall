@@ -1,6 +1,6 @@
 # Design: reviewing whether memory is still true
 
-Status: **proposal**, not built. Nothing here describes today's behaviour;
+Status: **agreed 2026-09-28**, not built yet. Nothing here describes today's behaviour;
 when a part of it is built, [`../reference/`](../reference/) and the
 [CHANGELOG](../../CHANGELOG.md) become the authority for it and this file
 moves to `history/` as the record of why. It answers the open entry in
@@ -274,27 +274,30 @@ Each pull request ships and is useful alone.
 Nothing here is on the breaking list: no command, flag, field, variable,
 wire contract or on-disk format that exists today changes.
 
-## Open decisions
+## Decisions
 
-1. **Name.** `recall review`, or `recall truth`. **Recommendation:**
+Decided by the owner on 2026-09-28: every recommendation below was
+accepted as written.
+
+1. **Name.** `recall review`, or `recall truth`. **Decided:**
    `review`: it says what the owner does with it, and `truth` promises a
    verdict the design deliberately withholds.
 2. **Where the shared code lives.** Ungate part of `recall-worker`, or a
    new small crate for the redactor and the `claude` call.
-   **Recommendation:** ungate. `recall-server` already depends on that
+   **Decided:** ungate. `recall-server` already depends on that
    crate the same way, and a crate per helper is structure without a
    boundary behind it.
-3. **Probing hosts named in memory.** **Recommendation:** only with
+3. **Probing hosts named in memory.** **Decided:** only with
    `--probe-hosts`, and only `GET /.well-known/recall`. It would have
    caught `recall.pimlabs.id` now serving the install URL, but a note's
    text should not decide by default where this machine sends requests.
-4. **Exit code on stale claims.** **Recommendation:** `0`. The review
+4. **Exit code on stale claims.** **Decided:** `0`. The review
    offers evidence, and `status`, not `doctor`, is its model; a script can
    read `--json`. Revisit if the owner wants it in CI.
-5. **Layer 3 by default.** **Recommendation:** off, behind `--claude`, as
+5. **Layer 3 by default.** **Decided:** off, behind `--claude`, as
    the contradiction check is. It spends Claude usage, and layers 1 and 2
    already cover the case that started this.
-6. **Review state per machine or synced.** **Recommendation:** per
+6. **Review state per machine or synced.** **Decided:** per
    machine. What a machine can decide differs (the cloud session decides
    the environment claims), and syncing it would put a second, unmerged
    file on the write path.
