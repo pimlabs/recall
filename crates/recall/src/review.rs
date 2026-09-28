@@ -16,14 +16,16 @@
 //! project's compose files and from a few environment variables. The last
 //! four live in [`sources`], which says what they send and what they never
 //! read; this file opens no connection of its own
-//! (`this_module_never_touches_the_network`). `--claude` (layer 3) and
-//! `recall review apply` are later PRs.
+//! (`this_module_never_touches_the_network`). `recall review apply` is a
+//! later PR.
 //!
-//! `--all` is accepted and stored for forward compatibility with layer 3,
-//! the only layer this design makes incremental: layers 1 and 2 are cheap
-//! enough to run over every claim on every run regardless (`docs/design/
-//! memory-truth.md`'s "Incremental" section), so `--all` has no visible
-//! effect until a later PR adds the layer it gates.
+//! Layer 3, only with `--claude`, lives in [`claude`]: the local `claude`
+//! CLI over what layers 1 and 2 left undecided, handed a fact sheet of
+//! what they observed and held to citing it. It is the only incremental
+//! layer: layers 1 and 2 are cheap enough to run over every claim on every
+//! run (`docs/design/memory-truth.md`'s "Incremental" section), while
+//! layer 3 asks again only about a file whose content changed, or one
+//! whose earlier answer cited a fact no longer observed, unless `--all`.
 //!
 //! **Scope matters to what can be checked.** A path, a script name or a
 //! version only means something against *this* project's checkout — a
@@ -42,6 +44,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::project as proj;
 
+mod claude;
 mod sources;
 
 /// `recall review …`.
@@ -54,10 +57,20 @@ pub enum Cmd {
         /// left out. Naming a file that is not memory in an active scope
         /// is an error
         files: Vec<String>,
-        /// Re-check every file. Reserved for layer 3 (`--claude`, a later
-        /// PR): layers 1 and 2 already check every file on every run
+        /// With `--claude`, ask about every file again, not only those
+        /// changed since claude was last asked. Layers 1 and 2 check every
+        /// file on every run regardless
         #[arg(long)]
         all: bool,
+        /// Also ask this machine's `claude` CLI (layer 3) about the claims
+        /// layers 1 and 2 left undecided, one call per file. Spends your
+        /// Claude usage; no API key is read or needed
+        #[arg(long)]
+        claude: bool,
+        /// With `--claude`, the most files one run asks about; the rest are
+        /// listed as skipped
+        #[arg(long, value_name = "N", default_value_t = claude::DEFAULT_MAX_CALLS, requires = "claude")]
+        max_calls: u32,
         /// Also ask each host a note names, other than this machine's
         /// server, for its discovery document (`GET /.well-known/recall`,
         /// no credential). Off by default: a note's text does not decide
@@ -82,9 +95,14 @@ pub async fn run(cmd: Cmd) -> anyhow::Result<i32> {
         Cmd::Run {
             files,
             all,
+            claude,
+            max_calls,
             probe_hosts,
             json,
-        } => run_review(&files, all, probe_hosts, json).await,
+        } => {
+            let layer3 = claude.then_some(max_calls);
+            run_review(&files, all, layer3, probe_hosts, json).await
+        }
         Cmd::Show { json } => show_last(json),
     }
 }
@@ -114,7 +132,7 @@ pub enum Class {
     /// instruction. Substance is never judged; each anchor gets its own
     /// verdict instead of the claim getting one.
     Rule,
-    /// None of the above. Only layer 3 (a later PR) can judge it.
+    /// None of the above. Only layer 3 (`--claude`) can judge it.
     Unsure,
     /// A merge left an inline `[CONFLICT: ...]` marker here. Reported, not
     /// judged.
@@ -138,7 +156,7 @@ pub enum Verdict {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Evidence {
     /// Where this came from: `repository`, `git`, `machine`, `server`,
-    /// `environment` or `compose`.
+    /// `environment`, `compose`, `probe`, or `claude` (layer 3's reading).
     pub source: String,
     /// What was found, in a sentence.
     pub detail: String,
@@ -186,7 +204,7 @@ pub struct Claim {
 /// A source this design names that was not consulted, and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnavailableSource {
-    /// `repository`, `server`, `compose` or `probe`.
+    /// `repository`, `server`, `compose`, `probe` or `claude`.
     pub source: String,
     /// Why it was not read this run.
     pub reason: String,
@@ -218,6 +236,31 @@ pub struct SourcesRead {
     /// the hosts memory names when `--probe-hosts` was not given.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unavailable: Vec<UnavailableSource>,
+    /// What layer 3 did, when `--claude` asked for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude: Option<ClaudeRun>,
+}
+
+/// What one `--claude` run did.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClaudeRun {
+    /// How many times `claude` was called: one per file asked about.
+    pub calls: u32,
+    /// Files whose earlier answer still holds (unchanged, and every fact it
+    /// cited still observed), so nothing was asked about them.
+    pub reused: u32,
+    /// Files with claims to decide that were not asked about, and why.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<SkippedFile>,
+}
+
+/// A file layer 3 did not ask about, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkippedFile {
+    /// The file, relative to the memory directory.
+    pub file: String,
+    /// Why it was skipped.
+    pub reason: String,
 }
 
 /// The `--json` shape. Stable from its first release, under
@@ -240,8 +283,7 @@ pub struct Report {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct SavedState {
     /// Each reviewed file's content hash, as of the last run that touched
-    /// it — kept for layer 3 (a later PR) to decide which files changed
-    /// since then.
+    /// it, and layer 3's last answer about it.
     #[serde(default)]
     files: BTreeMap<String, FileState>,
     /// The last report, so `recall review show` can print it again without
@@ -255,6 +297,9 @@ struct SavedState {
 struct FileState {
     /// [`recall_wire::content_sha256`] of the content this review last read.
     content_sha256: String,
+    /// Layer 3's answer, while it still holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    claude: Option<claude::Reviewed>,
 }
 
 fn load_state(path: &Path) -> SavedState {
@@ -298,15 +343,15 @@ fn is_project_scope(scopes: &[recall_hooks::Scope], rel: &str) -> bool {
         .unwrap_or(true)
 }
 
+/// Runs layers 1 and 2 over every file in scope (or the files named), and
+/// layer 3 when `layer3` holds `--max-calls`.
 async fn run_review(
     file_args: &[String],
-    _all: bool,
+    all: bool,
+    layer3: Option<u32>,
     probe_hosts: bool,
     json: bool,
 ) -> anyhow::Result<i32> {
-    // `_all` is reserved for layer 3 (PR 4): layers 1 and 2 cover every
-    // file on every run regardless, per the design's "Incremental" section,
-    // so there is nothing for this flag to change yet.
     let here = proj::resolve();
     let cfg = here.config();
     let remote = proj::remote();
@@ -360,6 +405,7 @@ async fn run_review(
     // `--probe-hosts` asks depends on what the claims name.
     let mut extracted = Vec::new();
     let mut new_file_states = BTreeMap::new();
+    let mut contents: BTreeMap<String, (String, bool)> = BTreeMap::new();
     for rel in &candidates {
         let is_project = is_project_scope(&scopes, rel);
         let path = join_relative(&memory_dir, rel);
@@ -373,6 +419,7 @@ async fn run_review(
             rel.clone(),
             FileState {
                 content_sha256: recall_wire::content_sha256(&content),
+                claude: None,
             },
         );
         let note_type = front_matter_type(&content);
@@ -380,6 +427,7 @@ async fn run_review(
             let class = classify(&raw.text, raw.in_record_section, note_type.as_deref());
             extracted.push((rel.clone(), is_project, raw, class));
         }
+        contents.insert(rel.clone(), (content, is_project));
     }
 
     let mut facts = sources::read(&here, &cfg, repo.root.as_deref()).await;
@@ -408,10 +456,26 @@ async fn run_review(
         });
     }
 
+    let mut saved = load_state(&review_file);
+
+    let layer3_run = layer_three(
+        &mut new_claims,
+        &mut new_file_states,
+        &saved,
+        &contents,
+        Layer3Inputs {
+            repo: &repo,
+            newest_tag: &newest_tag,
+            facts: &facts,
+            all,
+            max_calls: layer3,
+        },
+    )
+    .await;
+
     // Merge with whatever the last run held: a `[FILE]`-restricted run must
     // not make the other files' claims and hashes disappear from the
-    // stored report, since `show` and any later `--all` still need them.
-    let mut saved = load_state(&review_file);
+    // stored report, since `show` and any later run still need them.
     let processed: HashSet<&str> = candidates.iter().map(String::as_str).collect();
     let mut claims: Vec<Claim> = saved
         .report
@@ -477,6 +541,16 @@ async fn run_review(
             );
         }
     }
+    if layer3.is_none() && layer3_run.waiting > 0 {
+        missing(
+            "claude",
+            format!(
+                "{} file(s) hold claims only layer 3 can decide; --claude asks this machine's \
+                 claude CLI about them",
+                layer3_run.waiting
+            ),
+        );
+    }
     let report = Report {
         reviewed_at: now_rfc3339(),
         evidence: SourcesRead {
@@ -490,6 +564,7 @@ async fn run_review(
                 .unwrap_or_default(),
             probed: facts.probes.keys().cloned().collect(),
             unavailable,
+            claude: layer3.map(|_| layer3_run.run),
         },
         claims,
     };
@@ -514,6 +589,235 @@ async fn run_review(
         print_text(report);
     }
     Ok(exit::OK)
+}
+
+/// What layer 3 reads besides the claims themselves.
+struct Layer3Inputs<'a> {
+    repo: &'a Repo,
+    newest_tag: &'a Option<(u64, u64, u64, String)>,
+    facts: &'a sources::Facts,
+    /// `--all`: ask about every file again.
+    all: bool,
+    /// `--max-calls`, when `--claude` asked for layer 3 at all.
+    max_calls: Option<u32>,
+}
+
+/// What [`layer_three`] did.
+struct Layer3Done {
+    /// For the report, when `--claude` asked.
+    run: ClaudeRun,
+    /// Files with claims only layer 3 can decide and no answer that still
+    /// holds: what `--claude` would ask about.
+    waiting: usize,
+}
+
+/// A file layer 3 still has to ask about: its claims to decide, its fact
+/// sheet, and, under `--all`, the earlier answer to fall back on if it is
+/// not asked after all.
+type ToAsk<'a> = (
+    &'a String,
+    Vec<claude::Asked>,
+    Vec<String>,
+    Option<claude::Reviewed>,
+);
+
+/// Whether layers 1 and 2 left `c` for layer 3: an `unsure` claim, or a
+/// `present` one they could not decide.
+fn undecided(c: &Claim) -> bool {
+    c.class == Class::Unsure
+        || (c.class == Class::Present && matches!(c.verdict, None | Some(Verdict::CantTell)))
+}
+
+/// Layer 3's fact sheet for the file `rel`: what this machine and its
+/// checkout are, then everything layer 2 observed about this file's claims,
+/// including each anchor of a claim it left `unsure`.
+fn fact_sheet(
+    global: &[String],
+    claims: &[Claim],
+    rel: &str,
+    inputs: &Layer3Inputs<'_>,
+    is_project: bool,
+) -> Vec<String> {
+    let mut sheet = global.to_vec();
+    for c in claims.iter().filter(|c| c.file == rel) {
+        if c.class == Class::Unsure {
+            for a in anchors(&c.text) {
+                let o = evidence_for(
+                    &a,
+                    inputs.repo,
+                    is_project,
+                    inputs.newest_tag,
+                    &c.text,
+                    inputs.facts,
+                );
+                sheet.push(o.detail);
+            }
+        } else {
+            sheet.extend(
+                c.evidence
+                    .iter()
+                    .filter(|e| e.source != claude::SOURCE)
+                    .map(|e| e.detail.clone()),
+            );
+        }
+    }
+    claude::dedup(sheet)
+}
+
+/// Applies layer 3's answers about `rel` to the claims they were given for.
+fn apply_decided(claims: &mut [Claim], rel: &str, decided: &[claude::Decided]) {
+    for d in decided {
+        if let Some(c) = claims
+            .iter_mut()
+            .find(|c| c.file == rel && c.lines == d.lines && c.text == d.text && undecided(c))
+        {
+            c.class = d.class;
+            c.verdict = d.verdict;
+            c.layer = Some(3);
+            c.evidence.push(d.evidence.clone());
+        }
+    }
+}
+
+/// Layer 3 over the files this run read: an earlier answer is reused while
+/// it holds, and, only when `--claude` asked, `claude` is called about each
+/// file that still has claims to decide, up to `--max-calls`.
+async fn layer_three(
+    claims: &mut [Claim],
+    states: &mut BTreeMap<String, FileState>,
+    saved: &SavedState,
+    contents: &BTreeMap<String, (String, bool)>,
+    inputs: Layer3Inputs<'_>,
+) -> Layer3Done {
+    let mut global = Vec::new();
+    if let Some(head) = inputs.repo.head_short() {
+        global.push(format!("The project's repository is at commit {head}"));
+    }
+    if let Some((_, _, _, tag)) = inputs.newest_tag {
+        global.push(format!(
+            "The newest release tag in the project's repository is {tag}"
+        ));
+    }
+    global.extend(inputs.facts.sheet());
+
+    let mut run = ClaudeRun::default();
+    let mut to_ask: Vec<ToAsk<'_>> = Vec::new();
+    for (rel, (_, is_project)) in contents {
+        let asked: Vec<claude::Asked> = claims
+            .iter()
+            .filter(|c| &c.file == rel && undecided(c))
+            .map(|c| claude::Asked {
+                lines: c.lines,
+                text: c.text.clone(),
+                class: c.class,
+            })
+            .collect();
+        if asked.is_empty() {
+            continue;
+        }
+        let sheet = fact_sheet(&global, claims, rel, &inputs, *is_project);
+        let sha = states[rel].content_sha256.clone();
+        let held = saved
+            .files
+            .get(rel)
+            .and_then(|f| f.claude.clone())
+            .filter(|r| r.holds(&sha, &sheet));
+        match held {
+            Some(r) if !(inputs.all && inputs.max_calls.is_some()) => {
+                apply_decided(claims, rel, &r.decided);
+                states.get_mut(rel).expect("read this run").claude = Some(r);
+                run.reused += 1;
+            }
+            fallback => to_ask.push((rel, asked, sheet, fallback)),
+        }
+    }
+    let waiting = to_ask.len();
+
+    let Some(max_calls) = inputs.max_calls else {
+        return Layer3Done { run, waiting };
+    };
+    if to_ask.is_empty() {
+        return Layer3Done { run, waiting };
+    }
+
+    // Every file this run read teaches the redactor its secrets, so one
+    // quoted in another note is masked too.
+    let files: Vec<recall_wire::EvaluateFile> = contents
+        .iter()
+        .map(|(rel, (content, _))| recall_wire::EvaluateFile {
+            file_path: rel.clone(),
+            content: content.clone(),
+            ..Default::default()
+        })
+        .collect();
+    let redactor = recall_worker::Redactor::new(&files);
+    let merger = claude::merger();
+    let mut cannot_run: Option<String> = None;
+
+    for (rel, asked, sheet, fallback) in to_ask {
+        let (content, is_project) = &contents[rel];
+        let answer = if let Some(why) = &cannot_run {
+            Err(why.clone())
+        } else if run.calls >= max_calls {
+            Err(format!(
+                "--max-calls {max_calls} reached; a later run asks about it"
+            ))
+        } else {
+            let scope = if *is_project {
+                "project scope: about this repository"
+            } else {
+                "global or machine scope: not about this repository"
+            };
+            let prompt = claude::prompt(rel, scope, content, &sheet, &asked, &redactor);
+            if prompt.len() > claude::MAX_PROMPT_BYTES {
+                Err(format!(
+                    "its prompt is {} bytes, more than one call is handed ({})",
+                    prompt.len(),
+                    claude::MAX_PROMPT_BYTES
+                ))
+            } else {
+                eprintln!("recall review: asking claude about {rel}");
+                match merger.ask(claude::SYSTEM_PROMPT, &prompt).await {
+                    Ok(text) => {
+                        run.calls += 1;
+                        claude::decide(&text, &asked, &sheet).ok_or_else(|| {
+                            "claude's answer was not the JSON layer 3 asks for".to_string()
+                        })
+                    }
+                    Err(recall_worker::merge::Error::Unavailable(why)) => {
+                        let why = format!("claude cannot run on this machine: {why}");
+                        cannot_run = Some(why.clone());
+                        Err(why)
+                    }
+                    Err(e) => {
+                        run.calls += 1;
+                        Err(format!("the claude call failed: {e}"))
+                    }
+                }
+            }
+        };
+        match answer {
+            Ok(decided) => {
+                apply_decided(claims, rel, &decided);
+                let state = states.get_mut(rel).expect("read this run");
+                state.claude = Some(claude::Reviewed {
+                    content_sha256: state.content_sha256.clone(),
+                    decided,
+                });
+            }
+            Err(reason) => {
+                run.skipped.push(SkippedFile {
+                    file: rel.clone(),
+                    reason,
+                });
+                if let Some(r) = fallback {
+                    apply_decided(claims, rel, &r.decided);
+                    states.get_mut(rel).expect("read this run").claude = Some(r);
+                }
+            }
+        }
+    }
+    Layer3Done { run, waiting }
 }
 
 fn show_last(json: bool) -> anyhow::Result<i32> {
@@ -1680,6 +1984,29 @@ fn print_text(rep: &Report) {
         "{stale} stale, {still_true} still true, {cant_tell} cant tell, {conflicts} conflict(s), \
          {records} record(s), {unsure} unresolved"
     );
+
+    // Layer 3's own account: what it asked, and what it did not, never
+    // silently cut.
+    if let Some(run) = &rep.evidence.claude {
+        println!(
+            "claude: {} call(s), {} file(s) unchanged since it was last asked",
+            run.calls, run.reused
+        );
+        for s in &run.skipped {
+            println!(
+                "  skipped {}: {}",
+                sanitize_for_terminal(&s.file),
+                sanitize_for_terminal(&s.reason)
+            );
+        }
+    } else if let Some(u) = rep
+        .evidence
+        .unavailable
+        .iter()
+        .find(|u| u.source == "claude")
+    {
+        println!("{}", u.reason);
+    }
 }
 
 #[cfg(test)]

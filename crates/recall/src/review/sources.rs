@@ -101,6 +101,82 @@ pub(super) struct Facts {
 }
 
 impl Facts {
+    /// What these facts say, one sentence each, for layer 3's fact sheet.
+    /// Only what the report may already show: the configured server as
+    /// `recall status` prints it, the kind of session, the values of
+    /// [`VALUE_VARS`], the compose files' names, and what probes found.
+    pub fn sheet(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let s = &self.server;
+        out.push(match &s.url {
+            None => "No Recall server is configured on this machine (RECALL_URL is unset)".into(),
+            Some(url) => {
+                let mut line = format!(
+                    "This machine's configured Recall server is {url} (RECALL_URL, from {})",
+                    s.url_source
+                );
+                if s.answered {
+                    line.push_str("; /health answers there");
+                    if let Some(c) = &s.commit {
+                        line.push_str(&format!(", built from commit {c}"));
+                    }
+                    if let Some(v) = &s.version {
+                        line.push_str(&format!("; it reports version {v}"));
+                    }
+                    if !s.capabilities.is_empty() {
+                        line.push_str(&format!(" and capabilities {}", s.capabilities.join(", ")));
+                    }
+                } else {
+                    line.push_str(&format!(
+                        "; /health did not answer ({})",
+                        s.error.as_deref().unwrap_or("no reason given")
+                    ));
+                }
+                line
+            }
+        });
+        out.push(if self.remote_session {
+            "This check runs in a Claude Code cloud session (CLAUDE_CODE_REMOTE=true)".into()
+        } else {
+            "This check does not run in a Claude Code cloud session (CLAUDE_CODE_REMOTE is not \
+             true)"
+                .into()
+        });
+        for (name, value) in &self.env {
+            if *name == "CLAUDE_CODE_REMOTE" {
+                continue;
+            }
+            out.push(match value {
+                Some(v) => format!("{name} is {v} on this machine"),
+                None => format!("{name} is not set on this machine"),
+            });
+        }
+        if let Some(c) = &self.compose {
+            let names: Vec<&str> = c.names.keys().map(String::as_str).collect();
+            out.push(format!(
+                "The project's compose files ({}) name: {}",
+                c.files.join(", "),
+                names.join(", ")
+            ));
+            if !c.vars.is_empty() {
+                let vars: Vec<&str> = c.vars.keys().map(String::as_str).collect();
+                out.push(format!(
+                    "The project's compose files pass these variables to a service: {}",
+                    vars.join(", ")
+                ));
+            }
+        }
+        for (host, probe) in &self.probes {
+            out.push(match probe {
+                Probe::Recall(v) => format!("{host} answers as a Recall server, version {v}"),
+                Probe::NotRecall(why) => {
+                    format!("{host} does not answer as a Recall server ({why})")
+                }
+            });
+        }
+        out
+    }
+
     fn env(&self, name: &str) -> Option<&str> {
         self.env
             .iter()
