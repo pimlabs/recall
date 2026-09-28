@@ -566,45 +566,50 @@ jobs:
           # impossible without anyone noticing.
           docker run --rm --entrypoint sh recall-server-rel -c 'command -v wget'
 
-  # The images release.yml's `publish-image` job pushes, built here the way
-  # it builds them: the same script, the same Dockerfile targets, build
-  # arguments, annotations and provenance, for linux/amd64 and linux/arm64,
-  # with push=false. `build-image` above proves the Dockerfile builds; this
-  # proves the multi-platform build the release depends on does, under the
-  # same QEMU, before a release finds out. Nothing is pushed and no
-  # credential is used.
+  # The images release.yml publishes, built here the way its `build-image`
+  # legs build them: the same script, Dockerfile targets, build arguments
+  # and provenance, one leg per architecture on a runner of that
+  # architecture, with push=false, then each image's claude CLI and binary
+  # run on that runner. `build-image` above proves the Dockerfile builds;
+  # this proves the release's per-architecture builds do, before a release
+  # finds out. Never under emulation: under QEMU the arm64 npm install of
+  # the claude CLI died with an illegal instruction and the build hung for
+  # the job's whole timeout. Nothing is pushed and no credential is used.
   #
   # From the newest published release's binaries, since an unmerged change
   # has no release: the Dockerfile and fetch-release.sh under test, the
   # binaries from the newest release, as `releases/latest` names it.
   # Gated on the same diff as `build-image`.
   check-publish-image:
-    name: check-publish-image
+    name: check-publish-image (${{ matrix.arch }})
     needs: plan
     if: needs.plan.outputs.image == 'true'
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            os: ubuntu-latest
+          - arch: arm64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
-        with:
-          platforms: arm64
-          # The binfmt image that installs the emulators, pinned like the
-          # actions around it rather than the action's default, which is
-          # `latest`.
-          image: docker.io/tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 # qemu-v10.2.3
-
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: The release's images build, for both platforms
+      - name: The release's image builds and runs on this architecture
+        timeout-minutes: 20
+        env:
+          ARCH: ${{ matrix.arch }}
         run: |
           set -eu
           latest=$(curl -fsS -o /dev/null -w '%{redirect_url}' \
             https://github.com/pimlabs/recall/releases/latest)
           version="${latest##*/v}"
           echo "Newest release: $version ($latest)"
-          scripts/release-image.sh check "$version" "$(git rev-parse --short HEAD)"
+          scripts/release-image.sh build "$version" "$(git rev-parse --short HEAD)" "$ARCH" check
 
   # The client only — recall-server and recall-worker are Linux-only by
   # design (see deploy/Dockerfile and their own crate docs), so they are
