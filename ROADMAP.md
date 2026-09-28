@@ -916,10 +916,10 @@ See `docs/design/handshake.md` for the reasoning.
       directory with the binary under its own name. 0.4.5 and older keep
       their names, and every consumer picks by version. `install.sh` now
       checks `checksums.txt`, and `install.sh`, npm and the server image
-      refuse a symlinked binary. PR #138, shipped in 0.4.6. `cargo binstall recall` was
-      checked against the real 0.4.6 on 2026-09-28: it downloaded the
-      prebuilt `x86_64-unknown-linux-gnu` archive from the GitHub Release
-      with compiling disabled, no configuration needed.
+      refuse a symlinked binary. PR #138, shipped in 0.4.6. `cargo
+      binstall recall` was checked against the real 0.4.6 on 2026-09-28:
+      it downloaded the prebuilt `x86_64-unknown-linux-gnu` archive from
+      the GitHub Release with compiling disabled, no configuration needed.
 - Parked, not agreed: a claude.ai connector (remote MCP) for Recall
   memory; see the design doc's 'Future idea' section.
 
