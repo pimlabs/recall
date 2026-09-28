@@ -202,3 +202,33 @@ version fields agree, and then asks before each irreversible step. See
 ## Commit messages
 
 State the why, not just the what.
+
+The title is `area: what it does`, the way tokio and Go write theirs:
+
+```
+ci: run every job on public pull requests, add ci-passed (#141)
+deps: rustls 0.23.45 for RUSTSEC-2026-0285 (#136)
+release: 0.4.6 (#139)
+```
+
+- **One area, lowercase, from this list:** `server` (`recall-server`),
+  `worker`, `cli` (the `recall` binary), `hooks`, `wire`, `admin` (the
+  `/admin` page), `ci`, `release`, `deploy`, `install` (`install.sh`,
+  `install.ps1`, npm, the formula), `deps`, `docs`. A change that spans
+  several takes the one a reader would look under first. Add an area here
+  before using a new one.
+- **After the colon:** a short sentence in the imperative, lowercase first
+  word (`add`, `fix`, `keep`, `rename`), no full stop.
+- **At most about 72 characters**, the squash merge's ` (#N)` included:
+  that is where GitHub's lists and `git log --oneline` cut it off. What
+  does not fit goes in the body.
+- **Releases always read the same:** `release: 0.4.6` for the bump, and
+  `release: formula for 0.4.6` for the follow-up after it.
+- **No prefix carries a version meaning.** This is not Conventional
+  Commits: whether a change is a patch or breaking is decided by
+  `docs/reference/releasing.md` and stated in the pull request, never by
+  the prefix.
+
+The squash merge takes the pull request's title, so the title is where
+this is applied. Commits before #141 used no single scheme; they are left
+as they are.
