@@ -16,8 +16,9 @@
 //! project's compose files and from a few environment variables. The last
 //! four live in [`sources`], which says what they send and what they never
 //! read; this file opens no connection of its own
-//! (`this_module_never_touches_the_network`). `recall review apply` is a
-//! later PR.
+//! (`this_module_never_touches_the_network`). `recall review apply`, in
+//! [`apply`], makes one stale claim's suggested edit, and is the only
+//! thing here that ever changes a note.
 //!
 //! Layer 3, only with `--claude`, lives in [`claude`]: the local `claude`
 //! CLI over what layers 1 and 2 left undecided, handed a fact sheet of
@@ -44,6 +45,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::project as proj;
 
+mod apply;
 mod claude;
 mod sources;
 
@@ -87,6 +89,15 @@ pub enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Make one stale claim's suggested edit (a rewrite into a record of
+    /// what changed) to the local file, and push it
+    Apply {
+        /// The claim, such as t3, as `recall review show` lists it
+        claim: String,
+        /// Apply without asking, for scripts
+        #[arg(long, short)]
+        yes: bool,
+    },
 }
 
 /// Runs one `recall review` command.
@@ -104,6 +115,7 @@ pub async fn run(cmd: Cmd) -> anyhow::Result<i32> {
             run_review(&files, all, layer3, probe_hosts, json).await
         }
         Cmd::Show { json } => show_last(json),
+        Cmd::Apply { claim, yes } => apply::run(&claim, yes).await,
     }
 }
 
@@ -199,6 +211,11 @@ pub struct Claim {
     /// What was read to decide it, one entry per anchor.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<Evidence>,
+    /// For a `stale` claim layer 3 decided, the edit `recall review apply`
+    /// would make: the claim rewritten as a record of what changed, in the
+    /// lines it occupies, against the version of the file this run read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_edit: Option<recall_wire::SuggestedEdit>,
 }
 
 /// A source this design names that was not consulted, and why.
@@ -453,6 +470,7 @@ async fn run_review(
             verdict,
             layer,
             evidence,
+            suggested_edit: None,
         });
     }
 
@@ -469,6 +487,7 @@ async fn run_review(
             facts: &facts,
             all,
             max_calls: layer3,
+            scopes: &scopes,
         },
     )
     .await;
@@ -600,6 +619,8 @@ struct Layer3Inputs<'a> {
     all: bool,
     /// `--max-calls`, when `--claude` asked for layer 3 at all.
     max_calls: Option<u32>,
+    /// The scopes that are on, to say which scope's file an edit is to.
+    scopes: &'a [recall_hooks::Scope],
 }
 
 /// What [`layer_three`] did.
@@ -683,9 +704,33 @@ fn fact_sheet(
     (facts, context)
 }
 
+/// A file as an edit names it: its content, and its scope's key and path.
+struct EditBase<'a> {
+    content: &'a str,
+    /// The scope's key and the path within it; [`None`] when no scope that
+    /// is on owns the file, and no edit can be made to it.
+    target: Option<(String, String)>,
+}
+
+impl<'a> EditBase<'a> {
+    fn of(rel: &str, content: &'a str, scopes: &[recall_hooks::Scope]) -> Self {
+        EditBase {
+            content,
+            target: recall_hooks::scope::route(scopes, rel)
+                .map(|(scope, path)| (scope.key.clone(), path)),
+        }
+    }
+}
+
 /// Applies layer 3's answers about `rel` to the claims they were given for,
-/// each held to the rules again first.
-fn apply_decided(claims: &mut [Claim], rel: &str, decided: &[claude::Decided]) {
+/// each held to the rules again first, with the edit a stale claim's
+/// rewrite comes to.
+fn apply_decided(
+    claims: &mut [Claim],
+    rel: &str,
+    decided: &[claude::Decided],
+    base: &EditBase<'_>,
+) {
     for d in decided.iter().map(claude::Decided::checked) {
         if let Some(c) = claims
             .iter_mut()
@@ -695,6 +740,12 @@ fn apply_decided(claims: &mut [Claim], rel: &str, decided: &[claude::Decided]) {
             c.verdict = d.verdict;
             c.layer = Some(3);
             c.evidence.push(d.evidence);
+            c.suggested_edit = match (&d.rewrite, &base.target) {
+                (Some(rewrite), Some((key, path))) => {
+                    apply::build(base.content, c.lines, &c.text, (key, path), rewrite).ok()
+                }
+                _ => None,
+            };
         }
     }
 }
@@ -754,7 +805,12 @@ async fn layer_three(
         let (fallback, kept) = match stored {
             Some(r) if r.holds(&sha, &facts) => {
                 if r.complete && !(inputs.all && asking) {
-                    apply_decided(claims, rel, &r.decided);
+                    apply_decided(
+                        claims,
+                        rel,
+                        &r.decided,
+                        &EditBase::of(rel, &contents[rel].0, inputs.scopes),
+                    );
                     states.get_mut(rel).expect("read this run").claude = Some(r);
                     run.reused += 1;
                     continue;
@@ -837,9 +893,26 @@ async fn layer_three(
                         match merger.ask(claude::SYSTEM_PROMPT, &prompt).await {
                             Ok(text) => {
                                 run.calls += 1;
-                                claude::decide(&text, &t.asked, &t.facts).ok_or_else(|| {
-                                    "claude's answer was not the JSON layer 3 asks for".to_string()
-                                })
+                                claude::decide(&text, &t.asked, &t.facts)
+                                    .map(|decided| {
+                                        decided
+                                            .into_iter()
+                                            .map(|mut d| {
+                                                // A claim holding a secret is
+                                                // never rewritten: claude saw
+                                                // it masked, and its rewrite
+                                                // would write the mask in.
+                                                if redactor.text(&d.text) != d.text {
+                                                    d.rewrite = None;
+                                                }
+                                                d
+                                            })
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .ok_or_else(|| {
+                                        "claude's answer was not the JSON layer 3 asks for"
+                                            .to_string()
+                                    })
                             }
                             Err(recall_worker::merge::Error::Unavailable(why)) => {
                                 let why = format!("claude cannot run on this machine: {why}");
@@ -861,7 +934,12 @@ async fn layer_three(
         let state = states.get_mut(rel).expect("read this run");
         match answer {
             Ok(decided) => {
-                apply_decided(claims, rel, &decided);
+                apply_decided(
+                    claims,
+                    rel,
+                    &decided,
+                    &EditBase::of(rel, &contents[rel].0, inputs.scopes),
+                );
                 state.claude = Some(claude::Reviewed {
                     content_sha256: state.content_sha256.clone(),
                     complete: decided.len() == t.asked.len(),
@@ -877,7 +955,12 @@ async fn layer_three(
                     });
                 }
                 if let Some(r) = t.fallback {
-                    apply_decided(claims, rel, &r.decided);
+                    apply_decided(
+                        claims,
+                        rel,
+                        &r.decided,
+                        &EditBase::of(rel, &contents[rel].0, inputs.scopes),
+                    );
                     state.claude = Some(r);
                 } else {
                     state.claude = t.kept;
@@ -1953,9 +2036,7 @@ fn lines_desc(l: &[u32; 2]) -> String {
 /// came before it. Never applied to the stored or `--json` text — only to
 /// what actually reaches a terminal.
 fn sanitize_for_terminal(s: &str) -> String {
-    s.chars()
-        .map(|c| if c.is_control() && c != '\t' { ' ' } else { c })
-        .collect()
+    crate::edit::printable(s).replace('\n', " ")
 }
 
 fn print_text(rep: &Report) {
@@ -2032,6 +2113,13 @@ fn print_text(rep: &Report) {
                 );
                 for e in &c.evidence {
                     println!("             {}", sanitize_for_terminal(&e.detail));
+                }
+                if let Some(edit) = &c.suggested_edit {
+                    println!(
+                        "             suggested: {}",
+                        sanitize_for_terminal(edit.replacement.trim_end())
+                    );
+                    println!("             recall review apply {}", c.id);
                 }
             }
         }

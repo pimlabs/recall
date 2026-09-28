@@ -5350,3 +5350,224 @@ fn what_decided_nothing_is_context_not_a_citable_fact() {
     let context = rest.split("=== Claims to judge ===").next().unwrap();
     assert!(context.contains("/srv/recall-nowhere/archive"), "{context}");
 }
+
+/// Layer 3 answers `stale` for C1, citing E1, with a rewrite into a record.
+#[cfg(unix)]
+const C1_STALE_REWRITTEN: &str = r#"{"claims":[{"id":"C1","class":"present","verdict":"stale","cites":["E1"],"reason":"The facts say otherwise.","rewrite":"Until 2026-09 the deploy happened on Tuesdays; it now happens on Wednesdays."}]}"#;
+
+/// The design's `recall review apply`: a stale claim's rewrite into a
+/// record replaces the claim's own words, keeps the record beside it, is
+/// written and pushed, and is refused once the file has changed since the
+/// review read it.
+#[cfg(unix)]
+#[test]
+fn review_apply_rewrites_a_stale_claim_into_a_record_and_pushes_it() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let home = recall_home_with(&[(&server.url, "right")], &server.url);
+    let home_str = home.path().to_string_lossy().to_string();
+    let (_fake, path) = fake_claude(C1_STALE_REWRITTEN);
+    let env = [("RECALL_HOME", home_str.as_str()), ("PATH", path.as_str())];
+    // A paragraph: two claims on one line, the second a record the edit
+    // must keep word for word.
+    let content = "# Deploy\n\nThe deploy happens on Tuesdays. It used to happen on Mondays.\n";
+    let pushed = push_memory(&repo, &env, "deploy.md", content);
+    assert_eq!(pushed.code, 0, "{}", pushed.stderr);
+
+    let r = run(
+        &["review", "run", "--claude", "--json"],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    let claim = claim_containing(&report["claims"], "happens on Tuesdays");
+    assert_eq!(claim["verdict"], "stale", "{claim}");
+    let edit = &claim["suggested_edit"];
+    assert_eq!(edit["file_path"], "deploy.md", "{claim}");
+    assert_eq!(edit["lines"], serde_json::json!([3, 3]), "{claim}");
+    let id = claim["id"].as_str().unwrap().to_string();
+    let shown = run(&["review", "show"], repo.path(), &env, None);
+    assert!(
+        shown.stdout.contains(&format!("recall review apply {id}")),
+        "{}",
+        shown.stdout
+    );
+
+    let applied = run(&["review", "apply", &id, "--yes"], repo.path(), &env, None);
+    assert_eq!(applied.code, 0, "{}", applied.stderr);
+    let fixed = "# Deploy\n\nUntil 2026-09 the deploy happened on Tuesdays; it now happens on \
+                 Wednesdays. It used to happen on Mondays.\n";
+    let memory_dir = status_json(repo.path(), &env)["memory_dir"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&memory_dir).join("deploy.md")).unwrap(),
+        fixed
+    );
+    let on_server = stored(&server, &repo, &env);
+    let file = on_server
+        .iter()
+        .find(|f| f.file_path == "deploy.md")
+        .unwrap();
+    assert_eq!(file.content.as_deref(), Some(fixed));
+
+    // The report is from before the edit: applying it again is refused,
+    // and says how to get a new one.
+    let again = run(&["review", "apply", &id, "--yes"], repo.path(), &env, None);
+    assert_eq!(again.code, 1, "{}", again.stdout);
+    assert!(
+        again.stderr.contains("recall review run --claude"),
+        "{}",
+        again.stderr
+    );
+}
+
+/// A claim with no suggested edit, or one not in the report, is refused
+/// with where to look; before any review there is nothing to apply.
+#[cfg(unix)]
+#[test]
+fn review_apply_refuses_what_it_cannot_do() {
+    let repo = review_repo();
+    let (_fake, path) = fake_claude(C1_STALE);
+    let env = [("PATH", path.as_str())];
+    let none = run(&["review", "apply", "t1", "--yes"], repo.path(), &env, None);
+    assert_eq!(none.code, 1);
+    assert!(none.stderr.contains("recall review run"), "{}", none.stderr);
+
+    write_memory(
+        repo.path(),
+        &env,
+        "plans.md",
+        "- The deploy happens on Tuesdays.\n",
+    );
+    // Stale, but claude gave no rewrite.
+    let r = run(
+        &["review", "run", "--claude", "--json"],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    let claim = claim_containing(&report["claims"], "Tuesdays");
+    assert!(claim["suggested_edit"].is_null(), "{claim}");
+    let id = claim["id"].as_str().unwrap().to_string();
+    let r = run(&["review", "apply", &id, "--yes"], repo.path(), &env, None);
+    assert_eq!(r.code, 1);
+    assert!(r.stderr.contains("has no edit to make"), "{}", r.stderr);
+
+    let r = run(
+        &["review", "apply", "t99", "--yes"],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(r.code, 1);
+    assert!(r.stderr.contains("recall review show"), "{}", r.stderr);
+}
+
+/// A claim that holds a secret is never rewritten: claude saw it masked,
+/// and its rewrite would put the mask in the note.
+#[cfg(unix)]
+#[test]
+fn a_claim_holding_a_secret_gets_no_rewrite() {
+    let repo = review_repo();
+    let (_fake, path) = fake_claude(C1_STALE_REWRITTEN);
+    let env = [("PATH", path.as_str())];
+    let token = format!("ghp_{}", "Zx9Yw8Vu7T".repeat(4));
+    write_memory(
+        repo.path(),
+        &env,
+        "creds.md",
+        &format!("- The deploy key is {token} and it opens the vault.\n"),
+    );
+    let r = run(
+        &["review", "run", "--claude", "--json"],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    let claim = claim_containing(&report["claims"], "opens the vault");
+    assert_eq!(claim["verdict"], "stale", "{claim}");
+    assert!(claim["suggested_edit"].is_null(), "{claim}");
+}
+
+/// `.recall-review.json` decides nothing about which bytes change: the
+/// report's `suggested_edit` is rebuilt, not trusted, and a stored rewrite
+/// is held to the rules again. Without a terminal to ask on and without
+/// `--yes`, nothing is changed.
+#[cfg(unix)]
+#[test]
+fn review_apply_builds_the_edit_again_and_trusts_no_stored_one() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let home = recall_home_with(&[(&server.url, "right")], &server.url);
+    let home_str = home.path().to_string_lossy().to_string();
+    let (_fake, path) = fake_claude(C1_STALE_REWRITTEN);
+    let env = [("RECALL_HOME", home_str.as_str()), ("PATH", path.as_str())];
+    let content = "# Deploy\n\nThe deploy happens on Tuesdays. It used to happen on Mondays.\n";
+    assert_eq!(push_memory(&repo, &env, "deploy.md", content).code, 0);
+    let r = run(
+        &["review", "run", "--claude", "--json"],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    let id = claim_containing(&report["claims"], "Tuesdays")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let memory_dir = PathBuf::from(
+        status_json(repo.path(), &env)["memory_dir"]
+            .as_str()
+            .unwrap(),
+    );
+    let note = memory_dir.join("deploy.md");
+    let state_file = memory_dir.parent().unwrap().join(".recall-review.json");
+    let original = std::fs::read_to_string(&state_file).unwrap();
+
+    // No terminal, no --yes: refused, nothing changed.
+    let asked = run(&["review", "apply", &id], repo.path(), &env, None);
+    assert_eq!(asked.code, 1, "{}", asked.stdout);
+    assert!(
+        asked.stderr.contains("needs a terminal"),
+        "{}",
+        asked.stderr
+    );
+    assert_eq!(std::fs::read_to_string(&note).unwrap(), content);
+
+    // A stored rewrite that is no record is held to the rules again.
+    let mut state: serde_json::Value = serde_json::from_str(&original).unwrap();
+    state["files"]["deploy.md"]["claude"]["decided"][0]["rewrite"] =
+        "The deploy happens on Wednesdays.".into();
+    std::fs::write(&state_file, state.to_string()).unwrap();
+    let r = run(&["review", "apply", &id, "--yes"], repo.path(), &env, None);
+    assert_eq!(r.code, 1, "{}", r.stdout);
+    assert!(r.stderr.contains("has no edit to make"), "{}", r.stderr);
+    assert_eq!(std::fs::read_to_string(&note).unwrap(), content);
+
+    // A report whose suggested_edit was rewritten by hand: what is made is
+    // the edit built from the file and the stored rewrite, nothing else.
+    let mut state: serde_json::Value = serde_json::from_str(&original).unwrap();
+    for claim in state["report"]["claims"].as_array_mut().unwrap() {
+        if claim["id"] == id.as_str() {
+            claim["suggested_edit"]["replacement"] = "HACKED\n".into();
+            claim["suggested_edit"]["lines"] = serde_json::json!([1, 3]);
+        }
+    }
+    std::fs::write(&state_file, state.to_string()).unwrap();
+    let r = run(&["review", "apply", &id, "--yes"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(
+        std::fs::read_to_string(&note).unwrap(),
+        "# Deploy\n\nUntil 2026-09 the deploy happened on Tuesdays; it now happens on \
+         Wednesdays. It used to happen on Mondays.\n"
+    );
+}

@@ -29,6 +29,7 @@ mod backfill;
 mod connect;
 mod devices;
 mod doctor;
+mod edit;
 mod eval;
 mod hook;
 mod init;
