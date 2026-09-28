@@ -36,6 +36,7 @@ serde_json.workspace = true
 # is how a stale backup goes unnoticed in plain sight.
 time.workspace = true
 tokio.workspace = true
+yaml-rust2.workspace = true
 
 [dev-dependencies]
 # The integration tests start a real server in-process. A dev-dependency,

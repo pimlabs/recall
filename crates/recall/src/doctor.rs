@@ -1253,6 +1253,8 @@ mod tests {
                 extends: Some(true),
                 ..Default::default()
             }),
+            health: None,
+            discovery: None,
         }
     }
 

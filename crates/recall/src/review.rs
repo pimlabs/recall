@@ -10,15 +10,14 @@
 //! decision 4). The only non-zero exit is a genuine usage mistake, such as
 //! naming a `[FILE]` that is not a memory file in any scope that is on.
 //!
-//! This PR (Part 1 of the design's plan) implements layers 1 and 2 over the
-//! checkout and git only: a candidate filter for dead artefact references,
-//! and evidence from `git ls-files`, `git log`, `git grep` and `git tag`.
-//! It makes no network request at all (`this_module_never_touches_the_network`
-//! pins that down). The only environment variable it reads is `HOME`, to
-//! expand a `~/` path being checked on this machine — never a server, and
-//! never `RECALL_*`. `--claude` (layer 3), `--probe-hosts` and `recall
-//! review apply` are later PRs and are simply not implemented here — there
-//! is nothing in this file for them to do yet.
+//! Layers 1 and 2: a candidate filter for dead artefact references, and
+//! evidence from the checkout (`git ls-files`, `git log`, `git grep`, `git
+//! tag`), from what this machine and its server say they are, from the
+//! project's compose files and from a few environment variables. The last
+//! four live in [`sources`], which says what they send and what they never
+//! read; this file opens no connection of its own
+//! (`this_module_never_touches_the_network`). `--claude` (layer 3) and
+//! `recall review apply` are later PRs.
 //!
 //! `--all` is accepted and stored for forward compatibility with layer 3,
 //! the only layer this design makes incremental: layers 1 and 2 are cheap
@@ -43,6 +42,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::project as proj;
 
+mod sources;
+
 /// `recall review …`.
 #[derive(Subcommand)]
 pub enum Cmd {
@@ -57,6 +58,12 @@ pub enum Cmd {
         /// PR): layers 1 and 2 already check every file on every run
         #[arg(long)]
         all: bool,
+        /// Also ask each host a note names, other than this machine's
+        /// server, for its discovery document (`GET /.well-known/recall`,
+        /// no credential). Off by default: a note's text does not decide
+        /// where this machine sends requests
+        #[arg(long)]
+        probe_hosts: bool,
         /// Machine-readable output, for scripts
         #[arg(long)]
         json: bool,
@@ -70,9 +77,14 @@ pub enum Cmd {
 }
 
 /// Runs one `recall review` command.
-pub fn run(cmd: Cmd) -> anyhow::Result<i32> {
+pub async fn run(cmd: Cmd) -> anyhow::Result<i32> {
     match cmd {
-        Cmd::Run { files, all, json } => run_review(&files, all, json),
+        Cmd::Run {
+            files,
+            all,
+            probe_hosts,
+            json,
+        } => run_review(&files, all, probe_hosts, json).await,
         Cmd::Show { json } => show_last(json),
     }
 }
@@ -125,8 +137,8 @@ pub enum Verdict {
 /// One thing read to decide an anchor's verdict.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Evidence {
-    /// Where this came from: `repository`, `git`, `machine`, `server` or
-    /// `environment` (the last two are never decided in this PR).
+    /// Where this came from: `repository`, `git`, `machine`, `server`,
+    /// `environment` or `compose`.
     pub source: String,
     /// What was found, in a sentence.
     pub detail: String,
@@ -174,7 +186,7 @@ pub struct Claim {
 /// A source this design names that was not consulted, and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnavailableSource {
-    /// `server`, `environment`, or `repository`.
+    /// `repository`, `server`, `compose` or `probe`.
     pub source: String,
     /// Why it was not read this run.
     pub reason: String,
@@ -188,9 +200,22 @@ pub struct SourcesRead {
     /// repository.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repository_head: Option<String>,
-    /// Sources this design names that this release does not read: always
-    /// the server and the environment (later PRs), and the repository too
-    /// when the project root is not a git repository at all.
+    /// The version the configured server's discovery document reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_version: Option<String>,
+    /// The commit the configured server's `/health` reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_commit: Option<String>,
+    /// The compose files read, relative to the repository root.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compose_files: Vec<String>,
+    /// The hosts `--probe-hosts` asked. Empty without it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub probed: Vec<String>,
+    /// Sources that could not be read this run, and why: the repository
+    /// outside a git repository, the server when none is configured or it
+    /// did not answer, the compose files when the checkout has none, and
+    /// the hosts memory names when `--probe-hosts` was not given.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unavailable: Vec<UnavailableSource>,
 }
@@ -273,7 +298,12 @@ fn is_project_scope(scopes: &[recall_hooks::Scope], rel: &str) -> bool {
         .unwrap_or(true)
 }
 
-fn run_review(file_args: &[String], _all: bool, json: bool) -> anyhow::Result<i32> {
+async fn run_review(
+    file_args: &[String],
+    _all: bool,
+    probe_hosts: bool,
+    json: bool,
+) -> anyhow::Result<i32> {
     // `_all` is reserved for layer 3 (PR 4): layers 1 and 2 cover every
     // file on every run regardless, per the design's "Incremental" section,
     // so there is nothing for this flag to change yet.
@@ -326,7 +356,9 @@ fn run_review(file_args: &[String], _all: bool, json: bool) -> anyhow::Result<i3
     // change while this command is running.
     let newest_tag = repo.newest_tag();
 
-    let mut new_claims = Vec::new();
+    // Extracted and classified first, judged after: which hosts
+    // `--probe-hosts` asks depends on what the claims name.
+    let mut extracted = Vec::new();
     let mut new_file_states = BTreeMap::new();
     for rel in &candidates {
         let is_project = is_project_scope(&scopes, rel);
@@ -346,19 +378,34 @@ fn run_review(file_args: &[String], _all: bool, json: bool) -> anyhow::Result<i3
         let note_type = front_matter_type(&content);
         for raw in extract_claims(&content) {
             let class = classify(&raw.text, raw.in_record_section, note_type.as_deref());
-            let (verdict, layer, evidence) =
-                judge(class, &raw.text, &repo, is_project, &newest_tag);
-            new_claims.push(Claim {
-                id: String::new(),
-                file: rel.clone(),
-                lines: raw.lines,
-                class,
-                text: raw.text,
-                verdict,
-                layer,
-                evidence,
-            });
+            extracted.push((rel.clone(), is_project, raw, class));
         }
+    }
+
+    let mut facts = sources::read(&here, &cfg, repo.root.as_deref()).await;
+    let to_probe = sources::hosts_to_probe(
+        extracted
+            .iter()
+            .map(|(_, _, raw, class)| (*class, raw.text.as_str())),
+        &facts,
+        probe_hosts,
+    );
+    facts.probes = sources::probe(&to_probe).await;
+
+    let mut new_claims = Vec::new();
+    for (rel, is_project, raw, class) in extracted {
+        let (verdict, layer, evidence) =
+            judge(class, &raw.text, &repo, is_project, &newest_tag, &facts);
+        new_claims.push(Claim {
+            id: String::new(),
+            file: rel,
+            lines: raw.lines,
+            class,
+            text: raw.text,
+            verdict,
+            layer,
+            evidence,
+        });
     }
 
     // Merge with whatever the last run held: a `[FILE]`-restricted run must
@@ -383,48 +430,88 @@ fn run_review(file_args: &[String], _all: bool, json: bool) -> anyhow::Result<i3
         saved.files.insert(rel, state);
     }
 
-    let mut unavailable = vec![
-        UnavailableSource {
-            source: "server".to_string(),
-            reason: "not read until a later release".to_string(),
-        },
-        UnavailableSource {
-            source: "environment".to_string(),
-            reason: "not read until a later release".to_string(),
-        },
-    ];
-    if repo.root.is_none() {
+    let mut unavailable = Vec::new();
+    let mut missing = |source: &str, reason: String| {
         unavailable.push(UnavailableSource {
-            source: "repository".to_string(),
-            reason: "this is not a git repository".to_string(),
-        });
+            source: source.to_string(),
+            reason,
+        })
+    };
+    if repo.root.is_none() {
+        missing("repository", "this is not a git repository".to_string());
+    }
+    match (&facts.server.url, facts.server.answered) {
+        (None, _) => missing(
+            "server",
+            "no server is configured on this machine".to_string(),
+        ),
+        (Some(url), false) => missing(
+            "server",
+            format!(
+                "/health at {url} did not answer ({})",
+                facts.server.error.as_deref().unwrap_or("no reason given")
+            ),
+        ),
+        (Some(_), true) => {}
+    }
+    if facts.compose.is_none() {
+        missing(
+            "compose",
+            "the checkout has no deploy/docker-compose*.yml that reads as YAML".to_string(),
+        );
+    }
+    if !probe_hosts {
+        let named = sources::hosts_to_probe(
+            claims.iter().map(|c| (c.class, c.text.as_str())),
+            &facts,
+            true,
+        )
+        .len();
+        if named > 0 {
+            missing(
+                "probe",
+                format!(
+                    "{named} host(s) named in memory were not asked anything; --probe-hosts asks \
+                     them"
+                ),
+            );
+        }
     }
     let report = Report {
         reviewed_at: now_rfc3339(),
         evidence: SourcesRead {
             repository_head: repo.head_short(),
+            server_version: facts.server.version.clone(),
+            server_commit: facts.server.commit.clone(),
+            compose_files: facts
+                .compose
+                .as_ref()
+                .map(|c| c.files.clone())
+                .unwrap_or_default(),
+            probed: facts.probes.keys().cloned().collect(),
             unavailable,
         },
         claims,
     };
 
-    // Printed before it is saved. The report the owner is looking at right
-    // now must never depend on the disk write after it succeeding — decision
-    // 4 is that the exit code stays 0 whenever the review ran, and a save
-    // failure is exactly that: the review ran and has an answer, it is only
-    // this machine's memory of having asked that is at risk.
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        print_text(&report);
-    }
-
+    // Saved before it is printed, and a failed save is only a warning: the
+    // report the owner is looking at never depends on the disk write
+    // (decision 4: the exit code stays 0 whenever the review ran), and a
+    // reader that stops early (`recall review run | head`) ends the process
+    // at the first write to a closed pipe, which must not cost `recall
+    // review show` the report.
     saved.report = Some(report);
     if let Err(e) = save_state(&review_file, &saved) {
         eprintln!(
-            "recall review: the report above was not saved ({e}); recall review show will not \
-             have it until the next run succeeds"
+            "recall review: this report was not saved ({e}); recall review show will not have \
+             it until the next run succeeds"
         );
+    }
+    let report = saved.report.as_ref().expect("just set");
+    if json {
+        println!("{}", serde_json::to_string_pretty(report)?);
+    } else {
+        print_text(report);
     }
     Ok(exit::OK)
 }
@@ -462,6 +549,7 @@ fn judge(
     repo: &Repo,
     is_project: bool,
     newest_tag: &Option<(u64, u64, u64, String)>,
+    facts: &sources::Facts,
 ) -> (Option<Verdict>, Option<u8>, Vec<Evidence>) {
     if !matches!(class, Class::Present | Class::Rule) {
         // Layer 1's guard: a candidate in a record is dropped, not
@@ -475,7 +563,7 @@ fn judge(
     }
     let observed: Vec<Observed> = found
         .iter()
-        .map(|a| evidence_for(a, repo, is_project, newest_tag, text))
+        .map(|a| evidence_for(a, repo, is_project, newest_tag, text, facts))
         .collect();
     let evidence: Vec<Evidence> = observed
         .iter()
@@ -815,7 +903,16 @@ fn looks_like_present(text: &str) -> bool {
         return true;
     }
     let body = strip_leading_marker(text);
-    body.starts_with("Run `") || body.starts_with("run `")
+    if body.starts_with("Run `") || body.starts_with("run `") {
+        return true;
+    }
+    // A line that is nothing but `NAME=value` states what a variable is
+    // set to now: the design's own worked example has one
+    // (`CLAUDE_CODE_REMOTE_MEMORY_DIR=/home/user/.claude`).
+    let bare = body.trim().trim_end_matches('.').trim_matches('`');
+    bare.split_once('=')
+        .is_some_and(|(name, value)| is_envvarish(name) && !value.is_empty())
+        && !bare.contains(char::is_whitespace)
 }
 
 /// Classifies one claim, given the note's own front-matter `type:` (if any)
@@ -925,6 +1022,11 @@ fn is_machine_absolute(value: &str) -> bool {
 }
 
 fn is_pathish(tok: &str) -> bool {
+    // "`a.yml` / `b.yml`": a slash between two names is punctuation, and
+    // the root directory is never what a note means by it.
+    if tok.chars().all(|c| c == '/') {
+        return false;
+    }
     tok.starts_with('/')
         || tok.starts_with("~/")
         || tok.starts_with("./")
@@ -1421,24 +1523,30 @@ fn evidence_for(
     is_project: bool,
     newest_tag: &Option<(u64, u64, u64, String)>,
     claim_text: &str,
+    facts: &sources::Facts,
 ) -> Observed {
+    let value = anchor.value.as_str();
     match anchor.kind {
-        AnchorKind::Path => evidence_for_path(repo, &anchor.value, is_project),
-        AnchorKind::SemVer => {
-            evidence_for_semver(newest_tag, &anchor.value, is_project, claim_text)
+        AnchorKind::Path => evidence_for_path(repo, value, is_project),
+        // A version in a claim about the server is about what the server
+        // runs, whatever the scope: the server is this machine's, not the
+        // project's. Any other version is about this project's releases.
+        AnchorKind::SemVer => parse_semver(value)
+            .and_then(|v| sources::evidence_for_server_version(v, claim_text, facts))
+            .unwrap_or_else(|| evidence_for_semver(newest_tag, value, is_project, claim_text)),
+        AnchorKind::Code => sources::evidence_for_name(value, facts, is_project)
+            .unwrap_or_else(|| evidence_for_code(repo, value, is_project)),
+        AnchorKind::Hostname => sources::evidence_for_host(value, claim_text, facts),
+        AnchorKind::EnvVar => {
+            if let Some(o) = sources::evidence_for_env_value(value, claim_text, facts) {
+                return o;
+            }
+            // Any other variable is judged by its name: a value it is given
+            // in a note may be a secret, and is never read or compared.
+            let name = value.split('=').next().unwrap_or(value);
+            sources::evidence_for_env_name(name, facts, is_project)
+                .unwrap_or_else(|| evidence_for_code(repo, name, is_project))
         }
-        AnchorKind::Code => evidence_for_code(repo, &anchor.value, is_project),
-        AnchorKind::Hostname => observed(
-            Signal::Unknown,
-            "server",
-            "needs the server's /health and discovery document; not read until a later release"
-                .to_string(),
-        ),
-        AnchorKind::EnvVar => observed(
-            Signal::Unknown,
-            "environment",
-            "needs the environment; not read until a later release".to_string(),
-        ),
     }
 }
 
@@ -1726,6 +1834,26 @@ mod tests {
         assert_eq!(claims[0].0, Class::Unsure);
     }
 
+    /// The design's worked example writes one claim as a bare assignment
+    /// (`CLAUDE_CODE_REMOTE_MEMORY_DIR=/home/user/.claude`): that states
+    /// what a variable is set to now. Prose that merely contains one does
+    /// not become present for it.
+    #[test]
+    fn a_bare_assignment_is_a_present_claim() {
+        for line in [
+            "- CLAUDE_CODE_REMOTE_MEMORY_DIR=/home/user/.claude\n",
+            "- `RECALL_URL=https://recall.example.com`.\n",
+        ] {
+            assert_eq!(claims_of(line)[0].0, Class::Present, "{line:?}");
+        }
+        for line in [
+            "- Maybe try FOO_BAR=1 when it misbehaves.\n",
+            "- FOO_BAR=\n",
+        ] {
+            assert_eq!(claims_of(line)[0].0, Class::Unsure, "{line:?}");
+        }
+    }
+
     #[test]
     fn anchors_recognise_every_kind_the_design_names() {
         let text =
@@ -1752,7 +1880,7 @@ mod tests {
     /// The cheap false positives a bare slash-based path rule would create.
     #[test]
     fn common_idioms_and_fractions_are_not_path_anchors() {
-        for tok in ["and/or", "10/min", "on/off", "1/2"] {
+        for tok in ["and/or", "10/min", "on/off", "1/2", "/", "//"] {
             assert!(!is_pathish(tok), "{tok:?} should not look like a path");
         }
         assert!(is_pathish("hooks/recall-pull"), "a real path still does");
@@ -1772,8 +1900,10 @@ mod tests {
         }
     }
 
+    /// With no server configured there is nothing to compare a hostname
+    /// with, and nothing is asked of it.
     #[test]
-    fn a_hostname_anchor_is_never_checked_by_this_pr() {
+    fn a_hostname_with_no_server_configured_cant_tell() {
         let repo = Repo::at(None);
         let o = evidence_for(
             &Anchor {
@@ -1784,6 +1914,7 @@ mod tests {
             true,
             &None,
             "",
+            &sources::Facts::default(),
         );
         assert_eq!(o.signal, Signal::Unknown);
         assert_eq!(o.source, "server");
@@ -1803,6 +1934,7 @@ mod tests {
             &repo,
             true,
             &None,
+            &sources::Facts::default(),
         );
         assert_eq!(verdict, None);
         assert_eq!(layer, None);
@@ -1818,6 +1950,7 @@ mod tests {
             &repo,
             true,
             &None,
+            &sources::Facts::default(),
         );
         assert_eq!(verdict, None);
         assert_eq!(layer, None);
@@ -1834,8 +1967,14 @@ mod tests {
         std::fs::remove_file(dir.path().join("lib.sh")).unwrap();
         git_commit(dir.path(), "remove");
         let repo = Repo::at(Some(dir.path().to_path_buf()));
-        let (verdict, _layer, evidence) =
-            judge(Class::Rule, "Use `lib.sh` for this.", &repo, true, &None);
+        let (verdict, _layer, evidence) = judge(
+            Class::Rule,
+            "Use `lib.sh` for this.",
+            &repo,
+            true,
+            &None,
+            &sources::Facts::default(),
+        );
         assert_eq!(verdict, None, "a rule's substance is never judged as one");
         assert_eq!(evidence.len(), 1);
         assert_eq!(evidence[0].verdict, Verdict::Stale, "{evidence:?}");
@@ -2009,9 +2148,11 @@ mod tests {
         );
     }
 
-    /// This module's entire premise: it never makes a network request. The
-    /// forbidden words are built at runtime so this assertion cannot
-    /// trivially match itself.
+    /// Every request a review makes goes through `sources`: `/health` and
+    /// discovery at the configured server, inside `status`'s collection,
+    /// and a host's discovery document with `--probe-hosts`. This file
+    /// opens no connection of its own. The forbidden words are built at
+    /// runtime so this assertion cannot trivially match itself.
     #[test]
     fn this_module_never_touches_the_network() {
         let src = include_str!("review.rs");

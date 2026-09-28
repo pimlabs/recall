@@ -4728,3 +4728,147 @@ fn the_corrected_note_gets_no_stale_claim() {
     let history = claim_containing(&report["claims"], "Not the old");
     assert_eq!(history["class"], "record");
 }
+
+/// Design test row: the memory directory line is `still_true` in a cloud
+/// environment and `cant_tell` on a laptop, end to end: the variable as a
+/// hook sees it, and `CLAUDE_CODE_REMOTE` as the harness sets it.
+/// Mutation: decide environment claims on any machine.
+#[test]
+fn a_cloud_memory_dir_claim_is_decided_only_in_a_cloud_session() {
+    let repo = review_repo();
+    let memory = tempfile::tempdir().unwrap();
+    let memory_str = memory.path().to_string_lossy().to_string();
+    // Written the way the design's worked example writes it: the
+    // assignment alone, as a list item.
+    let note = format!("- CLAUDE_CODE_REMOTE_MEMORY_DIR={memory_str}\n");
+
+    let cloud = [
+        ("CLAUDE_CODE_REMOTE", "true"),
+        ("CLAUDE_CODE_REMOTE_MEMORY_DIR", memory_str.as_str()),
+    ];
+    write_memory(repo.path(), &cloud, "env.md", &note);
+    let r = run(&["review", "run", "--json"], repo.path(), &cloud, None);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    let claim = claim_containing(&report["claims"], "CLAUDE_CODE_REMOTE_MEMORY_DIR");
+    assert_eq!(claim["verdict"], "still_true", "{claim}");
+    assert_eq!(claim["evidence"][0]["source"], "environment", "{claim}");
+
+    // The same note, read on a laptop: the claim is about somewhere else.
+    let laptop: [(&str, &str); 0] = [];
+    write_memory(repo.path(), &laptop, "env.md", &note);
+    let r = run(&["review", "run", "--json"], repo.path(), &laptop, None);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    let claim = claim_containing(&report["claims"], "CLAUDE_CODE_REMOTE_MEMORY_DIR");
+    assert_eq!(claim["verdict"], "cant_tell", "{claim}");
+}
+
+/// The configured server, asked `/health` and its discovery document once:
+/// a note naming it is `still_true` with the commit it runs, and the report
+/// says which version and commit it read.
+#[test]
+fn a_claim_naming_the_configured_server_is_checked_against_it() {
+    let server = live_server("t");
+    let repo = review_repo();
+    let env = [("RECALL_URL", server.url.as_str()), ("RECALL_TOKEN", "t")];
+    write_memory(
+        repo.path(),
+        &env,
+        "server.md",
+        &format!("- The server is at {}.\n", server.url),
+    );
+    let r = run(&["review", "run", "--json"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    let claim = claim_containing(&report["claims"], "The server is at");
+    assert_eq!(claim["verdict"], "still_true", "{claim}");
+    assert_eq!(claim["evidence"][0]["source"], "server", "{claim}");
+    assert!(
+        report["evidence"]["server_version"].is_string(),
+        "{}",
+        report["evidence"]
+    );
+    let unavailable = report["evidence"]["unavailable"].to_string();
+    assert!(!unavailable.contains("\"server\""), "{unavailable}");
+}
+
+/// A server that does not answer is a source that could not be read, not
+/// a failed review: exit 0, and the reason in `evidence.unavailable`.
+#[test]
+fn an_unreachable_server_is_reported_as_unavailable() {
+    let repo = review_repo();
+    let env = [("RECALL_URL", "http://127.0.0.1:9"), ("RECALL_TOKEN", "t")];
+    write_memory(repo.path(), &env, "a.md", "- Run `lib.sh` first.\n");
+    let r = run(&["review", "run", "--json"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    let server = report["evidence"]["unavailable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["source"] == "server")
+        .unwrap_or_else(|| panic!("{}", report["evidence"]));
+    assert!(
+        server["reason"]
+            .as_str()
+            .unwrap()
+            .contains("did not answer"),
+        "{server}"
+    );
+}
+
+/// The project's compose files, read as YAML: an ingress a note names is
+/// `still_true` because a compose file runs it, not because a word appears
+/// somewhere in the tree.
+#[test]
+fn a_claim_naming_a_compose_service_is_confirmed_by_the_compose_file() {
+    let repo = review_repo();
+    std::fs::create_dir_all(repo.path().join("deploy")).unwrap();
+    std::fs::write(
+        repo.path().join("deploy").join("docker-compose.yml"),
+        "services:\n  cloudflared:\n    image: cloudflare/cloudflared:latest\n",
+    )
+    .unwrap();
+    let env: [(&str, &str); 0] = [];
+    write_memory(
+        repo.path(),
+        &env,
+        "ingress.md",
+        "- The server is deployed via `cloudflared`.\n",
+    );
+    let r = run(&["review", "run", "--json"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    let claim = claim_containing(&report["claims"], "cloudflared");
+    assert_eq!(claim["verdict"], "still_true", "{claim}");
+    assert_eq!(claim["evidence"][0]["source"], "compose", "{claim}");
+    assert_eq!(
+        report["evidence"]["compose_files"],
+        serde_json::json!(["deploy/docker-compose.yml"])
+    );
+}
+
+/// Without `--probe-hosts`, a host a note names is never asked anything,
+/// and the report says how many were left unasked.
+#[test]
+fn hosts_a_note_names_are_not_probed_without_the_flag() {
+    let repo = review_repo();
+    let env: [(&str, &str); 0] = [];
+    write_memory(
+        repo.path(),
+        &env,
+        "hosts.md",
+        "- The mirror is at `mirror.example.invalid`.\n",
+    );
+    let r = run(&["review", "run", "--json"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    assert!(
+        report["evidence"]["probed"].is_null(),
+        "{}",
+        report["evidence"]
+    );
+    let unavailable = report["evidence"]["unavailable"].to_string();
+    assert!(unavailable.contains("--probe-hosts"), "{unavailable}");
+}

@@ -17,7 +17,7 @@ use crate::project as proj;
 /// a variable added there cannot be silently missing here — which would
 /// reintroduce, one variable at a time, exactly the blind spot this report
 /// was fixed to remove.
-fn known_vars() -> Vec<&'static str> {
+pub(crate) fn known_vars() -> Vec<&'static str> {
     config::VARS
         .iter()
         .chain(claude::VARS.iter())
@@ -413,6 +413,16 @@ pub struct Report {
     /// reported even while it is down.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audit: Option<AuditReport>,
+    /// `GET /health` as the server answered it, for `recall review` to
+    /// read what this report summarises (the last backup, which it does
+    /// not) without asking the server twice. Never in the JSON: the fields
+    /// above are the contract.
+    #[serde(skip)]
+    pub health: Option<recall_wire::Health>,
+    /// The discovery document as the server answered it, kept for the
+    /// same reason and never in the JSON either.
+    #[serde(skip)]
+    pub discovery: Option<recall_wire::discovery::Discovery>,
 }
 
 /// Collects the report, then prints it as text or JSON.
@@ -445,6 +455,44 @@ pub(crate) async fn collect_within(
     here: &proj::Resolved,
     cfg: &ClientConfig,
     deadlines: Deadlines,
+) -> Report {
+    collect_asking(here, cfg, deadlines, Asks::Everything).await
+}
+
+/// The report `recall review` reads: everything this machine knows about
+/// itself, and what the server says it is (`/health` and the discovery
+/// document), waiting on the server at most `server`. None of what
+/// `recall status` also asks to check this machine's own standing: no
+/// pull, no enrolment check, no audit witness check. A review is not the
+/// place to learn those, and the witness check in particular counts an
+/// unanswered check against the server, which a review has no business
+/// doing.
+pub(crate) async fn collect_for_review(
+    here: &proj::Resolved,
+    cfg: &ClientConfig,
+    server: std::time::Duration,
+) -> Report {
+    let deadlines = Deadlines {
+        server,
+        audit: std::time::Duration::ZERO,
+    };
+    collect_asking(here, cfg, deadlines, Asks::WhatTheServerIs).await
+}
+
+/// How much of the server [`collect_asking`] asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Asks {
+    /// Everything `recall status` and `recall doctor` report.
+    Everything,
+    /// `/health` and the discovery document only.
+    WhatTheServerIs,
+}
+
+async fn collect_asking(
+    here: &proj::Resolved,
+    cfg: &ClientConfig,
+    deadlines: Deadlines,
+    asks: Asks,
 ) -> Report {
     let root = &here.root;
     let root_str = root.to_string_lossy().to_string();
@@ -571,6 +619,8 @@ pub(crate) async fn collect_within(
         last_synced_at: None,
         last_offbox_at: None,
         audit: None,
+        health: None,
+        discovery: None,
     };
 
     if !rep.url_set {
@@ -579,6 +629,7 @@ pub(crate) async fn collect_within(
     let witness = cfg
         .audit_file
         .as_ref()
+        .filter(|_| asks == Asks::Everything)
         .map(|file| recall_hooks::audit::Witness::new(file, &cfg.url));
     if let Some(witness) = &witness {
         let mut audit = AuditReport {
@@ -606,7 +657,7 @@ pub(crate) async fn collect_within(
     };
     match client {
         Ok(client) => {
-            let asked = ask_server(&mut rep, &client, usable);
+            let asked = ask_server(&mut rep, &client, usable, asks);
             let finished = tokio::time::timeout(deadlines.server, asked).await.is_ok();
             if !finished && !rep.server_ok {
                 rep.server_error.get_or_insert(format!(
@@ -639,9 +690,15 @@ pub(crate) async fn collect_within(
 /// Everything `collect` asks the server but the audit check, in order,
 /// filling in `rep`: what is filled in before the server's deadline passes
 /// stays, whatever is not reached.
-async fn ask_server(rep: &mut Report, client: &recall_hooks::client::Client, usable: bool) {
+async fn ask_server(
+    rep: &mut Report,
+    client: &recall_hooks::client::Client,
+    usable: bool,
+    asks: Asks,
+) {
     match client.health().await {
         Ok(health) => {
+            rep.health = Some(health.clone());
             rep.server_ok = true;
             rep.git_commit = Some(health.git_commit);
             rep.merge_ready = health.merge.claude_cli.logged_in.unwrap_or(false);
@@ -674,6 +731,7 @@ async fn ask_server(rep: &mut Report, client: &recall_hooks::client::Client, usa
             };
         }
         if let Ok(Some(doc)) = doc {
+            rep.discovery = Some(doc.clone());
             rep.server_devices = Some(
                 doc.accepts(recall_wire::discovery::AUTH_DEVICE_SIG) && doc.devices().is_some(),
             );
@@ -682,6 +740,9 @@ async fn ask_server(rep: &mut Report, client: &recall_hooks::client::Client, usa
             rep.server_protocols = doc.protocol.supported;
             rep.min_client = Some(doc.min_client);
         }
+    }
+    if asks == Asks::WhatTheServerIs {
+        return;
     }
     // The one request that says whether this machine is still
     // enrolled: a device key the server has revoked or swept looks

@@ -221,7 +221,7 @@ fn main() {
         Cmd::Authkey(cmd) => block_on_current(devices::run_authkey(cmd)),
         Cmd::Audit(cmd) => block_on_current(audit::run(cmd)),
         Cmd::Eval(cmd) => block_on_current(eval::run(cmd)),
-        Cmd::Review(cmd) => review::run(cmd),
+        Cmd::Review(cmd) => block_on_current(review::run(cmd)),
         Cmd::Status { json } => block_on_current(status::run(json)),
         Cmd::Doctor { json } => block_on_current(doctor::run(json)),
         Cmd::Push => block_on_current(hook::push()),
