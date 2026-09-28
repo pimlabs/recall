@@ -642,6 +642,27 @@ arriving new**, and **it has to stay cheap**.
       and older (`LAST_BUILT_ON_SERVER`) still build on the server; the clone
       stays, for the compose files and those older tags.
 
+- [ ] **The server runs whatever the image tag holds, and keeps every image
+      it ever pulled.** Two follow-ups left out of the pull deploy (#145) on
+      purpose, so it stayed reviewable.
+
+      *Trust.* Until #145 the server checked the release binaries against
+      `checksums.txt` itself. Now it pulls `ghcr.io/pimlabs/recall-server:
+      <version>` and trusts the tag. Tags never move by our own rule, but the
+      rule lives in our workflow, not in the registry. The fix is for
+      `deploy.yml` to resolve the tag to a digest on the runner, verify that
+      digest's attestation (`gh attestation verify`, which `publish-image`
+      already produces), and hand the server the digest to pull rather than
+      the tag.
+
+      *Disk.* Every deploy pulls a new version and the old one stays tagged,
+      so `docker image prune` never reclaims it. After a successful deploy,
+      keep the running version and the one before it (the rollback target)
+      and remove older `ghcr.io/pimlabs/recall-*` tags.
+
+      Neither is urgent on a VPS that deploys a few times a week; both
+      belong after the first real release has proved the pull path.
+
 - [x] **Setting up the off-box backup is eight manual steps and a trap.**
       Two `rclone config` invocations, a crypt password that must be stored
       outside the machine before anything else happens, a write-read test, a
