@@ -60,6 +60,24 @@ break will be described here in full rather than smoothed over.
   `server_commit`, `compose_files` and `probed`, and names the server,
   compose and probe sources when they could not be read. **Patch**: a new
   flag and new `--json` fields.
+- **`recall review run --claude`: this machine's `claude` CLI decides what
+  the checks could not.** Layer 3 of the design: the claims layers 1 and 2
+  leave undecided (no checkable anchor, or `cant_tell`) are handed to the
+  local `claude` CLI, one call per file, with the note, the claims and a
+  fact sheet of what the review observed (the server and what it reports,
+  the session, the compose files, the git and checkout evidence). A
+  `stale` or `still_true` verdict must cite that sheet or it is recorded as
+  `cant_tell`, labelled as `claude`'s reading; a claim it reads as history
+  becomes a record, never judged. Off by default (it spends Claude usage);
+  no API key (the same `claude -p` call the merge makes: no tools, one
+  turn, nothing persisted); secrets masked by the evaluation's redactor
+  before anything is handed over; `--max-calls N` (default 10) and a
+  64 KiB prompt bound, with every file left out listed as skipped. Answers
+  are kept per file in `.recall-review.json` and reused while the file is
+  unchanged and every fact they cited is still observed; `--all` asks
+  again. `--json` gains `evidence.claude` (`calls`, `reused`, `skipped`),
+  `claude` as an evidence source and as an unavailable source, and layer
+  `3`. **Patch**: new flags and new `--json` fields.
 
 ## 0.4.8 — 2026-09-28
 

@@ -101,6 +101,90 @@ pub(super) struct Facts {
 }
 
 impl Facts {
+    /// What these facts say, one sentence each, for layer 3's fact sheet:
+    /// facts that can be cited, then context that cannot (a server that did
+    /// not answer says nothing about what the server is). Only what the
+    /// report may already show: the configured server as `recall status`
+    /// prints it, the kind of session, the values of [`VALUE_VARS`], the
+    /// compose files' names, and what probes found. One fact per sentence,
+    /// so a changed commit does not unseat an answer that cited the URL.
+    pub fn sheet(&self) -> (Vec<String>, Vec<String>) {
+        let mut out = Vec::new();
+        let mut context = Vec::new();
+        let s = &self.server;
+        match &s.url {
+            None => out.push(
+                "No Recall server is configured on this machine (RECALL_URL is unset)".into(),
+            ),
+            Some(url) => {
+                out.push(format!(
+                    "This machine's configured Recall server is {url} (RECALL_URL, from {})",
+                    s.url_source
+                ));
+                if s.answered {
+                    out.push(format!("/health answers at {url}"));
+                    if let Some(c) = &s.commit {
+                        out.push(format!("The configured server is built from commit {c}"));
+                    }
+                    if let Some(v) = &s.version {
+                        out.push(format!("The configured server reports version {v}"));
+                    }
+                    if !s.capabilities.is_empty() {
+                        out.push(format!(
+                            "The configured server lists the capabilities {}",
+                            s.capabilities.join(", ")
+                        ));
+                    }
+                } else {
+                    context.push(format!(
+                        "/health at {url} did not answer this run ({})",
+                        s.error.as_deref().unwrap_or("no reason given")
+                    ));
+                }
+            }
+        }
+        out.push(if self.remote_session {
+            "This check runs in a Claude Code cloud session (CLAUDE_CODE_REMOTE=true)".into()
+        } else {
+            "This check does not run in a Claude Code cloud session (CLAUDE_CODE_REMOTE is not \
+             true)"
+                .into()
+        });
+        for (name, value) in &self.env {
+            if *name == "CLAUDE_CODE_REMOTE" {
+                continue;
+            }
+            out.push(match value {
+                Some(v) => format!("{name} is {v} on this machine"),
+                None => format!("{name} is not set on this machine"),
+            });
+        }
+        if let Some(c) = &self.compose {
+            let names: Vec<&str> = c.names.keys().map(String::as_str).collect();
+            out.push(format!(
+                "The project's compose files ({}) name: {}",
+                c.files.join(", "),
+                names.join(", ")
+            ));
+            if !c.vars.is_empty() {
+                let vars: Vec<&str> = c.vars.keys().map(String::as_str).collect();
+                out.push(format!(
+                    "The project's compose files pass these variables to a service: {}",
+                    vars.join(", ")
+                ));
+            }
+        }
+        for (host, probe) in &self.probes {
+            out.push(match probe {
+                Probe::Recall(v) => format!("{host} answers as a Recall server, version {v}"),
+                Probe::NotRecall(why) => {
+                    format!("{host} does not answer as a Recall server ({why})")
+                }
+            });
+        }
+        (out, context)
+    }
+
     fn env(&self, name: &str) -> Option<&str> {
         self.env
             .iter()

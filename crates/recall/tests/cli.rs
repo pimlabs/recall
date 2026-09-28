@@ -4872,3 +4872,481 @@ fn hosts_a_note_names_are_not_probed_without_the_flag() {
     let unavailable = report["evidence"]["unavailable"].to_string();
     assert!(unavailable.contains("--probe-hosts"), "{unavailable}");
 }
+
+/// A stand-in `claude`, prepended to `PATH` so it wins over any real one:
+/// it keeps each call's stdin as `stdin-<n>` in its directory and answers
+/// with the CLI's JSON envelope around `answer`. Returns the directory and
+/// the `PATH` to run with.
+///
+/// Unix only, for the reason [`hostname_shim`] gives.
+#[cfg(unix)]
+fn fake_claude(answer: &str) -> (tempfile::TempDir, String) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let envelope = serde_json::json!({"type": "result", "is_error": false, "result": answer});
+    std::fs::write(dir.path().join("answer.json"), envelope.to_string()).unwrap();
+    let script = dir.path().join("claude");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nd='{}'\nn=$(ls \"$d\" | grep -c '^stdin-')\ncat > \"$d/stdin-$n\"\ncat \"$d/answer.json\"\n",
+            dir.path().display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    (dir, path)
+}
+
+/// What each call to [`fake_claude`] was handed on stdin, in order.
+#[cfg(unix)]
+fn claude_calls(dir: &Path) -> Vec<String> {
+    let mut calls: Vec<(usize, String)> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| {
+            let name = e.unwrap().file_name().to_string_lossy().to_string();
+            let n = name.strip_prefix("stdin-")?.parse().ok()?;
+            Some((n, std::fs::read_to_string(dir.join(&name)).unwrap()))
+        })
+        .collect();
+    calls.sort();
+    calls.into_iter().map(|(_, s)| s).collect()
+}
+
+/// Layer 3 answers `stale` for C1, citing E1: the first fact on every
+/// sheet (the configured server, or that none is).
+#[cfg(unix)]
+const C1_STALE: &str = r#"{"claims":[{"id":"C1","class":"present","verdict":"stale","cites":["E1"],"reason":"The facts say otherwise."}]}"#;
+
+/// The design's "Layers 1 and 2 make no `claude` call, and none is made
+/// without `--claude`": the fake counts every call, and the positive
+/// control shows it is reachable.
+#[cfg(unix)]
+#[test]
+fn no_claude_call_is_made_without_the_flag() {
+    let repo = review_repo();
+    let (fake, path) = fake_claude(C1_STALE);
+    let env = [("PATH", path.as_str())];
+    write_memory(
+        repo.path(),
+        &env,
+        "plans.md",
+        "- The deploy happens on Tuesdays.\n",
+    );
+
+    let r = run(&["review", "run", "--json"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(claude_calls(fake.path()).is_empty(), "claude was called");
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    let unavailable = report["evidence"]["unavailable"].to_string();
+    assert!(unavailable.contains("--claude"), "{unavailable}");
+    assert!(
+        report["evidence"]["claude"].is_null(),
+        "{}",
+        report["evidence"]
+    );
+
+    // `--max-calls` means nothing without `--claude`, and says so.
+    let r = run(
+        &["review", "run", "--max-calls", "3"],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_ne!(r.code, 0, "{}", r.stdout);
+    assert!(claude_calls(fake.path()).is_empty(), "claude was called");
+
+    let r = run(&["review", "run", "--claude"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(claude_calls(fake.path()).len(), 1, "the control");
+}
+
+/// A verdict that cites a fact decides an `unsure` claim at layer 3; the
+/// answer is kept, so an unchanged file is not asked again (with or without
+/// `--claude`), and a changed one is.
+#[cfg(unix)]
+#[test]
+fn a_claude_verdict_is_kept_until_the_file_changes() {
+    let repo = review_repo();
+    let (fake, path) = fake_claude(C1_STALE);
+    let env = [("PATH", path.as_str())];
+    let note = "- The deploy happens on Tuesdays.\n";
+    write_memory(repo.path(), &env, "plans.md", note);
+
+    let r = run(
+        &["review", "run", "--claude", "--json"],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    let claim = claim_containing(&report["claims"], "Tuesdays");
+    assert_eq!(claim["class"], "present", "{claim}");
+    assert_eq!(claim["verdict"], "stale", "{claim}");
+    assert_eq!(claim["layer"], 3, "{claim}");
+    assert_eq!(claim["evidence"][0]["source"], "claude", "{claim}");
+    assert_eq!(
+        report["evidence"]["claude"]["calls"], 1,
+        "{}",
+        report["evidence"]
+    );
+    let calls = claude_calls(fake.path());
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0].contains("C1 (line 1): The deploy happens on Tuesdays."),
+        "{}",
+        calls[0]
+    );
+    assert!(calls[0].contains("E1: "), "{}", calls[0]);
+
+    // Unchanged: asked about again by nobody, the verdict kept.
+    for args in [
+        &["review", "run", "--claude", "--json"][..],
+        &["review", "run", "--json"][..],
+    ] {
+        let r = run(args, repo.path(), &env, None);
+        assert_eq!(r.code, 0, "{}", r.stderr);
+        let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+        let claim = claim_containing(&report["claims"], "Tuesdays");
+        assert_eq!(claim["verdict"], "stale", "{args:?}: {claim}");
+        assert_eq!(claude_calls(fake.path()).len(), 1, "{args:?}");
+    }
+
+    // `--all` asks again.
+    let r = run(
+        &["review", "run", "--claude", "--all"],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(claude_calls(fake.path()).len(), 2);
+
+    // Changed: asked again.
+    write_memory(
+        repo.path(),
+        &env,
+        "plans.md",
+        &format!("{note}- Nothing else.\n"),
+    );
+    let r = run(&["review", "run", "--claude"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(claude_calls(fake.path()).len(), 3);
+}
+
+/// The design's "A planted token in a note never reaches the fake
+/// `claude`'s stdin".
+#[cfg(unix)]
+#[test]
+fn a_planted_token_never_reaches_claude() {
+    let repo = review_repo();
+    let (fake, path) = fake_claude(C1_STALE);
+    let env = [("PATH", path.as_str())];
+    let token = format!("ghp_{}", "Zx9Yw8Vu7T".repeat(4));
+    write_memory(
+        repo.path(),
+        &env,
+        "creds.md",
+        &format!("- The deploy key is {token} and it opens the vault.\n"),
+    );
+
+    let r = run(&["review", "run", "--claude"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let calls = claude_calls(fake.path());
+    assert_eq!(calls.len(), 1);
+    assert!(!calls[0].contains(&token), "{}", calls[0]);
+    assert!(calls[0].contains("it opens the vault"), "{}", calls[0]);
+}
+
+/// `--max-calls` bounds the calls, and a file it leaves out is listed as
+/// skipped, never silently dropped.
+#[cfg(unix)]
+#[test]
+fn max_calls_bounds_the_calls_and_lists_what_it_skipped() {
+    let repo = review_repo();
+    let (fake, path) = fake_claude(C1_STALE);
+    let env = [("PATH", path.as_str())];
+    write_memory(
+        repo.path(),
+        &env,
+        "a.md",
+        "- The deploy happens on Tuesdays.\n",
+    );
+    write_memory(
+        repo.path(),
+        &env,
+        "b.md",
+        "- The backup happens on Fridays.\n",
+    );
+
+    let r = run(
+        &["review", "run", "--claude", "--max-calls", "1", "--json"],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(claude_calls(fake.path()).len(), 1);
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    let skipped = &report["evidence"]["claude"]["skipped"];
+    assert_eq!(skipped[0]["file"], "b.md", "{skipped}");
+    assert!(
+        skipped[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("--max-calls 1"),
+        "{skipped}"
+    );
+
+    // The text form says so too.
+    let r = run(&["review", "show"], repo.path(), &env, None);
+    assert!(r.stdout.contains("skipped b.md"), "{}", r.stdout);
+}
+
+/// The design's "A `claude` verdict with no fact-sheet citation becomes
+/// `cant_tell`", end to end.
+#[cfg(unix)]
+#[test]
+fn a_claude_verdict_citing_nothing_is_cant_tell() {
+    let repo = review_repo();
+    let (_fake, path) = fake_claude(
+        r#"{"claims":[{"id":"C1","class":"present","verdict":"stale","cites":[],"reason":"I just know."}]}"#,
+    );
+    let env = [("PATH", path.as_str())];
+    write_memory(
+        repo.path(),
+        &env,
+        "plans.md",
+        "- The deploy happens on Tuesdays.\n",
+    );
+    let r = run(
+        &["review", "run", "--claude", "--json"],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    let claim = claim_containing(&report["claims"], "Tuesdays");
+    assert_eq!(claim["verdict"], "cant_tell", "{claim}");
+    let detail = claim["evidence"][0]["detail"].as_str().unwrap();
+    assert!(
+        detail.starts_with("claude's reading, not evidence"),
+        "{detail}"
+    );
+}
+
+/// Only `unsure` and undecided `present` claims are handed over: a record
+/// and a rule never appear among the claims `claude` is asked to judge.
+#[cfg(unix)]
+#[test]
+fn records_and_rules_are_never_asked_about() {
+    let repo = review_repo();
+    let (fake, path) = fake_claude(C1_STALE);
+    let env = [("PATH", path.as_str())];
+    write_memory(
+        repo.path(),
+        &env,
+        "plans.md",
+        "- The deploy happens on Tuesdays.\n- The deploy used to happen on Mondays.\n",
+    );
+    write_memory(
+        repo.path(),
+        &env,
+        "feedback_style.md",
+        "---\ntype: feedback\n---\n- Always answer in Indonesian.\n",
+    );
+    let r = run(&["review", "run", "--claude"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let calls = claude_calls(fake.path());
+    assert_eq!(calls.len(), 1, "the feedback note has nothing to ask about");
+    let claims = calls[0].split("=== Claims to judge ===").nth(1).unwrap();
+    assert!(
+        claims.contains("C1 (line 1): The deploy happens on Tuesdays."),
+        "{claims}"
+    );
+    assert!(!claims.contains("Mondays"), "{claims}");
+    assert!(!claims.contains("C2"), "{claims}");
+}
+
+/// A run that cannot ask never throws an answer away: while a fact it cited
+/// is not observed the answer is not shown, and once it is again the answer
+/// is, with no new call. `--claude` asks again while the fact is missing.
+#[cfg(unix)]
+#[test]
+fn an_answer_whose_fact_went_missing_is_kept_not_shown() {
+    let repo = review_repo();
+    // Cites the first four facts, among which is the one about which
+    // server this machine is configured for.
+    let (fake, path) = fake_claude(
+        r#"{"claims":[{"id":"C1","class":"present","verdict":"stale","cites":["E1","E2","E3","E4"],"reason":"The facts say otherwise."}]}"#,
+    );
+    let unset = [("PATH", path.as_str())];
+    let moved = [
+        ("PATH", path.as_str()),
+        ("RECALL_URL", "http://127.0.0.1:9"),
+    ];
+    write_memory(
+        repo.path(),
+        &unset,
+        "plans.md",
+        "- The deploy happens on Tuesdays.\n",
+    );
+    let verdict = |env: &[(&str, &str)], args: &[&str]| {
+        let r = run(args, repo.path(), env, None);
+        assert_eq!(r.code, 0, "{}", r.stderr);
+        let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+        claim_containing(&report["claims"], "Tuesdays")["verdict"].clone()
+    };
+
+    assert_eq!(
+        verdict(&unset, &["review", "run", "--claude", "--json"]),
+        "stale"
+    );
+    assert_eq!(
+        verdict(&moved, &["review", "run", "--json"]),
+        serde_json::Value::Null
+    );
+    assert_eq!(verdict(&unset, &["review", "run", "--json"]), "stale");
+    assert_eq!(claude_calls(fake.path()).len(), 1);
+
+    assert_eq!(
+        verdict(&moved, &["review", "run", "--claude", "--json"]),
+        "stale"
+    );
+    assert_eq!(claude_calls(fake.path()).len(), 2);
+}
+
+/// An answer that leaves a claim out is shown, and asked about again.
+#[cfg(unix)]
+#[test]
+fn a_partial_answer_is_shown_and_asked_again() {
+    let repo = review_repo();
+    let (fake, path) = fake_claude(C1_STALE);
+    let env = [("PATH", path.as_str())];
+    write_memory(
+        repo.path(),
+        &env,
+        "plans.md",
+        "- The deploy happens on Tuesdays.\n- The backup happens on Fridays.\n",
+    );
+    for expected in [1, 2] {
+        let r = run(
+            &["review", "run", "--claude", "--json"],
+            repo.path(),
+            &env,
+            None,
+        );
+        assert_eq!(r.code, 0, "{}", r.stderr);
+        let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+        assert_eq!(
+            claim_containing(&report["claims"], "Tuesdays")["verdict"],
+            "stale"
+        );
+        assert_eq!(claude_calls(fake.path()).len(), expected);
+    }
+    let r = run(&["review", "run", "--json"], repo.path(), &env, None);
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(
+        claim_containing(&report["claims"], "Tuesdays")["verdict"],
+        "stale"
+    );
+    assert_eq!(claude_calls(fake.path()).len(), 2);
+}
+
+/// A `[FILE]` run asks about that file only, and keeps every other file's
+/// answer.
+#[cfg(unix)]
+#[test]
+fn a_files_run_keeps_the_other_files_answers() {
+    let repo = review_repo();
+    let (fake, path) = fake_claude(C1_STALE);
+    let env = [("PATH", path.as_str())];
+    write_memory(
+        repo.path(),
+        &env,
+        "a.md",
+        "- The deploy happens on Tuesdays.\n",
+    );
+    write_memory(
+        repo.path(),
+        &env,
+        "b.md",
+        "- The backup happens on Fridays.\n",
+    );
+    let r = run(&["review", "run", "--claude"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(claude_calls(fake.path()).len(), 2);
+
+    write_memory(
+        repo.path(),
+        &env,
+        "a.md",
+        "- The deploy happens on Thursdays.\n",
+    );
+    let r = run(
+        &["review", "run", "a.md", "--claude", "--json"],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(claude_calls(fake.path()).len(), 3);
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(
+        claim_containing(&report["claims"], "Fridays")["verdict"],
+        "stale"
+    );
+    assert_eq!(
+        claim_containing(&report["claims"], "Thursdays")["verdict"],
+        "stale"
+    );
+
+    let r = run(&["review", "run", "--json"], repo.path(), &env, None);
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(
+        claim_containing(&report["claims"], "Fridays")["verdict"],
+        "stale"
+    );
+    assert_eq!(claude_calls(fake.path()).len(), 3);
+}
+
+/// What layer 2 observed but could not decide on ("not found on this
+/// machine") is context `claude` cannot cite, so it cannot turn a claim the
+/// design keeps `cant_tell` into a verdict.
+#[cfg(unix)]
+#[test]
+fn what_decided_nothing_is_context_not_a_citable_fact() {
+    let repo = review_repo();
+    let (fake, path) = fake_claude(C1_STALE);
+    let env = [("PATH", path.as_str())];
+    write_memory(
+        repo.path(),
+        &env,
+        "data.md",
+        "- The archive lives in /srv/recall-nowhere/archive.\n",
+    );
+    let r = run(&["review", "run", "--claude"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let calls = claude_calls(fake.path());
+    assert_eq!(calls.len(), 1);
+    // The note itself is at the top of the prompt, path and all: only the
+    // facts section between it and the context is looked at.
+    let after_note = calls[0]
+        .split_once("=== Facts observed")
+        .unwrap_or_else(|| panic!("no facts section: {}", calls[0]))
+        .1;
+    let (facts, rest) = after_note
+        .split_once("=== Context")
+        .unwrap_or_else(|| panic!("no context section: {}", calls[0]));
+    assert!(!facts.contains("/srv/recall-nowhere/archive"), "{facts}");
+    let context = rest.split("=== Claims to judge ===").next().unwrap();
+    assert!(context.contains("/srv/recall-nowhere/archive"), "{context}");
+}

@@ -2147,6 +2147,7 @@ dependencies = [
  "recall-hooks",
  "recall-server",
  "recall-wire",
+ "recall-worker",
  "rusqlite",
  "serde",
  "serde_json",

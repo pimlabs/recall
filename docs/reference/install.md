@@ -900,6 +900,47 @@ host that still answers as a Recall server is not called wrong for not
 being this machine's, and one that does not is `stale` when the claim is
 about where the server is.
 
+**`--claude`: this machine's `claude` CLI, over what is left.** What layers
+1 and 2 cannot decide (a claim with nothing checkable in it, and a
+present-tense one they left `cant_tell`) is the only thing it is asked
+about, one call per file:
+
+```sh
+recall review run --claude
+```
+
+Each call hands `claude` the note with its lines numbered, the claims to
+judge, and a **fact sheet** of what the review observed here: the server
+and what it reports, the kind of session, the compose files, and every
+piece of git and checkout evidence about that note. What the review
+observed but could not decide on (a path not found here, a host not
+asked) is listed as context, which cannot be cited. It answers a class and
+a verdict per claim, and a `stale` or `still_true` verdict must cite the
+facts it rests on; one that cites none is recorded as `cant_tell`, with
+`claude`'s reason labelled as its reading, not evidence. A claim it reads
+as history becomes a record, and a record is never judged.
+
+- **Off by default**: it spends your Claude usage (about two US cents for
+  a long note, at the time of writing).
+- **No API key**: it runs `claude -p` under whatever `claude login` this
+  machine has, the same call the merge and `recall eval --contradictions`
+  make: no tools, one turn, no MCP servers, nothing kept in `claude`'s
+  session history, a neutral working directory. Recall neither reads,
+  sets nor asks for a key.
+- **Secrets masked first**: the note, the claims and the fact sheet pass
+  through the evaluation's secret redactor, so a token in a note never
+  reaches `claude`.
+- **Bounded**: at most `--max-calls N` calls (default 10), each prompt under
+  64 KiB. A file left out, for either reason, or because `claude` is not
+  installed or failed, is listed as skipped, never silently cut.
+- **Asked once per change**: an answer is kept per file and reused, without
+  a call, while the file is unchanged and every fact it cited is still
+  observed; a run without `--claude` shows it too. While a cited fact is
+  missing (the server did not answer this time) the answer is not shown
+  but is kept, and comes back when the fact does. An answer that left a
+  claim out is shown and asked about again. `--all` asks about every file
+  again; files never asked about go first, then those asked longest ago.
+
 Nothing is ever edited: the report is evidence, not an action.
 
 `recall review run [FILE]...` restricts the review to the files named,
@@ -908,10 +949,8 @@ that is not a memory file in a scope that is on is refused. Left out, it
 reviews every file in every scope that is on, merging into whatever the
 stored report already held for files a restricted run did not touch — a
 `[FILE]` run never makes other files disappear from `recall review show`.
-`--all` is accepted and reserved for a later release's `--claude` layer,
-which is the only part of this design that skips unchanged files; until then
-every file is checked on every run regardless, so `--all` has no visible
-effect yet.
+Layers 1 and 2 check every file on every run; only `--claude` skips a file
+it already has an answer for.
 
 `recall review show` prints the last report again, without reading memory a
 second time; before any run has happened, `--json` prints a bare `null`
@@ -919,16 +958,19 @@ second time; before any run has happened, `--json` prints a bare `null`
 `--json` otherwise prints the report machine-readably: `reviewed_at`, an
 `evidence` object naming the repository `HEAD`, the server's version and
 commit, the compose files read, the hosts probed, and which sources this run
-could not read and why (`repository`, `server`, `compose`, `probe`), and a
-`claims[]` array (`id`, `file`, `lines`,
-`class`, `text`, `verdict`, `layer`, `evidence[]`, the last with its own
-`source`, `detail` and `verdict` per anchor) — a stable contract from this
+could not read and why (`repository`, `server`, `compose`, `probe`,
+`claude`), with `--claude` a `claude` object (`calls`, `reused`, and each
+`skipped` file with its `reason`), and a `claims[]` array (`id`, `file`,
+`lines`, `class`, `text`, `verdict`, `layer`, `evidence[]`, the last with
+its own `source`, `detail` and `verdict` per anchor, `claude` for layer
+3's) — a stable contract from this
 release on, under [the Versioning rules](releasing.md#versioning). The exit
 code is always `0` once the review has run, whatever it found — a script
 that wants to act on `stale` claims reads `--json`.
 
-The report is kept in `.recall-review.json`, beside `.recall-state.json` in
-Claude Code's project directory: per machine, and never pushed.
+The report, and each file's last `claude` answer, are kept in
+`.recall-review.json`, beside `.recall-state.json` in Claude Code's project
+directory: per machine, and never pushed.
 
 ### Holding the server to its history: `recall audit`
 

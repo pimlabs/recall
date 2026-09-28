@@ -37,6 +37,9 @@ serde_json.workspace = true
 time.workspace = true
 tokio.workspace = true
 yaml-rust2.workspace = true
+# Layer 3 of `recall review`: the redactor and the `claude` call, without
+# the worker's client (the workspace entry turns it off).
+recall-worker.workspace = true
 
 [dev-dependencies]
 # The integration tests start a real server in-process. A dev-dependency,
