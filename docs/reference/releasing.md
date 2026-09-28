@@ -78,10 +78,11 @@ either refuses or resumes; it never moves a tag.
 2. **Build** the client's targets on native runners, then **create the
    GitHub Release** with `checksums.txt`. `install.sh` (and, on Windows,
    `install.ps1`) work from this moment.
-3. **Publish the server's images** (`publish-image`):
-   `ghcr.io/pimlabs/recall-server:<version>` and `recall-worker:<version>`,
-   for amd64 and arm64, built from the Release's own binaries, with no
-   `latest` tag. Then **deploy** them: the production server pulls the image
+3. **Publish the server's images** (`check-image`, `build-image`,
+   `publish-image`): `ghcr.io/pimlabs/recall-server:<version>` and
+   `recall-worker:<version>`, for amd64 and arm64, built from the Release's
+   own binaries, each architecture on a native runner (never emulated), with
+   no `latest` tag. Then **deploy** them: the production server pulls the image
    rather than building it (`deploy.yml`; see
    [`github-actions-deploy.md`](github-actions-deploy.md)). Neither waits for
    an approval, deliberately: the image holds nothing the Release did not
@@ -163,8 +164,8 @@ Done once per repository; nothing here needs repeating per release.
    before the deploy, until it can. Make each package public once, at
    `https://github.com/orgs/pimlabs/packages/container/<name>/settings`
    (*Danger Zone → Change visibility → Public*), then re-run the failed
-   jobs: `publish-image` does not rebuild a tag that is already there, and
-   the deploy follows it. Nothing needs doing for any release after that.
+   jobs: a tag that is already there is not rebuilt, and the deploy follows
+   `publish-image`. Nothing needs doing for any release after that.
 
 Once the first CI release has published cleanly, the old npm and crates.io
 tokens on any laptop can be revoked.

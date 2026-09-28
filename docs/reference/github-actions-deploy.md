@@ -18,9 +18,10 @@ Two workflows are involved:
   ways: from source, and from a release it assembles locally, including a
   tampered checksum that must stop the build. A second job,
   `check-publish-image`, builds the images the release will publish exactly
-  as its `publish-image` job does (`scripts/release-image.sh`, both
-  platforms, under the same QEMU), from the newest release's binaries.
-  Nothing is pushed anywhere and no secrets are needed. It deploys nothing.
+  as its `build-image` legs do (`scripts/release-image.sh`), one leg per
+  architecture on a runner of that architecture, from the newest release's
+  binaries, and runs each image's `claude` CLI and binary there. Nothing is
+  pushed anywhere and no secrets are needed. It deploys nothing.
 
   The image builds are the expensive part, so they run as jobs of their
   own (`build-image`, `check-publish-image`). While the repository is
@@ -271,18 +272,31 @@ authentication, which is why this works without the deploy secrets.
 
 ## The image: published by the release, pulled by the server
 
-The Release workflow's `publish-image` job builds the server's image once,
-from the release's own `recall-server` and `recall-worker` (downloaded from
-the GitHub Release and checked against its `checksums.txt`, exactly as a
-server built it for itself before), and pushes it:
+The Release workflow builds the server's image once, from the release's own
+`recall-server` and `recall-worker` (downloaded from the GitHub Release and
+checked against its `checksums.txt`, exactly as a server built it for itself
+before), and pushes it, in three jobs:
+
+- `check-image` asks whether each version tag is already published. A
+  re-run of a published version builds nothing, and a registry that cannot
+  say either way stops the run rather than risk moving a tag.
+- `build-image` builds both images once per architecture, **each on a
+  runner of that architecture** (`ubuntu-latest`, `ubuntu-24.04-arm`),
+  pushes them by digest with no tag, and runs each one's `claude` CLI and
+  binary on that runner. Emulated builds are not supported: under QEMU the
+  arm64 `npm install` of the `claude` CLI crashed with an illegal
+  instruction and the build hung until it was cancelled.
+- `publish-image` joins the two digests into the version's tag, attests
+  it, and checks it can be pulled without credentials.
 
 | Image | Built from |
 |---|---|
 | `ghcr.io/pimlabs/recall-server:<version>` | `deploy/Dockerfile`, target `server` |
 | `ghcr.io/pimlabs/recall-worker:<version>` | `deploy/Dockerfile`, target `worker` |
 
-Each is one multi-platform image, `linux/amd64` and `linux/arm64`. There is
-no `latest`: a deploy names the version it wants, and a tag that moves by
+Each is one multi-platform image, `linux/amd64` and `linux/arm64`, so the
+server's own architecture decides only which half `docker pull` fetches;
+nothing is built for it on the server. There is no `latest`: a deploy names the version it wants, and a tag that moves by
 itself would be a deploy nobody asked for. A version's tag is pushed once;
 re-running the job leaves one that is already there alone. Each carries
 provenance, from buildx and as a GitHub attestation, which anyone can check:
@@ -354,8 +368,8 @@ doesn't match how you normally connect.
 
 A failure at **Can the server pull the image?** means GHCR will not hand
 that version's image to a machine with no credentials: the package is still
-private (see the one-time step above), or that version's `publish-image`
-never pushed it, which re-running it fixes. A `docker pull` that is denied
+private (see the one-time step above), or that version's image jobs never
+published it, which re-running them fixes. A `docker pull` that is denied
 on the server while that step passed usually means the server holds a
 `docker login ghcr.io` with a token that has expired: `docker logout
 ghcr.io` there, since a public image needs none.
@@ -363,4 +377,4 @@ ghcr.io` there, since a public image needs none.
 For 0.4.6 and older, built on the server, a failure at the build step with a
 checksum error means the downloaded archive is not the one the release
 published, and the image was rightly not built. For later versions the same
-check runs in the release's `publish-image` job instead.
+check runs in the release's `build-image` jobs instead.
