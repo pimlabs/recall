@@ -665,12 +665,14 @@ arriving new**, and **it has to stay cheap**.
 
       Done after 0.4.7 proved it. *Trust:* `deploy.yml`'s "Is it the image
       the release built?" hashes each tag's index to a digest, requires
-      `gh attestation verify --repo pimlabs/recall --signer-workflow
-      pimlabs/recall/.github/workflows/release.yml` on it and the index's
-      `org.opencontainers.image.version` to be the version deployed (a
-      tag pointed at an older, also attested, release fails), and the
-      server pulls that digest, tags it `:<version>` and `:local`, and runs
-      `up --no-build --pull never`. *Disk:* after a healthy pull deploy the
+      the index's `org.opencontainers.image.version` to be the version
+      deployed (a tag pointed at an older, also attested, release fails)
+      and `gh attestation verify --repo pimlabs/recall --cert-identity
+      .../release.yml@refs/tags/v<version>` on it
+      (`scripts/verify-release-image.sh`, which ci.yml's
+      `check-release-image` runs on a real runner), and the server pulls
+      that digest, tags it `:<version>` and `:local`, and runs `up
+      --no-build --pull missing`. *Disk:* after a healthy pull deploy the
       server removes older version tags of the two images, keeping the
       deployed version, the one before it by `sort -V`, anything newer a
       rollback left, and `:local`, without forcing. Build deploys (0.4.6

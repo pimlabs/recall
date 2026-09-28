@@ -151,18 +151,13 @@ jobs:
       # A tag is a name, and anyone who can push to the package can point it
       # at other bytes; "tags never move" is this repository's rule, not the
       # registry's. A digest cannot be pointed anywhere: it is the hash of
-      # the bytes. So each tag is resolved here, once, to the digest of the
-      # multi-platform index it names now, hashed from the index's own
-      # bytes, fetched anonymously as the server will fetch them. That
-      # digest is what is checked, and the only thing the server pulls:
-      #
-      #   - its GitHub attestation must verify, for this repository and
-      #     signed by release.yml (`publish-image`'s actions/attest), so
-      #     only an index the Release workflow made passes;
-      #   - the index must say it is this version: release-image.sh writes
-      #     org.opencontainers.image.version into it, and the digest covers
-      #     it, so a tag pointed at an older release's image, attested too,
-      #     does not pass.
+      # the bytes. So each tag is resolved here, once, to a digest, and that
+      # digest is checked and is the only thing the server pulls: its index
+      # must say it is this version, and its attestation must verify as
+      # made by release.yml on the tag v$VERSION.
+      # scripts/verify-release-image.sh does both, and says how; ci.yml's
+      # check-release-image runs it on a real runner against the newest
+      # release, so a change to it is proven before a deploy depends on it.
       #
       # The worker is checked whether or not the server runs it, since this
       # runner cannot see COMPOSE_PROFILES. A worker tag that cannot be read
@@ -176,34 +171,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          for name in recall-server recall-worker; do
-            ref="ghcr.io/pimlabs/$name:$VERSION"
-            index="$RUNNER_TEMP/$name.index.json"
-            if ! docker buildx imagetools inspect --raw "$ref" > "$index"; then
-              if [ "$name" = recall-server ]; then
-                echo "::error::Could not read $ref from GHCR (the error is above), so it could not be resolved to a digest and verified. Nothing was deployed; production is still on the version it was on."
-                exit 1
-              fi
-              echo "::warning::Could not read $ref from GHCR, so it has no verified digest. A server that runs the worker (COMPOSE_PROFILES=worker) will refuse to deploy until it has one."
-              continue
-            fi
-            digest="sha256:$(sha256sum < "$index" | cut -d ' ' -f 1)"
-            labelled=$(jq -r '.annotations["org.opencontainers.image.version"] // empty' "$index")
-            if [ "$labelled" != "$VERSION" ]; then
-              echo "::error::$ref resolves to $digest, whose index says it is version '${labelled:-(none)}', not $VERSION: the tag does not name this release's image. Nothing was deployed; production is still on the version it was on."
-              exit 1
-            fi
-            if ! signer=$(gh attestation verify "oci://ghcr.io/pimlabs/$name@$digest" \
-                --repo pimlabs/recall \
-                --signer-workflow pimlabs/recall/.github/workflows/release.yml \
-                --format json \
-                --jq '.[0].verificationResult.signature.certificate.subjectAlternativeName'); then
-              echo "::error::ghcr.io/pimlabs/$name@$digest, which $ref names, has no attestation from this repository's release.yml that verifies (gh's error is above). It is not trusted as $VERSION's image, so nothing was deployed; production is still on the version it was on. If the release's attest step failed, re-run its publish-image job, which attests an image it already pushed."
-              exit 1
-            fi
-            echo "$ref is ghcr.io/pimlabs/$name@$digest, attested by $signer"
-            echo "${name#recall-}_digest=$digest" >> "$GITHUB_OUTPUT"
-          done
+          if ! scripts/verify-release-image.sh "$VERSION"; then
+            echo "::error::$VERSION's images were not verified (the reason is above), so nothing was deployed and production is still on the version it was on. If GitHub's attestations API or Sigstore was down, re-run this job later; to deploy during such an outage anyway, pull by hand as deploy/README.md's Updating section shows, which trusts the tag."
+            exit 1
+          fi
 
       - name: Deploy over SSH
         if: steps.secrets.outputs.configured == 'true'
@@ -298,15 +269,14 @@ jobs:
               done
               # --no-build: every image is here now, and one that is not
               # should fail this deploy, not be built on the server.
-              # --pull never: compose runs the tags just made, and does not
-              # ask the registry what they name. A compose too old to have
-              # the flag pulls nothing here either, since every image is
-              # present and its default policy pulls only a missing one.
-              pull_never=""
-              if docker compose up --help 2>/dev/null | grep -q -- '--pull'; then
-                pull_never="--pull never"
-              fi
-              docker compose $COMPOSE_FILES up -d --no-build $pull_never
+              # --pull missing: compose pulls only an image it does not
+              # have. Ours it has, under the tags just made, so it runs
+              # those and never asks the registry what they name; someone
+              # else's image (sqlite-web, cloudflared) that a fresh host has
+              # not got yet is still fetched, as it always was. It is
+              # compose's default, spelled out so that no flag or setting
+              # added later can quietly make it pull our tags.
+              docker compose $COMPOSE_FILES up -d --no-build --pull missing
             elif [ "$DEPLOY_MODE" = build ]; then
               docker compose $COMPOSE_FILES up -d --build
             else

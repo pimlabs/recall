@@ -74,28 +74,28 @@ jobs:
   # diff only decides anything for a private repository, where Windows
   # minutes are billed double, and it starts deciding by itself the day the
   # repository's visibility changes: `github.event.repository.private`.
+  #
+  # A third question, `deploy`, is asked of the diff whatever the
+  # repository's visibility: whether `check-release-image` runs. Its cost
+  # is not runner minutes but other people's uptime (GHCR, GitHub's
+  # attestations API, Sigstore), so a pull request that cannot have changed
+  # what it checks is not made to depend on them. A push to `main` runs it.
   plan:
     name: plan
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.diff.outputs.image }}
       windows: ${{ steps.diff.outputs.windows }}
+      deploy: ${{ steps.diff.outputs.deploy }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Does this change touch the server image or the Windows client?
+      - name: Does this change touch the server image, the Windows client or the deploy?
         id: diff
         run: |
           if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "Not a pull request — the image and the Windows jobs run unconditionally."
-            echo "image=true" >> "$GITHUB_OUTPUT"
-            echo "windows=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ "${{ github.event.repository.private }}" != "true" ]; then
-            echo "Public repository: runners are free, so the image and the Windows jobs run on every pull request."
-            echo "image=true" >> "$GITHUB_OUTPUT"
-            echo "windows=true" >> "$GITHUB_OUTPUT"
+            echo "Not a pull request — the image, Windows and release-image jobs run unconditionally."
+            printf '%s\n' image=true windows=true deploy=true >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -111,9 +111,8 @@ jobs:
             # A force-push to the base branch can leave that commit
             # unreachable. A diff that cannot be read is not evidence of
             # nothing: run both.
-            echo "::warning::Could not reach base commit $base, so the server image and the Windows jobs run rather than skip."
-            echo "image=true" >> "$GITHUB_OUTPUT"
-            echo "windows=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Could not reach base commit $base, so the server image, Windows and release-image jobs run rather than skip."
+            printf '%s\n' image=true windows=true deploy=true >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -124,6 +123,21 @@ jobs:
           changed="$(git diff --no-renames --name-only "$base" HEAD)"
           echo "Changed in this pull request:"
           echo "$changed"
+
+          # Asked of the diff even in a public repository; see above.
+          if printf '%s\n' "$changed" | grep -Eq '^(scripts/verify-release-image\.sh|\.github/workflows/(ci|deploy|release)\.yml)$'; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Nothing in scripts/verify-release-image.sh, deploy.yml, release.yml or this workflow changed, so check-release-image was skipped. It runs unconditionally on every push to main."
+          fi
+
+          if [ "${{ github.event.repository.private }}" != "true" ]; then
+            echo "Public repository: runners are free, so the image and the Windows jobs run on every pull request."
+            echo "image=true" >> "$GITHUB_OUTPUT"
+            echo "windows=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           # This workflow itself counts for both: a change to either gate
           # below, or to the jobs it feeds, is only proven by running them.
@@ -611,6 +625,69 @@ jobs:
           echo "Newest release: $version ($latest)"
           scripts/release-image.sh build "$version" "$(git rev-parse --short HEAD)" "$ARCH" check
 
+  # What deploy.yml asks before a server pulls anything: does the tag name
+  # the image the release built? scripts/verify-release-image.sh resolves
+  # it to a digest and checks the index's version and the digest's
+  # attestation, with `gh attestation verify` and this job's token, which
+  # is why this job, alone here, has `attestations: read`. Run on a real
+  # runner against the newest published release, so a change to the script,
+  # to the deploy, or to how release.yml attests is proven here and not
+  # first found by a deploy. Then once more with a version the image does
+  # not claim, which must fail, and fail for that reason, so the check is
+  # shown able to fail.
+  #
+  # The newest release is the newest v* tag after 0.4.6 (the last with no
+  # image; deploy.yml's LAST_BUILT_ON_SERVER), by sort -V. Gated on
+  # `plan`'s `deploy` answer, even while the repository is public: see
+  # `plan`.
+  check-release-image:
+    name: check-release-image
+    needs: plan
+    if: needs.plan.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: The newest release's images verify, and a mismatch does not
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          newest=$(git ls-remote --tags --refs origin 'v*' \
+            | sed -n 's|.*refs/tags/v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$|\1|p' \
+            | { cat; echo 0.4.6; } | sort -V | tail -n 1)
+          if [ "$newest" = 0.4.6 ]; then
+            echo "::error::No release after 0.4.6 found among the tags, so there is no published image to verify."
+            exit 1
+          fi
+          echo "Newest release with images: $newest"
+
+          out="$RUNNER_TEMP/verified"
+          GITHUB_OUTPUT="$out" scripts/verify-release-image.sh "$newest"
+          for name in server worker; do
+            if ! grep -Eq "^${name}_digest=sha256:[0-9a-f]{64}\$" "$out"; then
+              echo "::error::verify-release-image.sh passed for $newest but gave no ${name}_digest."
+              exit 1
+            fi
+          done
+
+          # 0.0.0's name on the image $newest's tag names: the index says
+          # $newest, so this must fail on the version, before anything else.
+          if GITHUB_ACTIONS=false scripts/verify-release-image.sh 0.0.0 "$newest" 2> "$RUNNER_TEMP/mismatch"; then
+            echo "::error::verify-release-image.sh accepted $newest's image as 0.0.0."
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/mismatch"
+          if ! grep -q "says it is version '$newest', not 0.0.0" "$RUNNER_TEMP/mismatch"; then
+            echo "::error::verify-release-image.sh refused $newest's image as 0.0.0, but not because of the version (its output is above)."
+            exit 1
+          fi
+          echo "Refused as 0.0.0, as it must be."
+
   # The client only — recall-server and recall-worker are Linux-only by
   # design (see deploy/Dockerfile and their own crate docs), so they are
   # excluded rather than tested and ignored. `recall`'s own integration tests still pull it in as
@@ -709,7 +786,7 @@ jobs:
   ci-passed:
     name: ci-passed
     if: always()
-    needs: [plan, check-scripts, test-installers, test-linux, build-image, check-publish-image, test-windows]
+    needs: [plan, check-scripts, test-installers, test-linux, build-image, check-publish-image, check-release-image, test-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Every job succeeded or was skipped on purpose
