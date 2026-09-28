@@ -941,7 +941,28 @@ as history becomes a record, and a record is never judged.
   claim out is shown and asked about again. `--all` asks about every file
   again; files never asked about go first, then those asked longest ago.
 
-Nothing is ever edited: the report is evidence, not an action.
+Nothing is edited by a review: the report is evidence, not an action.
+
+**`recall review apply <claim>`: one stale claim, rewritten into a record.**
+With `--claude`, a claim `claude` finds `stale` (citing a fact) can carry a
+suggestion: the claim rewritten as a record of what changed ("Until 2026-09
+the server was at X; it is now at Y"), never a deletion. `recall review
+show` prints it under the claim, with the command that makes it:
+
+```sh
+recall review apply t3          # shows the edit and asks first
+recall review apply t3 --yes    # for scripts
+```
+
+It takes the same path as `recall eval apply`: the edit is refused unless
+the file is still exactly the version the review read, the file is read
+again after you answer and left alone if a session changed it meanwhile,
+and the edit is pushed the way the hook pushes any edit. Only the claim's
+own words are replaced; every other word on its lines stays, and the edit
+is refused outright if its lines hold another claim (a record, a claim
+still true, a rule) that the replacement would not keep word for word. A
+claim holding a secret is never given a rewrite, since `claude` only ever
+saw it masked. After an edit, `recall review run` checks the file again.
 
 `recall review run [FILE]...` restricts the review to the files named,
 relative to the memory directory (as `recall status` prints it); naming one
@@ -963,7 +984,8 @@ could not read and why (`repository`, `server`, `compose`, `probe`,
 `skipped` file with its `reason`), and a `claims[]` array (`id`, `file`,
 `lines`, `class`, `text`, `verdict`, `layer`, `evidence[]`, the last with
 its own `source`, `detail` and `verdict` per anchor, `claude` for layer
-3's) — a stable contract from this
+3's, and a `stale` claim's optional `suggested_edit`, the shape `recall
+eval show --json` gives a finding's) — a stable contract from this
 release on, under [the Versioning rules](releasing.md#versioning). The exit
 code is always `0` once the review has run, whatever it found — a script
 that wants to act on `stale` claims reads `--json`.

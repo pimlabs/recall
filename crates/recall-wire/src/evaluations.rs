@@ -391,7 +391,7 @@ impl SuggestedEdit {
     pub fn apply_to(&self, content: &str) -> Result<String, String> {
         if crate::content_sha256(content) != self.base_sha256 {
             return Err(format!(
-                "{} has changed since the evaluation read it",
+                "{} has changed since the report read it",
                 self.file_path
             ));
         }
