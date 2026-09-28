@@ -166,8 +166,15 @@ jobs:
               # files name it: the server's, and the worker's where
               # COMPOSE_PROFILES in .env turns the worker on. Pulled one by
               # one before anything is stopped, so a pull that fails leaves
-              # every running container as it was.
-              images=$(docker compose $COMPOSE_FILES config --images | grep '^ghcr\.io/pimlabs/' || true)
+              # every running container as it was. Compose is asked on its
+              # own first, so a compose file or .env it cannot read stops
+              # the deploy with compose's own error, rather than reading as
+              # a stack with no images of ours.
+              if ! all=$(docker compose $COMPOSE_FILES config --images); then
+                echo "docker compose could not read the compose files at v$VERSION (its error is above), so nothing was changed." >&2
+                exit 1
+              fi
+              images=$(printf '%s\n' "$all" | grep '^ghcr\.io/pimlabs/' || true)
               if [ -z "$images" ]; then
                 echo "The compose files at v$VERSION name no ghcr.io/pimlabs image, so there is nothing to pull." >&2
                 exit 1
@@ -190,8 +197,11 @@ jobs:
               # --no-build: every image is here now, and one that is not
               # should fail this deploy, not be built on the server.
               docker compose $COMPOSE_FILES up -d --no-build
-            else
+            elif [ "$DEPLOY_MODE" = build ]; then
               docker compose $COMPOSE_FILES up -d --build
+            else
+              echo "DEPLOY_MODE is '$DEPLOY_MODE', not pull or build, so nothing was changed." >&2
+              exit 1
             fi
 
             # Asked from inside the container, because neither compose file
