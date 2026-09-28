@@ -23,10 +23,11 @@
 # can build for both platforms, and a `docker login ghcr.io` that may push.
 # A version whose tag is already in the registry is left alone rather than
 # rebuilt, so re-running a failed job is safe and a published tag never
-# changes under a server that already pulled it. Under GitHub Actions each
-# pushed image's digest becomes a step output (server_digest,
-# worker_digest), for the provenance attestation after it; an image that was
-# already there has none, since this run did not build it.
+# changes under a server that already pulled it; a registry that cannot say
+# whether it is there stops the job rather than risk that. Under GitHub
+# Actions each image's digest becomes a step output (server_digest,
+# worker_digest), for the provenance attestation after it, whether this run
+# pushed it or found it already there.
 #
 # `check` is ci.yml's `check-publish-image` job: the same build, the same
 # arguments, the same annotations and provenance, with push=false, so a
@@ -66,13 +67,39 @@ cd "$(dirname "$0")/.."
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 
+# Under GitHub Actions, the digest the attestation after this is made for.
+say_digest() {
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then
+    echo "${1}_digest=$2" >>"$GITHUB_OUTPUT"
+  fi
+}
+
 for entry in "${IMAGES[@]}"; do
   read -r name target description <<<"$entry"
   ref="$REGISTRY/$name:$version"
 
-  if [ "$mode" = push ] && docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then
-    echo "release-image: $ref is already published; leaving it as it is"
-    continue
+  # Asked with the job's own login, so a package that is still private is
+  # seen. Only two answers lead anywhere: the tag is there, or the registry
+  # says plainly that it is not (buildx's "<ref>: not found", its word for a
+  # 404). Anything else, a timeout, a 5xx, a 429, a refusal, is no evidence
+  # either way, and pushing on it could replace a published tag with
+  # different bytes, since the base images under it move. So it stops here,
+  # and a re-run asks again.
+  if [ "$mode" = push ]; then
+    if answer=$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$ref" 2>&1); then
+      digest=$(printf '%s' "$answer" | jq -r '.digest // empty' 2>/dev/null || true)
+      [ -n "$digest" ] || die "$ref is published, but its digest could not be read from: $answer"
+      echo "release-image: $ref is already published ($digest); leaving it as it is"
+      # Still named, so an attestation that failed after an earlier push
+      # is made on the re-run.
+      say_digest "$target" "$digest"
+      continue
+    fi
+    case "$answer" in
+      *"$ref: not found"* | *MANIFEST_UNKNOWN* | *NAME_UNKNOWN*) ;;
+      *) die "could not tell whether $ref is already published, so nothing was pushed: $answer" ;;
+    esac
+    echo "release-image: $ref is not published yet"
   fi
 
   push=false
@@ -107,8 +134,6 @@ for entry in "${IMAGES[@]}"; do
     digest=$(jq -r '."containerimage.digest" // empty' "$out/$name.json")
     [ -n "$digest" ] || die "the build of $ref reported no digest"
     echo "release-image: pushed $ref@$digest"
-    if [ -n "${GITHUB_OUTPUT:-}" ]; then
-      echo "${target}_digest=$digest" >>"$GITHUB_OUTPUT"
-    fi
+    say_digest "$target" "$digest"
   fi
 done
