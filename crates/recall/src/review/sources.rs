@@ -101,40 +101,48 @@ pub(super) struct Facts {
 }
 
 impl Facts {
-    /// What these facts say, one sentence each, for layer 3's fact sheet.
-    /// Only what the report may already show: the configured server as
-    /// `recall status` prints it, the kind of session, the values of
-    /// [`VALUE_VARS`], the compose files' names, and what probes found.
-    pub fn sheet(&self) -> Vec<String> {
+    /// What these facts say, one sentence each, for layer 3's fact sheet:
+    /// facts that can be cited, then context that cannot (a server that did
+    /// not answer says nothing about what the server is). Only what the
+    /// report may already show: the configured server as `recall status`
+    /// prints it, the kind of session, the values of [`VALUE_VARS`], the
+    /// compose files' names, and what probes found. One fact per sentence,
+    /// so a changed commit does not unseat an answer that cited the URL.
+    pub fn sheet(&self) -> (Vec<String>, Vec<String>) {
         let mut out = Vec::new();
+        let mut context = Vec::new();
         let s = &self.server;
-        out.push(match &s.url {
-            None => "No Recall server is configured on this machine (RECALL_URL is unset)".into(),
+        match &s.url {
+            None => out.push(
+                "No Recall server is configured on this machine (RECALL_URL is unset)".into(),
+            ),
             Some(url) => {
-                let mut line = format!(
+                out.push(format!(
                     "This machine's configured Recall server is {url} (RECALL_URL, from {})",
                     s.url_source
-                );
+                ));
                 if s.answered {
-                    line.push_str("; /health answers there");
+                    out.push(format!("/health answers at {url}"));
                     if let Some(c) = &s.commit {
-                        line.push_str(&format!(", built from commit {c}"));
+                        out.push(format!("The configured server is built from commit {c}"));
                     }
                     if let Some(v) = &s.version {
-                        line.push_str(&format!("; it reports version {v}"));
+                        out.push(format!("The configured server reports version {v}"));
                     }
                     if !s.capabilities.is_empty() {
-                        line.push_str(&format!(" and capabilities {}", s.capabilities.join(", ")));
+                        out.push(format!(
+                            "The configured server lists the capabilities {}",
+                            s.capabilities.join(", ")
+                        ));
                     }
                 } else {
-                    line.push_str(&format!(
-                        "; /health did not answer ({})",
+                    context.push(format!(
+                        "/health at {url} did not answer this run ({})",
                         s.error.as_deref().unwrap_or("no reason given")
                     ));
                 }
-                line
             }
-        });
+        }
         out.push(if self.remote_session {
             "This check runs in a Claude Code cloud session (CLAUDE_CODE_REMOTE=true)".into()
         } else {
@@ -174,7 +182,7 @@ impl Facts {
                 }
             });
         }
-        out
+        (out, context)
     }
 
     fn env(&self, name: &str) -> Option<&str> {

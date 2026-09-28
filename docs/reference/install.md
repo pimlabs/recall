@@ -912,7 +912,9 @@ recall review run --claude
 Each call hands `claude` the note with its lines numbered, the claims to
 judge, and a **fact sheet** of what the review observed here: the server
 and what it reports, the kind of session, the compose files, and every
-piece of git and checkout evidence about that note. It answers a class and
+piece of git and checkout evidence about that note. What the review
+observed but could not decide on (a path not found here, a host not
+asked) is listed as context, which cannot be cited. It answers a class and
 a verdict per claim, and a `stale` or `still_true` verdict must cite the
 facts it rests on; one that cites none is recorded as `cant_tell`, with
 `claude`'s reason labelled as its reading, not evidence. A claim it reads
@@ -933,8 +935,11 @@ as history becomes a record, and a record is never judged.
   installed or failed, is listed as skipped, never silently cut.
 - **Asked once per change**: an answer is kept per file and reused, without
   a call, while the file is unchanged and every fact it cited is still
-  observed; a run without `--claude` shows it too. `--all` asks about every
-  file again.
+  observed; a run without `--claude` shows it too. While a cited fact is
+  missing (the server did not answer this time) the answer is not shown
+  but is kept, and comes back when the fact does. An answer that left a
+  claim out is shown and asked about again. `--all` asks about every file
+  again; files never asked about go first, then those asked longest ago.
 
 Nothing is ever edited: the report is evidence, not an action.
 

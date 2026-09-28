@@ -611,15 +611,22 @@ struct Layer3Done {
     waiting: usize,
 }
 
-/// A file layer 3 still has to ask about: its claims to decide, its fact
-/// sheet, and, under `--all`, the earlier answer to fall back on if it is
-/// not asked after all.
-type ToAsk<'a> = (
-    &'a String,
-    Vec<claude::Asked>,
-    Vec<String>,
-    Option<claude::Reviewed>,
-);
+/// A file layer 3 still has to ask about.
+struct ToAsk<'a> {
+    rel: &'a String,
+    /// Its claims to decide, as the prompt numbers them.
+    asked: Vec<claude::Asked>,
+    /// Its fact sheet: what can be cited, and context that cannot.
+    facts: Vec<String>,
+    context: Vec<String>,
+    /// An earlier answer that still holds (under `--all`, or partial), to
+    /// show if the file is not asked about after all.
+    fallback: Option<claude::Reviewed>,
+    /// An earlier answer about this same content that no longer holds
+    /// (a fact it cited was not observed this run): not shown, but kept,
+    /// so a run that cannot ask never throws a paid answer away.
+    kept: Option<claude::Reviewed>,
+}
 
 /// Whether layers 1 and 2 left `c` for layer 3: an `unsure` claim, or a
 /// `present` one they could not decide.
@@ -630,15 +637,19 @@ fn undecided(c: &Claim) -> bool {
 
 /// Layer 3's fact sheet for the file `rel`: what this machine and its
 /// checkout are, then everything layer 2 observed about this file's claims,
-/// including each anchor of a claim it left `unsure`.
+/// including each anchor of a claim it left `unsure`. An observation that
+/// decided something can be cited; one that decided nothing ("not found on
+/// this machine", "only --probe-hosts asks") is context, so `claude` cannot
+/// turn what layer 2 deliberately left `cant_tell` into a verdict.
 fn fact_sheet(
-    global: &[String],
+    (global, global_context): (&[String], &[String]),
     claims: &[Claim],
     rel: &str,
     inputs: &Layer3Inputs<'_>,
     is_project: bool,
-) -> Vec<String> {
-    let mut sheet = global.to_vec();
+) -> (Vec<String>, Vec<String>) {
+    let mut facts = global.to_vec();
+    let mut context = global_context.to_vec();
     for c in claims.iter().filter(|c| c.file == rel) {
         if c.class == Class::Unsure {
             for a in anchors(&c.text) {
@@ -650,23 +661,32 @@ fn fact_sheet(
                     &c.text,
                     inputs.facts,
                 );
-                sheet.push(o.detail);
+                match o.signal {
+                    Signal::Unknown => context.push(o.detail),
+                    _ => facts.push(o.detail),
+                }
             }
         } else {
-            sheet.extend(
-                c.evidence
-                    .iter()
-                    .filter(|e| e.source != claude::SOURCE)
-                    .map(|e| e.detail.clone()),
-            );
+            for e in c.evidence.iter().filter(|e| e.source != claude::SOURCE) {
+                match e.verdict {
+                    Verdict::CantTell => context.push(e.detail.clone()),
+                    _ => facts.push(e.detail.clone()),
+                }
+            }
         }
     }
-    claude::dedup(sheet)
+    let facts = claude::dedup(facts);
+    let context = claude::dedup(context)
+        .into_iter()
+        .filter(|c| !facts.contains(c))
+        .collect();
+    (facts, context)
 }
 
-/// Applies layer 3's answers about `rel` to the claims they were given for.
+/// Applies layer 3's answers about `rel` to the claims they were given for,
+/// each held to the rules again first.
 fn apply_decided(claims: &mut [Claim], rel: &str, decided: &[claude::Decided]) {
-    for d in decided {
+    for d in decided.iter().map(claude::Decided::checked) {
         if let Some(c) = claims
             .iter_mut()
             .find(|c| c.file == rel && c.lines == d.lines && c.text == d.text && undecided(c))
@@ -674,14 +694,15 @@ fn apply_decided(claims: &mut [Claim], rel: &str, decided: &[claude::Decided]) {
             c.class = d.class;
             c.verdict = d.verdict;
             c.layer = Some(3);
-            c.evidence.push(d.evidence.clone());
+            c.evidence.push(d.evidence);
         }
     }
 }
 
 /// Layer 3 over the files this run read: an earlier answer is reused while
 /// it holds, and, only when `--claude` asked, `claude` is called about each
-/// file that still has claims to decide, up to `--max-calls`.
+/// file that still has claims to decide, up to `--max-calls`, the files
+/// never asked about first and then those asked about longest ago.
 async fn layer_three(
     claims: &mut [Claim],
     states: &mut BTreeMap<String, FileState>,
@@ -698,8 +719,10 @@ async fn layer_three(
             "The newest release tag in the project's repository is {tag}"
         ));
     }
-    global.extend(inputs.facts.sheet());
+    let (server_facts, global_context) = inputs.facts.sheet();
+    global.extend(server_facts);
 
+    let asking = inputs.max_calls.is_some();
     let mut run = ClaudeRun::default();
     let mut to_ask: Vec<ToAsk<'_>> = Vec::new();
     for (rel, (_, is_project)) in contents {
@@ -715,104 +738,149 @@ async fn layer_three(
         if asked.is_empty() {
             continue;
         }
-        let sheet = fact_sheet(&global, claims, rel, &inputs, *is_project);
+        let (facts, context) = fact_sheet(
+            (&global, &global_context),
+            claims,
+            rel,
+            &inputs,
+            *is_project,
+        );
         let sha = states[rel].content_sha256.clone();
-        let held = saved
+        let stored = saved
             .files
             .get(rel)
             .and_then(|f| f.claude.clone())
-            .filter(|r| r.holds(&sha, &sheet));
-        match held {
-            Some(r) if !(inputs.all && inputs.max_calls.is_some()) => {
-                apply_decided(claims, rel, &r.decided);
-                states.get_mut(rel).expect("read this run").claude = Some(r);
-                run.reused += 1;
+            .filter(|r| r.content_sha256 == sha);
+        let (fallback, kept) = match stored {
+            Some(r) if r.holds(&sha, &facts) => {
+                if r.complete && !(inputs.all && asking) {
+                    apply_decided(claims, rel, &r.decided);
+                    states.get_mut(rel).expect("read this run").claude = Some(r);
+                    run.reused += 1;
+                    continue;
+                }
+                (Some(r), None)
             }
-            fallback => to_ask.push((rel, asked, sheet, fallback)),
-        }
+            other => (None, other),
+        };
+        to_ask.push(ToAsk {
+            rel,
+            asked,
+            facts,
+            context,
+            fallback,
+            kept,
+        });
     }
     let waiting = to_ask.len();
+    // Never asked first, then asked longest ago: `--max-calls` reaches
+    // every file in turn rather than the same first few by name.
+    to_ask.sort_by_cached_key(|t| {
+        t.fallback
+            .as_ref()
+            .or(t.kept.as_ref())
+            .map(|r| r.reviewed_at.clone())
+    });
 
-    let Some(max_calls) = inputs.max_calls else {
-        return Layer3Done { run, waiting };
-    };
-    if to_ask.is_empty() {
-        return Layer3Done { run, waiting };
-    }
-
-    // Every file this run read teaches the redactor its secrets, so one
-    // quoted in another note is masked too.
-    let files: Vec<recall_wire::EvaluateFile> = contents
-        .iter()
-        .map(|(rel, (content, _))| recall_wire::EvaluateFile {
-            file_path: rel.clone(),
-            content: content.clone(),
-            ..Default::default()
-        })
-        .collect();
-    let redactor = recall_worker::Redactor::new(&files);
-    let merger = claude::merger();
     let mut cannot_run: Option<String> = None;
+    let merger = claude::merger();
+    let redactor = asking.then(|| {
+        // Every file this run read teaches the redactor its secrets, so one
+        // quoted in another note is masked too.
+        let files: Vec<recall_wire::EvaluateFile> = contents
+            .iter()
+            .map(|(rel, (content, _))| recall_wire::EvaluateFile {
+                file_path: rel.clone(),
+                content: content.clone(),
+                ..Default::default()
+            })
+            .collect();
+        recall_worker::Redactor::new(&files)
+    });
 
-    for (rel, asked, sheet, fallback) in to_ask {
-        let (content, is_project) = &contents[rel];
-        let answer = if let Some(why) = &cannot_run {
-            Err(why.clone())
-        } else if run.calls >= max_calls {
-            Err(format!(
-                "--max-calls {max_calls} reached; a later run asks about it"
-            ))
-        } else {
-            let scope = if *is_project {
-                "project scope: about this repository"
-            } else {
-                "global or machine scope: not about this repository"
-            };
-            let prompt = claude::prompt(rel, scope, content, &sheet, &asked, &redactor);
-            if prompt.len() > claude::MAX_PROMPT_BYTES {
-                Err(format!(
-                    "its prompt is {} bytes, more than one call is handed ({})",
-                    prompt.len(),
-                    claude::MAX_PROMPT_BYTES
-                ))
-            } else {
-                eprintln!("recall review: asking claude about {rel}");
-                match merger.ask(claude::SYSTEM_PROMPT, &prompt).await {
-                    Ok(text) => {
-                        run.calls += 1;
-                        claude::decide(&text, &asked, &sheet).ok_or_else(|| {
-                            "claude's answer was not the JSON layer 3 asks for".to_string()
-                        })
-                    }
-                    Err(recall_worker::merge::Error::Unavailable(why)) => {
-                        let why = format!("claude cannot run on this machine: {why}");
-                        cannot_run = Some(why.clone());
-                        Err(why)
-                    }
-                    Err(e) => {
-                        run.calls += 1;
-                        Err(format!("the claude call failed: {e}"))
+    for t in to_ask {
+        let rel = t.rel;
+        let answer = match (inputs.max_calls, &redactor) {
+            (Some(max_calls), Some(redactor)) => {
+                let (content, is_project) = &contents[rel];
+                if let Some(why) = &cannot_run {
+                    Err(why.clone())
+                } else if run.calls >= max_calls {
+                    Err(format!(
+                        "--max-calls {max_calls} reached; a later run asks about it"
+                    ))
+                } else {
+                    let scope = if *is_project {
+                        "project scope: about this repository"
+                    } else {
+                        "global or machine scope: not about this repository"
+                    };
+                    let prompt = claude::prompt(
+                        rel,
+                        scope,
+                        content,
+                        (&t.facts, &t.context),
+                        &t.asked,
+                        redactor,
+                    );
+                    if prompt.len() > claude::MAX_PROMPT_BYTES {
+                        Err(format!(
+                            "its prompt is {} bytes, more than one call is handed ({})",
+                            prompt.len(),
+                            claude::MAX_PROMPT_BYTES
+                        ))
+                    } else {
+                        eprintln!(
+                            "recall review: asking claude about {}",
+                            sanitize_for_terminal(rel)
+                        );
+                        match merger.ask(claude::SYSTEM_PROMPT, &prompt).await {
+                            Ok(text) => {
+                                run.calls += 1;
+                                claude::decide(&text, &t.asked, &t.facts).ok_or_else(|| {
+                                    "claude's answer was not the JSON layer 3 asks for".to_string()
+                                })
+                            }
+                            Err(recall_worker::merge::Error::Unavailable(why)) => {
+                                let why = format!("claude cannot run on this machine: {why}");
+                                cannot_run = Some(why.clone());
+                                Err(why)
+                            }
+                            Err(e) => {
+                                run.calls += 1;
+                                Err(format!("the claude call failed: {e}"))
+                            }
+                        }
                     }
                 }
             }
+            // Not asked to ask: whatever still holds is shown, and nothing
+            // is listed as skipped.
+            _ => Err(String::new()),
         };
+        let state = states.get_mut(rel).expect("read this run");
         match answer {
             Ok(decided) => {
                 apply_decided(claims, rel, &decided);
-                let state = states.get_mut(rel).expect("read this run");
                 state.claude = Some(claude::Reviewed {
                     content_sha256: state.content_sha256.clone(),
+                    complete: decided.len() == t.asked.len(),
                     decided,
+                    reviewed_at: now_rfc3339(),
                 });
             }
             Err(reason) => {
-                run.skipped.push(SkippedFile {
-                    file: rel.clone(),
-                    reason,
-                });
-                if let Some(r) = fallback {
+                if !reason.is_empty() {
+                    run.skipped.push(SkippedFile {
+                        file: rel.clone(),
+                        reason,
+                    });
+                }
+                if let Some(r) = t.fallback {
                     apply_decided(claims, rel, &r.decided);
-                    states.get_mut(rel).expect("read this run").claude = Some(r);
+                    state.claude = Some(r);
+                } else {
+                    state.claude = t.kept;
                 }
             }
         }
@@ -1910,7 +1978,7 @@ fn print_text(rep: &Report) {
         (0, 0, 0, 0, 0, 0);
 
     for (file, claims) in &by_file {
-        println!("{file}");
+        println!("{}", sanitize_for_terminal(file));
         for c in claims.iter().filter(|c| c.class == Class::Conflict) {
             println!(
                 "  {:<10} {:<7} {}",
@@ -1965,6 +2033,22 @@ fn print_text(rep: &Report) {
                 for e in &c.evidence {
                     println!("             {}", sanitize_for_terminal(&e.detail));
                 }
+            }
+        }
+        // An unsure claim claude was asked about and left unsure: its
+        // reason is worth reading, though it decides nothing.
+        for c in claims
+            .iter()
+            .filter(|c| c.class == Class::Unsure && c.layer == Some(3))
+        {
+            println!(
+                "  {:<10} {:<7} {}",
+                "unsure",
+                lines_desc(&c.lines),
+                sanitize_for_terminal(&c.text)
+            );
+            for e in &c.evidence {
+                println!("             {}", sanitize_for_terminal(&e.detail));
             }
         }
         let file_records = claims.iter().filter(|c| c.class == Class::Record).count();
