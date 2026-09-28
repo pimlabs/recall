@@ -127,13 +127,13 @@ jobs:
 
           # This workflow itself counts for both: a change to either gate
           # below, or to the jobs it feeds, is only proven by running them.
-          if printf '%s\n' "$changed" | grep -Eq '^(crates/|deploy/|Cargo\.(toml|lock)$|scripts/release-image\.sh$|\.github/workflows/ci\.yml$)'; then
+          if printf '%s\n' "$changed" | grep -Eq '^(crates/|deploy/|Cargo\.(toml|lock)$|scripts/(release-image|image-pullable)\.sh$|\.github/workflows/(ci|release)\.yml$)'; then
             echo "image=true" >> "$GITHUB_OUTPUT"
           else
             echo "image=false" >> "$GITHUB_OUTPUT"
             # One line on purpose: a `\` continuation inside a quoted
             # string keeps the next line's indentation in the annotation.
-            echo "::notice::Nothing under crates/, deploy/, Cargo.toml, Cargo.lock, scripts/release-image.sh or this workflow changed, so the server image builds were skipped. They run unconditionally on every push to main."
+            echo "::notice::Nothing under crates/, deploy/, Cargo.toml, Cargo.lock, scripts/release-image.sh, scripts/image-pullable.sh, release.yml or this workflow changed, so the server image builds were skipped. They run unconditionally on every push to main."
           fi
 
           # .github/actions/ too: the windows jobs set up Rust through the
@@ -575,14 +575,19 @@ jobs:
     needs: plan
     if: needs.plan.outputs.image == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
         with:
           platforms: arm64
+          # The binfmt image that installs the emulators, pinned like the
+          # actions around it rather than the action's default, which is
+          # `latest`.
+          image: docker.io/tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 # qemu-v10.2.3
 
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: The release's images build, for both platforms
         run: |
