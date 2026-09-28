@@ -14,7 +14,7 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
-## Unreleased
+## 0.4.8 — 2026-09-28
 
 - **The automatic deploy runs the image the release attested, and cleans
   up after itself.** Until now the server pulled
