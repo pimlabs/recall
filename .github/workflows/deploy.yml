@@ -1,4 +1,4 @@
-name: Deploy
+name: Deploy a release
 
 # Puts a release on the server. A server runs releases, not `main`: the
 # image it builds holds the recall-server that release published, checked
@@ -8,7 +8,7 @@ name: Deploy
 #
 #   - release.yml calls it once the GitHub Release exists, with that
 #     release's version. Every release deploys itself.
-#   - Actions → Deploy → Run workflow, with a version. For a rollback, or to
+#   - Actions → Deploy a release → Run workflow, with a version. For a rollback, or to
 #     retry a deploy that failed, from anywhere including the GitHub mobile
 #     app. An older tag deploys the way that tag did: before 0.4.0 its image
 #     built the server from source.
@@ -25,7 +25,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release to deploy, e.g. 0.4.0 (the tag v0.4.0 must exist)"
+        description: "Release to deploy again, e.g. 0.4.5 to roll back (its tag v0.4.5 must exist)"
         required: true
 
 permissions:

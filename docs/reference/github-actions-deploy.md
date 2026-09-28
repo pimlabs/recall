@@ -18,13 +18,19 @@ Two workflows are involved:
   no secrets are needed. It deploys nothing.
 
   The image build is the expensive part, so it runs as its own job
-  (`build-image`), skipped on a **pull request** unless the diff touches
-  `crates/`, `Cargo.toml`, `Cargo.lock` or `deploy/`. On a **push to
-  `main`** it always runs, whatever changed, and `start-release.yml`
-  refuses to tag a commit whose CI run is not green in every job.
+  (`build-image`). While the repository is public it runs on every pull
+  request, since GitHub-hosted runners cost nothing there. If the
+  repository is ever made private, it starts being skipped on a **pull
+  request** whose diff does not touch `crates/`, `Cargo.toml`,
+  `Cargo.lock` or `deploy/` (the Windows jobs likewise), with no edit to
+  the workflow. On a **push to `main`** it always runs, whatever changed,
+  and `start-release.yml` refuses to tag a commit whose CI run is not
+  green in every job. One job, `ci-passed`, stands for the whole run: it
+  is green when every other job succeeded or was deliberately skipped, and
+  it is the single check to require if `main` ever gets branch protection.
 - **`.github/workflows/deploy.yml`** puts a release on the server. The
   Release workflow calls it once the GitHub Release exists, so **every
-  release deploys itself**. It can also be run by hand, **Actions → Deploy
+  release deploys itself**. It can also be run by hand, **Actions → Deploy a release
   → Run workflow** with a version such as `0.4.0`, from anywhere including
   the GitHub mobile app: that is how to roll back, or retry a deploy that
   failed. It SSHes into the server, checks out the release's tag, and
@@ -256,7 +262,7 @@ authentication, which is why this works without the deploy secrets.
 
 ## Verifying it works
 
-Run **Actions → Deploy** with the version production should already be on,
+Run **Actions → Deploy a release** with the version production should already be on,
 and watch the log. A failure at the `git checkout` step usually means the
 server's clone has local changes to tracked files, or is not at
 `DEPLOY_PATH`; a failure at the SSH connection step usually means the public
