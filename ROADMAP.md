@@ -843,6 +843,16 @@ arriving new**, and **it has to stay cheap**.
       review can therefore assume its corrections stick; it should still
       treat a `CONFLICT` marker as a finding in its own right.
 
+      **Part of this shipped in 0.4.5, on the server side (PR #133).** The
+      worker's evaluation reports catch broken `MEMORY.md` links, notes that
+      name paths or commands and have not changed in 90 days, notes in the
+      wrong scope, and, when asked, contradictions between notes. That is the
+      cheap end of layer (1) plus an age signal. Layer (2), checking a claim
+      against the live system, and the client-side review of each claim
+      described above are still open: the worker sees what memory holds,
+      not the repository or the running system, so it can say a note is
+      old, not that it is wrong.
+
 ## Agreed 2026-09-23: versions, devices, two binaries, encryption
 
 See `docs/design/handshake.md` for the reasoning.
@@ -867,14 +877,17 @@ See `docs/design/handshake.md` for the reasoning.
       PR #127.
 - [x] Part 5, PR 2: a merge queue and `recall-worker`, so merges run off the
       public server. PR #112.
+- [x] Part 5, PR 6: evaluation reports, without encryption. The worker
+      checks memory for secrets, duplicates, broken `MEMORY.md` links,
+      notes in the wrong scope and stale paths, and contradictions when
+      asked; `recall eval run|list|show|apply`. Findings (enums only) are
+      kept apart from `details`, which are stored unsealed with secrets
+      masked, so encryption can be added later. PR #133, shipped in 0.4.5.
 - [ ] Part 5, PRs 3, 4, 5 and 7 (content keys, sealed sync, ciphertext only,
       strict end-to-end): **parked on 2026-09-25.** The owner is
       reconsidering the trade between ease of use and security, for example,
       with encryption a cloud session can no longer be set up from a phone
-      alone. **PR 6, evaluation reports, goes ahead without encryption:** the
-      worker's report details are stored unsealed for now, and the
-      findings/details split is kept so encryption can be added later. See
-      `docs/design/part5-plan.md`.
+      alone. See `docs/design/part5-plan.md`.
 - [x] SQLite WAL: the server's database is kept in WAL mode, synced at every
       commit. PR #126.
 - [x] Windows client: native builds, `install.ps1`, npm, and a Git Bash check
@@ -884,9 +897,29 @@ See `docs/design/handshake.md` for the reasoning.
       moderation) was too much friction for a single-owner tool. Windows
       installs with `install.ps1` or npm instead. The `publish-winget` job stays in
       `release.yml` and skips while `WINGET_TOKEN` is unset on the `release`
-      environment.
+      environment. The token left over from the attempt made that job fail on
+      0.4.4 and 0.4.6; it was deleted on 2026-09-28, so the next release
+      skips it.
 - [x] Optional direct TLS in `recall-server` (certificate files or ACME), for
       a server with no ingress in front of it. PR #105.
+- [x] GitHub Actions names that say what runs: verb-first jobs in the style
+      of astral-sh/uv (`plan`, `test-*`, `build-*`, `publish-*`), "Start a
+      release" (`start-release.yml`), "Deploy a release" with a real
+      `production` environment, and a weekly `cargo audit` (`audit.yml`).
+      PR #137. On a public repository every CI job runs on every pull
+      request, and one `ci-passed` job is the check to require. PR #141.
+      Splitting `release.yml` into `build-*`/`publish-*` files was
+      considered and left alone: npm and crates.io trusted publishing are
+      registered against `release.yml`.
+- [x] Release archives named for their Rust target
+      (`recall-<triple>.tar.gz`, `.zip` on Windows), each holding a
+      directory with the binary under its own name. 0.4.5 and older keep
+      their names, and every consumer picks by version. `install.sh` now
+      checks `checksums.txt`, and `install.sh`, npm and the server image
+      refuse a symlinked binary. PR #138, shipped in 0.4.6. `cargo binstall recall` was
+      checked against the real 0.4.6 on 2026-09-28: it downloaded the
+      prebuilt `x86_64-unknown-linux-gnu` archive from the GitHub Release
+      with compiling disabled, no configuration needed.
 - Parked, not agreed: a claude.ai connector (remote MCP) for Recall
   memory; see the design doc's 'Future idea' section.
 
