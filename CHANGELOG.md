@@ -14,7 +14,7 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
-## Unreleased
+## 0.4.7 — 2026-09-28
 
 - **Each release publishes the server's image, and a deploy pulls it.**
   `ghcr.io/pimlabs/recall-server:<version>` and
