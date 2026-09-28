@@ -1,0 +1,39 @@
+# Keeps the commit SHAs the workflows pin their actions to current.
+#
+# Every `uses:` in .github/ names a full commit SHA with the version it is in
+# a comment (`@<sha> # v5.1.0`), because a tag can be moved by whoever owns
+# the action and a SHA cannot. That makes updates this file's job: once a
+# week it opens one pull request moving every action to its newest minor or
+# patch release, and a separate one for each new major version, whose
+# changelog is worth reading on its own. Titles use CONTRIBUTING.md's `deps`
+# area. Nothing merges without the owner, as with any other pull request.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    # "/" finds .github/workflows; the composite action has to be named.
+    directories:
+      - /
+      - /.github/actions/*
+    schedule:
+      interval: weekly
+      day: monday
+      time: "10:00"
+      timezone: Asia/Jakarta
+    # A release has to be a week old before it is proposed: a compromised
+    # version is usually caught and pulled within days, and this keeps the
+    # window when it could land here closed.
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    commit-message:
+      prefix: deps
+    ignore:
+      # Pinned to a commit on its `stable` branch, which has no version tags
+      # to move between, and the Rust it installs is whatever is stable on
+      # the day, so the pin does not hold Rust back. Dependabot would propose
+      # the default branch instead, where `toolchain` has no default. Moved
+      # by hand when the action itself needs to change.
+      - dependency-name: dtolnay/rust-toolchain
