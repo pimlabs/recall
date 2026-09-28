@@ -637,7 +637,10 @@ jobs:
   # shown able to fail.
   #
   # The newest release is the newest v* tag after 0.4.6 (the last with no
-  # image; deploy.yml's LAST_BUILT_ON_SERVER), by sort -V. Gated on
+  # image; deploy.yml's LAST_BUILT_ON_SERVER), by sort -V, whose release
+  # run's publish-image job has succeeded: a release in progress has its
+  # tag before its images, and main must not go red in between. Reading
+  # the run is why this job also has `actions: read`. Gated on
   # `plan`'s `deploy` answer, even while the repository is public: see
   # `plan`.
   check-release-image:
@@ -648,6 +651,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      actions: read
       attestations: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -657,14 +661,34 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          newest=$(git ls-remote --tags --refs origin 'v*' \
+          # Newest first. A tag exists from the moment a release starts,
+          # minutes before its publish-image job pushes the images, so a
+          # push to main in between would find nothing to verify. A tag
+          # counts once the latest attempt of publish-image in its release
+          # run succeeded; until then, the release before it is checked.
+          newest=
+          for v in $(git ls-remote --tags --refs origin 'v*' \
             | sed -n 's|.*refs/tags/v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$|\1|p' \
-            | { cat; echo 0.4.6; } | sort -V | tail -n 1)
-          if [ "$newest" = 0.4.6 ]; then
-            echo "::error::No release after 0.4.6 found among the tags, so there is no published image to verify."
+            | { cat; echo 0.4.6; } | sort -Vr); do
+            [ "$v" = 0.4.6 ] && break
+            run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/runs?branch=v$v&per_page=1" \
+              --jq '.workflow_runs[0].id // empty')
+            published=
+            if [ -n "$run" ]; then
+              published=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/jobs?filter=latest&per_page=100" \
+                --jq '[.jobs[] | select(.name == "publish-image" and .conclusion == "success")] | length')
+            fi
+            if [ "${published:-0}" -gt 0 ]; then
+              newest=$v
+              break
+            fi
+            echo "::notice::v$v's release run (${run:-none found}) has not published its images, so the release before it is checked instead."
+          done
+          if [ -z "$newest" ]; then
+            echo "::error::No release after 0.4.6 has published its images, so there is no image to verify."
             exit 1
           fi
-          echo "Newest release with images: $newest"
+          echo "Newest release with published images: $newest"
 
           out="$RUNNER_TEMP/verified"
           GITHUB_OUTPUT="$out" scripts/verify-release-image.sh "$newest"
