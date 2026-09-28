@@ -81,7 +81,7 @@ jobs:
       image: ${{ steps.diff.outputs.image }}
       windows: ${{ steps.diff.outputs.windows }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Does this change touch the server image or the Windows client?
         id: diff
@@ -148,7 +148,7 @@ jobs:
             echo "::notice::Nothing under crates/, .github/actions/, Cargo.toml, Cargo.lock, install.ps1, npm/install.js, the installer test's scripts, release.yml or this workflow changed, so the Windows jobs were skipped. They run unconditionally on every push to main."
           fi
 
-  # Seven checks that are plain scripts against files already in the
+  # Eight checks that are plain scripts against files already in the
   # checkout: no Rust toolchain, no compile, a few seconds combined. Its own
   # job so a broken script, doc link, formula, manifest or compose leak fails
   # in seconds, in parallel with `test-linux` and `build-image`, rather than waiting on
@@ -157,7 +157,7 @@ jobs:
     name: check-scripts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       # The Worker that publishes recall.pimlabs.id/install. Its routing is
       # easy to get subtly wrong in ways no one would notice: a redirect
@@ -189,6 +189,14 @@ jobs:
       # would have announced.
       - name: Documentation links still resolve
         run: python3 scripts/link-check.py
+
+      # A tag like `@v5` is a pointer the action's owner can move, and a
+      # moved tag runs new code with this repository's secrets. Every
+      # `uses:` names a full commit SHA with its version in a comment, which
+      # .github/dependabot.yml reads to propose updates; this keeps a new
+      # job from bringing a tag back in.
+      - name: Every action is pinned to a commit
+        run: python3 scripts/actions-pin-check.py
 
       - name: Shipped shell scripts still parse
         run: |
@@ -257,7 +265,7 @@ jobs:
     name: test-installers
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Installers against a local release, new names and old
         run: |
@@ -271,7 +279,7 @@ jobs:
     name: test-linux
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       # Toolchain (stable, rustfmt + clippy) and Swatinem/rust-cache, saved
       # only from main (see .github/actions/rust-setup for why). shared-key
@@ -403,7 +411,7 @@ jobs:
     if: needs.plan.outputs.image == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       # A second, non-default builder, used only by the two `buildx build`
       # calls below (`--builder "$BUILDER"`). `docker build` a few lines down
@@ -418,7 +426,7 @@ jobs:
       # pointed at the original builder rather than this new one.
       - name: Set up a cache-backed builder for the source build
         id: buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           use: false
 
@@ -429,7 +437,7 @@ jobs:
       # token. It exports those values into the environment of the steps
       # after it, and nothing else.
       - name: Expose the Actions cache service to the build step
-        uses: crazy-max/ghaction-github-runtime@v4
+        uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
 
       # The image, both ways it can be built. This is where a crate rename
       # slipped through once: the Dockerfile has no file extension and was
@@ -592,7 +600,7 @@ jobs:
             arch: arm64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       # Toolchain (stable, rustfmt + clippy) and Swatinem/rust-cache, saved
       # only from main (see .github/actions/rust-setup for why). Keyed by

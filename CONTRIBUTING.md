@@ -180,6 +180,26 @@ probabilistic, so a single run proves nothing — see
 `scripts/probes/README.md` and `docs/history/memory-loading-findings.md` before
 drawing a conclusion from one.
 
+### Actions are pinned to commits
+
+Every `uses:` under `.github/` names a full commit SHA, with the version it
+is as a comment:
+
+```yaml
+- uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+```
+
+A tag such as `@v5` can be moved by whoever owns the action, and the moved
+tag then runs with this repository's secrets, the deploy key among them. A
+SHA cannot move. To add an action, look up the commit its release tag
+points to (`git ls-remote --tags https://github.com/<owner>/<repo>`, the
+`^{}` line for an annotated tag) and write both. `check-scripts` refuses a
+tag (`scripts/actions-pin-check.py`), and `.github/dependabot.yml` opens a
+weekly `deps:` pull request that moves the SHAs and their comments
+together. `dtolnay/rust-toolchain` is the exception Dependabot leaves
+alone: it is pinned to its `stable` branch, which has no releases, and is
+moved by hand.
+
 ## Ground rules
 
 See `CLAUDE.md`'s "Ground rules" section — same reason, one source of truth. Touching any of them? Stop and confirm with the user first.

@@ -47,7 +47,7 @@ jobs:
     env:
       VERSION: ${{ inputs.version }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       # The version reaches a shell on the server, so it is held to the shape
       # a release version has before anything else sees it, and the tag has
@@ -94,7 +94,7 @@ jobs:
 
       - name: Deploy over SSH
         if: steps.secrets.outputs.configured == 'true'
-        uses: appleboy/ssh-action@v1
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
