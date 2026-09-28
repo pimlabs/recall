@@ -34,6 +34,7 @@ mod hook;
 mod init;
 mod project;
 mod promote;
+mod review;
 mod status;
 mod ui;
 
@@ -139,6 +140,10 @@ enum Cmd {
     /// reports, and make a finding's suggested edit
     #[command(subcommand)]
     Eval(eval::Cmd),
+    /// Check what memory claims against what this checkout and its git
+    /// history can see, and say which claims still hold
+    #[command(subcommand)]
+    Review(review::Cmd),
     /// Remove a saved token, and this machine's device key
     Disconnect {
         /// The server; defaults to the one most recently connected
@@ -216,6 +221,7 @@ fn main() {
         Cmd::Authkey(cmd) => block_on_current(devices::run_authkey(cmd)),
         Cmd::Audit(cmd) => block_on_current(audit::run(cmd)),
         Cmd::Eval(cmd) => block_on_current(eval::run(cmd)),
+        Cmd::Review(cmd) => review::run(cmd),
         Cmd::Status { json } => block_on_current(status::run(json)),
         Cmd::Doctor { json } => block_on_current(doctor::run(json)),
         Cmd::Push => block_on_current(hook::push()),

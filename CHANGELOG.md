@@ -14,6 +14,35 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
+## Unreleased
+
+- **`recall review run` and `recall review show`: whether memory is still
+  true, not just whether it synced.** The worker's evaluation reports
+  (0.4.5) can say a note is old; they have no repository and no git, so they
+  cannot say it is wrong. This is the other half, from
+  [the design](docs/design/memory-truth.md), and the first of six planned
+  pull requests: it pulls every checkable claim out of memory (a list item,
+  a sentence, a fenced block), classifies each as a present-tense statement
+  of state, a record of what used to be true, a rule from the owner's own
+  `type: user`/`type: feedback` notes, or unsure, and checks the ones in the
+  project scope that name a path, a script, a crate or a version against
+  this checkout and its git history — `git ls-files`, `git log`, `git
+  grep` (excluding Markdown documentation, so a name merely discussed in
+  `docs/` does not count as still in use), `git tag`. A claim comes back
+  `stale` (evidence contradicts it — a version claim only when it asserts
+  being the *current* one), `still_true` (evidence confirms it, printed
+  just as prominently as a problem), or `cant_tell` (nothing here can
+  decide it — a global or machine-scope note, an absent code reference on
+  its own, or anything that would need the server or the environment, a
+  later pull request). A record is never `stale`, whatever the evidence; a
+  rule's own wording is never judged, only each anchor on its own. Nothing
+  is ever edited: the report is evidence, not an action, and its exit code
+  is always `0`. `--json` is a stable contract from this release. The
+  per-machine report is kept in `.recall-review.json`, beside
+  `.recall-state.json`, and never pushed.
+  This is a **patch** under `docs/reference/releasing.md`'s Versioning
+  rules: a new command and a new local file, nothing on the breaking list.
+
 ## 0.4.8 — 2026-09-28
 
 - **The automatic deploy runs the image the release attested, and cleans

@@ -975,8 +975,8 @@ fn promote_is_loud_about_missing_configuration() {
 /// Every command the CLI offers. A new one added without a line here is a
 /// command the help tests below will not notice is missing from the help.
 const COMMANDS: &[&str] = &[
-    "init", "backfill", "promote", "status", "doctor", "audit", "eval", "push", "pull", "version",
-    "help",
+    "init", "backfill", "promote", "status", "doctor", "audit", "eval", "review", "push", "pull",
+    "version", "help",
 ];
 
 #[test]
@@ -4368,4 +4368,363 @@ fn eval_apply_makes_the_suggested_edit_and_pushes_it() {
         "{}",
         asked.stderr
     );
+}
+
+// ---------------------------------------------------------------------------
+// recall review
+// ---------------------------------------------------------------------------
+
+/// A fixture modelled on `docs/design/memory-truth.md`'s "Why", and on this
+/// repository's own history (`git log --diff-filter=D -- '*lib.sh'`, commit
+/// `5b828c1`): a git repository that once had `hooks/lib.sh` and
+/// `hooks/recall-pull`, deleted both in a later commit (the Rust rewrite),
+/// and still tracks `docs/plan.md`. `lib.sh` lives under `hooks/`, not at
+/// the root — the real file did too — so a note that names it by its bare
+/// filename, the way people actually write, still has to be found by a
+/// glob, not a root-only lookup.
+fn review_repo() -> Repo {
+    let repo = git_repo();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "Test"]);
+    std::fs::create_dir_all(repo.path().join("hooks")).unwrap();
+    std::fs::write(repo.path().join("hooks").join("lib.sh"), "echo hi\n").unwrap();
+    std::fs::write(repo.path().join("hooks").join("recall-pull"), "echo pull\n").unwrap();
+    std::fs::create_dir_all(repo.path().join("docs")).unwrap();
+    std::fs::write(repo.path().join("docs").join("plan.md"), "# Plan\n").unwrap();
+    git(&["add", "-A"]);
+    git(&[
+        "commit",
+        "-q",
+        "-m",
+        "add hooks/lib.sh and hooks/recall-pull",
+    ]);
+    git(&["rm", "-q", "hooks/lib.sh"]);
+    git(&["rm", "-q", "hooks/recall-pull"]);
+    git(&["commit", "-q", "-m", "remove the old hooks (Rust rewrite)"]);
+    repo
+}
+
+/// Writes a memory file at `rel`, relative to the memory directory `status
+/// --json` reports for `repo`, creating parent directories as needed.
+fn write_memory(repo: &Path, env: &[(&str, &str)], rel: &str, body: &str) -> String {
+    let memory_dir = status_json(repo, env)["memory_dir"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let path = Path::new(&memory_dir).join(rel);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, body).unwrap();
+    memory_dir
+}
+
+/// The claim in `claims` (a `--json` `claims[]` array) whose `text` contains
+/// `needle`, failing with the whole array when there is none — an
+/// index/`find` panic would not say what was actually extracted.
+fn claim_containing<'a>(claims: &'a serde_json::Value, needle: &str) -> &'a serde_json::Value {
+    claims
+        .as_array()
+        .unwrap_or_else(|| panic!("claims[] is not an array: {claims}"))
+        .iter()
+        .find(|c| c["text"].as_str().is_some_and(|t| t.contains(needle)))
+        .unwrap_or_else(|| panic!("no claim contains {needle:?}: {claims}"))
+}
+
+/// The design's own worked example (`docs/design/memory-truth.md`'s Layer 2
+/// section), rebuilt as a fixture: `lib.sh` and `hooks/recall-pull` named as
+/// present, deleted in git history since; a present claim naming a hostname
+/// this PR cannot check; and a history-section sentence that names the same
+/// two dead paths and must never be flagged, whatever the evidence.
+///
+/// Mutation this pins against (design's test table, row 1): dropping the
+/// git-history lookup (`Repo::deleted`) would turn the `stale` verdict below
+/// into `cant_tell` — verified by hand while developing this test, not left
+/// in the shipped code.
+#[test]
+fn the_phase1_deploy_fixture_gets_the_documented_verdicts() {
+    let repo = review_repo();
+    let env: Vec<(&str, &str)> = vec![];
+    write_memory(
+        repo.path(),
+        &env,
+        "project_phase1_deploy.md",
+        "---\nname: project-phase1-deploy\n---\n\n\
+         - Recall's server is live at `recall.pimlabs.id`, deployed via OrbStack and a Cloudflare Tunnel.\n\
+         - Run `lib.sh` to start the legacy hooks; `hooks/recall-pull` runs at session start.\n\
+         \n\
+         ## History\n\
+         \n\
+         - Not the old `hooks/recall-pull` script, and not `lib.sh`: both were deleted in the Rust rewrite.\n",
+    );
+
+    let r = run(&["review", "run", "--json"], repo.path(), &env, None);
+    assert_eq!(
+        r.code, 0,
+        "review must exit 0 whenever it ran: {}",
+        r.stderr
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(&r.stdout).unwrap_or_else(|e| panic!("not JSON ({e}): {}", r.stdout));
+    let claims = &report["claims"];
+
+    let hooks = claim_containing(claims, "Run `lib.sh`");
+    assert_eq!(hooks["class"], "present");
+    assert_eq!(hooks["verdict"], "stale", "{hooks}");
+    let evidence: Vec<&str> = hooks["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["detail"].as_str().unwrap())
+        .collect();
+    assert!(
+        evidence
+            .iter()
+            .any(|d| d.contains("lib.sh") && d.contains("deleted")),
+        "{evidence:?}"
+    );
+    assert!(
+        evidence
+            .iter()
+            .any(|d| d.contains("hooks/recall-pull") && d.contains("deleted")),
+        "{evidence:?}"
+    );
+
+    let hostname = claim_containing(claims, "is live at");
+    assert_eq!(hostname["class"], "present");
+    assert_eq!(hostname["verdict"], "cant_tell", "{hostname}");
+
+    let history = claim_containing(claims, "Not the old");
+    assert_eq!(history["class"], "record");
+    assert!(
+        history.get("verdict").is_none() || history["verdict"].is_null(),
+        "a record must never carry a verdict: {history}"
+    );
+
+    let text = run(&["review", "run"], repo.path(), &env, None);
+    assert_eq!(text.code, 0);
+    assert!(text.stdout.contains("stale"), "{}", text.stdout);
+    assert!(
+        text.stdout.contains("record(s), not reviewed"),
+        "records are counted, not listed: {}",
+        text.stdout
+    );
+    // The record's own text — "Not the old `hooks/recall-pull` script" —
+    // must not appear on a line the report marks stale.
+    assert!(
+        !text.stdout.contains("stale") || !text.stdout.contains("Not the old"),
+        "{}",
+        text.stdout
+    );
+}
+
+/// A present claim naming something that still exists gets `still_true`,
+/// and — the point of the test — it is printed, not silently dropped.
+/// Mutation (design's test table): printing only problems would make the
+/// `assert!` on human output fail.
+#[test]
+fn a_still_true_claim_appears_in_both_outputs() {
+    let repo = review_repo();
+    let env: Vec<(&str, &str)> = vec![];
+    write_memory(
+        repo.path(),
+        &env,
+        "plan.md",
+        "- The plan lives in `docs/plan.md`.\n",
+    );
+
+    let json = run(&["review", "run", "--json"], repo.path(), &env, None);
+    assert_eq!(json.code, 0, "{}", json.stderr);
+    let report: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
+    let claim = claim_containing(&report["claims"], "docs/plan.md");
+    assert_eq!(claim["verdict"], "still_true", "{claim}");
+
+    let text = run(&["review", "show"], repo.path(), &env, None);
+    assert_eq!(text.code, 0);
+    assert!(text.stdout.contains("still_true"), "{}", text.stdout);
+    assert!(text.stdout.contains("docs/plan.md"), "{}", text.stdout);
+}
+
+/// `[FILE]...` restricts the review to exactly the files named.
+#[test]
+fn the_files_argument_restricts_which_files_are_reviewed() {
+    let repo = review_repo();
+    let env: Vec<(&str, &str)> = vec![];
+    write_memory(
+        repo.path(),
+        &env,
+        "a.md",
+        "- The plan lives in `docs/plan.md`.\n",
+    );
+    write_memory(repo.path(), &env, "b.md", "- Run `lib.sh` to start it.\n");
+
+    let r = run(
+        &["review", "run", "a.md", "--json"],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    let files: std::collections::HashSet<&str> = report["claims"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(files, std::collections::HashSet::from(["a.md"]), "{report}");
+}
+
+/// `recall review show` reprints the last run's report, unchanged, without
+/// asking anything of the repository again.
+#[test]
+fn show_reprints_the_last_report() {
+    let repo = review_repo();
+    let env: Vec<(&str, &str)> = vec![];
+    write_memory(
+        repo.path(),
+        &env,
+        "plan.md",
+        "- The plan lives in `docs/plan.md`.\n",
+    );
+
+    let ran = run(&["review", "run", "--json"], repo.path(), &env, None);
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+
+    let shown = run(&["review", "show", "--json"], repo.path(), &env, None);
+    assert_eq!(shown.code, 0, "{}", shown.stderr);
+    assert_eq!(shown.stdout, ran.stdout);
+}
+
+/// `recall review show` before any run has happened is a quiet no-op, the
+/// same shape of answer every other read-only command gives to "nothing
+/// has happened here yet".
+#[test]
+fn show_before_any_run_is_a_quiet_no_op() {
+    let repo = git_repo();
+    let r = run(&["review", "show"], repo.path(), &[], None);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stdout.contains("No review yet"), "{}", r.stdout);
+}
+
+/// The review never needs `RECALL_URL`/`RECALL_TOKEN` at all: this PR reads
+/// the checkout and git only. `run()` already spawns with a clean
+/// environment (no `RECALL_*` at all), so this is really asserting that
+/// `recall review` does not go looking for them and fail for want of a
+/// server, the way `recall eval` does.
+#[test]
+fn review_never_needs_a_server() {
+    let repo = review_repo();
+    let env: Vec<(&str, &str)> = vec![];
+    write_memory(
+        repo.path(),
+        &env,
+        "plan.md",
+        "- The plan lives in `docs/plan.md`.\n",
+    );
+    let r = run(&["review", "run"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(!r.stderr.contains("RECALL_URL"), "{}", r.stderr);
+}
+
+/// Naming a `[FILE]` that is not a memory file in any scope that is on is
+/// the one usage mistake this command refuses, per its own module doc.
+#[test]
+fn a_named_file_that_is_not_memory_errors() {
+    let repo = review_repo();
+    let env: Vec<(&str, &str)> = vec![];
+    write_memory(
+        repo.path(),
+        &env,
+        "a.md",
+        "- The plan lives in `docs/plan.md`.\n",
+    );
+    let r = run(&["review", "run", "nope.md"], repo.path(), &env, None);
+    assert_ne!(r.code, 0, "{}", r.stdout);
+    assert!(r.stderr.contains("nope.md"), "{}", r.stderr);
+}
+
+/// A `[FILE]`-restricted run must not make other files' claims disappear
+/// from the stored report: `show` (and a future `--all`) still need them.
+#[test]
+fn a_restricted_run_merges_into_the_stored_report_instead_of_replacing_it() {
+    let repo = review_repo();
+    let env: Vec<(&str, &str)> = vec![];
+    write_memory(
+        repo.path(),
+        &env,
+        "a.md",
+        "- The plan lives in `docs/plan.md`.\n",
+    );
+    write_memory(repo.path(), &env, "b.md", "- Run `lib.sh` to start it.\n");
+
+    let full = run(&["review", "run", "--json"], repo.path(), &env, None);
+    assert_eq!(full.code, 0, "{}", full.stderr);
+
+    // A second run restricted to a.md alone must still leave b.md's claim
+    // in the stored report.
+    let restricted = run(
+        &["review", "run", "a.md", "--json"],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(restricted.code, 0, "{}", restricted.stderr);
+    let report: serde_json::Value = serde_json::from_str(&restricted.stdout).unwrap();
+    let files: std::collections::HashSet<&str> = report["claims"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        files,
+        std::collections::HashSet::from(["a.md", "b.md"]),
+        "b.md's claim from the earlier run must survive a run restricted to a.md: {report}"
+    );
+
+    let shown = run(&["review", "show", "--json"], repo.path(), &env, None);
+    let shown_report: serde_json::Value = serde_json::from_str(&shown.stdout).unwrap();
+    assert_eq!(
+        shown_report["claims"].as_array().unwrap().len(),
+        report["claims"].as_array().unwrap().len()
+    );
+}
+
+/// The corrected version of a note — every claim about the old paths now
+/// phrased as history — gets no `stale` claim anywhere, mirroring the
+/// design's own test table (row 2).
+#[test]
+fn the_corrected_note_gets_no_stale_claim() {
+    let repo = review_repo();
+    let env: Vec<(&str, &str)> = vec![];
+    write_memory(
+        repo.path(),
+        &env,
+        "project_phase1_deploy.md",
+        "---\nname: project-phase1-deploy\n---\n\n\
+         The server is at `recall-server.pimlabs.id`, behind Traefik on a VPS.\n\
+         \n\
+         ## History\n\
+         \n\
+         - Not the old `hooks/recall-*` scripts, and not `lib.sh`; both were deleted \
+           in the Rust rewrite.\n",
+    );
+    let r = run(&["review", "run", "--json"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    for claim in report["claims"].as_array().unwrap() {
+        assert_ne!(
+            claim["verdict"], "stale",
+            "a corrected file must get no stale claim: {claim}"
+        );
+    }
+    let history = claim_containing(&report["claims"], "Not the old");
+    assert_eq!(history["class"], "record");
 }

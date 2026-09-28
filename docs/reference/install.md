@@ -806,6 +806,90 @@ cannot act on teaches them to skip the whole report.
 `check`, `detail` and `fix` — for a CI step or a shell prompt that should go
 red when memory stops syncing.
 
+### Checking whether memory is still true: `recall review`
+
+`recall status` and `recall doctor` say whether sync is working. Neither says
+whether what was synced is still *true*: a note can be perfectly delivered and
+still be wrong, the way `project_phase1_deploy.md` named a server this project
+no longer runs on six weeks after it moved. `recall review` is the other
+half — see [the design](../design/memory-truth.md) for the fuller reasoning.
+
+```sh
+recall review run
+```
+
+Reads every memory file in scope (the project, plus the global and machine
+scopes when they are on), pulls out its **claims** — one per list item, one
+per sentence of a paragraph, one per fenced block — and checks the ones that
+name something checkable (a path, a hostname, a version, a `recall` flag…)
+against what this checkout and its git history can see:
+
+```
+project_phase1_deploy.md
+  stale       L6      Run `lib.sh` to start the legacy hooks; `hooks/recall-pull` runs at session start.
+              `lib.sh` was deleted in 3a1c9de (2026-09-22) and is not at HEAD
+  cant_tell   L5      Recall's server is live at `recall.pimlabs.id`, deployed via OrbStack and a Cloudflare Tunnel.
+              needs the server's /health and discovery document; not read until a later release
+  1 record(s), not reviewed
+
+1 stale, 0 still true, 1 cant tell, 0 conflict(s), 1 record(s), 0 unresolved
+```
+
+Every claim gets a class before anything judges it — a present-tense
+statement of state can go **stale**; a record of what used to be true (a
+"History" section, a negated anchor, "used to be", "no longer"…) never can,
+and is only counted; a claim in a `type: user` or `type: feedback` note has
+each of its anchors checked and verdicted on its own, never the claim's
+wording as a whole (a record signal always wins first, even inside such a
+note). `still_true` claims are printed too, named rather than summarised
+away — the point is never to make it look like discarding a true line
+alongside a false one is free.
+
+This release reads the checkout and git only (`git ls-files`, `git log`,
+`git grep`, `git tag`), and only for a claim in the **project** scope — a
+global or machine-scope note is not about this repository, so the same
+check there reads `cant_tell` whatever the checkout shows. A bare filename
+(`lib.sh`) is found wherever it lives in the tree, not only at the
+repository root; a path that no longer exists tells you when and in which
+commit it was deleted; a script or flag name tells you whether it is still
+referenced anywhere in the tracked tree, *excluding* Markdown documentation,
+so a name merely discussed in `docs/`, `ROADMAP.md` or `CHANGELOG.md` is not
+mistaken for a name still in use — and absence there is weak evidence, so it
+reads `cant_tell`, never `stale`. A version claim compares against the
+newest release tag, and only turns `stale` when the claim's own words assert
+it is the *current* version ("Recall is at version 0.4.5"); "shipped in
+0.4.5" stays true forever and is never marked stale just for naming an older
+number. A claim that needs the server, the environment, or a live host to
+decide comes back `cant_tell` — that is a later release, not a bug in this
+one. Nothing here makes a network request, and nothing is ever edited: the
+report is evidence, not an action.
+
+`recall review run [FILE]...` restricts the review to the files named,
+relative to the memory directory (as `recall status` prints it); naming one
+that is not a memory file in a scope that is on is refused. Left out, it
+reviews every file in every scope that is on, merging into whatever the
+stored report already held for files a restricted run did not touch — a
+`[FILE]` run never makes other files disappear from `recall review show`.
+`--all` is accepted and reserved for a later release's `--claude` layer,
+which is the only part of this design that skips unchanged files; until then
+every file is checked on every run regardless, so `--all` has no visible
+effect yet.
+
+`recall review show` prints the last report again, without reading memory a
+second time; before any run has happened, `--json` prints a bare `null`
+(itself a complete JSON document) and the text form says so in a line.
+`--json` otherwise prints the report machine-readably: `reviewed_at`, an
+`evidence` object naming the repository `HEAD` and which sources this run
+could not read and why, and a `claims[]` array (`id`, `file`, `lines`,
+`class`, `text`, `verdict`, `layer`, `evidence[]`, the last with its own
+`source`, `detail` and `verdict` per anchor) — a stable contract from this
+release on, under [the Versioning rules](releasing.md#versioning). The exit
+code is always `0` once the review has run, whatever it found — a script
+that wants to act on `stale` claims reads `--json`.
+
+The report is kept in `.recall-review.json`, beside `.recall-state.json` in
+Claude Code's project directory: per machine, and never pushed.
+
 ### Holding the server to its history: `recall audit`
 
 The server keeps an append-only log of everything done to it, a Merkle tree

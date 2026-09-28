@@ -135,6 +135,11 @@ impl Resolved {
         claude::Env::from_lookup(self.env.lookup()).memory_root()
     }
 
+    /// `recall review`'s per-machine state file, beside `.recall-state.json`.
+    pub fn review_file(&self) -> PathBuf {
+        claude::Env::from_lookup(self.env.lookup()).review_file(&self.root.to_string_lossy())
+    }
+
     /// Recall's configuration, resolved through [`Resolved::env`].
     ///
     /// Built on demand rather than alongside the rest, and that is
