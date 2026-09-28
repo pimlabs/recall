@@ -14,7 +14,7 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
-## Unreleased
+## 0.4.6 — 2026-09-27
 
 - **Release archives are named for their Rust target from 0.4.6, and hold
   a directory.** `recall_darwin_arm64.tar.gz` becomes
