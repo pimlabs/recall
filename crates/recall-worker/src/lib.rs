@@ -13,16 +13,18 @@
 //! No Anthropic API key appears anywhere here, as anywhere in Recall: the
 //! merge rides whatever account the CLI on this machine is logged in to.
 //!
-//! The crate has two halves. [`merge`] is the merge itself, the prompt and
-//! the flags that keep it cheap; `recall-server` depends on it for the
-//! inline merge a deployment without a worker still runs. Everything else
-//! is behind the `client` feature (on by default): enrolling, signing
-//! requests, and the job loop, with the HTTP client they need. The server
-//! turns it off.
+//! The crate has two unconditional parts, so `recall-server` and (later)
+//! `recall`'s own CLI can use them without the job loop: [`merge`] is the
+//! merge itself, the prompt and the flags that keep it cheap, and
+//! [`redact`] finds and masks secrets in memory text
+//! (`docs/design/memory-truth.md` decision 2). Everything else is behind
+//! the `client` feature (on by default): enrolling, signing requests, and
+//! the job loop, with the HTTP client they need. The server turns it off.
 
 #![deny(missing_docs)]
 
 pub mod merge;
+pub mod redact;
 
 #[cfg(feature = "client")]
 pub mod api;
@@ -36,6 +38,7 @@ pub mod identity;
 pub mod worker;
 
 pub use merge::Merger;
+pub use redact::Redactor;
 
 use time::OffsetDateTime;
 
