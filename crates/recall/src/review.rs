@@ -18,7 +18,8 @@
 //! read; this file opens no connection of its own
 //! (`this_module_never_touches_the_network`). `recall review apply`, in
 //! [`apply`], makes one stale claim's suggested edit, and is the only
-//! thing here that ever changes a note.
+//! thing here that ever changes a note. [`reports`] shows the worker's
+//! newest evaluation report beside the claims its findings cover.
 //!
 //! Layer 3, only with `--claude`, lives in [`claude`]: the local `claude`
 //! CLI over what layers 1 and 2 left undecided, handed a fact sheet of
@@ -47,6 +48,7 @@ use crate::project as proj;
 
 mod apply;
 mod claude;
+mod reports;
 mod sources;
 
 /// `recall review …`.
@@ -216,12 +218,18 @@ pub struct Claim {
     /// lines it occupies, against the version of the file this run read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggested_edit: Option<recall_wire::SuggestedEdit>,
+    /// The findings of the worker's newest report that cover this claim's
+    /// lines, when this machine can read reports: the review says whether a
+    /// note is still true, the report whether it holds a secret, a
+    /// duplicate, a dead link, a wrong scope or a contradiction.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub eval: Vec<reports::EvalFinding>,
 }
 
 /// A source this design names that was not consulted, and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnavailableSource {
-    /// `repository`, `server`, `compose`, `probe` or `claude`.
+    /// `repository`, `server`, `compose`, `probe`, `claude` or `evaluation`.
     pub source: String,
     /// Why it was not read this run.
     pub reason: String,
@@ -256,6 +264,10 @@ pub struct SourcesRead {
     /// What layer 3 did, when `--claude` asked for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude: Option<ClaudeRun>,
+    /// The worker's report whose findings are shown beside the claims: its
+    /// newest finished one, when this machine can read reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluation: Option<String>,
 }
 
 /// What one `--claude` run did.
@@ -471,6 +483,7 @@ async fn run_review(
             layer,
             evidence,
             suggested_edit: None,
+            eval: Vec::new(),
         });
     }
 
@@ -511,6 +524,22 @@ async fn run_review(
     }
     for (rel, state) in new_file_states {
         saved.files.insert(rel, state);
+    }
+
+    // The worker's newest report, beside every claim this review holds,
+    // asked only of a server that has just answered.
+    let read = if facts.server.answered {
+        reports::newest(&cfg).await
+    } else {
+        reports::Read::NoServer
+    };
+    for c in claims.iter_mut() {
+        c.eval.clear();
+    }
+    if let reports::Read::Newest(id, findings) = &read {
+        reports::beside(&mut claims, id, findings, |file| {
+            recall_hooks::scope::route(&scopes, file).map(|(s, path)| (s.key.clone(), path))
+        });
     }
 
     let mut unavailable = Vec::new();
@@ -560,6 +589,9 @@ async fn run_review(
             );
         }
     }
+    if let reports::Read::Unreadable(why) = &read {
+        missing("evaluation", why.clone());
+    }
     if layer3.is_none() && layer3_run.waiting > 0 {
         missing(
             "claude",
@@ -584,6 +616,10 @@ async fn run_review(
             probed: facts.probes.keys().cloned().collect(),
             unavailable,
             claude: layer3.map(|_| layer3_run.run),
+            evaluation: match read {
+                reports::Read::Newest(id, _) => Some(id),
+                _ => None,
+            },
         },
         claims,
     };
@@ -2148,6 +2184,29 @@ fn print_text(rep: &Report) {
         }
         if file_unsure > 0 {
             println!("  {file_unsure} claim(s) with nothing here to decide them");
+        }
+        // The worker's findings on this file, each with the claims it
+        // covers.
+        let mut found: BTreeMap<(&str, &str), (&reports::EvalFinding, Vec<&str>)> = BTreeMap::new();
+        for c in claims {
+            for e in &c.eval {
+                found
+                    .entry((e.evaluation.as_str(), e.finding.as_str()))
+                    .or_insert((e, Vec::new()))
+                    .1
+                    .push(c.id.as_str());
+            }
+        }
+        for (e, ids) in found.values() {
+            println!(
+                "  {} {} {} ({}), beside {}; recall eval show {}",
+                sanitize_for_terminal(&e.evaluation),
+                sanitize_for_terminal(&e.finding),
+                sanitize_for_terminal(&e.kind),
+                sanitize_for_terminal(&e.severity),
+                ids.join(", "),
+                sanitize_for_terminal(&e.evaluation)
+            );
         }
         println!();
     }

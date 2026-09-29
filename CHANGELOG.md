@@ -92,6 +92,16 @@ break will be described here in full rather than smoothed over.
   never rewritten, and the edit is built again at apply time rather than
   taken from the stored report. **Patch**: a new subcommand and a new optional `--json`
   field.
+- **`recall review` shows the worker's findings beside the claims they
+  cover.** When this machine can read evaluation reports (a device enrolled
+  as admin, or `RECALL_TOKEN`), `recall review run` reads the newest
+  finished one and lists each finding under its file with the claims whose
+  lines it covers (`eval_7c2kq9 f4 stale (low), beside t3`); `--json`
+  gains each claim's `eval[]` and `evidence.evaluation`, and a machine that
+  cannot read reports says so under `evidence.unavailable`. The worker's
+  `stale` finding now says that `recall review run` tells whether the
+  note's claims are still true, not only that it is old. **Patch**: new
+  optional `--json` fields and a sentence of reasoning.
 
 ## 0.4.8 — 2026-09-28
 

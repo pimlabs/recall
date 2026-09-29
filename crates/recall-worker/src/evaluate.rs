@@ -846,7 +846,8 @@ fn stale(file: &EvaluateFile, settings: &Settings) -> Vec<Found> {
             reasoning: format!(
                 "Unchanged since {} ({} days), and it names paths or commands, which move \
                  and change. Confirm they still hold, and edit the note if not; editing it \
-                 also marks it current.",
+                 also marks it current. `recall review run`, on a machine with this \
+                 project checked out, says which of its claims are still true.",
                 &file.updated_at[..10.min(file.updated_at.len())],
                 age.whole_days()
             ),

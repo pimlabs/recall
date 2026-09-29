@@ -603,6 +603,13 @@ fn a_file_is_stale_once_old_and_naming_a_path_or_command() {
     let found = stale(&old, &settings());
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].lines, [4, 4]);
+    // The report says a note is old; `recall review` says whether it is
+    // also wrong, and the finding says where to ask.
+    assert!(
+        found[0].detail.reasoning.contains("`recall review run`"),
+        "{}",
+        found[0].detail.reasoning
+    );
 
     let mut fresh = old.clone();
     fresh.updated_at = "2026-09-01T00:00:00.000Z".into();

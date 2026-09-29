@@ -941,6 +941,21 @@ as history becomes a record, and a record is never judged.
   claim out is shown and asked about again. `--all` asks about every file
   again; files never asked about go first, then those asked longest ago.
 
+**Beside the worker's reports.** The review does not look for secrets,
+duplicates, dead links, notes in the wrong scope or contradictions:
+`recall eval` does. When this machine can read reports (a device enrolled
+as admin, or `RECALL_TOKEN`), the review reads the newest finished one,
+the same two requests `recall eval show` makes, and each finding is shown
+under its file beside the claims whose lines it covers:
+
+```
+  eval_7c2kq9 f4 stale (low), beside t3; recall eval show eval_7c2kq9
+```
+
+A `stale` finding says a note is old; the review says whether it is also
+wrong. A machine that cannot read reports says so once, under the sources
+it could not read, and the review goes on.
+
 Nothing is edited by a review: the report is evidence, not an action.
 
 **`recall review apply <claim>`: one stale claim, rewritten into a record.**
@@ -985,12 +1000,14 @@ second time; before any run has happened, `--json` prints a bare `null`
 `evidence` object naming the repository `HEAD`, the server's version and
 commit, the compose files read, the hosts probed, and which sources this run
 could not read and why (`repository`, `server`, `compose`, `probe`,
-`claude`), with `--claude` a `claude` object (`calls`, `reused`, and each
+`claude`, `evaluation`), the report whose findings are shown
+(`evaluation`), with `--claude` a `claude` object (`calls`, `reused`, and each
 `skipped` file with its `reason`), and a `claims[]` array (`id`, `file`,
 `lines`, `class`, `text`, `verdict`, `layer`, `evidence[]`, the last with
 its own `source`, `detail` and `verdict` per anchor, `claude` for layer
-3's, and a `stale` claim's optional `suggested_edit`, the shape `recall
-eval show --json` gives a finding's) — a stable contract from this
+3's, a `stale` claim's optional `suggested_edit`, the shape `recall eval
+show --json` gives a finding's, and `eval[]`, each covering finding's
+`evaluation`, `finding`, `kind` and `severity`) — a stable contract from this
 release on, under [the Versioning rules](releasing.md#versioning). The exit
 code is always `0` once the review has run, whatever it found — a script
 that wants to act on `stale` claims reads `--json`.
