@@ -33,6 +33,63 @@ pub struct State {
     /// before this existed; both simply push without a base.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub bases: BTreeMap<String, String>,
+    /// For each file this machine has synced, a fingerprint of it as it
+    /// stood on disk right after that sync: its content hash, less
+    /// Recall's own index lines when it is the root `MEMORY.md`.
+    ///
+    /// The question it answers is "has this file changed here since Recall
+    /// last had it in step with the server?", which neither of the others
+    /// can: `files` only knows the path existed, and a base is the server's
+    /// version, which `MEMORY.md` stops matching the moment its index lines
+    /// are rewritten. A change the hooks never saw (an edit through the
+    /// shell, which fires no `Edit|Write` hook) is found this way, and sent
+    /// before a pull can overwrite it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub disk: BTreeMap<String, String>,
+}
+
+impl State {
+    /// Whether the file at `rel`, now reading `content`, holds a change
+    /// this machine has not sent.
+    ///
+    /// Against its fingerprint from the last sync when there is one, and
+    /// otherwise against its base, which is how a baseline written before
+    /// fingerprints existed is still answered. A file known to neither was
+    /// never synced from here: unchanged if the baseline already listed it
+    /// (nothing here can say more), new and unsent if it did not.
+    pub(crate) fn changed_since_sync(&self, rel: &str, content: &str) -> bool {
+        let sha = recall_wire::content_sha256(content);
+        if self.bases.get(rel) == Some(&sha) {
+            return false;
+        }
+        match self.disk.get(rel) {
+            Some(fp) => *fp != fingerprint(rel, content),
+            None if self.bases.contains_key(rel) => true,
+            None => self
+                .files
+                .binary_search_by(|f| f.as_str().cmp(rel))
+                .is_err(),
+        }
+    }
+}
+
+/// What [`State::disk`] records for a file: the
+/// [`content_sha256`](recall_wire::content_sha256) of its content, less
+/// Recall's own index lines when it is the root `MEMORY.md`.
+pub(crate) fn fingerprint(rel: &str, content: &str) -> String {
+    if rel == "MEMORY.md" {
+        recall_wire::content_sha256(&crate::index::without_owned_links(content))
+    } else {
+        recall_wire::content_sha256(content)
+    }
+}
+
+/// Whether this is one of [`atomic::write`]'s temporary files, or another
+/// file Recall keeps for itself, rather than a memory file.
+pub(crate) fn is_internal(rel: &str) -> bool {
+    rel.rsplit('/')
+        .next()
+        .is_some_and(|name| name.starts_with(".recall-"))
 }
 
 /// Reads the baseline, returning `None` when there isn't one yet.
@@ -58,10 +115,16 @@ pub fn load(path: &Path) -> io::Result<Option<State>> {
 
 /// Writes the baseline atomically, so two hooks racing on adjacent edits
 /// can't leave a truncated file behind.
-pub fn save(path: &Path, files: &[String], bases: &BTreeMap<String, String>) -> io::Result<()> {
+pub fn save(
+    path: &Path,
+    files: &[String],
+    bases: &BTreeMap<String, String>,
+    disk: &BTreeMap<String, String>,
+) -> io::Result<()> {
     let state = State {
         files: files.to_vec(),
         bases: bases.clone(),
+        disk: disk.clone(),
     };
     let body = serde_json::to_vec(&state).map_err(io::Error::other)?;
     atomic::write(path, ".recall-state-", ".json", &body)
@@ -134,13 +197,10 @@ mod tests {
 
         assert_eq!(load(&path).unwrap(), None, "no file yet");
 
-        save(&path, &[], &BTreeMap::new()).unwrap();
+        save(&path, &[], &BTreeMap::new(), &BTreeMap::new()).unwrap();
         assert_eq!(
             load(&path).unwrap(),
-            Some(State {
-                files: vec![],
-                bases: BTreeMap::new()
-            }),
+            Some(State::default()),
             "an empty baseline is still a baseline"
         );
     }
@@ -152,6 +212,7 @@ mod tests {
         save(
             &path,
             &["MEMORY.md".into(), "topics/auth.md".into()],
+            &BTreeMap::new(),
             &BTreeMap::new(),
         )
         .unwrap();
@@ -178,10 +239,17 @@ mod tests {
     fn save_leaves_no_temp_files_behind() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".recall-state.json");
-        save(&path, &["MEMORY.md".into()], &BTreeMap::new()).unwrap();
+        save(
+            &path,
+            &["MEMORY.md".into()],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         save(
             &path,
             &["MEMORY.md".into(), "b.md".into()],
+            &BTreeMap::new(),
             &BTreeMap::new(),
         )
         .unwrap();

@@ -20,6 +20,9 @@ pub struct PushOutcome {
     pub pushed: Option<String>,
     /// Paths reported as deleted by reconciliation.
     pub deleted: Vec<String>,
+    /// Other memory files sent because they had changed since the last
+    /// sync without a hook seeing it: an edit through the shell, say.
+    pub swept: Vec<String>,
     /// The triggering file wasn't a memory file, so nothing happened at all.
     pub skipped: bool,
 }
@@ -51,44 +54,24 @@ pub async fn push(ctx: &Context, triggered_path: &Path) -> Result<PushOutcome, E
     }
 
     let baseline = state::load(&ctx.state_file)?;
+    let triggered_rel = relative_slash(&ctx.memory_dir, triggered_path);
 
-    // Reconcile deletes, but never on the very first run for a project.
-    // With no baseline, an empty or partial memory directory would otherwise
-    // read as "everything was deleted" and tombstone the project's whole
-    // history on the server. `None` here means "nothing has ever synced",
-    // which is why load() distinguishes it from an empty baseline.
+    // Everything else this machine changed since the last sync, deletes
+    // included: see [`send_pending`]. Never on the very first run for a
+    // project. With no baseline, an empty or partial memory directory would
+    // otherwise read as "everything was deleted" and tombstone the project's
+    // whole history on the server. `None` here means "nothing has ever
+    // synced", which is why load() distinguishes it from an empty baseline.
+    let mut synced = Vec::new();
     if let Some(prev) = &baseline {
-        for rel in &prev.files {
-            if state::join_relative(&ctx.memory_dir, rel).exists() {
-                continue;
-            }
-            // A vanished file goes to the scope that owned it, which is not
-            // necessarily this project's.
-            let Some((scope, path)) = route(&ctx.scopes, rel) else {
-                continue;
-            };
-            let req = PushRequest {
-                project_key: scope.key.clone(),
-                file_path: path,
-                deleted: true,
-                source_env: ctx.source_env.clone(),
-                ..Default::default()
-            };
-            ctx.client
-                .push(&req)
-                .await
-                .map_err(|source| Error::PushDelete {
-                    path: rel.clone(),
-                    source,
-                })?;
-            res.deleted.push(rel.clone());
-        }
+        let pending = send_pending(ctx, prev, triggered_rel.as_deref()).await?;
+        res.deleted = pending.deleted;
+        res.swept = pending.sent.iter().map(|(rel, _)| rel.clone()).collect();
+        synced = pending.sent;
     }
 
-    let mut synced = Vec::new();
     if fs::metadata(triggered_path).is_ok_and(|m| !m.is_dir()) {
-        let rel =
-            relative_slash(&ctx.memory_dir, triggered_path).expect("containment was just checked");
+        let rel = triggered_rel.expect("containment was just checked");
 
         // A file in no scope — the global directory while global sync is
         // off — is left alone rather than swept into this project.
@@ -136,4 +119,97 @@ pub async fn push(ctx: &Context, triggered_path: &Path) -> Result<PushOutcome, E
     }
     ctx.refresh_state_with(&synced)?;
     Ok(res)
+}
+
+/// What [`send_pending`] sent.
+#[derive(Debug, Default)]
+pub(crate) struct Pending {
+    /// `(path, content_sha256)` for each file sent, as the new base.
+    pub(crate) sent: Vec<(String, String)>,
+    /// Paths sent as deletes.
+    pub(crate) deleted: Vec<String>,
+}
+
+/// Sends every change this machine made since `prev` that the server has
+/// not had: files in the baseline that are gone (as deletes), and files
+/// that differ from how the last sync left them (see
+/// [`State::changed_since_sync`](state::State::changed_since_sync)),
+/// except `skip`, which the caller sends itself.
+///
+/// The hooks see only what goes through Claude Code's `Edit` and `Write`.
+/// A note written, appended to or removed through the shell fires nothing,
+/// and until this existed such a change reached the server only if a later
+/// `Edit` touched the same file. Worse, the next pull, which runs at every
+/// session start, resume and compaction, overwrote it with the server's
+/// copy, so the change was lost without a word. Both the push hook and a
+/// pull call this first, so neither can happen.
+///
+/// Each file is sent with its base, so the server replaces its copy when
+/// that is still the version this edit started from and merges when
+/// another machine moved it in between: the same rule as any other push.
+pub(crate) async fn send_pending(
+    ctx: &Context,
+    prev: &state::State,
+    skip: Option<&str>,
+) -> Result<Pending, Error> {
+    let mut out = Pending::default();
+
+    for rel in &prev.files {
+        if state::join_relative(&ctx.memory_dir, rel).exists() {
+            continue;
+        }
+        // A vanished file goes to the scope that owned it, which is not
+        // necessarily this project's.
+        let Some((scope, path)) = route(&ctx.scopes, rel) else {
+            continue;
+        };
+        let req = PushRequest {
+            project_key: scope.key.clone(),
+            file_path: path,
+            deleted: true,
+            source_env: ctx.source_env.clone(),
+            ..Default::default()
+        };
+        ctx.client
+            .push(&req)
+            .await
+            .map_err(|source| Error::PushDelete {
+                path: rel.clone(),
+                source,
+            })?;
+        out.deleted.push(rel.clone());
+    }
+
+    for rel in state::list_memory_files(&ctx.memory_dir)? {
+        if Some(rel.as_str()) == skip || state::is_internal(&rel) {
+            continue;
+        }
+        // A file in no scope is left alone, as a push leaves it.
+        let Some((scope, path)) = route(&ctx.scopes, &rel) else {
+            continue;
+        };
+        // Not memory Claude Code could have written, and not something to
+        // fail every hook over: left where it is, unsent.
+        let Ok(content) = fs::read_to_string(state::join_relative(&ctx.memory_dir, &rel)) else {
+            continue;
+        };
+        if !prev.changed_since_sync(&rel, &content) {
+            continue;
+        }
+        let sent = recall_wire::content_sha256(&content);
+        let req = PushRequest {
+            project_key: scope.key.clone(),
+            file_path: path,
+            content: Some(content),
+            source_env: ctx.source_env.clone(),
+            deleted: false,
+            base_sha256: prev.bases.get(&rel).cloned(),
+        };
+        ctx.client.push(&req).await.map_err(|source| Error::Push {
+            path: rel.clone(),
+            source,
+        })?;
+        out.sent.push((rel, sent));
+    }
+    Ok(out)
 }

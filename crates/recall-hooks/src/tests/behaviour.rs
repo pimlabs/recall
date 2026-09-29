@@ -462,9 +462,19 @@ fn describes_a_pull() {
     let res = PullOutcome {
         written: vec!["MEMORY.md".into()],
         removed: vec!["a.md".into(), "b.md".into()],
+        ..Default::default()
     };
     assert_eq!(
         res.describe("acme/app"),
         "recall-pull: synced 1 memory file(s), removed 2 deleted file(s) for acme/app"
+    );
+    let res = PullOutcome {
+        sent: vec!["notes.md".into()],
+        ..res
+    };
+    assert_eq!(
+        res.describe("acme/app"),
+        "recall-pull: synced 1 memory file(s), removed 2 deleted file(s) for acme/app; \
+         first sent 1 local change(s) and 0 local delete(s) no hook had seen"
     );
 }

@@ -17,24 +17,47 @@ pub struct PullOutcome {
     pub written: Vec<String>,
     /// Local files removed because their scope holds a tombstone for them.
     pub removed: Vec<String>,
+    /// Local changes sent before fetching, because the hooks never saw
+    /// them: files edited or created outside `Edit` and `Write`.
+    pub sent: Vec<String>,
+    /// Local deletes sent before fetching, for the same reason.
+    pub sent_deletes: Vec<String>,
 }
 
 impl PullOutcome {
     /// A short line for the hook's stderr, which is where Claude Code shows
     /// hook output to the user.
     pub fn describe(&self, project_key: &str) -> String {
-        format!(
+        let mut line = format!(
             "recall-pull: synced {} memory file(s), removed {} deleted file(s) for {}",
             self.written.len(),
             self.removed.len(),
             project_key
-        )
+        );
+        if !self.sent.is_empty() || !self.sent_deletes.is_empty() {
+            line.push_str(&format!(
+                "; first sent {} local change(s) and {} local delete(s) no hook had seen",
+                self.sent.len(),
+                self.sent_deletes.len()
+            ));
+        }
+        line
     }
 }
 
 /// Fetches every configured scope and makes the local memory directory match,
 /// then refreshes the baseline so a machine that only ever pulls still has an
 /// accurate one — otherwise its first local delete would go unnoticed.
+///
+/// First, though, it sends what this machine changed since its last sync
+/// and no hook saw (the same sweep the push hook makes), and then
+/// leaves those files as they are rather than overwriting them with what it
+/// fetched. A pull runs at every session start, resume and compaction, and
+/// it used to write the server's copy over every file: a note changed
+/// through the shell mid-session was simply gone after the next compaction.
+/// What it fetched for such a file is the stored result of that send, a
+/// merge when another machine had moved it, and the next pull brings it
+/// down, since by then the file is back in step with its base.
 ///
 /// A scope that fails is fatal, deliberately: a half-applied pull is worse
 /// than none, and the caller turns any error into "leaving local memory
@@ -43,6 +66,17 @@ pub async fn pull(ctx: &Context) -> Result<PullOutcome, Error> {
     let mut res = PullOutcome::default();
     let mut any_files = false;
     let mut synced = Vec::new();
+
+    // Never on a first run, for the reason the push hook gives: with no
+    // baseline there is no "since", and an empty directory would read as
+    // everything deleted.
+    if let Some(prev) = state::load(&ctx.state_file)? {
+        let pending = crate::push::send_pending(ctx, &prev, None).await?;
+        res.sent = pending.sent.iter().map(|(rel, _)| rel.clone()).collect();
+        res.sent_deletes = pending.deleted;
+        any_files = !pending.sent.is_empty() || !res.sent_deletes.is_empty();
+        synced = pending.sent;
+    }
 
     for scope in &ctx.scopes {
         let resp = ctx
@@ -77,6 +111,11 @@ pub async fn pull(ctx: &Context) -> Result<PullOutcome, Error> {
             // Belt and braces: validation is the real guard, but the
             // containment check is cheap and this is the security boundary.
             if !is_under(&ctx.memory_dir, &dest) {
+                continue;
+            }
+            // Just sent: the local file (or its absence) is the newer of
+            // the two, whatever the server made of it.
+            if res.sent.contains(&rel) || res.sent_deletes.contains(&rel) {
                 continue;
             }
 

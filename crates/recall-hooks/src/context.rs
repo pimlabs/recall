@@ -95,16 +95,28 @@ impl Context {
     /// version it was never edited from.
     pub(crate) fn refresh_state_with(&self, synced: &[(String, String)]) -> Result<(), Error> {
         let files = state::list_memory_files(&self.memory_dir)?;
-        let mut bases = state::load(&self.state_file)
+        let prev = state::load(&self.state_file)
             .ok()
             .flatten()
-            .map(|s| s.bases)
             .unwrap_or_default();
+        let (mut bases, mut disk) = (prev.bases, prev.disk);
         for (rel, hash) in synced {
             bases.insert(rel.clone(), hash.clone());
+            // As it stands now, after the write or the send and after any
+            // index rewrite, so the next run compares against exactly this.
+            let path = state::join_relative(&self.memory_dir, rel);
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    disk.insert(rel.clone(), state::fingerprint(rel, &content));
+                }
+                Err(_) => {
+                    disk.remove(rel);
+                }
+            }
         }
         bases.retain(|rel, _| files.binary_search(rel).is_ok());
-        state::save(&self.state_file, &files, &bases)?;
+        disk.retain(|rel, _| files.binary_search(rel).is_ok());
+        state::save(&self.state_file, &files, &bases, &disk)?;
         Ok(())
     }
 }

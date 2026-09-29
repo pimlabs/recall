@@ -2869,6 +2869,74 @@ fn a_cloud_session_enrolls_itself_at_its_first_pull_with_an_enrolment_key() {
     assert!(r.stderr.contains("sync scope"), "stderr: {}", r.stderr);
 }
 
+/// The case that lost memory, end to end against a real server: a note
+/// edited through the shell (no hook fires) survives the next pull, which a
+/// session start, resume or compaction runs, because the pull sends it
+/// first; and `recall sync` does the same by hand, mid-session.
+#[test]
+fn a_shell_edit_survives_the_next_pull_and_recall_sync_sends_one() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [
+        ("RECALL_HOME", home_str.as_str()),
+        ("RECALL_URL", server.url.as_str()),
+        ("RECALL_TOKEN", "right"),
+    ];
+    let r = push_memory(&repo, &env, "notes.md", "v1\n");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+
+    let memory_dir = write_memory(repo.path(), &env, "notes.md", "v1\nfrom the shell\n");
+    let r = run(&["pull"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(
+        r.stderr.contains("first sent 1 local change(s)"),
+        "stderr: {}",
+        r.stderr
+    );
+    let notes = Path::new(&memory_dir).join("notes.md");
+    assert_eq!(
+        std::fs::read_to_string(&notes).unwrap(),
+        "v1\nfrom the shell\n",
+        "the pull overwrote an edit no hook had seen"
+    );
+    let files = stored(&server, &repo, &env);
+    let stored_notes = files.iter().find(|f| f.file_path == "notes.md").unwrap();
+    assert_eq!(
+        stored_notes.content.as_deref(),
+        Some("v1\nfrom the shell\n")
+    );
+
+    std::fs::write(Path::new(&memory_dir).join("later.md"), "made with cat\n").unwrap();
+    let r = run(&["sync"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(r.stderr.contains("recall-sync: "), "stderr: {}", r.stderr);
+    let files = stored(&server, &repo, &env);
+    assert!(
+        files.iter().any(|f| f.file_path == "later.md"),
+        "recall sync did not send a file created through the shell"
+    );
+}
+
+/// A hook must never fail a session, but `recall sync` is a command someone
+/// ran, so it says when it could not sync.
+#[test]
+fn recall_sync_exits_non_zero_when_it_cannot_reach_the_server() {
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [
+        ("RECALL_HOME", home_str.as_str()),
+        ("RECALL_URL", "http://127.0.0.1:9"),
+        ("RECALL_TOKEN", "t"),
+    ];
+    let r = run(&["sync"], repo.path(), &env, None);
+    assert_eq!(r.code, 2, "stderr: {}", r.stderr);
+    assert!(r.stderr.contains("recall-sync:"), "stderr: {}", r.stderr);
+    assert_eq!(run(&["pull"], repo.path(), &env, None).code, 0);
+}
+
 /// An authkey for cloud sessions, which enrols ephemeral devices.
 fn ephemeral_authkey(server: &LiveServer) -> String {
     block_on(

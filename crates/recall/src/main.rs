@@ -189,6 +189,15 @@ enum Cmd {
         /// The server; defaults to the one most recently connected
         url: Option<String>,
     },
+    /// Send memory changed here, and fetch the rest, mid-session
+    ///
+    /// The session-start pull, run by hand: first it sends what changed here
+    /// since the last sync and no hook saw (a note edited, created or removed
+    /// through the shell), then it fetches what other machines sent. Run it
+    /// after changing memory outside Claude Code's Edit and Write, or to pick
+    /// up another machine's notes without starting a new session.
+    #[command(verbatim_doc_comment)]
+    Sync,
     /// Show whether sync is configured and reachable here
     ///
     /// Reports what the hooks would see in this project, and never fails
@@ -245,7 +254,7 @@ const GROUPS: &[(&str, &[&str])] = &[
         "Get started",
         &["connect", "init", "backfill", "disconnect"],
     ),
-    ("Every day", &["status", "doctor", "promote"]),
+    ("Every day", &["status", "doctor", "sync", "promote"]),
     ("Memory quality", &["review", "eval"]),
     ("Your server", &["devices", "authkey", "audit"]),
     ("Run by Claude Code (hooks)", &["push", "pull"]),
@@ -404,6 +413,7 @@ fn main() {
         Cmd::Doctor { json } => block_on_current(doctor::run(json)),
         Cmd::Push => block_on_current(hook::push()),
         Cmd::Pull => block_on_current(hook::pull()),
+        Cmd::Sync => block_on_current(hook::sync()),
     };
 
     match result {

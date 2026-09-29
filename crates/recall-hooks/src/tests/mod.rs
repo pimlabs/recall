@@ -12,6 +12,7 @@ mod behaviour;
 mod edge_cases;
 mod global_scope;
 mod machine_scope;
+mod pending;
 mod promote;
 
 use std::fs;
