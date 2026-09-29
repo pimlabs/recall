@@ -14,7 +14,7 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
-## Unreleased
+## 0.4.9 — 2026-09-29
 
 - **`recall review run` and `recall review show`: whether memory is still
   true, not just whether it synced.** The worker's evaluation reports
