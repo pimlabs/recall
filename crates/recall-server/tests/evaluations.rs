@@ -809,7 +809,35 @@ async fn end_to_end_the_worker_makes_the_report() {
     .await;
     put(G, "tools.md", "- I use vim\n").await;
 
+    // The worker's own key, enrolled by code and approved before it
+    // starts, so it starts as the enrolled worker it is from then on. Left
+    // to enrol itself it would first wait out the device flow's
+    // five-second poll interval. The real worker enrolling itself against
+    // this server is what jobs.rs's end-to-end test does; here it would
+    // prove nothing more, only take five seconds longer.
     let worker_dir = tempfile::tempdir().unwrap();
+    let mut id =
+        recall_worker::identity::Identity::load_or_create(worker_dir.path(), &url).unwrap();
+    let enrolled = http
+        .post(format!("{url}{}", devices::ENROLL_PATH))
+        .json(&json!({"name": "worker", "public_key": id.public_key(), "agent": "recall-worker/test"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(enrolled.status(), 200);
+    let pending: EnrollPending = enrolled.json().await.unwrap();
+    let approved = http
+        .post(format!("{url}{}", devices::APPROVE_PATH))
+        .bearer_auth(TOKEN)
+        .json(&json!({"user_code": pending.user_code, "scope": "worker"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(approved.status(), 200);
+    let approved: Device = approved.json().await.unwrap();
+    id.device_id = Some(approved.id);
+    id.save(worker_dir.path()).unwrap();
+
     let cfg = recall_worker::config::Config {
         server: url.clone(),
         data_dir: worker_dir.path().to_path_buf(),
@@ -822,23 +850,6 @@ async fn end_to_end_the_worker_makes_the_report() {
     let working = tokio::spawn(worker.run(async {
         let _ = worker_stopped.await;
     }));
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let code = loop {
-        let id = recall_worker::identity::Identity::load(worker_dir.path()).unwrap();
-        if let Some(code) = id.and_then(|id| id.user_code) {
-            break code;
-        }
-        assert!(Instant::now() < deadline, "the worker never enrolled");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    };
-    let approved = http
-        .post(format!("{url}{}", devices::APPROVE_PATH))
-        .bearer_auth(TOKEN)
-        .json(&json!({"user_code": code, "scope": "worker"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(approved.status(), 200);
 
     let run = |contradictions: bool| {
         let (http, url) = (http.clone(), url.clone());

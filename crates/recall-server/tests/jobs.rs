@@ -1206,9 +1206,12 @@ async fn a_full_queue_is_merged_around() {
 }
 
 fn fill_the_queue(h: &Harness) {
-    let conn = rusqlite::Connection::open(h.dir.path().join("recall.db")).unwrap();
+    let mut conn = rusqlite::Connection::open(h.dir.path().join("recall.db")).unwrap();
+    // One transaction, so one sync for the thousand rows rather than one
+    // each, which took seconds; the server sees the same rows either way.
+    let tx = conn.transaction().unwrap();
     for i in 0..recall_server::store::MAX_OPEN_JOBS {
-        conn.execute(
+        tx.execute(
             "INSERT INTO jobs (id, kind, state, project_key, file_path, payload,
                                not_before, created_at, updated_at)
              VALUES (?1, 'merge', 'queued', 'other/project', 'f.md', '{}',
@@ -1218,6 +1221,7 @@ fn fill_the_queue(h: &Harness) {
         )
         .unwrap();
     }
+    tx.commit().unwrap();
 }
 
 /// `/health` answers anyone, so whatever went wrong with a merge it names
