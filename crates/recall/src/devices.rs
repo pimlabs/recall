@@ -766,8 +766,9 @@ pub(crate) fn next_line(command: &str, what: &str) -> String {
 /// When a timestamp in the API's format was, or will be, from now, in the
 /// largest unit that is not zero: `just now`, `12 min ago`, `5 h ago`,
 /// `3 days ago`; `in 20 min`, `in 5 h`, `in 90 days`. The one form a time
-/// takes in the text of these commands; `--json` keeps the timestamp. One
-/// that does not parse is shown as the date it names.
+/// takes in the text of these commands, with the timestamp beside it only
+/// where it is evidence (the rewrite `recall audit` found); `--json` keeps
+/// the timestamp. One that does not parse is shown as the date it names.
 pub(crate) fn relative(stamp: &str) -> String {
     let Some(age) = crate::doctor::age_of(stamp) else {
         return stamp.split('T').next().unwrap_or(stamp).to_string();
