@@ -14,6 +14,21 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
+## Unreleased
+
+- **`recall review run` reads at a glance.** A summary line first, then the
+  files with something to act on, the worst first; each claim on one line
+  with its id (the `t3` that `recall review apply` takes), its lines and a
+  coloured mark, the evidence under it marked the same way, what to do
+  next on a `→` line, and a short Next section at the end. Counts of
+  nothing are left out. `--json` is unchanged.
+- **`recall review run --claude` says why `claude` failed.** A machine
+  where `claude` is not installed or not logged in is told so once, before
+  any call. A failed call now shows what `claude` said (it reports errors
+  on stdout, which was not read, so every failure read "exit 1: (no
+  stderr)"), and the files after it are not asked in that run instead of
+  each failing the same way.
+
 ## 0.4.9 — 2026-09-29
 
 - **`recall review run` and `recall review show`: whether memory is still
