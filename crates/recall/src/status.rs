@@ -10,6 +10,7 @@ use recall_hooks::declared_env::{Declared, Ignored};
 use recall_hooks::{claude, config, exit, project, scope, settings, state, ClientConfig};
 
 use crate::project as proj;
+use crate::ui::{self, Tone};
 
 /// Every variable Recall reads, in the order status reports them.
 ///
@@ -887,368 +888,865 @@ fn declared_empty(rep: &Report, name: &str) -> bool {
         .any(|var| var.name == name && var.empty)
 }
 
-/// One line of the text report, formatted like `println!` and styled by
-/// [`crate::ui::field_line`].
-macro_rules! field {
-    ($($arg:tt)*) => {
-        crate::ui::field_line(&format!($($arg)*))
-    };
+/// Where a variable in the environment was set, as far as it can be known.
+///
+/// A settings file can be named, because it was read. The shell cannot: by
+/// the time a process sees a variable, which profile exported it is gone.
+fn origin(rep: &Report, name: &str) -> String {
+    match declared_in(rep, name) {
+        Some(file) => format!("set by {file}"),
+        None if rep.remote_session => "set in the environment".to_string(),
+        None => "set in this shell".to_string(),
+    }
 }
 
-/// The block that exists because a value set in a settings file and a value
-/// exported from a shell look identical once they are in the environment —
-/// and only one of them is the one the hooks obey.
-fn print_declared_env(rep: &Report) {
-    for (i, var) in rep.declared_env.iter().enumerate() {
-        // Continuation lines are indented to the width of the labels above,
-        // so a multi-variable block reads as one answer rather than four.
-        let label = if i == 0 {
-            "declared env "
+/// What connects this machine, for a line reporting that nothing does.
+fn connect_hint(rep: &Report, url: &str) -> String {
+    match (rep.remote_session, url.is_empty()) {
+        (true, _) => "set RECALL_URL and RECALL_AUTHKEY on the cloud environment".to_string(),
+        (false, true) => "recall connect https://your-recall-host".to_string(),
+        (false, false) => format!("recall connect {url}"),
+    }
+}
+
+/// `1 file`, `3 files`.
+fn files(n: usize) -> String {
+    match n {
+        1 => "1 file".to_string(),
+        n => format!("{n} files"),
+    }
+}
+
+/// How many characters of a hash or a commit a person is shown: plenty to
+/// tell two apart. `--json` carries the whole value.
+const SHORT: usize = 12;
+
+/// A checkpoint as a person reads it, `<size> <root>` with the root cut to
+/// [`SHORT`] characters.
+pub(crate) fn short_checkpoint(header: &str) -> String {
+    match header.split_once(' ') {
+        Some((size, root)) if root.chars().count() > SHORT => {
+            format!("{size} {}…", root.chars().take(SHORT).collect::<String>())
+        }
+        _ => header.to_string(),
+    }
+}
+
+/// A commit cut to [`SHORT`] characters, as git abbreviates one.
+pub(crate) fn short_commit(commit: &str) -> String {
+    commit.chars().take(SHORT).collect()
+}
+
+/// What a report is about, after the command's name: this machine's name,
+/// and the server it talks to. Shared with `recall doctor`, which opens the
+/// same way.
+pub(crate) fn about(cfg: &ClientConfig) -> String {
+    let server = cfg
+        .url
+        .split_once("://")
+        .map(|(_, rest)| rest.trim_end_matches('/'))
+        .unwrap_or("no server");
+    format!("{} → {server}", cfg.source_env)
+}
+
+/// The groups the text report is read in, in `recall doctor`'s order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Group {
+    Connection,
+    Project,
+    Scopes,
+    History,
+}
+
+impl Group {
+    const ALL: [Group; 4] = [
+        Group::Connection,
+        Group::Project,
+        Group::Scopes,
+        Group::History,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            Group::Connection => "Connection",
+            Group::Project => "This project",
+            Group::Scopes => "Scopes",
+            Group::History => "History",
+        }
+    }
+}
+
+/// One line of the text report: its mark, what it is about, what was found
+/// and, when something is wrong, what to run about it.
+///
+/// Built only through the four constructors below, which is what makes the
+/// rule `recall doctor` keeps hold here too: a problem cannot be written
+/// down without what to do about it, because a problem nobody can act on
+/// teaches the reader to skip the report.
+#[derive(Debug)]
+struct Line {
+    group: Group,
+    tone: Tone,
+    label: &'static str,
+    detail: String,
+    fix: Option<String>,
+    /// A dimmed line under the detail: a long path, say, which would push
+    /// the part worth reading off the end of the line.
+    under: Option<String>,
+}
+
+impl Line {
+    fn new(group: Group, tone: Tone, label: &'static str, detail: String) -> Line {
+        Line {
+            group,
+            tone,
+            label,
+            detail,
+            fix: None,
+            under: None,
+        }
+    }
+
+    /// Working.
+    fn good(group: Group, label: &'static str, detail: impl Into<String>) -> Line {
+        Line::new(group, Tone::Good, label, detail.into())
+    }
+
+    /// Off by choice, or not applicable here.
+    fn quiet(group: Group, label: &'static str, detail: impl Into<String>) -> Line {
+        Line::new(group, Tone::Quiet, label, detail.into())
+    }
+
+    /// Worth a look, and what to run about it.
+    fn warn(
+        group: Group,
+        label: &'static str,
+        detail: impl Into<String>,
+        fix: impl Into<String>,
+    ) -> Line {
+        Line {
+            fix: Some(fix.into()),
+            ..Line::new(group, Tone::Warn, label, detail.into())
+        }
+    }
+
+    /// Broken, and what to run about it.
+    fn bad(
+        group: Group,
+        label: &'static str,
+        detail: impl Into<String>,
+        fix: impl Into<String>,
+    ) -> Line {
+        Line {
+            fix: Some(fix.into()),
+            ..Line::new(group, Tone::Bad, label, detail.into())
+        }
+    }
+
+    fn under(mut self, text: impl Into<String>) -> Line {
+        self.under = Some(text.into());
+        self
+    }
+}
+
+/// Reads the report into lines, most fundamental first within each group.
+fn lines(cfg: &ClientConfig, rep: &Report) -> Vec<Line> {
+    let mut out = Vec::new();
+    connection_lines(cfg, rep, &mut out);
+    project_lines(rep, &mut out);
+    scope_lines(rep, &mut out);
+    if let Some(audit) = &rep.audit {
+        out.push(audit_line(audit, rep.server_ok));
+    }
+    out
+}
+
+fn connection_lines(cfg: &ClientConfig, rep: &Report, out: &mut Vec<Line>) {
+    use Group::Connection as C;
+    let config_file = rep.config_file.as_deref().unwrap_or("the config file");
+    let credentials_file = rep
+        .credentials_file
+        .as_deref()
+        .unwrap_or("the credentials file");
+
+    out.push(match rep.url_source {
+        Source::Unset => Line::bad(
+            C,
+            "RECALL_URL",
+            "not set, so nothing syncs",
+            connect_hint(rep, ""),
+        ),
+        Source::Environment => Line::good(
+            C,
+            "RECALL_URL",
+            format!("{}, {}", cfg.url, origin(rep, "RECALL_URL")),
+        ),
+        Source::CredentialsFile | Source::ConfigFile => Line::good(
+            C,
+            "RECALL_URL",
+            format!("{}, saved in {config_file}", cfg.url),
+        ),
+    });
+    out.push(match rep.token_source {
+        Source::Unset if rep.device.is_some() => Line::quiet(
+            C,
+            "RECALL_TOKEN",
+            "not needed, this machine signs its requests",
+        ),
+        Source::Unset if rep.authkey_set => Line::quiet(
+            C,
+            "RECALL_TOKEN",
+            "not needed, RECALL_AUTHKEY enrols this session as a device",
+        ),
+        Source::Unset => Line::bad(C, "RECALL_TOKEN", "not set", connect_hint(rep, &cfg.url)),
+        Source::Environment => Line::good(C, "RECALL_TOKEN", origin(rep, "RECALL_TOKEN")),
+        Source::CredentialsFile | Source::ConfigFile => {
+            Line::good(C, "RECALL_TOKEN", format!("saved in {credentials_file}"))
+        }
+    });
+
+    if rep.url_set && !rep.server_ok {
+        let fix = if rep.remote_session {
+            "add the server's domain under the cloud environment's Allowed domains".to_string()
         } else {
-            "             "
+            format!("curl -sS {}/health", cfg.url.trim_end_matches('/'))
         };
-        let mut note = String::new();
+        out.push(Line::bad(
+            C,
+            "server",
+            format!(
+                "unreachable: {}",
+                rep.server_error.as_deref().unwrap_or("unknown error")
+            ),
+            fix,
+        ));
+    }
+    if rep.server_ok {
+        out.push(Line::good(
+            C,
+            "server",
+            match (&rep.server_version, rep.server_channel.as_deref()) {
+                (Some(v), Some("release") | None) => format!("answered, {v}"),
+                (Some(v), Some(channel)) => format!("answered, {v} ({channel} build)"),
+                (None, _) => format!(
+                    "answered, commit {}",
+                    short_commit(rep.git_commit.as_deref().unwrap_or("unknown"))
+                ),
+            },
+        ));
+        let parse = recall_wire::discovery::Version::parse;
+        let too_old = rep.min_client.as_deref().filter(|min| {
+            matches!(
+                (parse(&rep.client_version), parse(min)),
+                (Some(mine), Some(min)) if mine < min
+            )
+        });
+        out.push(match too_old {
+            Some(min) => Line::bad(
+                C,
+                "client",
+                format!(
+                    "{}, and the server needs at least {min}",
+                    rep.client_version
+                ),
+                "brew upgrade recall, or npm install -g @pimlabs/recall",
+            ),
+            None => Line::good(C, "client", rep.client_version.clone()),
+        });
+    }
+
+    device_lines(rep, out);
+
+    if let Some(err) = &rep.credentials_error {
+        out.push(Line::warn(
+            C,
+            "credentials",
+            format!("{err}, so nothing in it is in effect"),
+            format!("move {credentials_file} aside and run recall connect again"),
+        ));
+    }
+    if rep.credentials_exposed {
+        out.push(Line::warn(
+            C,
+            "credentials",
+            format!("{credentials_file} is readable by other users"),
+            format!("chmod 600 {credentials_file}"),
+        ));
+    }
+    for problem in &rep.config_problems {
+        out.push(Line::warn(
+            C,
+            "config",
+            format!("{problem}, in {config_file}"),
+            format!("edit {config_file}"),
+        ));
+    }
+    for o in &rep.overridden {
+        let from = declared_in(rep, o.variable).unwrap_or("your shell profile");
+        out.push(Line::warn(
+            C,
+            "config",
+            format!(
+                "{}={} overrides {} = {:?} in {config_file}",
+                o.variable, o.environment, o.setting, o.config
+            ),
+            format!(
+                "remove {} from {from}, or change {} to match",
+                o.variable, o.setting
+            ),
+        ));
+    }
+
+    if rep.server_ok {
+        merge_lines(rep, out);
+    }
+}
+
+/// This machine's device, when it has one or the server would enrol one.
+fn device_lines(rep: &Report, out: &mut Vec<Line>) {
+    use Group::Connection as C;
+    let key_file = rep.device_file.as_deref().unwrap_or("~/.recall/device.key");
+    if let Some(err) = &rep.device_error {
+        out.push(Line::bad(
+            C,
+            "device",
+            format!("{err}, so this machine sends nothing to the server"),
+            format!("move {key_file} aside, then recall connect to enrol again"),
+        ));
+    }
+    if rep.device_file_exposed {
+        out.push(Line::warn(
+            C,
+            "device",
+            format!("{key_file} is readable by other users"),
+            format!("chmod 600 {key_file}"),
+        ));
+    }
+    let Some(d) = &rep.device else {
+        if rep.authkey_set {
+            out.push(Line::quiet(
+                C,
+                "device",
+                "none yet, RECALL_AUTHKEY enrols one at the next pull",
+            ));
+        } else if rep.server_devices == Some(true) && rep.token_set {
+            out.push(Line::warn(
+                C,
+                "device",
+                "not enrolled, so this machine uses the shared RECALL_TOKEN",
+                if rep.remote_session {
+                    "on an admin device: recall authkey create --tag cloud --expires 90d, then \
+                     set RECALL_AUTHKEY on the cloud environment and remove RECALL_TOKEN"
+                } else {
+                    "recall connect"
+                },
+            ));
+        }
+        return;
+    };
+    let what = format!(
+        "{} ({}{})",
+        d.name,
+        d.scope,
+        if d.ephemeral { ", ephemeral" } else { "" }
+    );
+    let why = d.check_error.as_deref().unwrap_or("no answer");
+    out.push(match d.confirmed {
+        Some(false) if d.gone => Line::bad(
+            C,
+            "device",
+            format!("{what} is refused by the server: {why}"),
+            if rep.remote_session && rep.authkey_set {
+                "start a new session, which enrols again with RECALL_AUTHKEY"
+            } else {
+                "recall connect"
+            },
+        ),
+        Some(false) => Line::warn(
+            C,
+            "device",
+            format!("{what}, not confirmed by the server: {why}"),
+            "recall status again; if it persists, recall connect",
+        ),
+        Some(true) => Line::good(
+            C,
+            "device",
+            format!("{what}, confirmed by the server, key in {}", d.key_file),
+        ),
+        None => Line::good(C, "device", format!("{what}, key in {}", d.key_file)),
+    });
+}
+
+/// Whether conflicting edits are merged, and what is waiting to be.
+fn merge_lines(rep: &Report, out: &mut Vec<Line>) {
+    use Group::Connection as C;
+    const WORKER_LOGS: &str = "on the server: docker logs recall-worker, and check it is running";
+    const LOG_IN: &str = "on the server: docker exec -it -u node";
+    out.push(match crate::doctor::worker_quiet(rep) {
+        // What the worker last said about its CLI is only as current as
+        // the worker: one that stopped asking for work is not ready,
+        // whatever its last report was.
+        Some(quiet) => Line::warn(
+            C,
+            "merge",
+            format!(
+                "stalled: the merge worker has not asked for work in {} minutes",
+                quiet.whole_minutes()
+            ),
+            WORKER_LOGS,
+        ),
+        None => match (rep.merge_ready, rep.merge_worker) {
+            (true, false) => Line::good(C, "merge", "ready, the server's claude CLI is logged in"),
+            (true, true) => Line::good(
+                C,
+                "merge",
+                "ready, through the merge worker, whose claude CLI is logged in",
+            ),
+            (false, false) => Line::warn(
+                C,
+                "merge",
+                "not configured, so conflicting edits use last-write-wins",
+                format!("{LOG_IN} recall-server claude setup-token"),
+            ),
+            (false, true) => Line::warn(
+                C,
+                "merge",
+                "waiting: the merge worker's claude CLI is not logged in",
+                format!("{LOG_IN} recall-worker claude setup-token"),
+            ),
+        },
+    });
+    let Some(q) = &rep.merge_queue else {
+        return;
+    };
+    let waiting = |since: &str| format!("{} waiting, the oldest since {since}", q.queued);
+    out.push(match q.oldest_queued_at.as_deref() {
+        // An hour is long past what a running worker takes: say so here,
+        // as doctor does, rather than leave the date to be read.
+        Some(since)
+            if crate::doctor::age_of(since).is_some_and(|age| age >= time::Duration::hours(1)) =>
+        {
+            Line::warn(C, "merge queue", waiting(since), WORKER_LOGS)
+        }
+        Some(since) => Line::good(C, "merge queue", waiting(since)),
+        None => Line::good(C, "merge queue", "nothing waiting"),
+    });
+    if q.failed > 0 {
+        out.push(Line::warn(
+            C,
+            "failed merges",
+            format!(
+                "{}; for each, the newest push stands and the merge is kept in its job",
+                q.failed
+            ),
+            "GET /v1/jobs?state=failed, then POST /v1/jobs/{id}/retry, with the operator token",
+        ));
+    }
+}
+
+fn project_lines(rep: &Report, out: &mut Vec<Line>) {
+    use Group::Project as P;
+    out.push(if rep.in_git_repo {
+        Line::good(P, "root", rep.project.clone())
+    } else {
+        Line::quiet(P, "root", format!("{}, not a git repository", rep.project))
+    });
+
+    let key = &rep.project_key;
+    let mut key_line = match rep.project_key_source {
+        KeySource::Declared => Line::good(
+            P,
+            "key",
+            format!(
+                "{key}, declared in RECALL_PROJECT_KEY, {}",
+                match declared_in(rep, "RECALL_PROJECT_KEY") {
+                    Some(file) => format!("set by {file}"),
+                    None => "set in this shell".to_string(),
+                }
+            ),
+        ),
+        KeySource::Remote => Line::good(P, "key", format!("{key}, from the git remote")),
+        KeySource::LocalPath if rep.in_git_repo => Line::warn(
+            P,
+            "key",
+            format!(
+                "{key}, from this checkout's path: with no git remote, another machine \
+                 derives a different one"
+            ),
+            "git remote add origin <url>, or declare RECALL_PROJECT_KEY in .claude/settings.json",
+        ),
+        KeySource::LocalPath => Line::quiet(P, "key", format!("{key}, from this directory's path")),
+        KeySource::DeclaredButRejected => Line::bad(
+            P,
+            "key",
+            format!("{key}, derived: RECALL_PROJECT_KEY is set but unusable, so it was ignored"),
+            "make RECALL_PROJECT_KEY non-empty, free of whitespace, and not under 'global:'",
+        ),
+    };
+    // An empty declaration never reaches `rejected_vars` (an empty value
+    // reads as unset before anything can refuse it), so without this the
+    // line would report a derived key while a settings file is plainly
+    // trying to set it. The `declared` line below carries the fix.
+    if let Some(file) = declared_in(rep, "RECALL_PROJECT_KEY") {
+        if declared_empty(rep, "RECALL_PROJECT_KEY") {
+            key_line.detail.push_str(&format!(
+                "; RECALL_PROJECT_KEY is declared empty in {file}, which reads as unset"
+            ));
+        }
+    }
+    out.push(key_line);
+
+    out.push(match (rep.hooks_wired, rep.in_git_repo) {
+        (true, _) => Line::good(P, "hooks", "wired in .claude/settings.json"),
+        (false, true) => Line::bad(
+            P,
+            "hooks",
+            "not wired, so nothing here syncs",
+            "recall init",
+        ),
+        (false, false) => Line::quiet(P, "hooks", "nothing to wire outside a git repository"),
+    });
+    out.push(
+        match rep.memory_files {
+            0 => Line::quiet(P, "memory", "no files yet"),
+            n => Line::good(P, "memory", format!("{} on disk", files(n))),
+        }
+        .under(rep.memory_dir.clone()),
+    );
+    // Only when the server was asked: it was not without a credential.
+    if rep.server_ok && rep.auth != "none" {
+        out.push(Line::good(
+            P,
+            "synced",
+            format!("{} on the server", files(rep.synced_files)),
+        ));
+    }
+    if rep.remote_session {
+        out.push(if rep.remote_memory_dir_set {
+            Line::good(P, "remote memory", "CLAUDE_CODE_REMOTE_MEMORY_DIR is set")
+        } else {
+            Line::bad(
+                P,
+                "remote memory",
+                "CLAUDE_CODE_REMOTE_MEMORY_DIR is not set, so auto-memory is off in this \
+                 remote session",
+                "set it to /home/user/.claude on the cloud environment (not $HOME)",
+            )
+        });
+    }
+
+    // Settings files, which is where a value actually comes from once one
+    // declares it: the shell's is replaced, not consulted.
+    for var in &rep.declared_env {
+        let mut detail = format!("{} from {}", var.name, var.file);
         if var.empty {
-            note.push_str(", declared EMPTY, so the setting is off");
+            detail.push_str(", declared empty, so the setting is off");
         }
         if var.shadows_shell {
-            note.push_str(if var.empty {
+            detail.push_str(if var.empty {
                 ", and it hides the value set in this shell"
             } else {
                 ", overrides the value set in this shell"
             });
         }
-        field!("{label}: {} from {}{note}", var.name, var.file);
+        out.push(if var.empty {
+            let fix = format!(
+                "give {} a value in {}, or remove it there",
+                var.name, var.file
+            );
+            Line::warn(P, "declared", detail, fix)
+        } else {
+            Line::good(P, "declared", detail)
+        });
     }
-
     for var in &rep.ignored_env {
-        field!(
-            "settings     : {} in {} is not a string, so it sets nothing",
-            var.name,
-            var.file
-        );
+        out.push(Line::warn(
+            P,
+            "declared",
+            format!(
+                "{} in {} is not a string, so it sets nothing",
+                var.name, var.file
+            ),
+            format!("quote its value in {}", var.file),
+        ));
     }
-
     for file in &rep.unreadable_settings {
-        field!("settings     : UNREADABLE — {file}");
-    }
-    if !rep.unreadable_settings.is_empty() {
-        field!(
-            "               Claude Code cannot read it either, so nothing it \
-declares is in effect for the hooks."
-        );
+        out.push(Line::bad(
+            P,
+            "settings",
+            format!(
+                "{file} is not readable JSON, so nothing it declares is in effect; Claude \
+                 Code cannot read it either"
+            ),
+            format!("fix the JSON in {file}"),
+        ));
     }
 }
 
-fn print_audit(audit: &AuditReport) {
+/// The global and machine scopes, each asked the questions `recall doctor`
+/// asks of them.
+fn scope_lines(rep: &Report, out: &mut Vec<Line>) {
+    use Group::Scopes as S;
+    let scopes = [
+        (
+            "global",
+            "RECALL_GLOBAL_KEY",
+            scope::GLOBAL_DIR,
+            &rep.global_key,
+            rep.global_files,
+            rep.global_linked,
+            // Deliberately an invitation: sharing more is usually what
+            // someone wants.
+            "set RECALL_GLOBAL_KEY to share memories across projects",
+        ),
+        (
+            "machine",
+            "RECALL_MACHINE_KEY",
+            scope::MACHINE_DIR,
+            &rep.machine_key,
+            rep.machine_files,
+            rep.machine_linked,
+            // Deliberately not an invitation: this content is true of one
+            // machine only, and a cloud session, a new machine every time,
+            // should leave it off.
+            "name this machine with recall connect",
+        ),
+    ];
+    for (label, var, dir, key, count, linked, when_off) in scopes {
+        out.push(match key {
+            None if rep.rejected_vars.contains(&var) => Line::bad(
+                S,
+                label,
+                format!("off: {var} is set but empty once trimmed, so it was ignored"),
+                format!("give {var} a value, or unset it"),
+            ),
+            // An empty *declaration* never reaches `rejected_vars`; the
+            // `declared` line above says so and carries the fix.
+            None if declared_empty(rep, var) => Line::quiet(
+                S,
+                label,
+                format!(
+                    "off, because {} declares {var} empty",
+                    declared_in(rep, var).unwrap_or("a settings file")
+                ),
+            ),
+            // Off with files under it: they are not filed under the
+            // project either, so they sync nowhere at all.
+            None if count > 0 => Line::warn(
+                S,
+                label,
+                format!("off, but {} under {dir}/ sync nowhere", files(count)),
+                format!("set {var}, or move the files out of {dir}/"),
+            ),
+            None => Line::quiet(S, label, format!("off; {when_off}")),
+            Some(key) if count == 0 => Line::good(S, label, format!("{key}, no files yet")),
+            Some(key) if linked => Line::good(
+                S,
+                label,
+                format!("{key}, {} linked from MEMORY.md", files(count)),
+            ),
+            // The state the machine scope shipped in: the files arrive and
+            // Claude Code never opens them, because it reads what
+            // MEMORY.md links.
+            Some(key) => Line::bad(
+                S,
+                label,
+                format!(
+                    "{key}, {}, but MEMORY.md links none of them, so Claude Code never reads \
+                     them",
+                    files(count)
+                ),
+                "recall pull",
+            ),
+        });
+    }
+    if let Some(d) = &rep.miscased_dir {
+        out.push(Line::bad(
+            S,
+            "directory",
+            format!(
+                "{}/ is not {}/, so nothing under it syncs. On macOS the two are one directory \
+                 and on Linux they are not, so Recall files it nowhere",
+                d.found, d.reserved
+            ),
+            format!(
+                "rename {}/ to {}/ in the memory directory",
+                d.found, d.reserved
+            ),
+        ));
+    }
+}
+
+/// This machine's witness of the server's audit log, in one line.
+/// `server_ok`: whether the server answered at all, which the server's own
+/// line has already reported when it did not.
+fn audit_line(audit: &AuditReport, server_ok: bool) -> Line {
+    use Group::History as H;
+    const LABEL: &str = "audit log";
     if let Some(found) = &audit.inconsistent {
-        field!(
-            "audit log    : REWRITTEN, found {}: {}{}; see recall doctor",
-            found.found_at,
-            found.detail,
-            if audit.unsaved.is_some() {
-                " (NOT SAVED to audit.json this time)"
-            } else {
-                ""
-            }
-        );
-    } else if let Some(err) = &audit.file_error {
-        field!("audit log    : UNREADABLE ({err}); it may hold the only record of a rewrite");
-    } else if audit.dropped > 0 {
-        field!(
-            "audit log    : {} checkpoint(s) DROPPED unchecked, a gap a rewrite could hide in; \
-             see recall doctor",
-            audit.dropped
-        );
-    } else if let Some(why) = &audit.unproven {
-        field!("audit log    : NOT PROVEN, the server answered without a proof: {why}");
-    } else if audit.extends == Some(true) {
-        field!(
-            "audit log    : extends every checkpoint saved here ({} kept, newest {})",
-            audit.checkpoints,
-            audit.newest.as_deref().unwrap_or("none")
-        );
-    } else if let Some(err) = &audit.error {
-        field!(
-            "audit log    : not checked ({err}), {} checkpoint(s) saved{}",
-            audit.saved(),
-            match audit.refused {
-                true => "; the server refused this machine's credential, see recall doctor",
-                false => "",
-            }
-        );
-    } else if audit.server_log == Some(false) && audit.saved() == 0 {
-        field!("audit log    : not kept by this server (older than 0.4.2)");
-    } else if audit.saved() > 0 {
-        field!(
-            "audit log    : {} checkpoint(s) saved, not checked",
-            audit.saved()
+        return Line::bad(
+            H,
+            LABEL,
+            format!(
+                "rewritten: the server's log no longer extends a checkpoint saved here (found \
+                 {}): {}{}",
+                found.found_at,
+                found.detail,
+                if audit.unsaved.is_some() {
+                    ", and this could not be saved to audit.json"
+                } else {
+                    ""
+                }
+            ),
+            crate::audit::AFTER_A_REWRITE,
         );
     }
+    if let Some(err) = &audit.file_error {
+        return Line::bad(
+            H,
+            LABEL,
+            format!("{err}; it may hold the only record of a rewrite"),
+            format!(
+                "look at {} first; move it aside only once you know what it held",
+                audit.file
+            ),
+        );
+    }
+    if audit.dropped > 0 {
+        return Line::bad(
+            H,
+            LABEL,
+            format!(
+                "{} checkpoint(s) dropped unchecked, a gap a rewrite could hide in",
+                audit.dropped
+            ),
+            "recall audit verify",
+        );
+    }
+    if let Some(why) = &audit.unproven {
+        return Line::bad(
+            H,
+            LABEL,
+            format!("not proven: the server answered without a proof: {why}"),
+            "recall audit verify",
+        );
+    }
+    if audit.extends == Some(true) {
+        let newest = audit.newest.as_deref().map(short_checkpoint);
+        return Line::good(
+            H,
+            LABEL,
+            format!(
+                "extends every checkpoint saved here ({} kept, newest {})",
+                audit.checkpoints,
+                newest.as_deref().unwrap_or("none")
+            ),
+        );
+    }
+    if let Some(err) = &audit.error {
+        // Said once: an unreachable server is the server line's to report.
+        let why = if server_ok || audit.refused {
+            err.as_str()
+        } else {
+            "the server did not answer"
+        };
+        let detail = format!("not checked ({why}); {} checkpoint(s) saved", audit.saved());
+        return match (audit.refused, audit.saved()) {
+            (true, _) => Line::warn(
+                H,
+                LABEL,
+                detail,
+                "recall connect, if the server no longer accepts this device",
+            ),
+            // Nothing saved is nothing left unproven.
+            (false, 0) => Line::quiet(H, LABEL, detail),
+            (false, _) => Line::warn(
+                H,
+                LABEL,
+                detail,
+                "recall audit verify, once the server answers",
+            ),
+        };
+    }
+    if audit.server_log == Some(false) && audit.saved() == 0 {
+        return Line::quiet(H, LABEL, "not kept by this server (older than 0.4.2)");
+    }
+    if audit.saved() > 0 {
+        return Line::warn(
+            H,
+            LABEL,
+            format!("{} checkpoint(s) saved, not checked", audit.saved()),
+            "recall audit verify",
+        );
+    }
+    Line::quiet(H, LABEL, "nothing saved yet")
 }
 
 fn print_text(cfg: &ClientConfig, rep: &Report) {
-    crate::ui::title("recall status", &cfg.source_env);
-    anstream::println!();
-    field!("project      : {}", rep.project);
-    // Bound rather than inlined: one arm has to name the settings file the
-    // key came from, and a `format!` inside a `match` inside a `println!`
-    // does not outlive the statement that borrows it.
-    let key_source = match rep.project_key_source {
-        KeySource::Declared => format!(
-            "declared in RECALL_PROJECT_KEY, {}",
-            match declared_in(rep, "RECALL_PROJECT_KEY") {
-                Some(file) => format!("set by {file}"),
-                None => "set in this shell".to_string(),
-            }
-        ),
-        KeySource::Remote => "from the git remote".to_string(),
-        KeySource::LocalPath => {
-            "from this checkout's path. With no git remote another machine will \
-             disagree, so set RECALL_PROJECT_KEY on both"
-                .to_string()
+    ui::title("recall status", &about(cfg));
+    let lines = lines(cfg, rep);
+    let width = lines.iter().map(|l| l.label.len()).max().unwrap_or(0);
+    for group in Group::ALL {
+        let items: Vec<&Line> = lines.iter().filter(|l| l.group == group).collect();
+        if items.is_empty() {
+            continue;
         }
-        KeySource::DeclaredButRejected => {
-            "RECALL_PROJECT_KEY was SET BUT UNUSABLE and ignored. It must be \
-             non-empty, free of whitespace, and not under 'global:'"
-                .to_string()
-        }
-    };
-    // An empty declaration never reaches `rejected_vars` — an empty value
-    // reads as unset before anything can refuse it — so without this the
-    // line would report a derived key while a settings file three lines
-    // below is plainly trying to set it.
-    let key_source = match declared_in(rep, "RECALL_PROJECT_KEY") {
-        Some(file) if declared_empty(rep, "RECALL_PROJECT_KEY") => format!(
-            "{key_source}; RECALL_PROJECT_KEY is declared empty in {file}, which reads as unset"
-        ),
-        _ => key_source,
-    };
-    field!("project_key  : {} ({key_source})", rep.project_key);
-    field!("memory dir   : {}", rep.memory_dir);
-    field!("memory files : {} on disk", rep.memory_files);
-    field!(
-        "hooks wired  : {}",
-        if rep.hooks_wired {
-            "yes"
-        } else {
-            "NO, run 'recall init' in this project"
-        }
-    );
-    print_declared_env(rep);
-    field!(
-        "global       : {}",
-        match &rep.global_key {
-            None if rep.rejected_vars.contains(&"RECALL_GLOBAL_KEY") =>
-                "off, RECALL_GLOBAL_KEY was SET BUT EMPTY once trimmed, so it was ignored"
-                    .to_string(),
-            // An empty *declaration* never reaches `rejected_vars`: an empty
-            // value reads as unset before anything gets a chance to refuse
-            // it. Without this arm the line would advise setting a variable
-            // that is already set, two lines under a report saying where it
-            // was set and that it is empty.
-            None if declared_empty(rep, "RECALL_GLOBAL_KEY") => format!(
-                "off, RECALL_GLOBAL_KEY is declared empty in {}, which reads as unset",
-                declared_in(rep, "RECALL_GLOBAL_KEY").unwrap_or("a settings file")
-            ),
-            None => "off (set RECALL_GLOBAL_KEY to share memories across projects)".to_string(),
-            Some(key) if rep.global_linked =>
-                format!("{key}, {} file(s), linked from MEMORY.md", rep.global_files),
-            Some(key) => format!(
-                "{key}, {} file(s), NOT linked from MEMORY.md yet (run 'recall pull')",
-                rep.global_files
-            ),
-        }
-    );
-    field!(
-        "machine      : {}",
-        match &rep.machine_key {
-            None if rep.rejected_vars.contains(&"RECALL_MACHINE_KEY") =>
-                "off, RECALL_MACHINE_KEY was SET BUT EMPTY once trimmed, so it was ignored"
-                    .to_string(),
-            None if declared_empty(rep, "RECALL_MACHINE_KEY") => format!(
-                "off, RECALL_MACHINE_KEY is declared empty in {}, which reads as unset",
-                declared_in(rep, "RECALL_MACHINE_KEY").unwrap_or("a settings file")
-            ),
-            // Deliberately not phrased as an invitation. The global line
-            // suggests setting a key because sharing more is usually what
-            // someone wants; this content is true of one machine only, and a
-            // cloud session — a new machine every time — should leave it off.
-            None => "off (name this machine with recall connect)".to_string(),
-            Some(key) if rep.machine_files == 0 => format!("{key}, no files yet"),
-            Some(key) if rep.machine_linked => {
-                format!(
-                    "{key}, {} file(s), linked from MEMORY.md",
-                    rep.machine_files
-                )
-            }
-            // The state this scope shipped in: the files arrive and Claude
-            // Code never opens them, because it reads what MEMORY.md links.
-            Some(key) => format!(
-                "{key}, {} file(s), NOT linked from MEMORY.md yet (run 'recall pull')",
-                rep.machine_files
-            ),
-        }
-    );
-    if let Some(d) = &rep.miscased_dir {
-        field!(
-            "             ! '{}/' is not '{}/', so nothing under it syncs. On \
-             macOS the two are the same directory and on Linux they are not, so \
-             Recall refuses rather than file it somewhere you did not mean. \
-             Rename it to '{}'.",
-            d.found,
-            d.reserved,
-            d.reserved
-        );
-    }
-    let from_file = rep
-        .credentials_file
-        .as_deref()
-        .unwrap_or("the credentials file");
-    let from_config = rep.config_file.as_deref().unwrap_or("the config file");
-    field!(
-        "RECALL_URL   : {}",
-        match rep.url_source {
-            Source::Unset => "(unset)".to_string(),
-            Source::Environment => cfg.url.clone(),
-            Source::CredentialsFile | Source::ConfigFile => {
-                format!("{} (from {from_config})", cfg.url)
+        let about = match group {
+            Group::Project => rep.project_key.as_str(),
+            _ => "",
+        };
+        ui::section(group.name(), about);
+        for l in items {
+            ui::check_fitted(
+                l.tone,
+                l.label,
+                width,
+                &ui::tilde(&l.detail),
+                l.fix.as_deref().map(ui::tilde).as_deref(),
+            );
+            if let Some(under) = &l.under {
+                anstream::println!("{}{}", " ".repeat(width + 6), ui::dim(&ui::tilde(under)));
             }
         }
-    );
-    field!(
-        "RECALL_TOKEN : {}",
-        match rep.token_source {
-            Source::Unset if rep.device.is_some() => {
-                "(unset, not needed: this machine signs its requests)".to_string()
-            }
-            Source::Unset => "(unset)".to_string(),
-            Source::Environment => match declared_in(rep, "RECALL_TOKEN") {
-                Some(file) => format!("set, by {file}"),
-                None => "set, in this shell".to_string(),
-            },
-            Source::CredentialsFile | Source::ConfigFile => {
-                format!("saved in {from_file}")
-            }
-        }
-    );
-    if let Some(d) = &rep.device {
-        field!(
-            "device       : {} ({}{}), key in {}",
-            d.name,
-            d.scope,
-            if d.ephemeral { ", ephemeral" } else { "" },
-            d.key_file
-        );
-    } else if rep.authkey_set {
-        field!("device       : none yet, RECALL_AUTHKEY enrols one at the next pull");
-    }
-    if let Some(err) = &rep.device_error {
-        field!("device       : UNREADABLE ({err})");
-    }
-    for problem in &rep.config_problems {
-        field!("config       : {problem} ({from_config})");
-    }
-    for o in &rep.overridden {
-        field!(
-            "config       : {}={} overrides {} = {:?} in {from_config}",
-            o.variable,
-            o.environment,
-            o.setting,
-            o.config
-        );
-    }
-    if let Some(err) = &rep.credentials_error {
-        field!("credentials  : UNREADABLE ({err})");
-    }
-    if rep.credentials_exposed {
-        field!("credentials  : readable by other users, run chmod 600 {from_file}");
     }
 
-    if !rep.url_set {
-        return;
-    }
-    // Before the server's lines, and whether or not it answered: a rewrite
-    // found earlier stays found while the server is down.
-    if let Some(audit) = &rep.audit {
-        print_audit(audit);
-    }
-    if !rep.server_ok {
-        field!(
-            "server       : UNREACHABLE ({})",
-            rep.server_error.as_deref().unwrap_or("unknown error")
-        );
-        return;
-    }
-
-    match (&rep.server_version, &rep.server_channel) {
-        (Some(version), Some(channel)) => {
-            field!("server       : reachable ({version}, {channel} build)")
-        }
-        _ => field!(
-            "server       : reachable (git_commit {})",
-            rep.git_commit.as_deref().unwrap_or("unknown")
+    // The closing line, in `recall doctor`'s words, so the two commands
+    // never describe the same state differently.
+    let count = |tone| lines.iter().filter(|l| l.tone == tone).count();
+    match (count(Tone::Bad), count(Tone::Warn)) {
+        (0, 0) if !rep.in_git_repo => ui::verdict(
+            Tone::Good,
+            "Connected. Outside a git repository there is nothing here to sync.",
         ),
-    }
-    field!("client       : {}", rep.client_version);
-    match (&rep.device, rep.server_devices) {
-        (Some(d), _) if d.gone => field!(
-            "device       : REFUSED by the server ({}), run recall connect",
-            d.check_error.as_deref().unwrap_or("unknown device")
-        ),
-        (Some(d), _) if d.confirmed == Some(false) => field!(
-            "device       : not confirmed ({})",
-            d.check_error.as_deref().unwrap_or("no answer")
-        ),
-        (Some(_), _) => field!("device       : confirmed by the server"),
-        (None, Some(true)) => {
-            field!("device       : not enrolled, this machine uses the shared token")
-        }
-        _ => {}
-    }
-    match crate::doctor::worker_quiet(rep) {
-        // What the worker last said about its CLI is only as current as
-        // the worker: one that stopped asking for work is not ready,
-        // whatever its last report was.
-        Some(quiet) => field!(
-            "merge        : stalled: the merge worker has not asked for work in {} minutes; \
-             is recall-worker running?",
-            quiet.whole_minutes()
-        ),
-        None => field!(
-            "merge        : {}",
-            match (rep.merge_ready, rep.merge_worker) {
-                (true, false) => "ready (claude CLI logged in)",
-                (true, true) => "ready (merge worker, claude CLI logged in)",
-                (false, false) => "not configured, so the server uses last-write-wins",
-                (false, true) => "waiting: the merge worker's claude CLI is not logged in",
-            }
-        ),
-    }
-    if let Some(q) = &rep.merge_queue {
-        match &q.oldest_queued_at {
-            // An hour is long past what a running worker takes: say so
-            // here, as doctor does, rather than leave the date to be read.
-            Some(since)
-                if crate::doctor::age_of(since)
-                    .is_some_and(|age| age >= time::Duration::hours(1)) =>
-            {
-                field!(
-                    "merge queue  : {} waiting since {since}; is recall-worker running?",
-                    q.queued
-                )
-            }
-            Some(since) => field!(
-                "merge queue  : {} waiting, the oldest since {since}",
-                q.queued
+        (0, 0) if rep.server_ok && rep.auth != "none" => ui::verdict(
+            Tone::Good,
+            &format!(
+                "{} syncs: {} here, {} on the server.",
+                rep.project_key,
+                files(rep.memory_files),
+                rep.synced_files
             ),
-            None => field!("merge queue  : nothing waiting"),
-        }
-        if q.failed > 0 {
-            field!("failed merges: {}; see GET /v1/jobs?state=failed", q.failed);
-        }
+        ),
+        (0, 0) => ui::verdict(
+            Tone::Good,
+            &format!("{} is set up to sync.", rep.project_key),
+        ),
+        (0, w) => ui::verdict(
+            Tone::Warn,
+            &format!("Nothing broken. {w} thing(s) worth a look."),
+        ),
+        (b, _) => ui::verdict(
+            Tone::Bad,
+            &format!(
+                "{b} problem(s). {}",
+                if rep.url_set {
+                    "Some of it is not syncing."
+                } else {
+                    "Nothing syncs here."
+                }
+            ),
+        ),
     }
-    field!("synced files : {} on server", rep.synced_files);
 }
 
 #[cfg(test)]
@@ -1307,6 +1805,113 @@ mod tests {
             audit: Duration::from_secs(10),
         };
         collect_within(&here, &cfg, deadlines).await
+    }
+
+    /// Every line of the text report that marks a problem carries what to
+    /// run about it, the rule `recall doctor` keeps: a problem nobody can
+    /// act on teaches the reader to skip the report. `Line::warn` and
+    /// `Line::bad` take the fix; this is the guard on a line built some
+    /// other way. Mutation: build one with `Line::new` and no fix.
+    #[test]
+    fn every_problem_line_says_what_to_run() {
+        let healthy = crate::doctor::tests::healthy;
+        let cfg = ClientConfig::default();
+        let mut reports = Vec::new();
+
+        let mut rep = healthy();
+        rep.url_set = false;
+        rep.url_source = Source::Unset;
+        rep.token_set = false;
+        rep.token_source = Source::Unset;
+        rep.hooks_wired = false;
+        rep.project_key_source = KeySource::DeclaredButRejected;
+        rep.rejected_vars = vec!["RECALL_PROJECT_KEY", "RECALL_GLOBAL_KEY"];
+        rep.unreadable_settings = vec!["/w/app/.claude/settings.json".into()];
+        rep.miscased_dir = Some(MiscasedDir {
+            found: "Global".into(),
+            reserved: "global",
+        });
+        reports.push(rep);
+
+        let mut rep = healthy();
+        rep.server_ok = false;
+        rep.server_error = Some("timed out".into());
+        rep.project_key_source = KeySource::LocalPath;
+        rep.credentials_exposed = true;
+        rep.credentials_error = Some("bad TOML".into());
+        rep.config_problems = vec!["unknown key 'sever'".into()];
+        rep.machine_key = Some("machine:jarvis".into());
+        rep.machine_files = 2;
+        rep.global_files = 1;
+        rep.device_error = Some("device.key is damaged".into());
+        rep.device_file_exposed = true;
+        rep.remote_session = true;
+        rep.remote_memory_dir_set = false;
+        rep.audit.as_mut().unwrap().dropped = 2;
+        reports.push(rep);
+
+        let mut rep = healthy();
+        rep.merge_ready = false;
+        rep.min_client = Some("9.0.0".into());
+        rep.server_devices = Some(true);
+        rep.merge_queue = Some(recall_wire::QueueStatus {
+            queued: 3,
+            oldest_queued_at: Some("2020-01-01T00:00:00.000Z".into()),
+            failed: 1,
+            ..Default::default()
+        });
+        rep.audit = Some(AuditReport {
+            error: Some("forbidden".into()),
+            refused: true,
+            checkpoints: 1,
+            ..Default::default()
+        });
+        reports.push(rep);
+
+        let mut problems = 0;
+        for rep in &reports {
+            for line in lines(&cfg, rep) {
+                if matches!(line.tone, Tone::Bad | Tone::Warn) {
+                    problems += 1;
+                    assert!(line.fix.is_some(), "a problem with no fix: {line:?}");
+                }
+            }
+        }
+        // Enough of them that the loop above is testing something.
+        assert!(problems >= 20, "{problems}");
+    }
+
+    /// A healthy report is all good lines, closed by a count of what is
+    /// here and on the server, and says nothing a person has to act on.
+    #[test]
+    fn a_healthy_report_has_nothing_to_act_on() {
+        let rep = crate::doctor::tests::healthy();
+        let lines = lines(&ClientConfig::default(), &rep);
+        assert!(
+            lines
+                .iter()
+                .all(|l| matches!(l.tone, Tone::Good | Tone::Quiet) && l.fix.is_none()),
+            "{lines:#?}"
+        );
+        let audit = lines.iter().find(|l| l.label == "audit log").unwrap();
+        assert!(
+            audit.detail.contains("newest 1042 CsUYapGGPo4d…"),
+            "the root is cut short: {audit:?}"
+        );
+    }
+
+    #[test]
+    fn a_checkpoint_and_a_commit_are_cut_short_for_reading() {
+        assert_eq!(
+            short_checkpoint("1042 CsUYapGGPo4dkMgIAUqom/Xajj7h2fB2MPA3j2jxq2I="),
+            "1042 CsUYapGGPo4d…"
+        );
+        assert_eq!(short_checkpoint("7 short"), "7 short");
+        assert_eq!(
+            short_commit("0fa9e05aa1b2c3d4e5f60718293a4b5c6d7e8f90"),
+            "0fa9e05aa1b2"
+        );
+        assert_eq!(short_commit("a1b2c3d"), "a1b2c3d");
     }
 
     /// A credential the audit routes refuse is reported as that, for

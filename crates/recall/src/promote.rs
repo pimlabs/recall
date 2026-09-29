@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use recall_hooks::{exit, PromoteError, PromoteTarget};
 
 use crate::project;
+use crate::ui::{self, Tone};
 
 /// The destinations `--to` accepts.
 ///
@@ -41,40 +42,46 @@ pub async fn run(file: &Path, to: Target) -> anyhow::Result<i32> {
 
     match recall_hooks::promote(&ctx, &path, to.into()).await {
         Ok(res) => {
-            if res.resumed {
-                println!(
-                    "recall: finished an earlier promotion of {}, it was already in {}",
-                    res.from, res.to
-                );
-            } else {
-                println!("recall: promoted {} → {}", res.from, res.to);
-            }
             // What happens next differs by scope, and getting it wrong in
             // either direction is the confusion this command exists to
             // prevent: a machine note is not going to appear in every
             // project, and saying so would be a promise Recall does not keep.
-            match to {
-                Target::Global => {
-                    if let Some(global) = ctx.global() {
-                        println!(
-                            "
-  It is stored under {} and linked from MEMORY.md. Every other project
-  picks it up at its next session start, when the pull hook runs.",
-                            global.key
-                        );
-                    }
-                }
-                Target::Machine => {
-                    if let Some(machine) = ctx.machine() {
-                        println!(
-                            "
-  It is stored under {} and linked from MEMORY.md. It follows this machine
-  into every project here, and reaches no other machine.",
-                            machine.key
-                        );
-                    }
-                }
+            let (scope, next) = match to {
+                Target::Global => (
+                    ctx.global(),
+                    "Every other project picks it up at its next session start.",
+                ),
+                Target::Machine => (
+                    ctx.machine(),
+                    "It follows this machine into every project here, and reaches no other \
+                     machine.",
+                ),
+            };
+            let key = scope.map(|s| s.key.as_str()).unwrap_or_default();
+            ui::title("recall promote", &format!("{} → {key}", ctx.project_key()));
+            anstream::println!();
+            if res.resumed {
+                ui::step(
+                    Tone::Good,
+                    &format!(
+                        "Finished an earlier promotion: {} was already in {}",
+                        res.from, res.to
+                    ),
+                    None,
+                );
+            } else {
+                ui::step(
+                    Tone::Good,
+                    &format!("Moved {} to {}", res.from, res.to),
+                    None,
+                );
             }
+            ui::step(
+                Tone::Good,
+                &format!("Stored under {key}, and linked from MEMORY.md"),
+                None,
+            );
+            ui::verdict(Tone::Good, next);
             Ok(exit::OK)
         }
         Err(err) => {

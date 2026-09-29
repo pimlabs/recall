@@ -627,7 +627,10 @@ list of things that are not actually wrong. After a pull, what is left to
 send is only what this machine has and the server has never seen.
 
 It asks the server what it already holds, then sends what is missing. It
-prints a count and then names anything it left behind.
+names anything it left behind, a group at a time with what to do about it,
+and closes with one line for the whole run: `Sent 3 files. The server has
+all 5 now.`, or `Nothing to send: the server already has all 5 files.` A
+count of zero appears only when zero is the answer.
 
 **It deliberately sends less than everything on your disk.** `POST /sync`
 overwrites in place: no timestamp comparison, no conflict, whatever arrives
@@ -724,6 +727,40 @@ whether `RECALL_URL`/`RECALL_TOKEN` are set, whether the server answers,
 whether merge is actually configured server-side, and how many files the
 server holds for this project.
 
+```
+recall status  laptop → recall.example.com
+
+Connection
+  ✓ RECALL_URL    https://recall.example.com, saved in ~/.recall/config.toml
+  ○ RECALL_TOKEN  not needed, this machine signs its requests
+  ✓ server        answered, 0.4.9
+  ✓ client        0.4.9
+  ✓ device        laptop (admin), confirmed by the server, key in ~/.recall/device.key
+  ✓ merge         ready, the server's claude CLI is logged in
+
+This project  acme/app
+  ✓ root          ~/code/app
+  ✓ key           acme/app, from the git remote
+  ✓ hooks         wired in .claude/settings.json
+  ✓ memory        12 files on disk
+                  ~/.claude/projects/-Users-me-code-app/memory
+  ✓ synced        12 files on the server
+
+Scopes
+  ○ global        off; set RECALL_GLOBAL_KEY to share memories across projects
+  ✓ machine       machine:laptop, no files yet
+
+History
+  ✓ audit log     extends every checkpoint saved here (41 kept, newest 1042 CsUYapGGPo4d…)
+
+✓ acme/app syncs: 12 files here, 12 on the server.
+```
+
+The marks are `recall doctor`'s: `✓` working, `!` worth a look, `✗` broken, `○`
+off or not applicable here. Anything marked `!` or `✗` has what to run on the
+`→` line under it. Home is shown as `~`, and a long hash is cut short; `recall
+status --json` carries every value whole.
+
 It reports them as the *hooks* would see them, not as your shell holds them
 — which is the same thing on most machines and emphatically not the same
 thing on a project that declares anything in `.claude/settings.json`.
@@ -751,30 +788,44 @@ Same questions, read as verdicts, and **non-zero when sync is actually
 broken**:
 
 ```
-  FAIL RECALL_URL                     not set anywhere
-                                      → cloud environment: the "Add/Edit cloud environment" dialog; laptop: recall connect <url>
-  FAIL CLAUDE_CODE_REMOTE_MEMORY_DIR  not set in a remote session, so Claude Code's
-                                        auto-memory is off entirely and there is nothing
-                                        for Recall to sync
-                                      → set it on this cloud environment, and note it is
-                                        not $HOME: /home/user/.claude
-  ok   hooks                          wired in .claude/settings.json
+recall doctor  cloud → no server
 
-  2 problem(s). Recall is not syncing anything here.
+Connection
+  ✗ RECALL_URL    not set anywhere
+                  → cloud environment: the "Add/Edit cloud environment" dialog; laptop:
+                    recall connect <url>
+  ✗ RECALL_TOKEN  not set anywhere
+                  → cloud environment: the "Add/Edit cloud environment" dialog; laptop:
+                    recall connect <url>
+
+This project  acme/app
+  ✓ hooks                          wired in .claude/settings.json
+  ✗ CLAUDE_CODE_REMOTE_MEMORY_DIR  not set, so auto-memory is off in this remote session
+                                   → set it to /home/user/.claude on the cloud environment
+                                     (not $HOME)
+  ✓ memory dir                     ~/.claude/projects/-home-user-app/memory (0 files)
+
+Scopes
+  ○ global scope   off
+  ○ machine scope  off
+
+✗ 3 problem(s). Nothing syncs here.
 ```
 
 The exit code is the reason this exists rather than the formatting. `recall
-status` prints `(unset)` and exits `0`; `recall pull` warns on stderr and
-exits `0` so a hook can never fail your session. Both are right on their own,
-and together they mean an environment that has *never* synced anything looks
-exactly like one with nothing new to sync. This repository lost a day of
-memory to that before the command existed, in its own cloud environment.
+status` marks an unset `RECALL_URL` and exits `0`; `recall pull` warns on
+stderr and exits `0` so a hook can never fail your session. Both are right on
+their own, and together they mean an environment that has *never* synced
+anything looks exactly like one with nothing new to sync. This repository lost
+a day of memory to that before the command existed, in its own cloud
+environment.
 
-`FAIL` means memory is not syncing, or is syncing somewhere you did not ask
-for. `warn` means something is not doing what it looks like it does — files
-sitting under a scope that is switched off, a server that is up but falling
-back to last-write-wins — and never changes the exit code, because a check
-that fails on taste is a check people append `|| true` to.
+`✗` (`fail` in `--json`) means memory is not syncing, or is syncing somewhere
+you did not ask for. `!` (`warn`) means something is not doing what it looks
+like it does — files sitting under a scope that is switched off, a server that
+is up but falling back to last-write-wins — and never changes the exit code,
+because a check that fails on taste is a check people append `|| true` to.
+`○` is something off by choice, or that does not apply here.
 
 One of them is about the server rather than this machine. **`off-box backup`**
 reports when a copy last reached somewhere the loss of the server does not
@@ -786,21 +837,22 @@ than two days old. Two days is generous against the six-hourly cadence
 false alarm here would cost the credibility of every other line.
 
 Warn rather than fail because a stopped backup is serious and is still not
-"memory is not syncing", which is what `FAIL` means here.
+"memory is not syncing", which is what `✗` means here.
 
 Two checks read the environment rather than guessing at it, and both were
-wrong in *both* directions before they did. Unwired hooks are a `FAIL` inside
+wrong in *both* directions before they did. Unwired hooks are a `✗` inside
 a git repository and nothing at all outside one — checking your connection
 from your home directory is an ordinary thing to do, and failing for it is
 how a command teaches you to stop reading its output. An unset
-`CLAUDE_CODE_REMOTE_MEMORY_DIR` is a `FAIL` in a remote session, where Claude
-Code's auto-memory is off entirely, and goes unmentioned on a laptop, where it
-is correct. `CLAUDE_CODE_REMOTE` is what tells the two apart — the same signal
-`.claude/hooks/session-start.sh` keys off.
+`CLAUDE_CODE_REMOTE_MEMORY_DIR` is a `✗` in a remote session, where Claude
+Code's auto-memory is off entirely, and only a quiet `○` on a laptop, where
+unset is correct. `CLAUDE_CODE_REMOTE` is what tells the two apart — the same
+signal `.claude/hooks/session-start.sh` keys off.
 
-Every finding that is not `ok` carries the thing to do about it. That is a
-rule rather than a habit: a test asserts it, because a finding a reader
-cannot act on teaches them to skip the whole report.
+Every finding that is not `✓` or `○` carries the thing to do about it, on the
+`→` line under it. That is a rule rather than a habit: a test asserts it,
+because a finding a reader cannot act on teaches them to skip the whole
+report. `recall status` keeps the same rule, with the same marks.
 
 `recall doctor --json` emits the findings as an array, each with its `level`,
 `check`, `detail` and `fix` — for a CI step or a shell prompt that should go

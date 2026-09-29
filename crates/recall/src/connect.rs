@@ -29,7 +29,7 @@ use recall_wire::discovery::AUTH_DEVICE_SIG;
 use recall_wire::{ApproveRequest, DeviceIdentity, EnrollPending, EnrollPollResponse};
 
 use crate::project as proj;
-use crate::ui;
+use crate::ui::{self, Tone};
 
 /// What `recall connect` was told on the command line.
 pub struct Args {
@@ -201,12 +201,17 @@ async fn run(args: Args) -> Step<()> {
         ));
     }
 
+    let project = proj::git_root().map(|root| project_name(&root));
+    let project = project.as_deref().unwrap_or("this project");
     let _ = cliclack::outro(match wiring {
         Wiring::NoProject => {
             format!("Connected as {name}. Run recall init in a project to sync it.")
         }
-        Wiring::Declined => format!("Connected as {name}. Run recall init to sync this project."),
-        Wiring::Already | Wiring::JustNow => format!("Connected as {name}"),
+        Wiring::Declined => format!("Connected as {name}. Run recall init to sync {project}."),
+        Wiring::Already => format!("Connected as {name}, and {project} syncs."),
+        Wiring::JustNow => {
+            format!("Connected as {name}. {project} syncs from its next Claude Code session.")
+        }
     });
     Ok(())
 }
@@ -552,9 +557,9 @@ impl Setup<'_> {
             match saved {
                 Ok(()) => {
                     let _ = cliclack::log::remark(format!(
-                        "Removed the shared token from {}: this machine signs its requests \
-                         now. The token still works on the server; rotating RECALL_TOKEN \
-                         there is the operator's call.",
+                        "Removed the shared token from {}: this machine signs its requests now.\n\
+                         The token still works on the server; rotating it there is the \
+                         operator's call.",
                         ui::tilde(&self.home.credentials_path().display().to_string())
                     ));
                 }
@@ -945,10 +950,7 @@ fn offer_init(args: &Args, interactive: bool) -> Step<Wiring> {
     }
     // Committing it is not a nicety: it is what makes a fresh clone or a
     // cloud session sync without any setup of its own.
-    let git = match std::env::current_dir() {
-        Ok(cwd) if cwd == root => "git".to_string(),
-        _ => format!("git -C {}", ui::tilde(&root.display().to_string())),
-    };
+    let git = crate::init::git_in(&root);
     let _ = cliclack::note(
         "Hooks added. Commit them so other clones sync too:",
         format!(
@@ -1106,13 +1108,15 @@ fn intro() {
     }
 }
 
-/// cliclack's look with round marks instead of its squares and diamonds: a
-/// filled bullet for the step being asked or a result, a hollow one for a
-/// step that is done, and a bullet to mask the token.
+/// cliclack's look with the marks every other command uses (`crate::ui`)
+/// instead of its squares and diamonds: a filled bullet for the question
+/// being asked, `✓` for a step that is done, `!` for a warning and `✗` for
+/// what failed, and a bullet to mask the token.
 struct Bullets;
 
 const FILLED: console::Emoji = console::Emoji("●", "*");
-const HOLLOW: console::Emoji = console::Emoji("○", "o");
+const CHECK: console::Emoji = console::Emoji("✓", "v");
+const BANG: console::Emoji = console::Emoji("!", "!");
 const CROSS: console::Emoji = console::Emoji("✗", "x");
 
 impl cliclack::Theme for Bullets {
@@ -1120,22 +1124,26 @@ impl cliclack::Theme for Bullets {
         let color = self.state_symbol_color(state);
         let symbol = match state {
             cliclack::ThemeState::Active => FILLED,
-            cliclack::ThemeState::Submit => HOLLOW,
+            cliclack::ThemeState::Submit => CHECK,
             cliclack::ThemeState::Cancel | cliclack::ThemeState::Error(_) => CROSS,
         };
         color.apply_to(symbol).to_string()
     }
 
     fn active_symbol(&self) -> String {
-        console::style(FILLED).green().to_string()
+        console::style(CHECK).green().to_string()
     }
 
     fn submit_symbol(&self) -> String {
-        console::style(HOLLOW).green().to_string()
+        console::style(CHECK).green().to_string()
+    }
+
+    fn warning_symbol(&self) -> String {
+        console::style(BANG).yellow().bold().to_string()
     }
 
     fn error_symbol(&self) -> String {
-        console::style(CROSS).red().to_string()
+        console::style(CROSS).red().bold().to_string()
     }
 
     fn password_mask(&self) -> char {
@@ -1242,6 +1250,7 @@ pub fn disconnect(url: Option<&str>) -> anyhow::Result<i32> {
         }
     };
     let path = h.credentials_path();
+    let shown = |p: &Path| ui::tilde(&p.display().to_string());
 
     // Every server something is saved for, a token or a device key.
     let mut saved: Vec<String> = creds.servers.keys().cloned().collect();
@@ -1257,41 +1266,57 @@ pub fn disconnect(url: Option<&str>) -> anyhow::Result<i32> {
             (saved.len() == 1).then(|| saved[0].clone())
         }),
     };
+    if target.is_none() && !saved.is_empty() {
+        eprintln!("recall disconnect: more than one server is saved; name one:");
+        for u in &saved {
+            eprintln!("  recall disconnect {u}");
+        }
+        return Ok(exit::CONFIG);
+    }
 
-    match target {
-        None if saved.is_empty() => {
-            println!("No token is saved in {}.", path.display());
-        }
-        None => {
-            eprintln!("recall disconnect: more than one server is saved; name one:");
-            for u in &saved {
-                eprintln!("  recall disconnect {u}");
-            }
-            return Ok(exit::CONFIG);
-        }
+    ui::title(
+        "recall disconnect",
+        target.as_deref().map(host).unwrap_or(""),
+    );
+    anstream::println!();
+    let mut removed = false;
+    match &target {
+        None => ui::step(
+            Tone::Quiet,
+            &format!("No token or device key is saved in {}", shown(h.dir())),
+            None,
+        ),
         Some(target) => {
             // The device key first, and on its own: removing it is the one
             // part that changes how this machine appears to the server.
-            if let Some(device) = devices.for_url(&target).cloned() {
+            if let Some(device) = devices.for_url(target).cloned() {
                 // Under the device lock, read afresh: a hook may be saving
                 // another server's key at this moment.
-                if let Err(e) = h.forget_device(&target) {
+                if let Err(e) = h.forget_device(target) {
                     eprintln!("recall disconnect: {e}");
                     return Ok(exit::CONFIG);
                 }
-                println!(
-                    "Removed this machine's device key for {target} from {}.",
-                    h.device_path().display()
+                ui::step(
+                    Tone::Good,
+                    &format!(
+                        "Removed this machine's device key for {target} from {}",
+                        shown(&h.device_path())
+                    ),
+                    None,
                 );
                 // The key is gone from here, not from the server's list,
                 // and only an admin can take it off that.
-                println!(
-                    "The server still lists the device {}. To revoke it: recall devices \
-                     revoke {} on an admin device.",
-                    device.name, device.name
+                ui::step(
+                    Tone::Warn,
+                    &format!("The server still lists the device {}", device.name),
+                    Some(&format!(
+                        "on an admin device: recall devices revoke {}",
+                        device.name
+                    )),
                 );
+                removed = true;
                 if config.server.as_deref() == Some(target.as_str())
-                    && creds.token_for(&target).is_none()
+                    && creds.token_for(target).is_none()
                 {
                     config.server = None;
                     if let Err(e) = h.save_config(&config) {
@@ -1300,7 +1325,7 @@ pub fn disconnect(url: Option<&str>) -> anyhow::Result<i32> {
                     }
                 }
             }
-            if creds.remove(&target) {
+            if creds.remove(target) {
                 let result = if creds.servers.is_empty() {
                     h.delete_credentials()
                 } else {
@@ -1321,39 +1346,71 @@ pub fn disconnect(url: Option<&str>) -> anyhow::Result<i32> {
                     eprintln!("recall disconnect: {e}");
                     return Ok(exit::CONFIG);
                 }
-                println!("Removed the token for {target} from {}.", path.display());
+                ui::step(
+                    Tone::Good,
+                    &format!("Removed the token for {target} from {}", shown(&path)),
+                    None,
+                );
                 // Removing a copy is not revoking the secret, and with one
                 // shared token there is no revoking one machine's.
-                println!(
-                    "The token itself still works on the server. To revoke it, rotate \
-                     RECALL_TOKEN there and reconnect every machine."
+                ui::step(
+                    Tone::Warn,
+                    "The token itself still works on the server",
+                    Some("rotate RECALL_TOKEN there, then recall connect on every machine"),
                 );
-            } else if !saved.contains(&target) {
-                println!("No token for {target} is saved in {}.", path.display());
+                removed = true;
+            } else if !saved.contains(target) {
+                ui::step(
+                    Tone::Quiet,
+                    &format!("No token for {target} is saved in {}", shown(&path)),
+                    None,
+                );
             }
         }
     }
 
     // What is still in effect after this, which the command cannot change.
     let cfg = here.config();
-    if cfg.token_source == Source::Environment {
-        println!();
-        println!("{}", environment_token_origin(&here, "still supplies"));
+    let from_environment = cfg.token_source == Source::Environment;
+    if from_environment {
+        let (what, fix) = environment_token_origin(&here);
+        ui::step(Tone::Warn, &what, Some(&fix));
+    }
+    match (removed, from_environment) {
+        (true, false) => ui::verdict(
+            Tone::Good,
+            "Disconnected: nothing saved on this machine reaches that server now.",
+        ),
+        (true, true) => ui::verdict(
+            Tone::Warn,
+            "Removed what was saved here, and the environment still supplies a token.",
+        ),
+        (false, false) => ui::verdict(Tone::Quiet, "Nothing to remove."),
+        (false, true) => ui::verdict(
+            Tone::Warn,
+            "Nothing saved to remove, and the environment still supplies a token.",
+        ),
     }
     Ok(exit::OK)
 }
 
 /// Where the environment's `RECALL_TOKEN` comes from, as far as it can be
-/// known.
+/// known, and what removes it.
 ///
 /// A settings file can be named, because it was read. The shell cannot: by
 /// the time a process sees a variable, which profile exported it is gone,
 /// and guessing a file name here would send someone to edit the wrong one
 /// and believe they were done.
-fn environment_token_origin(here: &proj::Resolved, verb: &str) -> String {
+fn environment_token_origin(here: &proj::Resolved) -> (String, String) {
     match here.env.declared(&["RECALL_TOKEN"]).into_iter().next() {
-        Some(d) => format!("{} {verb} RECALL_TOKEN.", d.file),
-        None => format!("Your shell {verb} RECALL_TOKEN. Remove it from your shell profile."),
+        Some(d) => (
+            format!("{} still supplies RECALL_TOKEN", d.file),
+            format!("remove RECALL_TOKEN from {}", d.file),
+        ),
+        None => (
+            "Your shell still supplies RECALL_TOKEN".to_string(),
+            "remove it from your shell profile".to_string(),
+        ),
     }
 }
 
