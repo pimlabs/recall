@@ -841,6 +841,20 @@ jobs:
             arch: arm64
     runs-on: ${{ matrix.os }}
     steps:
+      # windows-11-arm only: the first thing a job there does that touches
+      # a newly written file waits about 30 s, whichever step it is, and
+      # nothing after it does. In #170's run a Defender status query that
+      # happened to come first took 38 s and the Python packing after it
+      # 4 s; without it, the packing took 38 s and the first install 29 s.
+      # So the job asks Defender for its status in the background as its
+      # very first act, and that one-time wait overlaps the checkout, the
+      # cache restore and the build instead of adding to the test. Nothing
+      # waits on it, and nothing fails if it does.
+      - name: Wake Defender in the background (arm64)
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: Start-Process -FilePath pwsh -ArgumentList '-NoProfile', '-Command', 'Get-MpComputerStatus | Out-Null' -WindowStyle Hidden
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Toolchain (stable, and clippy where it runs) and Swatinem/rust-cache,
@@ -893,6 +907,20 @@ jobs:
             arch: arm64
     runs-on: ${{ matrix.os }}
     steps:
+      # windows-11-arm only: the first thing a job there does that touches
+      # a newly written file waits about 30 s, whichever step it is, and
+      # nothing after it does. In #170's run a Defender status query that
+      # happened to come first took 38 s and the Python packing after it
+      # 4 s; without it, the packing took 38 s and the first install 29 s.
+      # So the job asks Defender for its status in the background as its
+      # very first act, and that one-time wait overlaps the checkout, the
+      # cache restore and the build instead of adding to the test. Nothing
+      # waits on it, and nothing fails if it does.
+      - name: Wake Defender in the background (arm64)
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: Start-Process -FilePath pwsh -ArgumentList '-NoProfile', '-Command', 'Get-MpComputerStatus | Out-Null' -WindowStyle Hidden
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Parsed rather than run: running it for real means downloading a
@@ -941,9 +969,19 @@ jobs:
       # script is written for. Then npm/install.js against the same release,
       # the one place its Windows zip path runs before a real release. The
       # Windows half of `test-installers`; see scripts/installer-test.ps1.
+      #
+      # The first line names the Python the test packs and serves the
+      # release with, and which architecture it was built for: an x64 build
+      # on windows-11-arm runs under emulation and nothing else would say
+      # so. The image's own is a native ARM64 build today (runner-images'
+      # toolset-win-11-arm64.json), so there is no setup-python step; this
+      # line is what would show that changing. It uses sysconfig and
+      # sys.version rather than `platform`, which asks WMI on Windows and
+      # can itself take seconds on a runner that has just started.
       - name: install.ps1 installs from a local release, new names and old
         shell: powershell
         run: |
+          python -c "import sys, sysconfig; print(sys.executable, sysconfig.get_platform(), sys.version)"
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts\installer-test.ps1 target\debug\recall.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
