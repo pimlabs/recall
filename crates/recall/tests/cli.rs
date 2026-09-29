@@ -5571,3 +5571,58 @@ fn review_apply_builds_the_edit_again_and_trusts_no_stored_one() {
          Wednesdays. It used to happen on Mondays.\n"
     );
 }
+
+/// The design's "Beside the worker's reports": with a machine that can
+/// read reports, each claim a finding of the newest finished one covers
+/// names it, in `--json` and in the text; one that cannot says so as a
+/// source it could not read, and the review goes on.
+#[test]
+fn a_reports_findings_are_shown_beside_the_claims_they_cover() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let home = recall_home_with(&[(&server.url, "right")], &server.url);
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [("RECALL_HOME", home_str.as_str())];
+    let content = "# Deploy\n- key: abc123\n- ship it\n";
+    assert_eq!(push_memory(&repo, &env, "deploy.md", content).code, 0);
+    let key = status_json(repo.path(), &env)["project_key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    plant_report(&server, &key, content);
+
+    let r = run(&["review", "run", "--json"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(
+        report["evidence"]["evaluation"], "eval_cli",
+        "{}",
+        report["evidence"]
+    );
+    let covered = claim_containing(&report["claims"], "key: abc123");
+    assert_eq!(covered["eval"][0]["evaluation"], "eval_cli", "{covered}");
+    assert_eq!(covered["eval"][0]["finding"], "f1", "{covered}");
+    assert_eq!(covered["eval"][0]["kind"], "secret", "{covered}");
+    let beside = claim_containing(&report["claims"], "ship it");
+    assert!(beside["eval"].is_null(), "{beside}");
+    let shown = run(&["review", "show"], repo.path(), &env, None);
+    assert!(
+        shown.stdout.contains("eval_cli f1 secret (high), beside"),
+        "{}",
+        shown.stdout
+    );
+
+    // The same server, from a machine with no admin access: no report, and
+    // the reason as an unread source.
+    let url_only = [("RECALL_URL", server.url.as_str())];
+    let r = run(&["review", "run", "--json"], repo.path(), &url_only, None);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    assert!(
+        report["evidence"]["evaluation"].is_null(),
+        "{}",
+        report["evidence"]
+    );
+    let unavailable = report["evidence"]["unavailable"].to_string();
+    assert!(unavailable.contains("\"evaluation\""), "{unavailable}");
+}
