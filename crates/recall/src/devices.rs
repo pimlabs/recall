@@ -31,25 +31,33 @@ use crate::ui::{self, Tone};
 /// `recall devices …`.
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// Every device: name, scope, whether it is ephemeral, last seen, agent
+    /// List the enrolled devices
+    ///
+    /// With each one's name, scope, whether it is ephemeral, when it was
+    /// last seen, and its agent.
+    #[command(verbatim_doc_comment)]
     List {
         /// Machine-readable output, for scripts
         #[arg(long)]
         json: bool,
     },
-    /// Approve a machine by the code it shows, after checking what it is
+    /// Approve a machine by the code it shows
+    ///
+    /// Shows what the code would approve and asks first, then approves that
+    /// key and no other.
+    #[command(verbatim_doc_comment)]
     Approve {
         /// The code the machine shows, such as WDJB-MJHT
         code: String,
-        /// Give it the admin scope, so it can approve and revoke devices too
+        /// Give it the admin scope, to approve and revoke devices too
         #[arg(long, conflicts_with = "worker")]
         admin: bool,
-        /// Give it the worker scope: a recall-worker, which may take merge
-        /// jobs and nothing else
+        /// Give it the worker scope, for a recall-worker
+        ///
+        /// A worker may take merge jobs and nothing else.
         #[arg(long)]
         worker: bool,
-        /// The fingerprint the machine shows. Refuses to approve a key with
-        /// any other
+        /// The fingerprint the machine shows; any other is refused
         #[arg(long)]
         fingerprint: Option<String>,
         /// Approve without asking, for scripts
@@ -59,7 +67,7 @@ pub enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Revoke a device: its requests are refused from now on
+    /// Revoke a device, so its requests are refused from now on
     Revoke {
         /// The device's name, or its id (dev_…)
         name: String,
@@ -75,25 +83,27 @@ pub enum Cmd {
 /// `recall authkey …`.
 #[derive(Subcommand)]
 pub enum KeyCmd {
-    /// Make an authkey. It is shown once
+    /// Make an authkey; it is shown only once
     Create {
         /// A label, and the start of the name of every device it enrols
         #[arg(long)]
         tag: Option<String>,
-        /// How long it works: days, such as 90d, or weeks, such as 12w (at most 365 days)
+        /// How long it works, in days or weeks, such as 90d or 12w
+        ///
+        /// At most 365 days.
         #[arg(long)]
         expires: String,
         /// The most devices it may have enrolled at once
         #[arg(long)]
         max_devices: Option<u32>,
-        /// Devices it enrols stay until revoked, instead of being removed once idle
+        /// Devices it enrols stay until revoked, not removed once idle
         #[arg(long)]
         persistent: bool,
         /// Machine-readable output, for scripts
         #[arg(long)]
         json: bool,
     },
-    /// Every authkey, without the keys themselves
+    /// List every authkey, without the keys themselves
     List {
         /// Machine-readable output, for scripts
         #[arg(long)]

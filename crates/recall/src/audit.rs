@@ -56,26 +56,34 @@ const UNUSABLE: i32 = 2;
 /// `recall audit …`.
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// Write the server's whole audit log to a file that recall audit verify
-    /// and scripts/audit-verify.py both read. Needs an admin device or
-    /// RECALL_TOKEN
+    /// Write the server's whole audit log to a file
+    ///
+    /// In the format recall audit verify and scripts/audit-verify.py both
+    /// read. Needs an admin device or the server's RECALL_TOKEN.
+    #[command(verbatim_doc_comment)]
     Export {
         /// Where to write it; standard output when not given
         #[arg(long, short, value_name = "FILE")]
         output: Option<PathBuf>,
     },
-    /// Check an export offline. With no file, have the server prove its log
-    /// still extends every checkpoint saved here
+    /// Check an export offline, or have the server prove its log
+    ///
+    /// With FILE, checks that export offline. With no file, has the server
+    /// prove its log still extends every checkpoint saved here.
+    #[command(verbatim_doc_comment)]
     Verify {
         /// An export, from recall audit export
         file: Option<PathBuf>,
-        /// A checkpoint saved elsewhere, as SIZE:ROOT, that the log must
-        /// still extend; may be given more than once
+        /// A checkpoint saved elsewhere, that the log must still extend
+        ///
+        /// May be given more than once.
         #[arg(long = "checkpoint", value_name = "SIZE:ROOT")]
         checkpoints: Vec<String>,
     },
-    /// Forget the checkpoints saved here for the server, and any rewrite
-    /// found in them. For once you know why the log changed
+    /// Forget the checkpoints saved here for the server
+    ///
+    /// And any rewrite found in them. For once you know why the log changed.
+    #[command(verbatim_doc_comment)]
     Reset {
         /// Forget without asking, for scripts
         #[arg(long, short)]

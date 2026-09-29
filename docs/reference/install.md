@@ -700,14 +700,20 @@ after asking the server, so a run that cannot reach it changes nothing at all.
 
 ```sh
 recall --help            # or -h, or `recall help`
-recall help status       # the same as `recall status --help`
+recall help status       # the same as `recall status --help`; -h is shorter
 recall --version         # or -V, or `recall version`
 ```
 
-All three forms of each work and say the same thing. The version prints the
-release and the commit it was built from — `recall 0.2.0 (d85d225)` — and that
-commit is worth quoting in a bug report, because it identifies the build
-exactly where a version number alone does not.
+The help lists the commands by what they are for: getting started, every
+day, memory quality, your server, and the two Claude Code runs as hooks. For
+one command, `-h` gives its one-line summary and flags, and `--help` or
+`recall help <command>` adds what it does in full.
+
+The three ways of asking for the version print the same thing, and every
+help starts with it too: the release and the commit it was built from —
+`recall 0.2.0 (d85d225)` — and that commit is worth quoting in a bug report,
+because it identifies the build exactly where a version number alone does
+not.
 
 ## Check it's working
 
