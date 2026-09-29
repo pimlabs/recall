@@ -48,7 +48,9 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         ["help" | "--help" | "-h"] => {
-            println!("{USAGE}");
+            // The version first, as `recall`'s help has it, and from the
+            // same function `version` prints, so the two cannot disagree.
+            println!("{}\n\n{USAGE}", version_line());
             return ExitCode::SUCCESS;
         }
         _ => {

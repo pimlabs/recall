@@ -45,6 +45,23 @@ fn every_way_of_asking_for_the_version_says_the_same() {
     assert_eq!(answers[0], answers[2]);
 }
 
+/// Every way of asking for help starts with the version, as `recall`'s help
+/// does: the first line of what `version` prints, taken from it rather than
+/// from a literal.
+#[test]
+fn every_way_of_asking_for_help_starts_with_the_version() {
+    let version = run(&["version"], &[]);
+    let version = String::from_utf8_lossy(&version.stdout);
+    let first = version.lines().next().expect("a version line");
+    for a in ["help", "--help", "-h"] {
+        let out = run(&[a], &[]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(0), "{a}: {stdout}");
+        assert_eq!(stdout.lines().next(), Some(first), "{a}: {stdout}");
+        assert!(stdout.contains("Usage: recall-server"), "{a}: {stdout}");
+    }
+}
+
 /// Verification finding 7: the version names the optional parts built in,
 /// on a line of its own, so the release workflow can refuse a server built
 /// without passkey sign-in, which would otherwise start and sync as usual.

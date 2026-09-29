@@ -31,6 +31,11 @@ anyhow::Result<i32>` returning an `exit::*` constant, a `///` line on the
 **how loudly that command is allowed to fail**. The failure policy lives beside
 the command it governs, not in a table somewhere.
 
+That `///` line is the command's summary in the lists and in `-h`: one line,
+at most 60 characters, no full stop. Anything longer goes in a paragraph
+after it, which `--help` adds. Tests in `main.rs` hold the summary to that
+length and every line of every help to 100 columns.
+
 Three conventions are settled and worth not relitigating:
 
 - **`--help`, `-h` and `help` all work, and so does `help <command>` and
@@ -43,7 +48,8 @@ Three conventions are settled and worth not relitigating:
   it cannot be missing. Both go through `version_line()` in `main.rs` and a
   test pins the three together rather than each to a literal — two ways of
   asking one question that give different answers is a bug this project has
-  had more than once.
+  had more than once. Every help prints the same line first, from the same
+  function.
 - **A bare `recall` prints help and exits non-zero.** It is a question, not an
   instruction, and answering with silence and success would be wrong twice.
 
@@ -53,7 +59,9 @@ the one being tagged.
 
 Adding a command means adding it to `COMMANDS` in
 `crates/recall/tests/cli.rs`, which is what makes the help tests notice a
-command missing from the help.
+command missing from the help, and naming it in one of `GROUPS` in
+`main.rs`, which is where the top-level help lists it. A command in no group
+is listed under "Other" rather than left out.
 
 ### Where a test goes
 

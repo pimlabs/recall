@@ -28,6 +28,25 @@ break will be described here in full rather than smoothed over.
   on stdout, which was not read, so every failure read "exit 1: (no
   stderr)"), and the files after it are not asked in that run instead of
   each failing the same way.
+- **Every help starts with the version.** `recall --help`, `-h`, `help`, a
+  bare `recall` and every command's own help print the line `recall
+  version` prints first, the one thing a bug report always needs.
+  `recall-server` and `recall-worker` do the same above their usage.
+- **`recall --help` groups the commands by what they are for** (get
+  started, every day, memory quality, your server, the hooks) and ends by
+  saying where to start. Each command has a one-line summary, which `-h`
+  shows; `--help` adds the explanation.
+- **`recall devices`, `recall authkey`, `recall eval` and `recall audit`
+  read like `recall doctor` and `recall review`.** A title naming the
+  server and a summary first; lists as aligned tables, revoked and
+  expired entries last; a report's findings grouped by project, the worst
+  first, each with the command that applies it; audit checks as marked
+  lines closing with a verdict. Times read "3 h ago" or "in 90 days", and
+  hashes and key fingerprints are cut short, whole in `--json` and
+  wherever a person compares them. A new authkey is printed alone on its
+  line, so it copies whole. Errors from `recall authkey` are signed
+  `recall authkey:`, not `recall devices:`. `--json`, flags and exit codes
+  are unchanged.
 - **`recall status` reads like `recall doctor`.** Sections (the
   connection, this project, scopes, history), a `✓ ! ✗ ○` mark on every
   line, the command to run under every problem, home shown as `~`, hashes

@@ -55,47 +55,59 @@ mod sources;
 /// `recall review …`.
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// Extract every checkable claim from memory and say which still hold
+    /// Check which claims in memory still hold
+    ///
+    /// Extracts every checkable claim from memory, and checks it against
+    /// what this checkout and its git history can see.
+    #[command(verbatim_doc_comment)]
     Run {
-        /// Only these files, relative to the memory directory (as `recall
-        /// status` shows it); every file in every scope that is on, when
-        /// left out. Naming a file that is not memory in an active scope
-        /// is an error
+        /// Only these files; every file in every scope that is on, when left out
+        ///
+        /// Relative to the memory directory, as recall status shows it.
+        /// Naming a file that is not memory in an active scope is an error.
+        #[arg(verbatim_doc_comment)]
         files: Vec<String>,
-        /// With `--claude`, ask about every file again, not only those
-        /// changed since claude was last asked. Layers 1 and 2 check every
-        /// file on every run regardless
-        #[arg(long)]
+        /// With --claude, ask about every file again
+        ///
+        /// Not only those changed since claude was last asked. Layers 1 and 2
+        /// check every file on every run regardless.
+        #[arg(long, verbatim_doc_comment)]
         all: bool,
-        /// Also ask this machine's `claude` CLI (layer 3) about the claims
-        /// layers 1 and 2 left undecided, one call per file. Spends your
-        /// Claude usage; no API key is read or needed
-        #[arg(long)]
+        /// Also ask the local claude CLI about undecided claims
+        ///
+        /// Layer 3: one call per file, about the claims layers 1 and 2 left
+        /// undecided. Spends your Claude usage; no API key is read or needed.
+        #[arg(long, verbatim_doc_comment)]
         claude: bool,
-        /// With `--claude`, the most files one run asks about; the rest are
-        /// listed as skipped
+        /// With --claude, the most files one run asks about
+        ///
+        /// The rest are listed as skipped.
         #[arg(long, value_name = "N", default_value_t = claude::DEFAULT_MAX_CALLS, requires = "claude")]
         max_calls: u32,
-        /// Also ask each host a note names, other than this machine's
-        /// server, for its discovery document (`GET /.well-known/recall`,
-        /// no credential). Off by default: a note's text does not decide
-        /// where this machine sends requests
-        #[arg(long)]
+        /// Also ask each host a note names for its discovery document
+        ///
+        /// GET /.well-known/recall, with no credential, of every host but
+        /// this machine's server. Off by default: a note's text does not
+        /// decide where this machine sends requests.
+        #[arg(long, verbatim_doc_comment)]
         probe_hosts: bool,
         /// Machine-readable output, for scripts
         #[arg(long)]
         json: bool,
     },
-    /// The last report again
+    /// Show the last report again
     Show {
         /// Machine-readable output, for scripts
         #[arg(long)]
         json: bool,
     },
-    /// Make one stale claim's suggested edit (a rewrite into a record of
-    /// what changed) to the local file, and push it
+    /// Make a stale claim's suggested edit, and push it
+    ///
+    /// The edit rewrites the claim, in the local file, into a record of
+    /// what changed.
+    #[command(verbatim_doc_comment)]
     Apply {
-        /// The claim, such as t3, as `recall review show` lists it
+        /// The claim, such as t3, as recall review show lists it
         claim: String,
         /// Apply without asking, for scripts
         #[arg(long, short)]
