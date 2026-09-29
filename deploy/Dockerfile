@@ -15,6 +15,10 @@
 # Cargo.toml, so `docker compose up -d --build` in a checkout of tag v0.4.0
 # deploys 0.4.0.
 #
+# RECALL_FAST_BUILD=1 makes a source build skip the release profile's LTO,
+# for CI's throwaway images only; see the `source` stage. A deployment leaves
+# it unset, and so compiles with the profile release.yml ships.
+#
 # The server is the last stage, so a build that names no target builds it,
 # as every build did before the worker existed. The worker is
 # `--target worker`: the same Node and `claude` CLI, and recall-worker in
@@ -73,9 +77,39 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 # ---- source: build the binary from this checkout.
 FROM chef AS source
+
+# CI's switch, off unless set to 1, and set by nothing but ci.yml's
+# `build-image`, whose images are never published: they prove that this
+# file builds and that the binaries run. On a change to server code, about
+# a minute of that job's wait was the release profile's fat LTO over a
+# single codegen unit, which is what makes the shipped binaries small and
+# does nothing for a build that is thrown away. Set, it writes a cargo config that turns LTO off and gives each
+# crate 16 codegen units, cargo's usual number, and leaves the rest of
+# Cargo.toml's [profile.release] (opt-level, strip, panic, the
+# curve25519-dalek override) as it is. A config file, not flags on each
+# command, because every cargo run after it reads it, `cargo chef cook`
+# and source-worker's build included (cook runs cargo in /src with this
+# environment, and source-worker starts from this stage's filesystem), so
+# the cook compiles the dependencies the real builds then look for; a cook
+# and a build under different settings would share nothing. In
+# CARGO_HOME, not /src/.cargo, because cook writes /src/.cargo/config.toml
+# itself when the recipe carries one. Unset, as the compose files and
+# every deployment leave it, nothing is written, and cargo reads exactly
+# what it read before this switch existed. (release.yml never builds this
+# stage: it compiles its binaries with cargo directly, and its images
+# fetch them.)
+ARG RECALL_FAST_BUILD=
+RUN case "$RECALL_FAST_BUILD" in \
+      "") ;; \
+      1) printf '%s\n' '[profile.release]' 'lto = "off"' 'codegen-units = 16' \
+           > "${CARGO_HOME:?the rust image sets CARGO_HOME}/config.toml" ;; \
+      *) echo "RECALL_FAST_BUILD is 1 or unset, not '$RECALL_FAST_BUILD'" >&2; exit 1 ;; \
+    esac
+
 COPY --from=planner /src/recipe.json recipe.json
 # Cooks recall-server's dependency tree, then recall-worker's, into one
-# layer keyed only on recipe.json, so source-worker below reuses it instead
+# layer keyed only on recipe.json (and the switch above, whose profile it
+# compiles with), so source-worker below reuses it instead
 # of compiling its own copy of the deps they share. This has to mirror the
 # real `cargo build` calls below flag for flag and package for package:
 # cargo fingerprints a dependency by its exact feature set, and a `cook`
