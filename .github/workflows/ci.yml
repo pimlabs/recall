@@ -414,7 +414,8 @@ jobs:
       # what the server says on the wire, which the optimisation level does
       # not change; the dev build also has the debug assertions and overflow
       # checks the release build leaves out. `build-image` still compiles
-      # the release profile's binary, inside Docker, and runs it. Asserted
+      # an optimised binary, inside Docker, and runs it, and release.yml
+      # compiles the release profile's own on every release. Asserted
       # first, so a test build that one day stops leaving the binary behind
       # fails here, by name, and not as a server that never came up.
       - name: The test build left the server binary behind
@@ -553,6 +554,18 @@ jobs:
       # real code change did. `mode=max` on both so the cache holds every
       # intermediate layer (the cook layer and recall-server's own compile
       # included), not only the ones the final image is made of.
+      #
+      # Both `source` builds pass RECALL_FAST_BUILD=1, which compiles
+      # without the release profile's LTO and with 16 codegen units instead
+      # of one (deploy/Dockerfile's `source` stage says how). These images
+      # are never published, and what this job asserts of them (the
+      # Dockerfile builds, each binary runs, the release path fetches and
+      # checks an archive, a bad checksum is refused) holds of either
+      # profile. On a change to server code, compiling the workspace's own
+      # crates took about 85 seconds with the release profile and about 20
+      # without its LTO, measured on four cores. The shipped profile is
+      # still compiled on every release, by release.yml's own
+      # `cargo build --release`, which never reads this argument.
       - name: Server image builds, from source and from a release
         env:
           BUILDER: ${{ steps.buildx.outputs.name }}
@@ -560,21 +573,26 @@ jobs:
           set -eu
           # Main writes the layer cache and a PR only reads it, for the same
           # reason rust-cache saves only from main: an entry per PR branch
-          # would crowd main's out of the repository's cache quota.
+          # would crowd main's out of the repository's cache quota. The
+          # scope is named for the fast profile, and only the two builds
+          # below read or write it, so no build with the release profile
+          # ever finds these layers.
           cache_to=""
           if [ "$GITHUB_REF" = "refs/heads/main" ]; then
-            cache_to="--cache-to type=gha,scope=recall-docker-source,mode=max"
+            cache_to="--cache-to type=gha,scope=recall-docker-source-fast,mode=max"
           fi
           # shellcheck disable=SC2086 # cache_to is empty or several words on purpose
           docker buildx build --builder "$BUILDER" --load \
-            --cache-from type=gha,scope=recall-docker-source $cache_to \
-            -f deploy/Dockerfile --build-arg RECALL_SOURCE=source -t recall-server-ci .
+            --cache-from type=gha,scope=recall-docker-source-fast $cache_to \
+            -f deploy/Dockerfile --build-arg RECALL_SOURCE=source \
+            --build-arg RECALL_FAST_BUILD=1 -t recall-server-ci .
           # The worker's image from source too: its own target, whose
           # binary stage is picked by the same argument.
           # shellcheck disable=SC2086
           docker buildx build --builder "$BUILDER" --load \
-            --cache-from type=gha,scope=recall-docker-source $cache_to \
-            -f deploy/Dockerfile --target worker --build-arg RECALL_SOURCE=source -t recall-worker-ci .
+            --cache-from type=gha,scope=recall-docker-source-fast $cache_to \
+            -f deploy/Dockerfile --target worker --build-arg RECALL_SOURCE=source \
+            --build-arg RECALL_FAST_BUILD=1 -t recall-worker-ci .
 
           # A version after v0.4.5, so deploy/fetch-release.sh asks for the
           # archive names and layout every release since has: packed by
