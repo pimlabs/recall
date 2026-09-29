@@ -1952,7 +1952,7 @@ impl LiveServer {
                     .ok()
             })
             .expect("the same port again");
-        serve(db, &token, true, listener)
+        serve(db, &token, 60, listener)
     }
 }
 
@@ -1968,27 +1968,42 @@ impl Drop for LiveServer {
 }
 
 fn live_server(token: &str) -> LiveServer {
-    live_server_started(token, true)
+    live_server_started(token, 60)
 }
 
 /// A server that has only just started, so for its first few seconds it
 /// refuses every signature, as a deployed one does after each deploy.
+///
+/// A server refuses what is signed up to `MAX_AHEAD_SECONDS`, five, after
+/// its start, counting in whole seconds, so its refusal ends five to six
+/// seconds after it starts, by how far into a second that was. This one
+/// acts as if it started three or four seconds earlier, whichever ends
+/// the refusal one and a half to two and a half seconds after it starts:
+/// still well after a request made at once is first signed, and before
+/// the client, two and a half seconds on, signs it again. So a test waits
+/// out one of the client's waits, not the two or three a whole refusal
+/// takes.
 fn live_server_just_started(token: &str) -> LiveServer {
-    live_server_started(token, false)
+    let into_second = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_millis();
+    live_server_started(token, if into_second < 500 { 4 } else { 3 })
 }
 
-/// Every other test's server acts as if it started a minute ago, so that
-/// requests are signed and accepted at once.
-fn live_server_started(token: &str, a_minute_ago: bool) -> LiveServer {
+/// A server acting as if it started `seconds_ago`. Every other test's
+/// started a minute ago, so that requests are signed and accepted at once.
+fn live_server_started(token: &str, seconds_ago: i64) -> LiveServer {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    serve(tempfile::tempdir().unwrap(), token, a_minute_ago, listener)
+    serve(tempfile::tempdir().unwrap(), token, seconds_ago, listener)
 }
 
-/// A server on `listener`, over the database in `db`.
+/// A server on `listener`, over the database in `db`, acting as if it
+/// started `seconds_ago`.
 fn serve(
     db: tempfile::TempDir,
     token: &str,
-    a_minute_ago: bool,
+    seconds_ago: i64,
     listener: std::net::TcpListener,
 ) -> LiveServer {
     let cfg = recall_server::Config {
@@ -2010,9 +2025,7 @@ fn serve(
             .block_on(async move {
                 let listener = tokio::net::TcpListener::from_std(listener).unwrap();
                 let server = recall_server::Server::new(cfg, store);
-                if a_minute_ago {
-                    server.backdate_start(60);
-                }
+                server.backdate_start(seconds_ago);
                 server
                     .serve_with_shutdown(listener, async {
                         let _ = stopped.await;
@@ -3981,9 +3994,13 @@ fn against_a_server_without_devices_everything_stays_on_the_token() {
 /// rather than dropping the push or the pull.
 #[test]
 fn a_signed_request_refused_just_after_a_server_start_is_signed_again() {
-    let server = live_server_just_started("right");
-    let started = std::time::Instant::now();
+    // Everything that takes time is ready before the server starts, so the
+    // first signature comes as soon after its start as it can, well inside
+    // the refusal (see `live_server_just_started`).
     let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().to_string();
+    let server = live_server_just_started("right");
     let key = block_on(
         operator(&server).create_authkey(&recall_wire::AuthkeyRequest {
             tag: "cloud".into(),
@@ -3993,8 +4010,6 @@ fn a_signed_request_refused_just_after_a_server_start_is_signed_again() {
         }),
     )
     .unwrap();
-    let home = tempfile::tempdir().unwrap();
-    let home_str = home.path().to_string_lossy().to_string();
     let env = [
         ("RECALL_HOME", home_str.as_str()),
         ("RECALL_URL", server.url.as_str()),
@@ -4002,6 +4017,7 @@ fn a_signed_request_refused_just_after_a_server_start_is_signed_again() {
     ];
 
     // Enrolling is unsigned; the pull after it is the first signature.
+    let started = std::time::Instant::now();
     let r = run(&["pull"], repo.path(), &env, None);
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
     assert!(

@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
+use axum::Router;
 use passkey_authenticator::{Authenticator, UiHint, UserCheck, UserValidationMethod};
 use passkey_client::{Client, DefaultClientData};
 use passkey_types::ctap2::{Aaguid, Ctap2Error};
@@ -82,6 +83,10 @@ fn counting_key() -> Phone {
 
 struct Harness {
     server: Server,
+    /// `server`'s router, made once and cloned for each request, as a
+    /// running server does. Made again for every request, it was most of
+    /// what the tests here that send thousands of them spent.
+    router: Router,
     _dir: TempDir,
     store: Arc<Store>,
     /// The bootstrap code the server issued as it started, as
@@ -115,6 +120,7 @@ fn harness_configured(public_url: &str, rate_limit_max: u32) -> Harness {
         .map(|c| c.code)
         .unwrap_or_default();
     Harness {
+        router: server.router(),
         server,
         _dir: dir,
         store,
@@ -191,7 +197,7 @@ impl Harness {
 
     /// Sends a request built by hand.
     async fn raw(&self, req: Request<Body>) -> Reply {
-        let resp = self.server.router().oneshot(req).await.unwrap();
+        let resp = self.router.clone().oneshot(req).await.unwrap();
         let status = resp.status();
         let headers = resp.headers().clone();
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)

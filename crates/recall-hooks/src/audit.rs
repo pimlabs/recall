@@ -155,7 +155,19 @@ const COMMAND_WAIT: Duration = Duration::from_secs(20);
 
 /// How long a check waits after the server's rate limit refuses a request
 /// before asking again. The check's own deadline bounds how often.
+#[cfg(not(test))]
 const RETRY_WAIT: Duration = Duration::from_secs(5);
+
+/// A second in this crate's own tests, so a test that is refused once does
+/// not sit out five. What they check does not depend on the length, only
+/// on the order around it, which a second keeps: a test that lifts the
+/// limit, or slips another check's promotion in, does it 300 ms after the
+/// check starts, so the check is still in this wait when that happens and
+/// asks again only afterwards, 700 ms later; and a test that stops a
+/// rate-limited check at its deadline sets that at half a second or less,
+/// which still comes before this wait ends, as it did before five.
+#[cfg(test)]
+const RETRY_WAIT: Duration = Duration::from_secs(1);
 
 /// One checkpoint of a server's audit log: how many leaves, and their root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

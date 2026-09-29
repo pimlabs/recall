@@ -9,6 +9,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use recall_wire::{AdminTotals, File, ProjectStats};
@@ -160,14 +161,21 @@ impl Store {
     /// WAL's index beside it. A network filesystem may well not fail here
     /// and still not work; `deploy/README.md` says not to use one.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
+        Self::open_waiting(path.as_ref(), admin::BUSY_TIMEOUT)
+    }
+
+    /// [`Store::open`], its connection waiting `busy` rather than
+    /// [`admin::BUSY_TIMEOUT`] on a lock another process holds. The server
+    /// always opens through `open`; taking the wait apart is for the test
+    /// of what happens past it, which need not sit through five seconds.
+    fn open_waiting(path: &Path, busy: Duration) -> Result<Self> {
         if let Some(dir) = path.parent() {
             if !dir.as_os_str().is_empty() {
                 fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
             }
         }
         let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
-        use_durable_wal(&conn).with_context(|| {
+        use_durable_wal(&conn, busy).with_context(|| {
             format!(
                 "switching {} to SQLite's WAL journal. It needs a local filesystem, and a \
                  moment with no other process holding the file (sqlite-web mid-read, an admin \
@@ -573,8 +581,8 @@ pub(crate) fn test_leaf(seq: u64, at: &str) -> Vec<u8> {
 /// alone is not the whole database while `recall.db-wal` holds commits not
 /// yet copied back into it, and a WAL left beside a replaced `recall.db`
 /// is replayed into it.
-fn use_durable_wal(conn: &Connection) -> Result<()> {
-    conn.busy_timeout(admin::BUSY_TIMEOUT)?;
+fn use_durable_wal(conn: &Connection, busy: Duration) -> Result<()> {
+    conn.busy_timeout(busy)?;
     let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
     if !mode.eq_ignore_ascii_case("wal") {
         anyhow::bail!("SQLite kept the {mode} journal");
@@ -933,7 +941,11 @@ mod tests {
             .query_row("SELECT count(*) FROM memory_files", [], |r| r.get(0))
             .unwrap();
 
-        let err = match Store::open(&path) {
+        // Waiting a quarter of a second rather than the server's five: the
+        // reader holds on until after the open has failed, so it is held
+        // up past whatever the wait is, and what is checked is what
+        // happens then, which does not depend on how long that was.
+        let err = match Store::open_waiting(&path, Duration::from_millis(250)) {
             Ok(_) => panic!("switched to WAL under a reader holding the file"),
             Err(e) => format!("{e:#}"),
         };

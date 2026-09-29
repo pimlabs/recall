@@ -1654,55 +1654,140 @@ fn a_reader_mid_read_no_longer_holds_up_a_change() {
     assert_eq!(pulled(server.addr, "me/thing"), 2);
 }
 
-/// A stand-in `claude` that takes `seconds` to merge, which is how long a
-/// push holds a row it has read without holding any lock.
+/// A stand-in `claude` whose merge lasts exactly as long as a test needs:
+/// it leaves `merging` beside itself as it starts, which is once the
+/// server has read the row it merges into, and answers only once `release`
+/// is there. Meanwhile the push holds that row without holding any lock.
+///
+/// So the test says when the merge ends, rather than a sleep guessing how
+/// long the command takes to commit: a merge that began before the command
+/// started and ends after its change committed, on a slow machine as on a
+/// fast one. (It stops waiting after 30 seconds, so a test that fails half
+/// way leaves nothing running.)
 #[cfg(unix)]
-fn slow_claude(dir: &Path, seconds: u32) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let path = dir.join("slow-claude");
-    std::fs::write(
-        &path,
-        format!(
-            "#!/bin/sh\ncat > /dev/null\nsleep {seconds}\n\
-             printf '%s' '{{\"is_error\":false,\"result\":\"merged late\"}}'\n"
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    path
+struct HeldClaude {
+    path: PathBuf,
+    merging: PathBuf,
+    release: PathBuf,
+}
+
+#[cfg(unix)]
+impl HeldClaude {
+    fn new(dir: &Path) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let held = Self {
+            path: dir.join("held-claude"),
+            merging: dir.join("claude-merging"),
+            release: dir.join("claude-release"),
+        };
+        std::fs::write(
+            &held.path,
+            format!(
+                "#!/bin/sh\ncat > /dev/null\n: > '{}'\ni=0\n\
+                 while [ ! -e '{}' ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done\n\
+                 printf '%s' '{{\"is_error\":false,\"result\":\"merged late\"}}'\n",
+                held.merging.display(),
+                held.release.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&held.path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        held
+    }
+
+    /// Returns once a merge has begun, so its push has read its row.
+    fn wait_until_merging(&self) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !self.merging.exists() {
+            assert!(Instant::now() < deadline, "the push never started merging");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Runs `cmd`, a change the merge under way is racing, to the end, and
+    /// lets that merge finish only once the change has committed, which
+    /// the command says as it starts waiting to check it held. All it
+    /// printed, as `output()` would have it.
+    fn race(&self, mut cmd: Command) -> Output {
+        use std::io::BufRead;
+        let mut child = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut printed = String::new();
+        loop {
+            let mut line = String::new();
+            // A command that ends without waiting is left to the
+            // assertions to describe.
+            if stdout.read_line(&mut line).unwrap() == 0 {
+                break;
+            }
+            printed.push_str(&line);
+            if line.contains("Waiting ") {
+                break;
+            }
+        }
+        std::fs::write(&self.release, "").unwrap();
+        stdout.read_to_string(&mut printed).unwrap();
+        let mut stderr = Vec::new();
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_end(&mut stderr)
+            .unwrap();
+        let out = Output {
+            status: child.wait().unwrap(),
+            stdout: printed.into_bytes(),
+            stderr,
+        };
+        // Ready to hold the next merge.
+        std::fs::remove_file(&self.merging).unwrap();
+        std::fs::remove_file(&self.release).unwrap();
+        out
+    }
 }
 
 /// The race a lock cannot close: a push reads a row, merges for a while
 /// holding no lock, and writes after the change has committed, partly
 /// undoing it. The command cannot prevent that from its side, so it waits
 /// out the merge window and says exactly what came back and what to do.
+///
+/// The command is told the server's merge timeout is half a second, so it
+/// waits one and a half before it checks, where a real server's default of
+/// 45 has it wait 46: the held merge is let go as the change commits and
+/// lands a moment later, well inside either, so what the check finds is
+/// the same.
 #[cfg(unix)]
 #[test]
 fn a_push_being_merged_as_a_change_commits_is_reported_afterwards() {
     let fx = Fixture::new();
-    let claude = slow_claude(fx.dir.path(), 2);
-    let server = Running::start_with(&fx.db(), Some(&claude));
+    let claude = HeldClaude::new(fx.dir.path());
+    let server = Running::start_with(&fx.db(), Some(&claude.path));
     let addr = server.addr;
     let snapshot = Store::open(fx.db())
         .unwrap()
         .backup(fx.dir.path().join("periodic"), 7)
         .unwrap();
     let snap = snapshot.to_str().unwrap().to_string();
+    let racing = |args: &[&str]| {
+        let mut cmd = fx.command(args);
+        cmd.env("RECALL_MERGE_TIMEOUT_MS", "500");
+        claude.race(cmd)
+    };
 
     // A remove, with a push to notes.md already merging as it commits.
     let pushing = thread::spawn(move || push(addr, OLD, "notes.md"));
-    thread::sleep(Duration::from_millis(500));
-    let out = fx
-        .command(&["remove", OLD, "--yes"])
-        .env("RECALL_MERGE_TIMEOUT_MS", "4000")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
+    claude.wait_until_merging();
+    let out = racing(&["remove", OLD, "--yes"]);
     assert_eq!(pushing.join().unwrap(), 200);
     assert_exit(&out, 3);
     let (stdout, stderr) = text(&out);
     assert!(stdout.contains("Done: removed 3 row(s)"), "{stdout}");
-    assert!(stdout.contains("Waiting 5.0s"), "{stdout}");
+    assert!(stdout.contains("Waiting 1.5s"), "{stdout}");
     assert!(
         stderr.contains(&format!(
             "1 row(s) are under \"{OLD}\" again:\n  notes.md\n"
@@ -1727,13 +1812,8 @@ fn a_push_being_merged_as_a_change_commits_is_reported_afterwards() {
         "UPDATE memory_files SET content = 'edited since' WHERE project_key = '{OLD}'"
     ));
     let pushing = thread::spawn(move || push(addr, OLD, "notes.md"));
-    thread::sleep(Duration::from_millis(500));
-    let out = fx
-        .command(&["restore", &snap, OLD, "--yes", "--overwrite"])
-        .env("RECALL_MERGE_TIMEOUT_MS", "4000")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
+    claude.wait_until_merging();
+    let out = racing(&["restore", &snap, OLD, "--yes", "--overwrite"]);
     assert_eq!(pushing.join().unwrap(), 200);
     assert_exit(&out, 3);
     let (_, stderr) = text(&out);
