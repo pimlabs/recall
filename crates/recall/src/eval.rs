@@ -462,8 +462,13 @@ async fn show(client: &Client, id: Option<String>, json: bool) -> Done {
                 ui::toned(tone, &format!("{} {n} {level}", severity(level).0.mark()))
             })
             .collect();
+        // The three severities are the answer even at zero, as review's
+        // verdicts are; a count of edits to apply is only a count, and a
+        // zero there says nothing.
         let applicable = e.findings.iter().filter(|f| with_edit(f)).count();
-        parts.push(ui::dim(&format!("{applicable} with an edit to apply")));
+        if applicable > 0 {
+            parts.push(ui::dim(&format!("{applicable} with an edit to apply")));
+        }
         if !details.skipped.is_empty() {
             parts.push(ui::dim(&format!(
                 "{} not run",
