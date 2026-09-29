@@ -14,6 +14,23 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
+## Unreleased
+
+- **A memory change made outside Claude's Edit and Write is no longer lost.**
+  A note edited, created or removed through the shell, a script or your
+  editor fires no hook, and the next `recall pull` wrote the server's copy
+  over it. Claude Code runs the session-start pull again when a session is
+  resumed or compacted, so this happened mid-session, without a word. Now
+  a pull first sends what changed here since the last sync, with the
+  version it started from so the server merges when another machine moved
+  the file, and leaves those files alone. The push hook sends the same
+  changes alongside the file it was triggered by. `MEMORY.md`'s own links
+  into `global/` and `machine/` are not counted as a change. A machine's
+  first sync is unchanged.
+- **`recall sync`**: the same, by hand, mid-session. It sends what changed
+  here, fetches what other machines sent, and exits 2 when it could not
+  reach the server.
+
 ## 0.4.11 — 2026-09-29
 
 - **`recall review` no longer calls a claim true because what it names

@@ -135,8 +135,11 @@ earns the property back with the guard. Not installed is a silent no-op.
 
 `recall pull`:
 1. Derives the project key (see below).
-2. `GET`s the latest merged snapshot from the server.
-3. Writes it into `$CLAUDE_CODE_REMOTE_MEMORY_DIR/projects/<slug>/memory/` (or `~/.claude/projects/<slug>/memory/` when that env var isn't set) before Claude Code loads context — atomically, so a session starting mid-write can never read half a memory file.
+2. Sends what changed here since the last sync and no hook saw: a memory file edited, created or removed outside `Edit` and `Write`, found by comparing each file with how the last sync left it (`State::disk` in `recall_hooks::state`). The push hook does the same sweep beside the file it was triggered by. Needed because `SessionStart` also fires on resume and compaction, so a pull runs mid-session, and it used to overwrite such a change with the server's copy.
+3. `GET`s the latest merged snapshot from the server.
+4. Writes it into `$CLAUDE_CODE_REMOTE_MEMORY_DIR/projects/<slug>/memory/` (or `~/.claude/projects/<slug>/memory/` when that env var isn't set) before Claude Code loads context — atomically, so a session starting mid-write can never read half a memory file — except the files step 2 just sent, which are left as they are.
+
+`recall sync` is the same pull, run by hand mid-session, and exits non-zero when it could not reach the server.
 
 A pull that can't reach the server, or a machine with nothing configured, warns on stderr and exits **0**. A hook must not be the reason a session fails to start.
 

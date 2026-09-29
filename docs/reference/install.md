@@ -655,7 +655,10 @@ rescue memory — it is a way to delete the first machine's newer work. So:
 moves all pick a winner rather than merging:
 
 - `recall pull` overwrites your local copy with the server's, without
-  comparing them. Copy yours aside first if you want to keep it.
+  comparing them. A held-back file was never synced from here, so there is
+  no "last sync" to tell your change by, and the protection described under
+  `recall sync` below does not reach it. Copy yours aside first if you want
+  to keep it.
 - **Deleting your local copy deletes the server's too.** Deletes propagate,
   so that is the one move that loses both versions instead of one.
 - Editing the file in your editor sends nothing at all: the push hook is
@@ -705,6 +708,42 @@ write one, and says so: the baseline is a claim that this disk and the server
 have been compared, and half a comparison is not that. And with global sync
 on, it refreshes `MEMORY.md`'s links to your `global/` files before sending —
 after asking the server, so a run that cannot reach it changes nothing at all.
+
+### Memory changed outside Claude's Edit and Write: `recall sync`
+
+The hooks see only what goes through Claude Code's `Edit` and `Write` tools.
+A note written, appended to or removed through the shell (`cat >>`, `sed`,
+`rm`, a script), or in your editor, fires no hook. That is not lost:
+
+- **Every pull sends it first.** `recall pull` runs at every session
+  start, and Claude Code runs session-start hooks again when a session is
+  resumed or its context is compacted. Before fetching, a pull compares
+  each memory file with how the last sync left it, sends what changed or
+  was created or removed here, and then leaves those files as they are
+  instead of overwriting them with the server's copy. Until 0.4.12 it
+  overwrote them, so such a change was gone after the next compaction.
+- **Every push sends it too.** The push hook sends the file Claude just
+  wrote and, alongside, any other memory file changed since the last sync.
+- **`recall sync` does it now**, mid-session: it sends what changed here,
+  then fetches what other machines sent. Run it after changing memory
+  outside Claude, or to pick up another machine's notes without starting a
+  new session. It exits 2 when it could not reach the server, where the
+  hook exits 0.
+
+```sh
+recall sync
+# recall-sync: synced 12 memory file(s), removed 0 deleted file(s) for pimlabs/recall; first sent 1 local change(s) and 0 local delete(s) no hook had seen
+```
+
+Each change is sent with the version it started from, so the server takes
+it outright when nothing else moved the file, and merges it when another
+machine did, the same as any push. `MEMORY.md`'s links into `global/` and
+`machine/` are not counted as a change: every machine writes those for
+itself.
+
+None of this applies before a machine's first sync, when there is no "last
+sync" to compare with: a first pull still writes the server's copy, and
+`recall backfill` is how memory that predates Recall is sent.
 
 ## Asking the binary itself
 

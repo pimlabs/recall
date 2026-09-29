@@ -19,7 +19,7 @@ Recall exists for that specific gap: **a central service any environment can tal
 No custom client daemon. Claude Code's own hook system does the work:
 
 - **Push**: a `PostToolUse` hook matching `Edit|Write` runs `recall push`, which checks whether the edited file is a memory file and, if so, sends it to Recall's API. (An earlier design assumed a `FileChanged` event and a declarative `http` hook type — neither exists in the installed CLI; see [`docs/history/phase-0-findings.md`](docs/history/phase-0-findings.md).)
-- **Pull**: a `SessionStart` hook runs `recall pull`, which fetches the latest synced state before Claude loads context.
+- **Pull**: a `SessionStart` hook runs `recall pull`, which fetches the latest synced state before Claude loads context. It first sends any memory change no hook saw (a note edited through the shell, say), so a resumed or compacted session, which runs it again, never overwrites one; `recall sync` does the same by hand, mid-session.
 
 Neither can break a session: an unreachable server or an unconfigured machine warns on stderr and exits 0.
 

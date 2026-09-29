@@ -124,6 +124,18 @@ fn links_into(memory_md: &[u8], dir: &str) -> bool {
     String::from_utf8_lossy(memory_md).contains(&format!("]({dir}/"))
 }
 
+/// `MEMORY.md` without the lines Recall owns: what is left when every
+/// reserved directory is empty.
+///
+/// The part of the file that is content rather than derived. Whether this
+/// machine changed `MEMORY.md` since it last synced is asked of this, not of
+/// the whole file: [`refresh`] rewrites the owned lines after every pull,
+/// and a file that differs only there has nothing to send.
+pub(crate) fn without_owned_links(memory_md: &str) -> String {
+    let empty: Vec<(&str, Vec<Entry>)> = RESERVED_DIRS.iter().map(|d| (*d, Vec::new())).collect();
+    rewrite(memory_md, &empty, None)
+}
+
 /// One linkable file: its path inside the reserved directory, and the
 /// front-matter description that becomes the gloss.
 ///

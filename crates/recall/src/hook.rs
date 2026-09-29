@@ -87,31 +87,45 @@ pub async fn push() -> anyhow::Result<i32> {
 pub async fn pull() -> anyhow::Result<i32> {
     // An unconfigured or unreachable server warns on stderr and exits 0,
     // leaving whatever is already on disk alone.
+    fetch("recall-pull", exit::OK).await
+}
+
+/// `recall sync`: the same as the session-start pull, typed by a person or
+/// run by Claude mid-session, which is why it exits non-zero when it could
+/// not sync. A hook must never stop a session; a command someone ran should
+/// say it failed.
+pub async fn sync() -> anyhow::Result<i32> {
+    fetch("recall-sync", exit::SERVER).await
+}
+
+/// A pull, labelled `tag` in what it prints, exiting `on_failure` when the
+/// server could not be reached or refused.
+async fn fetch(tag: &str, on_failure: i32) -> anyhow::Result<i32> {
     let here = project::resolve();
     // A cloud session with RECALL_AUTHKEY and no device key yet becomes
     // a device here, before its first request, with nobody asked anything.
     let cfg = here.config();
-    here.protect_device_key(&cfg, "recall-pull");
-    let cfg = here.enroll_if_needed(cfg, "recall-pull").await;
+    here.protect_device_key(&cfg, tag);
+    let cfg = here.enroll_if_needed(cfg, tag).await;
     if cfg.device_error.is_none()
         && cfg.device.is_none()
         && cfg.token.is_empty()
         && cfg.authkey.is_some()
     {
-        eprintln!("recall-pull: no device key and no RECALL_TOKEN, leaving local memory untouched");
-        return Ok(exit::OK);
+        eprintln!("{tag}: no device key and no RECALL_TOKEN, leaving local memory untouched");
+        return Ok(on_failure);
     }
     let ctx = match here.hook_context_for(&cfg) {
         Ok(ctx) => ctx,
         Err(err) => {
-            eprintln!("recall-pull: {err}, leaving local memory untouched");
-            return Ok(exit::OK);
+            eprintln!("{tag}: {err}, leaving local memory untouched");
+            return Ok(on_failure);
         }
     };
     let result = match recall_hooks::pull(&ctx).await {
         Err(err) => match err.server_error().filter(|e| e.device_gone()) {
             Some(refusal) => match here
-                .after_refusal(&cfg, "recall-pull", refusal)
+                .after_refusal(&cfg, tag, refusal)
                 .await
                 .and_then(|cfg| here.hook_context_for(&cfg).ok())
             {
@@ -122,14 +136,19 @@ pub async fn pull() -> anyhow::Result<i32> {
         },
         ok => ok,
     };
-    match &result {
-        Ok(res) => eprintln!("{}", res.describe(ctx.project_key())),
-        Err(err) => {
-            eprintln!("recall-pull: fetch failed ({err}), leaving local memory untouched")
+    let code = match &result {
+        Ok(res) => {
+            let line = res.describe(ctx.project_key());
+            eprintln!("{}", line.replacen("recall-pull", tag, 1));
+            exit::OK
         }
-    }
+        Err(err) => {
+            eprintln!("{tag}: fetch failed ({err}), leaving local memory untouched");
+            on_failure
+        }
+    };
     audit_notes(&cfg);
-    Ok(exit::OK)
+    Ok(code)
 }
 
 /// What a session start is told about this machine's witness of the
