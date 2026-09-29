@@ -585,21 +585,24 @@ jobs:
           ci_version=9.9.9-ci
           rel="$RUNNER_TEMP/releases/v$ci_version"
           mkdir -p "$rel"
-          # source-worker holds both binaries, as a release does. Its layers
-          # are already in the two builds above (the worker one reaches
-          # source-worker to get recall-worker), so this is cache-from only:
-          # nothing new to save.
-          docker buildx build --builder "$BUILDER" --load \
-            --cache-from type=gha,scope=recall-docker-source \
-            -f deploy/Dockerfile --target source-worker -t recall-server-bin .
-          id=$(docker create recall-server-bin)
+          # Both binaries, as a release has them, copied out of the two
+          # images just built: each carries, at /usr/local/bin, the file its
+          # source stage compiled, byte for byte. This used to build the
+          # `source-worker` stage a third time and `--load` it to copy from.
+          # Nothing was left to compile, but loading a stage exports the
+          # whole of it, and this one is the Rust builder: toolchain,
+          # registry and target directory, about a gigabyte, 25 seconds to
+          # reach two files. `--output type=local` would write out that same
+          # gigabyte, since it too exports the stage's entire filesystem.
+          # `rm -v`: each image declares a VOLUME, so `create` made one.
+          mkdir -p "$RUNNER_TEMP/bin"
           for name in recall-server recall-worker; do
-            mkdir -p "$RUNNER_TEMP/bin"
-            docker cp "$id:/out/$name" "$RUNNER_TEMP/bin/$name"
+            id=$(docker create "$name-ci")
+            docker cp "$id:/usr/local/bin/$name" "$RUNNER_TEMP/bin/$name"
+            docker rm -v "$id"
             python3 scripts/package-release.py "$RUNNER_TEMP/bin/$name" \
               x86_64-unknown-linux-musl "$rel"
           done
-          docker rm "$id"
           (cd "$rel" && sha256sum *.tar.gz > checksums.txt)
           (cd "$RUNNER_TEMP/releases" && python3 -m http.server 8765 --bind 127.0.0.1 &)
           sleep 1
