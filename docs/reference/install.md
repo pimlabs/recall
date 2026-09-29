@@ -927,6 +927,19 @@ note). `still_true` claims are printed too, named rather than summarised
 away — the point is never to make it look like discarding a true line
 alongside a false one is free.
 
+**What `still_true` takes: a value that matches.** A version equal to the
+newest release tag or to what the server reports, a variable set to the
+value the claim gives, the configured server answering at the host the
+claim names. That something the claim names *exists* (a path at HEAD or
+on this machine, a name in the tracked tree, a variable the client reads
+or a compose file passes, a compose service, a capability the server
+lists) is shown as evidence, but on its own it leaves a present claim
+`cant_tell`: "`RECALL_HOST` sets the bind address" names a variable that
+appears in the code and is still false. A present claim is `still_true`
+when at least one value matches and every other anchor at least exists.
+Existence does answer a rule's anchor, since whether what a rule names
+still exists is all a rule is checked for.
+
 **The checkout and git** (`git ls-files`, `git log`, `git grep`, `git
 tag`) decide only a claim in the **project** scope — a global or
 machine-scope note is not about this repository, so the same check there
@@ -959,7 +972,7 @@ server reports, and a capability name (`evaluation`) with what it lists.
 **The compose files.** `deploy/docker-compose*.yml`, read as YAML: a
 service, container, image (`cloudflared` for
 `cloudflare/cloudflared:latest`) or label namespace (`traefik`) a note names
-is `still_true` when a compose file carries it, and a variable when a
+is found when a compose file carries it, and a variable when a
 service is passed it. They say which ingresses the project supports, never
 which one production runs: that lives on the server.
 
@@ -994,7 +1007,8 @@ judge, and a **fact sheet** of what the review observed here: the server
 and what it reports, the kind of session, the compose files, and every
 piece of git and checkout evidence about that note. What the review
 observed but could not decide on (a path not found here, a host not
-asked) is listed as context, which cannot be cited. It answers a class and
+asked) is listed as context, which cannot be cited; what it found to
+exist is a fact, which can, either way. It answers a class and
 a verdict per claim, and a `stale` or `still_true` verdict must cite the
 facts it rests on; one that cites none is recorded as `cant_tell`, with
 `claude`'s reason labelled as its reading, not evidence. A claim it reads

@@ -4997,19 +4997,25 @@ fn the_phase1_deploy_fixture_gets_the_documented_verdicts() {
     );
 }
 
-/// A present claim naming something that still exists gets `still_true`,
-/// and — the point of the test — it is printed, not silently dropped.
-/// Mutation (design's test table): printing only problems would make the
-/// `assert!` on human output fail.
+/// A present claim whose stated version matches the newest release tag
+/// gets `still_true`, and — the point of the test — it is printed, not
+/// silently dropped. Mutation (design's test table): printing only
+/// problems would make the `assert!` on human output fail.
 #[test]
 fn a_still_true_claim_appears_in_both_outputs() {
     let repo = review_repo();
+    assert!(Command::new("git")
+        .args(["tag", "v0.1.0"])
+        .current_dir(repo.path())
+        .status()
+        .unwrap()
+        .success());
     let env: Vec<(&str, &str)> = vec![];
     write_memory(
         repo.path(),
         &env,
         "plan.md",
-        "- The plan lives in `docs/plan.md`.\n",
+        "- Recall is at version `0.1.0`; the plan lives in `docs/plan.md`.\n",
     );
 
     let json = run(&["review", "run", "--json"], repo.path(), &env, None);
@@ -5292,10 +5298,11 @@ fn an_unreachable_server_is_reported_as_unavailable() {
 }
 
 /// The project's compose files, read as YAML: an ingress a note names is
-/// `still_true` because a compose file runs it, not because a word appears
-/// somewhere in the tree.
+/// found because a compose file runs it, not because a word appears
+/// somewhere in the tree. That it runs is not what the note claims of it,
+/// so the claim is `cant_tell`, with the compose file as its evidence.
 #[test]
-fn a_claim_naming_a_compose_service_is_confirmed_by_the_compose_file() {
+fn a_claim_naming_a_compose_service_is_found_in_the_compose_file() {
     let repo = review_repo();
     std::fs::create_dir_all(repo.path().join("deploy")).unwrap();
     std::fs::write(
@@ -5314,7 +5321,7 @@ fn a_claim_naming_a_compose_service_is_confirmed_by_the_compose_file() {
     assert_eq!(r.code, 0, "{}", r.stderr);
     let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
     let claim = claim_containing(&report["claims"], "cloudflared");
-    assert_eq!(claim["verdict"], "still_true", "{claim}");
+    assert_eq!(claim["verdict"], "cant_tell", "{claim}");
     assert_eq!(claim["evidence"][0]["source"], "compose", "{claim}");
     assert_eq!(
         report["evidence"]["compose_files"],

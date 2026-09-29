@@ -73,6 +73,14 @@ COMPOSE = sorted(str(p) for p in Path('deploy').glob('docker-compose*.yml'))
 
 problems = []
 
+# Variables a document names on purpose although nothing reads them, each
+# with why. Keep this short: an entry is a promise that the mention is an
+# example or a warning, never a setting someone might go and set.
+NAMED_NOT_READ = {
+    'RECALL_HOST': 'the worked example of a claim that names a variable '
+                   'nothing reads, in recall review and install.md',
+}
+
 
 def note(where, name, found):
     found.setdefault(name, where)
@@ -119,8 +127,10 @@ def variables():
     for v in sorted(set(read) - set(named)):
         if not in_family(v):
             problems.append(f'{v} is read ({read[v]}) but no document names it')
-    for v in sorted(set(named) - set(read)):
+    for v in sorted(set(named) - set(read) - set(NAMED_NOT_READ)):
         problems.append(f'{v} is named ({named[v]}) but nothing reads it')
+    for v in sorted(set(NAMED_NOT_READ) & set(read)):
+        problems.append(f'{v} is read now; drop it from NAMED_NOT_READ')
     return len(read)
 
 

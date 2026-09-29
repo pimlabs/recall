@@ -353,10 +353,12 @@ pub(super) fn decide(answer: &str, asked: &[Asked], facts: &[String]) -> Option<
             }
             seen
         };
+        // Layer 3's own reading is never cited back to it as a fact.
         let evidence = |detail: String, verdict: Verdict| Evidence {
             source: SOURCE.to_string(),
             detail,
             verdict,
+            citable: false,
         };
         decided[i] = Some(match a.class.trim() {
             "record" => Decided {
@@ -631,6 +633,7 @@ mod tests {
                     source: SOURCE.into(),
                     detail: "d".into(),
                     verdict: Verdict::Stale,
+                    citable: false,
                 },
                 cites: vec![fact.clone()],
                 rewrite: None,
@@ -659,6 +662,7 @@ mod tests {
                 source: SOURCE.into(),
                 detail: "d".into(),
                 verdict: verdict.unwrap_or(Verdict::CantTell),
+                citable: false,
             },
             cites: Vec::new(),
             rewrite: None,
