@@ -210,8 +210,13 @@ try {
 # bare assignment would outlive the install and leave their progress bars
 # off as well. The setting found here is kept instead, and each block that
 # turns progress off puts it back in a `finally`, which runs whether the
-# block finishes or throws.
-$callerProgress = $ProgressPreference
+# block finishes or throws. It is the global one, not this script's own:
+# Expand-Archive comes from a script module in 5.1, and a module's
+# functions read preferences from the global scope, never from the script
+# that called them. Run through `iex` at a prompt the two are the same
+# variable anyway; run with -File, as CI runs it, only the global one
+# reaches the unpacking.
+$callerProgress = $global:ProgressPreference
 
 # --- detect the architecture --------------------------------------------
 # PROCESSOR_ARCHITECTURE describes the *process*, so a 32-bit PowerShell on
@@ -239,12 +244,12 @@ switch ($archRaw) {
 $version = $env:RECALL_VERSION
 if (-not $version) {
     try {
-        $ProgressPreference = "SilentlyContinue"
+        $global:ProgressPreference = "SilentlyContinue"
         $response = Invoke-WebRequest -Uri "$Releases/latest" -Method Head -UseBasicParsing
     } catch {
         Stop-WithError "could not look up the latest release at $Releases/latest: $($_.Exception.Message)"
     } finally {
-        $ProgressPreference = $callerProgress
+        $global:ProgressPreference = $callerProgress
     }
     # Where the redirect ended: HttpWebResponse.ResponseUri on Windows
     # PowerShell 5.1, the final request's URI on PowerShell 7.
@@ -280,7 +285,7 @@ $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("recall-install-" + [System.
 New-Item -ItemType Directory -Path $tmp -Force | Out-Null
 
 try {
-    $ProgressPreference = "SilentlyContinue"
+    $global:ProgressPreference = "SilentlyContinue"
     $archivePath = Join-Path $tmp $archiveName
     $checksumPath = Join-Path $tmp "checksums.txt"
 
@@ -390,6 +395,6 @@ try {
     Write-Info ""
     Write-Info "Next: recall connect https://your-recall-host"
 } finally {
-    $ProgressPreference = $callerProgress
+    $global:ProgressPreference = $callerProgress
     Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
