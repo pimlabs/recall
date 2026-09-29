@@ -1275,8 +1275,17 @@ async fn an_answer_after_five_minutes_is_refused() {
     );
     assert!(late.headers.get(header::SET_COOKIE).is_none());
 
-    // A second sooner, the same answer would have done.
-    h.server.set_clock_offset(5 * 60 - 1);
+    // Ten seconds sooner, the same answer would have done. Not one second
+    // sooner: the server's clock counts whole seconds, and the ceremony
+    // expires at its start's whole second plus five minutes. If the wall
+    // clock ticks over to a new second between the start above and this
+    // answer, which needs only the start to land late in its second, and
+    // more so on a busy runner, then `5 * 60 - 1` is already the expiry,
+    // and the answer is refused. Ten seconds is more than this test ever
+    // takes, and still well inside the window. The exact edge, 299
+    // seconds in and 300 out, is pinned without a real clock by the unit
+    // test `a_sealed_ceremony_opens_once_here_and_nowhere_else`.
+    h.server.set_clock_offset(5 * 60 - 10);
     let in_time = h.finish_sign_in(&started, credential).await;
     assert_eq!(in_time.status, StatusCode::OK, "{}", in_time.body);
 }
