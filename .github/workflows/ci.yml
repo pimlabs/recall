@@ -824,27 +824,6 @@ jobs:
             arch: arm64
     runs-on: ${{ matrix.os }}
     steps:
-      # Defender's real-time scanning reads every file the build writes and
-      # every program a test starts, and cargo writes and starts thousands,
-      # so it is turned off on this runner, which is thrown away after the
-      # job. An experiment: if the timings show no gain it goes. Where the
-      # image does not allow it (no Defender, tamper protection) this only
-      # warns, so a runner image change cannot turn CI red. The state
-      # before and after is printed, which is how to tell from the log
-      # whether it did anything. First, so the checkout is not scanned
-      # either.
-      - name: Turn off Defender real-time scanning, where the image allows it
-        shell: pwsh
-        run: |
-          try {
-            $before = (Get-MpComputerStatus -ErrorAction Stop).RealTimeProtectionEnabled
-            Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Stop
-            $after = (Get-MpComputerStatus -ErrorAction Stop).RealTimeProtectionEnabled
-            Write-Output "Defender real-time protection enabled: $before before, $after after"
-          } catch {
-            Write-Output "::warning::Defender real-time scanning was left as it was: $($_.Exception.Message)"
-          }
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Toolchain (stable, and clippy where it runs) and Swatinem/rust-cache,
@@ -899,21 +878,6 @@ jobs:
             arch: arm64
     runs-on: ${{ matrix.os }}
     steps:
-      # Defender's real-time scanning off, as in `test-windows` above and
-      # for the same reasons: the build writes thousands of files, and the
-      # installer test unpacks, installs and starts recall.exe many times.
-      - name: Turn off Defender real-time scanning, where the image allows it
-        shell: pwsh
-        run: |
-          try {
-            $before = (Get-MpComputerStatus -ErrorAction Stop).RealTimeProtectionEnabled
-            Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Stop
-            $after = (Get-MpComputerStatus -ErrorAction Stop).RealTimeProtectionEnabled
-            Write-Output "Defender real-time protection enabled: $before before, $after after"
-          } catch {
-            Write-Output "::warning::Defender real-time scanning was left as it was: $($_.Exception.Message)"
-          }
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Parsed rather than run: running it for real means downloading a
