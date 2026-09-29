@@ -306,7 +306,7 @@ release in v0.4.5's layout. It serves them on 127.0.0.1 and runs
 `install.sh`, `npm/install.js` and `deploy/fetch-release.sh` against them,
 for "latest" and pinned versions on both sides of the cutoff, and runs what
 each installed; a wrong checksum or a binary that is a symlink installs
-nothing. The `windows` job does the same for `install.ps1`, and for
+nothing. The `install-windows` jobs do the same for `install.ps1`, and for
 `npm/install.js`'s zip path, on both Windows architectures
 (`scripts/installer-test.sh`, `scripts/installer-test.ps1`). Keep the
 `Package` steps `shell: bash`, which is how the test runs them.

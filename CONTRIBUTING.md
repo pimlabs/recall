@@ -11,7 +11,7 @@ See `README.md`'s "Project docs" table for what each file/directory is for — k
 A Cargo workspace; every crate builds and tests on its own.
 
 ```sh
-cargo test --workspace                 # what CI runs
+cargo test --workspace                 # every test CI runs
 cargo test -p recall-hooks             # just one crate, much faster
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
@@ -20,6 +20,8 @@ cargo build --release -p recall-server   # the server, beside it
 ```
 
 The first build is slow — `rusqlite` compiles SQLite from C. After that it's cached.
+
+CI runs the same tests with [cargo-nextest](https://nexte.st) (`cargo nextest run --workspace --profile ci`, then `cargo test --doc --workspace` for the doctests nextest does not run), which puts every test in a process of its own and spreads them over every core. Either way runs every test once; nextest is only faster. Its settings are in `.config/nextest.toml`.
 
 `cargo test -p recall-wire` is the fastest useful check: that crate holds the request/response contract both halves depend on, and its tests pin the wire format byte for byte — field order and the `null`-versus-`""` distinction included — because those were once compatibility guarantees against a second implementation and are now guarantees against the rows already in production.
 

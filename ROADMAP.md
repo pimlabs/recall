@@ -516,7 +516,9 @@ without running it" is the whole claim those three make.
   symlink on Linux fails exactly the same seven tests, by name. So the fixture
   resolves the path once, where it is created, and CI now runs the suite a
   second time behind a symlinked `TMPDIR` — a runner that cannot see a class
-  of failure is a runner that will let it back in.
+  of failure is a runner that will let it back in. (Since 2026-09-29 the
+  Linux job runs it behind the symlink only, once; the real-directory
+  spelling is the Windows jobs' and every developer's.)
 
 ## Designed, not yet built (2026-09-22)
 
