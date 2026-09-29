@@ -809,7 +809,7 @@ Scopes
   ○ global scope   off
   ○ machine scope  off
 
-✗ 3 problem(s). Nothing syncs here.
+✗ 3 problems. Nothing syncs here.
 ```
 
 The exit code is the reason this exists rather than the formatting. `recall

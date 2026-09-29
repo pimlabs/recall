@@ -1155,12 +1155,16 @@ fn print_text(cfg: &ClientConfig, rep: &Report, found: &[Finding]) {
         // look identical to a healthy one.
         (0, w) => ui::verdict(
             ui::Tone::Warn,
-            &format!("Nothing broken. {w} thing(s) worth a look."),
+            &format!(
+                "Nothing broken. {w} {} worth a look.",
+                if w == 1 { "thing" } else { "things" }
+            ),
         ),
         (f, _) => ui::verdict(
             ui::Tone::Bad,
             &format!(
-                "{f} problem(s). {}",
+                "{f} {}. {}",
+                if f == 1 { "problem" } else { "problems" },
                 if cfg.url.is_empty() {
                     "Nothing syncs here."
                 } else {

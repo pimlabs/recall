@@ -1733,12 +1733,16 @@ fn print_text(cfg: &ClientConfig, rep: &Report) {
         ),
         (0, w) => ui::verdict(
             Tone::Warn,
-            &format!("Nothing broken. {w} thing(s) worth a look."),
+            &format!(
+                "Nothing broken. {w} {} worth a look.",
+                if w == 1 { "thing" } else { "things" }
+            ),
         ),
         (b, _) => ui::verdict(
             Tone::Bad,
             &format!(
-                "{b} problem(s). {}",
+                "{b} {}. {}",
+                if b == 1 { "problem" } else { "problems" },
                 if rep.url_set {
                     "Some of it is not syncing."
                 } else {

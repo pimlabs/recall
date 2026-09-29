@@ -511,7 +511,7 @@ fn status_reports_rather_than_fails_when_unconfigured() {
         r.stdout
     );
     assert!(
-        r.stdout.contains("problem(s)"),
+        r.stdout.contains(" problems. ") || r.stdout.contains(" problem. "),
         "a closing line: {}",
         r.stdout
     );
