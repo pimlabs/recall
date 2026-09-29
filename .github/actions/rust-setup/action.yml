@@ -1,24 +1,28 @@
 name: Rust setup
 description: >-
   Installs the pinned stable Rust toolchain (with whatever components the
-  caller's checks need) and restores/saves Swatinem/rust-cache. Shared by
-  ci.yml's `test-linux` and `test-windows` jobs so the toolchain-plus-cache steps are
-  written once instead of twice. The caller checks out the repository itself
-  first: a local action cannot be loaded before its own checkout.
+  caller's checks need), restores/saves Swatinem/rust-cache and, when asked,
+  installs cargo-nextest. Shared by ci.yml's Rust jobs (`lint`, `test-linux`,
+  `test-windows`, `install-windows`) so these steps are written once instead
+  of once per job. The caller checks out the repository itself first: a
+  local action cannot be loaded before its own checkout.
 
 inputs:
   components:
     description: >-
       Toolchain components to install, comma-separated (dtolnay/rust-toolchain's
-      own `components` input). Both current callers want the same rustfmt and
-      clippy checks, so that is the default; pass '' for a job that needs neither.
+      own `components` input). rustfmt and clippy are the default, which is
+      what `lint` runs; pass '' for a job that needs neither, or just the one
+      it runs.
     required: false
     default: rustfmt, clippy
   cache-key:
     description: >-
       Swatinem/rust-cache's `key`: an extra segment for a job whose cache must
-      stay separate along some axis of its own, e.g. a build matrix's OS. Leave
-      unset (the default) when cache-shared-key is used instead.
+      stay separate along some axis of its own, e.g. a build matrix's OS.
+      rust-cache adds the job's id after it, so two jobs passing the same
+      value still get an entry each. Leave unset (the default) when
+      cache-shared-key is used instead.
     required: false
     default: ''
   cache-shared-key:
@@ -28,6 +32,12 @@ inputs:
       unset (the default) when cache-key is used instead.
     required: false
     default: ''
+  nextest:
+    description: >-
+      'true' to install cargo-nextest too, for a job that runs the tests with
+      it. The version is pinned below, once for every job that asks.
+    required: false
+    default: 'false'
 
 runs:
   using: composite
@@ -35,6 +45,21 @@ runs:
     - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
       with:
         components: ${{ inputs.components }}
+
+    # A prebuilt cargo-nextest, checked against the SHA-256 that
+    # install-action's own manifest records for this version. The version
+    # is named rather than left to the action's "latest", so a new nextest
+    # changes nothing here until someone moves it. `fallback: none`: a
+    # version the manifest does not know fails here, rather than being
+    # compiled from source for minutes or fetched by cargo-binstall with
+    # this run's token. Before rust-cache, which saves only the binaries
+    # ~/.cargo/bin gained after it started: a copy restored from the cache
+    # would be one this step never checked.
+    - if: inputs.nextest == 'true'
+      uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+      with:
+        tool: cargo-nextest@0.9.146
+        fallback: none
 
     # Every push to main writes the cache (mainline is the one history a
     # PR's own restore should fall back to); a PR run only ever restores it.

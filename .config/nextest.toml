@@ -1,0 +1,19 @@
+# cargo-nextest's settings, read from here by `cargo nextest run` in this
+# workspace. CI's Linux job runs the suite with nextest (ci.yml, `--profile
+# ci`); the Windows jobs keep `cargo test`, measured faster there; a plain
+# `cargo test --workspace` still runs the same tests and is what
+# CONTRIBUTING.md asks of a developer, so nothing here is needed locally.
+#
+# nextest runs each test in a process of its own, spread over every core at
+# once, where `cargo test` runs one test binary after another. The same
+# tests, each one run exactly once; on four cores the workspace's suite went
+# from 70 seconds of test execution to 44. It does not run doctests, which
+# is why CI follows it with `cargo test --doc`.
+
+[profile.ci]
+# Every failure in one run, not the first: a CI round trip per failing
+# test is what `--no-fail-fast` was on `cargo test` before this.
+fail-fast = false
+# A failing test's output as it fails, and all of them again together at
+# the end, so the last screen of a long log is the list of what broke.
+failure-output = "immediate-final"

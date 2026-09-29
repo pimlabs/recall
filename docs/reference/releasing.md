@@ -184,7 +184,7 @@ all three real-server checkers, checks the crate names are still free, then
 walks the irreversible steps — tag, `npm publish`, `cargo publish`, the tap —
 **asking before each one**. Answering anything but `y` skips that step;
 nothing is published by accident. It needs npm and crates.io credentials on
-the machine running it.
+the machine running it, and cargo 1.90 or later, which it checks first.
 
 Pushing the tag from the script also starts the workflow above. Its publish
 jobs will wait for approval and then find every version already published,
@@ -306,7 +306,7 @@ release in v0.4.5's layout. It serves them on 127.0.0.1 and runs
 `install.sh`, `npm/install.js` and `deploy/fetch-release.sh` against them,
 for "latest" and pinned versions on both sides of the cutoff, and runs what
 each installed; a wrong checksum or a binary that is a symlink installs
-nothing. The `windows` job does the same for `install.ps1`, and for
+nothing. The `install-windows` jobs do the same for `install.ps1`, and for
 `npm/install.js`'s zip path, on both Windows architectures
 (`scripts/installer-test.sh`, `scripts/installer-test.ps1`). Keep the
 `Package` steps `shell: bash`, which is how the test runs them.
@@ -482,8 +482,10 @@ the alternative is a half-installed package.
 
 ## 4. crates.io
 
-Five crates, published **bottom-up**. Each one has to be on the index before
-anything that depends on it can be packaged, so the order is not optional:
+Five crates, listed here bottom-up, each depending only on crates before it
+in the list: `recall-wire`, `recall-hooks`, `recall-worker`, `recall-server`
+(which uses the worker's merge code), `recall`. They have to reach the index
+in that order, but keeping it is cargo's job now, not yours — see below.
 
 On a **first** publish, check the names are still free before you start —
 crate names are global and first-come, and a half-published set is awkward to
@@ -511,19 +513,26 @@ available and the first publishable number was 0.2.0. A `200` from the check
 above no longer means "pick another name" when the name is already ours — it
 means look at which versions are there before choosing the next one.
 
-Then, bottom-up:
+Then, in one call (cargo 1.90 or later):
 
 ```sh
-cargo publish -p recall-wire
-cargo publish -p recall-hooks
-cargo publish -p recall-worker
-cargo publish -p recall-server
-cargo publish -p recall
+cargo publish --locked -p recall-wire -p recall-hooks -p recall-worker -p recall-server -p recall
 ```
 
-Wait for each to land before the next — the index takes a few seconds, and
-`cargo publish` will fail with "no matching package named …" if you get ahead
-of it. Then:
+cargo packages all five and verifies each by building it from its package,
+serving the ones not yet on crates.io to each other from a local registry
+under `target/package`. Only when all five build does it upload them, in
+dependency order, waiting for each to reach the index before it uploads
+anything that depends on it. So a crate that does not build stops the
+publish before anything is public, and nothing needs a pause between crates.
+This is the call the workflow's `publish-crates` job and `release.sh` both
+make.
+
+It refuses the whole call if any crate it names is already published. When
+finishing an interrupted publish, name only the crates whose index file
+(`https://index.crates.io/re/ca/recall-wire`, and so on) does not list the
+version yet; the workflow and `release.sh` work that out for themselves.
+Then:
 
 ```sh
 cargo install recall

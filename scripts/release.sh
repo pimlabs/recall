@@ -29,7 +29,9 @@ REPO="pimlabs/recall"
 # The shared Homebrew tap. Being named homebrew-* is what lets Homebrew
 # resolve `pimlabs/tap/recall` with no URL and no separate `brew tap` step.
 TAP="pimlabs/homebrew-tap"
-# Bottom-up: recall-worker before recall-server, which uses its merge code.
+# Every crate this workspace publishes, listed bottom-up: recall-worker
+# before recall-server, which uses its merge code. Step 8 no longer relies
+# on the order: one `cargo publish` names them all, and cargo orders it.
 CRATES=(recall-wire recall-hooks recall-worker recall-server recall)
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -148,6 +150,16 @@ elif docker compose version >/dev/null 2>&1; then
   ok "docker compose, for restore-check.sh"
 else
   die "restore-check.sh (step 3) reads the compose files with PyYAML or 'docker compose config', and this machine has neither: python3 -m pip install pyyaml"
+fi
+
+# Step 8 publishes every crate in one `cargo publish` with several -p, which
+# cargo 1.90 was the first to accept. Asked here for the same reason.
+cargo_line="$(cargo --version 2>/dev/null || true)"
+cargo_minor="$(printf '%s\n' "$cargo_line" | sed -nE 's/^cargo 1\.([0-9]+)\..*/\1/p')"
+if [ -n "$cargo_minor" ] && [ "$cargo_minor" -ge 90 ]; then
+  ok "${cargo_line%% (*}, for publishing every crate in one call"
+else
+  die "step 8 publishes every crate in one cargo publish, which needs cargo 1.90 or later, and this is '${cargo_line:-no cargo}': rustup update stable"
 fi
 
 # Channels that were asked to publish and did not. Kept as a string rather
@@ -345,37 +357,46 @@ fi
 # --------------------------------------------------------------------------
 step "8/9  crates.io"
 # --------------------------------------------------------------------------
-# Bottom-up, because each crate must be on the index before anything that
-# depends on it can even be packaged.
-if confirm "publish ${#CRATES[@]} crates to crates.io (a version can be yanked, never deleted)"; then
-  i=0
-  for n in "${CRATES[@]}"; do
-    i=$((i + 1))
-    # Asking the index costs one request and saves publishing a version that
-    # is already there, which is what makes a second run of this script safe.
-    if curl -sf "https://index.crates.io/${n:0:2}/${n:2:2}/$n" 2>/dev/null \
-         | grep -q "\"vers\":\"$VERSION\""; then
-      printf '    %-16s already at %s\n' "$n" "$VERSION"
-      continue
-    fi
-    printf '    publishing %s ... ' "$n"
-    if cargo publish -p "$n" >/tmp/release-publish.log 2>&1; then
-      printf '%sok%s\n' "$green" "$off"
-    else
-      printf '%sFAILED%s\n' "$red" "$off"
-      tail -20 /tmp/release-publish.log
-      # Stop the loop but not the script: the crates after this one depend on
-      # it and would fail anyway, while the formula below does not.
-      warn "stopped at $n — the ones before it are published and will be skipped next run"
-      failed="$failed crates.io"
-      break
-    fi
-    # The index needs a moment; publishing the next crate too early fails
-    # with "no matching package named ...". Indexed rather than ${CRATES[-1]},
-    # which needs bash 4.3 — macOS still ships 3.2.
-    [ "$i" -eq "${#CRATES[@]}" ] || sleep 20
-  done
-  [ -n "$failed" ] || ok "published — verify with: cargo install recall && recall version"
+# One `cargo publish` for every crate not on the index yet, the same call
+# as the release workflow's publish-crates job. cargo keeps the bottom-up
+# order itself: it packages every crate named and verifies each by building
+# it, the unpublished ones served to each other from a local registry under
+# target/package, and only when all of them build does it upload them, each
+# after what it depends on has reached the index. So a crate that does not
+# build stops this before anything is public, and there is no sleeping
+# between crates: `cargo publish` has waited for the index since 1.66.
+#
+# Asking the index costs one request per crate and leaves out a version that
+# is already there, which is what makes a second run of this script safe —
+# and is required, since cargo refuses the whole call if any crate it names
+# is already published. The index is read into a variable and matched with
+# `case` rather than piped into `grep -q`: under this script's pipefail, a
+# grep that stops reading early can fail the pipeline, and a crate wrongly
+# counted as missing would now fail the whole call rather than one crate.
+# A string rather than an array, for bash 3.2's `set -u` (see `failed`
+# above).
+todo=""
+for n in "${CRATES[@]}"; do
+  index="$(curl -sf "https://index.crates.io/${n:0:2}/${n:2:2}/$n" 2>/dev/null || true)"
+  case "$index" in
+    *"\"vers\":\"$VERSION\""*) printf '    %-16s already at %s\n' "$n" "$VERSION" ;;
+    *) todo="$todo -p $n" ;;
+  esac
+done
+if [ -z "$todo" ]; then
+  ok "crates.io already has every crate at $VERSION — skipping"
+elif confirm "cargo publish$todo (a version can be yanked, never deleted)"; then
+  # $todo unquoted on purpose: it is -p/name pairs, and no name has a space.
+  # shellcheck disable=SC2086
+  if cargo publish --locked $todo >/tmp/release-publish.log 2>&1; then
+    ok "published — verify with: cargo install recall && recall version"
+  else
+    tail -20 /tmp/release-publish.log
+    # Not fatal, for the reason npm's failure is not: the formula below does
+    # not depend on crates.io.
+    warn "cargo publish failed — whatever it uploaded is on the index and is skipped next run"
+    failed="$failed crates.io"
+  fi
 else
   warn "skipped crates.io"
 fi
