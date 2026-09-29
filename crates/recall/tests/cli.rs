@@ -4511,10 +4511,18 @@ fn the_phase1_deploy_fixture_gets_the_documented_verdicts() {
     assert_eq!(text.code, 0);
     assert!(text.stdout.contains("stale"), "{}", text.stdout);
     assert!(
-        text.stdout.contains("record(s), not reviewed"),
+        text.stdout.contains("· 1 record(s)"),
         "records are counted, not listed: {}",
         text.stdout
     );
+    // A count of nothing is left out rather than printed as a zero.
+    assert!(
+        !text.stdout.contains(" 0 record(s)") && !text.stdout.contains(" 0 not decided"),
+        "{}",
+        text.stdout
+    );
+    // A stale claim says what to do about it, on the line under it.
+    assert!(text.stdout.contains("→ edit "), "{}", text.stdout);
     // The record's own text — "Not the old `hooks/recall-pull` script" —
     // must not appear on a line the report marks stale.
     assert!(
@@ -4547,7 +4555,7 @@ fn a_still_true_claim_appears_in_both_outputs() {
 
     let text = run(&["review", "show"], repo.path(), &env, None);
     assert_eq!(text.code, 0);
-    assert!(text.stdout.contains("still_true"), "{}", text.stdout);
+    assert!(text.stdout.contains("✓ 1 still true"), "{}", text.stdout);
     assert!(text.stdout.contains("docs/plan.md"), "{}", text.stdout);
 }
 
@@ -4873,8 +4881,9 @@ fn hosts_a_note_names_are_not_probed_without_the_flag() {
     assert!(unavailable.contains("--probe-hosts"), "{unavailable}");
 }
 
-/// A stand-in `claude`, prepended to `PATH` so it wins over any real one:
-/// it keeps each call's stdin as `stdin-<n>` in its directory and answers
+/// A stand-in `claude`, prepended to `PATH` so it wins over any real one.
+/// `claude auth status` says it is logged in; every other call keeps its
+/// stdin as `stdin-<n>` in its directory and answers
 /// with the CLI's JSON envelope around `answer`. Returns the directory and
 /// the `PATH` to run with.
 ///
@@ -4890,7 +4899,7 @@ fn fake_claude(answer: &str) -> (tempfile::TempDir, String) {
     std::fs::write(
         &script,
         format!(
-            "#!/bin/sh\nd='{}'\nn=$(ls \"$d\" | grep -c '^stdin-')\ncat > \"$d/stdin-$n\"\ncat \"$d/answer.json\"\n",
+            "#!/bin/sh\nd='{}'\nif [ \"$1\" = auth ]; then echo '{{\"loggedIn\":true}}'; exit 0; fi\nn=$(ls \"$d\" | grep -c '^stdin-')\ncat > \"$d/stdin-$n\"\ncat \"$d/answer.json\"\n",
             dir.path().display()
         ),
     )
@@ -5107,7 +5116,7 @@ fn max_calls_bounds_the_calls_and_lists_what_it_skipped() {
 
     // The text form says so too.
     let r = run(&["review", "show"], repo.path(), &env, None);
-    assert!(r.stdout.contains("skipped b.md"), "{}", r.stdout);
+    assert!(r.stdout.contains("! b.md: --max-calls 1"), "{}", r.stdout);
 }
 
 /// The design's "A `claude` verdict with no fact-sheet citation becomes
@@ -5607,7 +5616,7 @@ fn a_reports_findings_are_shown_beside_the_claims_they_cover() {
     assert!(beside["eval"].is_null(), "{beside}");
     let shown = run(&["review", "show"], repo.path(), &env, None);
     assert!(
-        shown.stdout.contains("eval_cli f1 secret (high), beside"),
+        shown.stdout.contains("eval_cli f1 secret (high), on t"),
         "{}",
         shown.stdout
     );
@@ -5625,4 +5634,113 @@ fn a_reports_findings_are_shown_beside_the_claims_they_cover() {
     );
     let unavailable = report["evidence"]["unavailable"].to_string();
     assert!(unavailable.contains("\"evaluation\""), "{unavailable}");
+}
+
+/// A stand-in `claude` running `script` (a `sh` body) for every call.
+/// Returns the directory and the `PATH` to run with.
+#[cfg(unix)]
+fn claude_script(script: &str) -> (tempfile::TempDir, String) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("claude");
+    std::fs::write(
+        &path,
+        format!("#!/bin/sh\nd='{}'\n{script}", dir.path().display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let env_path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    (dir, env_path)
+}
+
+/// A machine whose `claude` is not logged in is told so once, in words that
+/// say what to do, and no file is asked about.
+#[cfg(unix)]
+#[test]
+fn claude_not_logged_in_is_said_once_before_any_call() {
+    let repo = review_repo();
+    let (fake, path) = claude_script(
+        "if [ \"$1\" = auth ]; then echo '{\"loggedIn\":false}'; exit 1; fi\n: > \"$d/called\"\n",
+    );
+    let env = [("PATH", path.as_str())];
+    write_memory(
+        repo.path(),
+        &env,
+        "a.md",
+        "- The deploy happens on Tuesdays.\n",
+    );
+    write_memory(
+        repo.path(),
+        &env,
+        "b.md",
+        "- The backup happens on Fridays.\n",
+    );
+    let r = run(
+        &["review", "run", "--claude", "--json"],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(!fake.path().join("called").exists(), "a call was made");
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    let skipped = report["evidence"]["claude"]["skipped"].to_string();
+    assert!(skipped.contains("not logged in"), "{skipped}");
+    assert_eq!(report["evidence"]["claude"]["calls"], 0);
+}
+
+/// When the CLI itself fails, the reason is what it said (on stdout, in its
+/// JSON envelope), and the files after it are not asked.
+#[cfg(unix)]
+#[test]
+fn a_claude_failure_says_why_and_stops_asking() {
+    let repo = review_repo();
+    let (fake, path) = claude_script(concat!(
+        "if [ \"$1\" = auth ]; then echo '{\"loggedIn\":true}'; exit 0; fi\n",
+        "cat > /dev/null; : >> \"$d/calls\"; echo x >> \"$d/calls\"\n",
+        "echo '{\"type\":\"result\",\"is_error\":true,\"result\":\"Credit balance is too low\"}'; exit 1\n",
+    ));
+    let env = [("PATH", path.as_str())];
+    write_memory(
+        repo.path(),
+        &env,
+        "a.md",
+        "- The deploy happens on Tuesdays.\n",
+    );
+    write_memory(
+        repo.path(),
+        &env,
+        "b.md",
+        "- The backup happens on Fridays.\n",
+    );
+    let r = run(
+        &["review", "run", "--claude", "--json"],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let calls = std::fs::read_to_string(fake.path().join("calls")).unwrap();
+    assert_eq!(calls.lines().count(), 1, "asked again after a failure");
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    let skipped = report["evidence"]["claude"]["skipped"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(
+        skipped[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Credit balance is too low"),
+        "{skipped:?}"
+    );
+    assert!(
+        skipped[1]["reason"].as_str().unwrap().contains("not asked"),
+        "{skipped:?}"
+    );
 }

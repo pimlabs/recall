@@ -125,6 +125,29 @@ struct AuthStatus {
     logged_in: bool,
 }
 
+/// Why a `claude` run that exited non-zero failed, in its own words.
+///
+/// With `--output-format json` the CLI reports most failures (not logged
+/// in, an API error, a usage limit) as a JSON envelope on stdout and
+/// nothing on stderr, so stderr alone reads as "(no stderr)" to whoever
+/// has to fix it. The envelope's `result` comes first when there is one,
+/// then stderr, then whatever stdout held.
+fn failure_detail(stdout: &[u8], stderr: &[u8]) -> String {
+    let out = String::from_utf8_lossy(stdout);
+    let said = serde_json::from_str::<CliResult>(out.trim())
+        .ok()
+        .map(|r| r.result.trim().to_string())
+        .filter(|r| !r.is_empty());
+    let err = String::from_utf8_lossy(stderr).trim().to_string();
+    match (said, err.is_empty(), out.trim().is_empty()) {
+        (Some(said), true, _) => said,
+        (Some(said), false, _) => format!("{said} ({err})"),
+        (None, false, _) => err,
+        (None, true, false) => out.trim().to_string(),
+        (None, true, true) => "no output on stdout or stderr".to_string(),
+    }
+}
+
 /// Builds the user-side prompt for one merge.
 pub fn prompt(old_content: &str, new_content: &str) -> String {
     format!("--- VERSION A (currently stored) ---\n{old_content}\n\n--- VERSION B (incoming) ---\n{new_content}")
@@ -244,12 +267,7 @@ impl Merger {
         };
 
         if !status.success() {
-            let detail = String::from_utf8_lossy(&stderr).trim().to_string();
-            let detail = if detail.is_empty() {
-                "(no stderr)".to_string()
-            } else {
-                detail
-            };
+            let detail = failure_detail(&stdout, &stderr);
             return Err(Error::Failed(format!(
                 "exit {}: {}",
                 status
@@ -304,6 +322,16 @@ impl Merger {
         };
 
         if !out.status.success() {
+            // A CLI that is not logged in may say so as JSON on stdout and
+            // exit non-zero: that is an answer, not a failure to check.
+            if let Ok(a) = serde_json::from_slice::<AuthStatus>(&out.stdout) {
+                return Status {
+                    checked_at,
+                    available: true,
+                    logged_in: a.logged_in,
+                    error: String::new(),
+                };
+            }
             let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
             return Status {
                 checked_at,
@@ -463,6 +491,41 @@ mod tests {
             .check_status()
             .await;
         assert!(st.available && st.logged_in, "got {st:?}");
+    }
+
+    /// The CLI reports "not logged in" and API errors as a JSON envelope on
+    /// stdout, with nothing on stderr: that is what a failure must say.
+    #[test]
+    fn a_failure_says_what_the_cli_said_on_stdout() {
+        let envelope = br#"{"type":"result","is_error":true,"result":"Invalid API key \u00b7 Please run /login"}"#;
+        assert_eq!(
+            failure_detail(envelope, b""),
+            "Invalid API key \u{b7} Please run /login"
+        );
+        assert_eq!(
+            failure_detail(envelope, b"warn: x"),
+            "Invalid API key \u{b7} Please run /login (warn: x)"
+        );
+        assert_eq!(failure_detail(b"", b"boom"), "boom");
+        assert_eq!(failure_detail(b"plain text\n", b""), "plain text");
+        assert_eq!(failure_detail(b"", b""), "no output on stdout or stderr");
+    }
+
+    /// A CLI that is not logged in may say so on stdout and exit 1: that is
+    /// a clear "no", not a failure to check.
+    #[tokio::test]
+    async fn a_not_logged_in_answer_with_a_failing_exit_is_still_an_answer() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claude");
+        std::fs::write(&path, "#!/bin/sh\necho '{\"loggedIn\":false}'\nexit 1\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        settle(&path);
+        let st = Merger::new(path.to_str().unwrap(), Duration::from_secs(10))
+            .check_status()
+            .await;
+        assert!(st.available && !st.logged_in, "{st:?}");
+        assert!(st.error.is_empty(), "{st:?}");
     }
 
     /// A stand-in `claude` that drains stdin, ignores its arguments and

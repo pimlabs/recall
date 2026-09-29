@@ -827,15 +827,30 @@ this machine and its server say they are, the project's compose files, and
 a few environment variables:
 
 ```
-project_phase1_deploy.md
-  stale       L5      Recall's server is live at `recall.pimlabs.id`, deployed via OrbStack and a Cloudflare Tunnel.
-              RECALL_URL (credentials.toml) is https://recall-server.pimlabs.id; /health answers there
-  stale       L6      Run `lib.sh` to start the legacy hooks; `hooks/recall-pull` runs at session start.
-              `lib.sh` was deleted in 3a1c9de (2026-09-22) and is not at HEAD
-  1 record(s), not reviewed
+recall review  checkout 9f2c1ab · server 0.4.9
 
-2 stale, 0 still true, 0 cant tell, 0 conflict(s), 1 record(s), 0 unresolved
+  ✗ 2 stale   ✓ 0 still true   ? 0 can't tell   1 record(s)
+
+project_phase1_deploy.md
+  ✗ t1    L5       Recall's server is live at `recall.pimlabs.id`, deployed via OrbStack and a Cloudflare Tunnel.
+           ✗ RECALL_URL (credentials.toml) is https://recall-server.pimlabs.id; /health answers there
+           → edit project_phase1_deploy.md L5
+  ✗ t2    L6       Run `lib.sh` to start the legacy hooks; `hooks/recall-pull` runs at session start.
+           ✗ `lib.sh` was deleted in 3a1c9de (2026-09-22) and is not at HEAD
+           → edit project_phase1_deploy.md L6
+  · 1 record(s)
 ```
+
+The summary comes first, then the files with something to act on, the
+worst first. Each claim line carries its id (`t1`, the one `recall review
+apply` takes), its lines in the note and its text; under it is each piece
+of evidence, marked by what that piece says: `✗` stale, `✓` still true,
+`?` can't tell. A rule's anchors are listed under a `§` line, and a merge
+conflict left in a note is marked `!`. What to do next is on a `→` line,
+and a short Next section at the end repeats the commands. A file where no
+check could decide anything is named on one line at the end rather than
+given a section. On a terminal the marks are coloured; piped, or with
+`NO_COLOR` set, the same text comes without colour.
 
 Every claim gets a class before anything judges it — a present-tense
 statement of state can go **stale**; a record of what used to be true (a
@@ -931,8 +946,13 @@ as history becomes a record, and a record is never judged.
   through the evaluation's secret redactor, so a token in a note never
   reaches `claude`.
 - **Bounded**: at most `--max-calls N` calls (default 10), each prompt under
-  64 KiB. A file left out, for either reason, or because `claude` is not
-  installed or failed, is listed as skipped, never silently cut.
+  64 KiB. A file left out, for either reason, is listed as skipped, never
+  silently cut.
+- **Stops at the first failure**: a machine where `claude` is not installed
+  or not logged in is told so once, before any call, with what to do. A
+  call that fails says what `claude` said (an expired login, a usage
+  limit), and the files after it are not asked in that run; each is listed
+  as skipped, with the file whose call failed.
 - **Asked once per change**: an answer is kept per file and reused, without
   a call, while the file is unchanged and every fact it cited is still
   observed; a run without `--claude` shows it too. While a cited fact is
@@ -949,7 +969,7 @@ the same two requests `recall eval show` makes, and each finding is shown
 under its file beside the claims whose lines it covers:
 
 ```
-  eval_7c2kq9 f4 stale (low), beside t3; recall eval show eval_7c2kq9
+  ◆ eval_7c2kq9 f4 stale (low), on t3 (L12)  → recall eval show eval_7c2kq9
 ```
 
 A `stale` finding says a note is old; the review says whether it is also
