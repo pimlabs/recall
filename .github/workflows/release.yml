@@ -93,21 +93,28 @@ jobs:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
       # Not .github/actions/rust-setup (ci.yml's `test-linux`/`test-windows` jobs):
-      # that composite bakes in rustfmt+clippy components and a main-only
-      # save-if, and this job needs neither, wanting a cross-compile target
-      # instead of components, and a cache that always saves, since a
-      # release only runs from a tag or a manual dispatch, never a PR
-      # restore-only run that main-only saving exists to protect. Reusing
-      # it here would mean overriding most of what it fixes, so the two
-      # rust-cache steps stay written out plainly instead of threading
-      # exceptions through a composite built for a different shape.
+      # that composite bakes in rustfmt+clippy components and
+      # Swatinem/rust-cache, and this job wants neither: a cross-compile
+      # target instead of components, and no cache at all.
+      #
+      # No rust-cache, here or in any other job in this workflow, and not by
+      # oversight: a release can never read one. GitHub scopes a cache to
+      # the ref that saved it, and a run restores only from its own ref and
+      # the default branch. Every release runs on a tag no run has used
+      # before (refs/tags/v0.4.11 cannot see what refs/tags/v0.4.10 saved),
+      # and `main` never builds these targets in the release profile: ci.yml
+      # builds the dev and test profiles, for Linux and Windows. The one run
+      # that could restore an entry is a re-run on the same tag, and the
+      # usual re-run is of the failed jobs only, which saved nothing:
+      # rust-cache does not save from a job that failed. v0.4.10's run
+      # (36539755030) showed it: all nine restores said "No cache found",
+      # every job compiled from scratch, and each then spent 4 to 23
+      # seconds uploading 180 to 535 MB that nothing would read, 2.2 GB a
+      # release counted against the repository's cache quota, where it can
+      # push out the entries `main` saves for CI, which are read.
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
         with:
           targets: ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: ${{ matrix.target }}
 
       # Every target but one builds on a native runner. rusqlite's `bundled`
       # feature compiles the SQLite amalgamation from C, so a cross build
@@ -223,13 +230,11 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
+      # No Swatinem/rust-cache, for the reason build-client gives: this runs
+      # on a new tag every release, so a cache could only ever miss.
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
         with:
           targets: ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: ${{ matrix.target }}
 
       # rusqlite compiles SQLite's C source, so a musl build needs a C
       # compiler that targets musl. Native runners again, so musl-gcc is
@@ -606,35 +611,63 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
+      # No Swatinem/rust-cache: this job runs on the tag too, so, as
+      # build-client explains, it could only miss; it used to upload 535 MB
+      # after every publish for nothing to read.
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # Exchanges this job's OIDC token for a crates.io token that lasts 30
       # minutes and is revoked when the job ends.
       - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
         id: auth
-      - name: cargo publish, bottom-up
+      # One `cargo publish` for every crate still to publish, not one per
+      # crate with a 20-second sleep between them. Since cargo 1.90 a single
+      # call takes several -p: it packages every crate named, and verifies
+      # each by building it from its package, with the crates not yet on
+      # crates.io served to each other from a local registry cargo makes
+      # under target/package. Only when all of them build does it upload,
+      # in dependency order, waiting for each crate to reach the index
+      # before it uploads one that depends on it. So the bottom-up order
+      # (recall-wire, recall-hooks, recall-worker, recall-server, which uses
+      # the worker's merge code, then recall) is now kept by cargo rather
+      # than by this list, and the sleeps, which dated from before
+      # `cargo publish` waited for the index by itself (cargo 1.66), are
+      # gone. A crate that fails to build now stops the publish before
+      # anything is uploaded, rather than after the crates below it are
+      # already public for good.
+      #
+      # Re-running is still safe. A crate the index already has at this
+      # version is left out, and has to be: cargo refuses the whole call,
+      # before uploading anything, if any crate it names is already
+      # published. If an upload fails part way, the crates before it are
+      # public, and a re-run publishes only the rest, against those.
+      - name: cargo publish, in dependency order
         env:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          # The verification builds are dev-profile builds whose output is
+          # thrown away when the job ends, so debug info and incremental
+          # state are time spent on nothing. rust-cache used to set
+          # CARGO_INCREMENTAL=0 here; debug info has no bearing on whether
+          # a package compiles, which is all the verification asks.
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: |
           v="${TAG#v}"
-          # Bottom-up: each crate must be on the index before anything that
-          # depends on it can be packaged. Same order as scripts/release.sh.
-          # recall-worker before recall-server, which uses its merge code.
-          crates=(recall-wire recall-hooks recall-worker recall-server recall)
-          for i in "${!crates[@]}"; do
-            n="${crates[$i]}"
+          todo=()
+          for n in recall-wire recall-hooks recall-worker recall-server recall; do
             if curl -sf "https://index.crates.io/${n:0:2}/${n:2:2}/$n" | grep -q "\"vers\":\"$v\""; then
               echo "$n already at $v"
-              continue
+            else
+              todo+=(-p "$n")
             fi
-            echo "::group::cargo publish -p $n"
-            cargo publish -p "$n"
-            echo "::endgroup::"
-            # The index needs a moment, or the next crate fails with
-            # "no matching package named ...".
-            [ "$i" -eq $(( ${#crates[@]} - 1 )) ] || sleep 20
           done
+          # Never a bare `cargo publish`: at a virtual workspace's root that
+          # means every member, and it is not what an empty list asked for.
+          if [ "${#todo[@]}" -eq 0 ]; then
+            echo "crates.io already has every crate at $v; nothing to do"
+            exit 0
+          fi
+          cargo publish --locked "${todo[@]}"
 
   publish-homebrew:
     name: publish-homebrew
