@@ -1,9 +1,13 @@
 # Design: version discovery and device handshake
 
-Status: **proposal**, not built. Nothing here describes today's behaviour;
-[`../reference/api.md`](../reference/api.md) does. When a part of this is
-built, the reference docs become the authority for it and this file moves to
-`history/` as the record of why.
+Status: **agreed 2026-09-23, mostly built.** Parts 1, 2 and 4 shipped in
+0.4.0 to 0.4.2. Of Part 5, the audit log, the merge queue with
+`recall-worker`, and evaluation reports shipped; encryption was parked on
+2026-09-25, and [`part5-plan.md`](part5-plan.md) says which pull requests
+that covers. Part 3 and the claude.ai idea are not planned. For what is
+built, [`../reference/api.md`](../reference/api.md) and the other reference
+docs are the authority, not this file; it stays here, rather than in
+`history/`, until the parked part is built or dropped.
 
 ## Why
 

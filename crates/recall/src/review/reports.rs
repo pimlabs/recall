@@ -1,5 +1,5 @@
 //! The worker's newest evaluation report, beside the claims. See
-//! `docs/design/memory-truth.md`'s "Beside the worker's reports, not
+//! `docs/history/memory-truth.md`'s "Beside the worker's reports, not
 //! instead of them".
 //!
 //! The review does not look for secrets, duplicates, dead links, wrong

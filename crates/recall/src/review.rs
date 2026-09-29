@@ -1,12 +1,12 @@
 //! `recall review run` and `recall review show` — checks what a memory
 //! *claims* against what this checkout and its git history can see, and
-//! says which claims still hold. See `docs/design/memory-truth.md`.
+//! says which claims still hold. See `docs/history/memory-truth.md`.
 //!
 //! **How loudly it may fail:** as quietly as `recall status`. A memory file
 //! this cannot read, a directory that is not a git repository, a claim with
 //! nothing here to check it against — none of that is an error. The review
 //! offers evidence; it never refuses to run, and its exit code is always
-//! [`exit::OK`] once it has run at all (`docs/design/memory-truth.md`'s
+//! [`exit::OK`] once it has run at all (`docs/history/memory-truth.md`'s
 //! decision 4). The only non-zero exit is a genuine usage mistake, such as
 //! naming a `[FILE]` that is not a memory file in any scope that is on.
 //!
@@ -25,7 +25,7 @@
 //! CLI over what layers 1 and 2 left undecided, handed a fact sheet of
 //! what they observed and held to citing it. It is the only incremental
 //! layer: layers 1 and 2 are cheap enough to run over every claim on every
-//! run (`docs/design/memory-truth.md`'s "Incremental" section), while
+//! run (`docs/history/memory-truth.md`'s "Incremental" section), while
 //! layer 3 asks again only about a file whose content changed, or one
 //! whose earlier answer cited a fact no longer observed, unless `--all`.
 //!
@@ -140,7 +140,7 @@ pub async fn run(cmd: Cmd) -> anyhow::Result<i32> {
 
 /// What a claim is, decided before anything judges it.
 ///
-/// See `docs/design/memory-truth.md`'s classification table. The heuristic
+/// See `docs/history/memory-truth.md`'s classification table. The heuristic
 /// leans toward [`Class::Record`] on purpose: calling a record present
 /// pushes toward deleting history, and calling a present claim a record
 /// only misses a stale line. Checked in this order — a record heading or
@@ -258,7 +258,7 @@ pub struct UnavailableSource {
 }
 
 /// What this run actually read, and what it did not. See
-/// `docs/design/memory-truth.md`'s Output section.
+/// `docs/history/memory-truth.md`'s Output section.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SourcesRead {
     /// The repository's `HEAD`, short form, when the project root is a git

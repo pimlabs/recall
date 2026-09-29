@@ -4839,7 +4839,7 @@ fn eval_apply_makes_the_suggested_edit_and_pushes_it() {
 // recall review
 // ---------------------------------------------------------------------------
 
-/// A fixture modelled on `docs/design/memory-truth.md`'s "Why", and on this
+/// A fixture modelled on `docs/history/memory-truth.md`'s "Why", and on this
 /// repository's own history (`git log --diff-filter=D -- '*lib.sh'`, commit
 /// `5b828c1`): a git repository that once had `hooks/lib.sh` and
 /// `hooks/recall-pull`, deleted both in a later commit (the Rust rewrite),
@@ -4902,7 +4902,7 @@ fn claim_containing<'a>(claims: &'a serde_json::Value, needle: &str) -> &'a serd
         .unwrap_or_else(|| panic!("no claim contains {needle:?}: {claims}"))
 }
 
-/// The design's own worked example (`docs/design/memory-truth.md`'s Layer 2
+/// The design's own worked example (`docs/history/memory-truth.md`'s Layer 2
 /// section), rebuilt as a fixture: `lib.sh` and `hooks/recall-pull` named as
 /// present, deleted in git history since; a present claim naming a hostname
 /// this PR cannot check; and a history-section sentence that names the same

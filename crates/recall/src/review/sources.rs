@@ -2,7 +2,7 @@
 //! about itself (`status::Report`, collected once), what its server says it
 //! is (`GET /health` and `GET /.well-known/recall`, asked once, inside that
 //! collection), what the project's compose files carry, and a short list of
-//! environment variables. See `docs/design/memory-truth.md`'s Layer 2 table.
+//! environment variables. See `docs/history/memory-truth.md`'s Layer 2 table.
 //!
 //! Everything is read first, into [`Facts`], and judged after: the judging
 //! below is pure, so the tests hand it facts rather than a machine.

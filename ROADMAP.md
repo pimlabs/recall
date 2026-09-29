@@ -897,7 +897,11 @@ arriving new**, and **it has to stay cheap**.
       not the repository or the running system, so it can say a note is
       old, not that it is wrong.
 
-      **Design proposed (2026-09-28):** [`docs/design/memory-truth.md`](docs/design/memory-truth.md).
+      **Design proposed (2026-09-28):** [`docs/history/memory-truth.md`](docs/history/memory-truth.md).
+
+      **Built in 0.4.9 (#152, #153, #156 to #159):** `recall review run`,
+      `show` and `apply`, with `--claude` for what the local checks cannot
+      decide. The design moved to `docs/history/` once all of it shipped.
 
 ## Agreed 2026-09-23: versions, devices, two binaries, encryption
 

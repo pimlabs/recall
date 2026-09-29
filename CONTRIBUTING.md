@@ -122,6 +122,25 @@ cargo build --release -p recall-server
 
 142 checks against a real server on a real socket: every status code, error string, field order and `null`-versus-`""` claim the document makes. Change a handler without changing the doc and this fails, which is the point.
 
+### The documents still describe the code
+
+```sh
+python3 scripts/docs-check.py                            # variables, the docs index, the changelog
+cargo build -p recall && python3 scripts/docs-check.py --cli target/debug/recall
+```
+
+Every `RECALL_*` variable something reads is named in a document, and every
+one a document names (a compose file included) is read. Every file under
+`docs/` is linked from `docs/README.md`, and every design there opens with a
+`Status:` line. `CHANGELOG.md` has a section for the version in `Cargo.toml`.
+With `--cli`, every command in `recall help` and every long flag in its
+`--help` appears in a document. So a pull request that adds a flag or a
+variable carries its documentation, or CI says which one is missing.
+
+It matches names, not meaning: a flag is documented if it is written down
+anywhere, and a wrong default passes. Meaning is checked once per release,
+by reading, in [`releasing.md`](docs/reference/releasing.md#the-documents).
+
 ### Links between documents
 
 ```sh

@@ -845,8 +845,9 @@ RECALL_BACKUP_REMOTE=recall-crypt: ./deploy/backup-offbox.sh --dry-run
 RECALL_BACKUP_REMOTE=recall-crypt: ./deploy/backup-offbox.sh
 ```
 
-It copies every `recall-*.db` in `deploy/backups/` to an [rclone][] remote
-and then verifies the copy. Run it from the deployment directory on the VPS,
+It copies every `recall-*.db` in `deploy/backups/` (or in
+`RECALL_BACKUP_SRC`, when set) to an [rclone][] remote and then verifies
+the copy. Run it from the deployment directory on the VPS,
 as a user that can read `deploy/backups/`. Note that the snapshots are
 written from inside the container, so they are owned by its uid rather than
 by the user running the compose stack; readable is what matters here, not
@@ -877,7 +878,8 @@ Supported providers:
 | `existing` | A remote you already configured with `rclone config`, for anything not listed above | `--raw-remote` (its name) |
 
 Every value can also come from an environment variable of the same shape
-(`--access-key-id` is `RECALL_BACKUP_INIT_ACCESS_KEY_ID`, and so on), which
+(`--access-key-id` is `RECALL_BACKUP_INIT_ACCESS_KEY_ID`, and so on:
+`RECALL_BACKUP_INIT_*`), which
 is what makes this scriptable:
 
 ```sh
