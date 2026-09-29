@@ -28,29 +28,38 @@ use crate::project as proj;
 /// `recall eval …`.
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// Ask the worker for a report: secrets, duplicates, dead links, notes
-    /// in the wrong scope, stale notes, and contradictions when asked
+    /// Ask the worker for a report on what memory holds
+    ///
+    /// It looks for secrets, duplicates, dead links, notes in the wrong
+    /// scope and stale notes, and for contradictions when asked.
+    #[command(verbatim_doc_comment)]
     Run {
-        /// A project to look at, by its key; repeat for more. Every project
-        /// when left out. The global scope is always read beside them
-        #[arg(long = "project", value_name = "KEY")]
+        /// A project to look at, by its key; repeat for more
+        ///
+        /// Every project when left out. The global scope is always read
+        /// beside them.
+        #[arg(long = "project", value_name = "KEY", verbatim_doc_comment)]
         projects: Vec<String>,
-        /// Also look for notes that contradict each other: one claude call
-        /// per project, which spends your Claude usage
+        /// Also look for notes that contradict each other
+        ///
+        /// One claude call per project, which spends your Claude usage.
         #[arg(long)]
         contradictions: bool,
         /// Machine-readable output, for scripts
         #[arg(long)]
         json: bool,
     },
-    /// Every report, newest first, with how many of each finding
+    /// List every report, newest first, with its finding counts
     List {
         /// Machine-readable output, for scripts
         #[arg(long)]
         json: bool,
     },
-    /// One report: each finding, the lines it quotes, why, and the edit
-    /// that would resolve it
+    /// Show a report's findings
+    ///
+    /// Each finding, the lines it quotes, why, and the edit that would
+    /// resolve it.
+    #[command(verbatim_doc_comment)]
     Show {
         /// The report's id, such as eval_7c2kq9; the newest when left out
         id: Option<String>,
@@ -58,7 +67,11 @@ pub enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Make a finding's suggested edit to the local file, and push it
+    /// Make a finding's suggested edit, and push it
+    ///
+    /// Writes it into the local file, only if the file is still the version
+    /// the report read, and pushes it the way the hook pushes any edit.
+    #[command(verbatim_doc_comment)]
     Apply {
         /// The finding, such as f2
         finding: String,
