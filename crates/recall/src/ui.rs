@@ -1,5 +1,5 @@
-//! How the human-facing commands look: `doctor`, `status`, `connect`,
-//! `init`, `review`.
+//! How the human-facing commands look: every command a person reads the
+//! output of, which is all of them but the `push` and `pull` hooks.
 //!
 //! One module so the whole CLI has one visual language — the same four
 //! marks, the same colours meaning the same thing — rather than each command
