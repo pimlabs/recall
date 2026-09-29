@@ -45,6 +45,7 @@ use recall_hooks::exit;
 use serde::{Deserialize, Serialize};
 
 use crate::project as proj;
+use crate::ui;
 
 mod apply;
 mod claude;
@@ -876,6 +877,24 @@ async fn layer_three(
 
     let mut cannot_run: Option<String> = None;
     let merger = claude::merger();
+    // One local check, which costs nothing, before the first call: a
+    // machine without claude, or one that is definitely not logged in, is
+    // said once, in words that say what to do, not once per file as an
+    // exit code.
+    if asking && !to_ask.is_empty() {
+        let status = merger.check_status().await;
+        if !status.available {
+            cannot_run = Some(format!(
+                "claude is not installed here ({}); install Claude Code, or leave out --claude",
+                status.error
+            ));
+        } else if !status.logged_in && status.error.is_empty() {
+            cannot_run = Some(
+                "claude is not logged in on this machine; run claude and log in, then try again"
+                    .to_string(),
+            );
+        }
+    }
     let redactor = asking.then(|| {
         // Every file this run read teaches the redactor its secrets, so one
         // quoted in another note is masked too.
@@ -957,7 +976,14 @@ async fn layer_three(
                             }
                             Err(e) => {
                                 run.calls += 1;
-                                Err(format!("the claude call failed: {e}"))
+                                // A failure of the CLI itself (a login, a
+                                // usage limit, a flag it does not know)
+                                // fails every file the same way: the rest
+                                // are not asked, and say why.
+                                let why = e.to_string();
+                                cannot_run =
+                                    Some(format!("not asked, after claude failed on {rel}"));
+                                Err(why)
                             }
                         }
                     }
@@ -2075,120 +2101,248 @@ fn sanitize_for_terminal(s: &str) -> String {
     crate::edit::printable(s).replace('\n', " ")
 }
 
-fn print_text(rep: &Report) {
-    crate::ui::title(
-        "recall review",
-        rep.evidence.repository_head.as_deref().unwrap_or(""),
+/// How wide a claim's text may run before it is clipped.
+const CLAIM_WIDTH: usize = 96;
+/// How wide one line of evidence may run.
+const DETAIL_WIDTH: usize = 104;
+
+/// `✗ stale`, `✓ still true`, `? can't tell`, in their colour.
+fn verdict_mark(v: Verdict) -> String {
+    let (mark, tone) = match v {
+        Verdict::Stale => ("✗", ui::Tone::Bad),
+        Verdict::StillTrue => ("✓", ui::Tone::Good),
+        Verdict::CantTell => ("?", ui::Tone::Warn),
+    };
+    ui::toned(tone, mark)
+}
+
+/// One claim's first line: its mark, its id, its lines and its text.
+fn claim_line(mark: &str, c: &Claim) {
+    anstream::println!(
+        "  {mark} {}  {}  {}",
+        ui::bold(&format!("{:<4}", c.id)),
+        ui::dim(&format!("{:<7}", lines_desc(&c.lines))),
+        sanitize_for_terminal(&ui::clip(&c.text, CLAIM_WIDTH))
     );
-    println!();
+}
+
+/// One line under a claim: a piece of evidence, marked by its own verdict,
+/// or a note.
+fn under_claim(mark: &str, text: &str) {
+    anstream::println!(
+        "           {mark} {}",
+        sanitize_for_terminal(&ui::clip(text, DETAIL_WIDTH))
+    );
+}
+
+/// What a stale claim can do next: its suggested edit, or where to get one.
+fn next_for_stale(c: &Claim, asked_claude: bool) -> String {
+    match &c.suggested_edit {
+        Some(_) => format!("recall review apply {}", c.id),
+        None if asked_claude => format!("edit {} {} yourself", c.file, lines_desc(&c.lines)),
+        None => format!(
+            "recall review run --claude, for a suggested rewrite; or edit {} {} yourself",
+            c.file,
+            lines_desc(&c.lines)
+        ),
+    }
+}
+
+fn print_text(rep: &Report) {
+    let mut about = Vec::new();
+    if let Some(head) = &rep.evidence.repository_head {
+        about.push(format!("checkout {head}"));
+    }
+    if let Some(v) = &rep.evidence.server_version {
+        about.push(format!("server {v}"));
+    }
+    if let Some(id) = &rep.evidence.evaluation {
+        about.push(format!("report {id}"));
+    }
+    ui::title("recall review", &about.join(" · "));
     if rep.claims.is_empty() {
-        println!("Nothing to review: no memory files with checkable content were found.");
+        anstream::println!();
+        anstream::println!("Nothing to review: no memory files with checkable content were found.");
         return;
     }
 
+    let count = |f: &dyn Fn(&Claim) -> bool| rep.claims.iter().filter(|c| f(c)).count();
+    let verdicts_of = |c: &Claim| -> Vec<Verdict> {
+        match c.class {
+            Class::Present => c.verdict.into_iter().collect(),
+            Class::Rule => c.evidence.iter().map(|e| e.verdict).collect(),
+            _ => Vec::new(),
+        }
+    };
+    let tally = |v: Verdict| {
+        rep.claims
+            .iter()
+            .map(|c| verdicts_of(c).iter().filter(|x| **x == v).count())
+            .sum::<usize>()
+    };
+    let (stale, still_true, cant_tell) = (
+        tally(Verdict::Stale),
+        tally(Verdict::StillTrue),
+        tally(Verdict::CantTell),
+    );
+    let records = count(&|c| c.class == Class::Record);
+    let conflicts = count(&|c| c.class == Class::Conflict);
+    let undecided =
+        count(&|c| c.class == Class::Unsure || (c.class == Class::Present && c.verdict.is_none()));
+
+    // The summary first: what a person wants to know before any detail.
+    anstream::println!();
+    let mut parts = vec![
+        ui::toned(
+            if stale > 0 {
+                ui::Tone::Bad
+            } else {
+                ui::Tone::Quiet
+            },
+            &format!("✗ {stale} stale"),
+        ),
+        ui::toned(
+            if still_true > 0 {
+                ui::Tone::Good
+            } else {
+                ui::Tone::Quiet
+            },
+            &format!("✓ {still_true} still true"),
+        ),
+        ui::toned(
+            if cant_tell > 0 {
+                ui::Tone::Warn
+            } else {
+                ui::Tone::Quiet
+            },
+            &format!("? {cant_tell} can't tell"),
+        ),
+    ];
+    if conflicts > 0 {
+        parts.push(ui::toned(
+            ui::Tone::Warn,
+            &format!("! {conflicts} conflict(s)"),
+        ));
+    }
+    parts.push(ui::dim(&format!("{records} record(s)")));
+    parts.push(ui::dim(&format!("{undecided} not decided")));
+    anstream::println!("  {}", parts.join("   "));
+
+    let asked_claude = rep.evidence.claude.is_some();
     let mut by_file: BTreeMap<&str, Vec<&Claim>> = BTreeMap::new();
     for c in &rep.claims {
         by_file.entry(c.file.as_str()).or_default().push(c);
     }
+    // Files with something to act on first, the worst first; files with
+    // nothing any check could decide are one line at the end.
+    let worst = |claims: &[&Claim]| -> u8 {
+        let vs: Vec<Verdict> = claims.iter().flat_map(|c| verdicts_of(c)).collect();
+        if vs.contains(&Verdict::Stale) || claims.iter().any(|c| c.class == Class::Conflict) {
+            0
+        } else if vs.contains(&Verdict::CantTell) {
+            1
+        } else if !vs.is_empty() || claims.iter().any(|c| !c.eval.is_empty()) {
+            2
+        } else {
+            3
+        }
+    };
+    let mut files: Vec<(&str, &Vec<&Claim>)> = by_file.iter().map(|(f, c)| (*f, c)).collect();
+    files.sort_by_key(|(f, c)| (worst(c), *f));
 
-    let (mut stale, mut still_true, mut cant_tell, mut conflicts, mut records, mut unsure) =
-        (0, 0, 0, 0, 0, 0);
+    let mut quiet_files = Vec::new();
+    let mut next: Vec<String> = Vec::new();
+    for (file, claims) in &files {
+        if worst(claims) == 3 {
+            quiet_files.push(*file);
+            continue;
+        }
+        anstream::println!();
+        anstream::println!("{}", ui::bold(&sanitize_for_terminal(file)));
 
-    for (file, claims) in &by_file {
-        println!("{}", sanitize_for_terminal(file));
-        for c in claims.iter().filter(|c| c.class == Class::Conflict) {
-            println!(
-                "  {:<10} {:<7} {}",
-                "conflict",
-                lines_desc(&c.lines),
-                sanitize_for_terminal(&c.text)
-            );
-            conflicts += 1;
-        }
-        for c in claims.iter().filter(|c| c.class == Class::Rule) {
-            println!(
-                "  {:<10} {:<7} {}",
-                "rule",
-                lines_desc(&c.lines),
-                sanitize_for_terminal(&c.text)
-            );
-            for e in &c.evidence {
-                let tag = match e.verdict {
-                    Verdict::Stale => "stale",
-                    Verdict::StillTrue => "still_true",
-                    Verdict::CantTell => "cant_tell",
-                };
-                println!("             [{tag}] {}", sanitize_for_terminal(&e.detail));
-                match e.verdict {
-                    Verdict::Stale => stale += 1,
-                    Verdict::StillTrue => still_true += 1,
-                    Verdict::CantTell => cant_tell += 1,
-                }
-            }
-        }
-        for verdict in [Verdict::Stale, Verdict::CantTell, Verdict::StillTrue] {
-            for c in claims
-                .iter()
-                .filter(|c| c.class == Class::Present && c.verdict == Some(verdict))
-            {
-                let tag = match verdict {
-                    Verdict::Stale => "stale",
-                    Verdict::CantTell => "cant_tell",
-                    Verdict::StillTrue => "still_true",
-                };
-                match verdict {
-                    Verdict::Stale => stale += 1,
-                    Verdict::CantTell => cant_tell += 1,
-                    Verdict::StillTrue => still_true += 1,
-                }
-                println!(
-                    "  {:<10} {:<7} {}",
-                    tag,
-                    lines_desc(&c.lines),
-                    sanitize_for_terminal(&c.text)
-                );
-                for e in &c.evidence {
-                    println!("             {}", sanitize_for_terminal(&e.detail));
-                }
-                if let Some(edit) = &c.suggested_edit {
-                    println!(
-                        "             suggested: {}",
-                        sanitize_for_terminal(edit.replacement.trim_end())
-                    );
-                    println!("             recall review apply {}", c.id);
-                }
-            }
-        }
-        // An unsure claim claude was asked about and left unsure: its
-        // reason is worth reading, though it decides nothing.
-        for c in claims
+        let mut order: Vec<&&Claim> = claims
             .iter()
-            .filter(|c| c.class == Class::Unsure && c.layer == Some(3))
-        {
-            println!(
-                "  {:<10} {:<7} {}",
-                "unsure",
-                lines_desc(&c.lines),
-                sanitize_for_terminal(&c.text)
-            );
-            for e in &c.evidence {
-                println!("             {}", sanitize_for_terminal(&e.detail));
+            .filter(|c| {
+                matches!(c.class, Class::Conflict | Class::Rule)
+                    || (c.class == Class::Present && c.verdict.is_some())
+                    || (c.class == Class::Unsure && c.layer == Some(3))
+            })
+            .collect();
+        let rank = |c: &Claim| match (c.class, c.verdict) {
+            (Class::Conflict, _) => 0,
+            (_, Some(Verdict::Stale)) => 1,
+            (Class::Rule, _) if c.evidence.iter().any(|e| e.verdict == Verdict::Stale) => 1,
+            (_, Some(Verdict::CantTell)) => 2,
+            (Class::Rule, _) => 3,
+            (_, Some(Verdict::StillTrue)) => 4,
+            _ => 5,
+        };
+        order.sort_by_key(|c| (rank(c), c.lines[0]));
+
+        for c in order {
+            match (c.class, c.verdict) {
+                (Class::Conflict, _) => {
+                    claim_line(&ui::toned(ui::Tone::Warn, "!"), c);
+                    under_claim(
+                        &ui::toned(ui::Tone::Warn, "!"),
+                        "a merge left a conflict here; edit the file to keep one version",
+                    );
+                }
+                (Class::Rule, _) => {
+                    claim_line(&ui::dim("§"), c);
+                    for e in &c.evidence {
+                        under_claim(&verdict_mark(e.verdict), &e.detail);
+                    }
+                }
+                (Class::Unsure, _) => {
+                    claim_line(&ui::dim("·"), c);
+                    for e in &c.evidence {
+                        under_claim(&ui::dim("·"), &e.detail);
+                    }
+                }
+                (_, Some(v)) => {
+                    claim_line(&verdict_mark(v), c);
+                    for e in &c.evidence {
+                        under_claim(&verdict_mark(e.verdict), &e.detail);
+                    }
+                    if v == Verdict::Stale {
+                        if let Some(edit) = &c.suggested_edit {
+                            under_claim(
+                                &ui::accent("→"),
+                                &format!("suggested: {}", edit.replacement.trim()),
+                            );
+                        }
+                        let step = next_for_stale(c, asked_claude);
+                        under_claim(&ui::accent("→"), &step);
+                        if c.suggested_edit.is_some() {
+                            next.push(step);
+                        }
+                    }
+                }
+                _ => {}
             }
         }
+
         let file_records = claims.iter().filter(|c| c.class == Class::Record).count();
-        let file_unsure = claims.iter().filter(|c| c.class == Class::Unsure).count();
-        records += file_records;
-        unsure += file_unsure;
-        if file_records > 0 {
-            println!("  {file_records} record(s), not reviewed");
-        }
-        if file_unsure > 0 {
-            println!("  {file_unsure} claim(s) with nothing here to decide them");
+        let file_undecided = claims
+            .iter()
+            .filter(|c| {
+                (c.class == Class::Unsure && c.layer != Some(3))
+                    || (c.class == Class::Present && c.verdict.is_none())
+            })
+            .count();
+        if file_records + file_undecided > 0 {
+            anstream::println!(
+                "  {}",
+                ui::dim(&format!(
+                    "· {file_records} record(s), {file_undecided} not decided by any check"
+                ))
+            );
         }
         // The worker's findings on this file, each with the claims it
         // covers.
         let mut found: BTreeMap<(&str, &str), (&reports::EvalFinding, Vec<&str>)> = BTreeMap::new();
-        for c in claims {
+        for c in claims.iter() {
             for e in &c.eval {
                 found
                     .entry((e.evaluation.as_str(), e.finding.as_str()))
@@ -2198,45 +2352,98 @@ fn print_text(rep: &Report) {
             }
         }
         for (e, ids) in found.values() {
-            println!(
-                "  {} {} {} ({}), beside {}; recall eval show {}",
+            let tone = match e.severity.as_str() {
+                "high" => ui::Tone::Bad,
+                "medium" => ui::Tone::Warn,
+                _ => ui::Tone::Quiet,
+            };
+            anstream::println!(
+                "  {} {} {} {} ({}), on {}  {}",
+                ui::toned(tone, "◆"),
                 sanitize_for_terminal(&e.evaluation),
                 sanitize_for_terminal(&e.finding),
-                sanitize_for_terminal(&e.kind),
+                ui::toned(tone, &sanitize_for_terminal(&e.kind)),
                 sanitize_for_terminal(&e.severity),
                 ids.join(", "),
-                sanitize_for_terminal(&e.evaluation)
+                ui::accent(&format!(
+                    "→ recall eval show {}",
+                    sanitize_for_terminal(&e.evaluation)
+                ))
             );
         }
-        println!();
     }
 
-    println!(
-        "{stale} stale, {still_true} still true, {cant_tell} cant tell, {conflicts} conflict(s), \
-         {records} record(s), {unsure} unresolved"
-    );
+    if !quiet_files.is_empty() {
+        anstream::println!();
+        anstream::println!(
+            "{}",
+            ui::dim(&format!(
+                "No check could decide anything in: {}",
+                quiet_files
+                    .iter()
+                    .map(|f| sanitize_for_terminal(f))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        );
+    }
 
     // Layer 3's own account: what it asked, and what it did not, never
     // silently cut.
     if let Some(run) = &rep.evidence.claude {
-        println!(
-            "claude: {} call(s), {} file(s) unchanged since it was last asked",
-            run.calls, run.reused
+        anstream::println!();
+        anstream::println!(
+            "{}  {}",
+            ui::bold("claude"),
+            ui::dim(&format!(
+                "{} call(s), {} file(s) unchanged since it was last asked",
+                run.calls, run.reused
+            ))
         );
         for s in &run.skipped {
-            println!(
-                "  skipped {}: {}",
+            anstream::println!(
+                "  {} {}: {}",
+                ui::toned(ui::Tone::Warn, "!"),
                 sanitize_for_terminal(&s.file),
-                sanitize_for_terminal(&s.reason)
+                sanitize_for_terminal(&ui::clip(&s.reason, DETAIL_WIDTH))
             );
         }
-    } else if let Some(u) = rep
+    }
+
+    // What to run next, in one place.
+    let waiting = rep
         .evidence
         .unavailable
         .iter()
         .find(|u| u.source == "claude")
+        .is_some();
+    if waiting && undecided > 0 {
+        next.push(format!(
+            "recall review run --claude, to decide what no check could ({undecided} claim(s))"
+        ));
+    }
+    for u in rep
+        .evidence
+        .unavailable
+        .iter()
+        .filter(|u| !matches!(u.source.as_str(), "claude" | "compose"))
     {
-        println!("{}", u.reason);
+        anstream::println!(
+            "{} {} {}",
+            ui::toned(ui::Tone::Quiet, "○"),
+            ui::dim(&format!("{} not read:", u.source)),
+            ui::dim(&sanitize_for_terminal(&ui::clip(&u.reason, DETAIL_WIDTH)))
+        );
+    }
+    if !next.is_empty() {
+        anstream::println!();
+        anstream::println!("{}", ui::bold("Next"));
+        for step in next.iter().take(8) {
+            anstream::println!("  {}", ui::accent(&format!("→ {step}")));
+        }
+        if next.len() > 8 {
+            anstream::println!("  {}", ui::dim(&format!("… and {} more", next.len() - 8)));
+        }
     }
 }
 

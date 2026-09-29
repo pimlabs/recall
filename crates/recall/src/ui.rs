@@ -1,5 +1,5 @@
 //! How the human-facing commands look: `doctor`, `status`, `connect`,
-//! `init`.
+//! `init`, `review`.
 //!
 //! One module so the whole CLI has one visual language — the same four
 //! marks, the same colours meaning the same thing — rather than each command
@@ -55,6 +55,39 @@ const ACCENT: Style = AnsiColor::Cyan.on_default();
 /// `text` in `style`, reset afterwards.
 fn paint(style: Style, text: &str) -> String {
     format!("{style}{text}{style:#}")
+}
+
+/// `text` coloured by `tone`, for a mark or a word inside a line.
+pub fn toned(tone: Tone, text: &str) -> String {
+    paint(tone.style(), text)
+}
+
+/// `text` dimmed: what is there for completeness, not to be read first.
+pub fn dim(text: &str) -> String {
+    paint(DIM, text)
+}
+
+/// `text` in bold: a heading, or the one word a line is about.
+pub fn bold(text: &str) -> String {
+    paint(BOLD, text)
+}
+
+/// `text` in the accent colour: a command to run next.
+pub fn accent(text: &str) -> String {
+    paint(ACCENT, text)
+}
+
+/// `text` cut to `max` characters, with an ellipsis when it was cut: a line
+/// that fits a terminal, whatever the note says. The full text stays in
+/// `--json`.
+pub fn clip(text: &str, max: usize) -> String {
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match one_line.char_indices().nth(max.saturating_sub(1)) {
+        Some((cut, _)) if one_line.chars().count() > max => {
+            format!("{}…", one_line[..cut].trim_end())
+        }
+        _ => one_line,
+    }
 }
 
 /// A command's first line: its name, and what it is talking about.
@@ -169,6 +202,15 @@ pub fn tilde(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_line_is_clipped_to_fit_and_says_so() {
+        assert_eq!(clip("short", 10), "short");
+        assert_eq!(clip("one\n two   three", 20), "one two three");
+        assert_eq!(clip("abcdefghij klm", 10), "abcdefghi…");
+        assert_eq!(clip("abcd efgh", 5), "abcd…");
+        assert_eq!(clip("héllo wörld", 6), "héllo…");
+    }
 
     #[test]
     fn problems_in_status_values_are_toned_by_severity() {
