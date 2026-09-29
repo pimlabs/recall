@@ -823,6 +823,20 @@ jobs:
             arch: arm64
     runs-on: ${{ matrix.os }}
     steps:
+      # windows-11-arm only: the first thing a job there does that touches
+      # a newly written file waits about 30 s, whichever step it is, and
+      # nothing after it does. In #170's run a Defender status query that
+      # happened to come first took 38 s and the Python packing after it
+      # 4 s; without it, the packing took 38 s and the first install 29 s.
+      # So the job asks Defender for its status in the background as its
+      # very first act, and that one-time wait overlaps the checkout, the
+      # cache restore and the build instead of adding to the test. Nothing
+      # waits on it, and nothing fails if it does.
+      - name: Wake Defender in the background (arm64)
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: Start-Process -FilePath pwsh -ArgumentList '-NoProfile', '-Command', 'Get-MpComputerStatus | Out-Null' -WindowStyle Hidden
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Toolchain (stable, and clippy where it runs) and Swatinem/rust-cache,
@@ -875,6 +889,20 @@ jobs:
             arch: arm64
     runs-on: ${{ matrix.os }}
     steps:
+      # windows-11-arm only: the first thing a job there does that touches
+      # a newly written file waits about 30 s, whichever step it is, and
+      # nothing after it does. In #170's run a Defender status query that
+      # happened to come first took 38 s and the Python packing after it
+      # 4 s; without it, the packing took 38 s and the first install 29 s.
+      # So the job asks Defender for its status in the background as its
+      # very first act, and that one-time wait overlaps the checkout, the
+      # cache restore and the build instead of adding to the test. Nothing
+      # waits on it, and nothing fails if it does.
+      - name: Wake Defender in the background (arm64)
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: Start-Process -FilePath pwsh -ArgumentList '-NoProfile', '-Command', 'Get-MpComputerStatus | Out-Null' -WindowStyle Hidden
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Parsed rather than run: running it for real means downloading a
