@@ -28,6 +28,14 @@ break will be described here in full rather than smoothed over.
   on stdout, which was not read, so every failure read "exit 1: (no
   stderr)"), and the files after it are not asked in that run instead of
   each failing the same way.
+- **Every help starts with the version.** `recall --help`, `-h`, `help`, a
+  bare `recall` and every command's own help print the line `recall
+  version` prints first, the one thing a bug report always needs.
+  `recall-server` and `recall-worker` do the same above their usage.
+- **`recall --help` groups the commands by what they are for** (get
+  started, every day, memory quality, your server, the hooks) and ends by
+  saying where to start. Each command has a one-line summary, which `-h`
+  shows; `--help` adds the explanation.
 
 ## 0.4.9 — 2026-09-29
 
