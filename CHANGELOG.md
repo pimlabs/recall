@@ -47,6 +47,16 @@ break will be described here in full rather than smoothed over.
   line, so it copies whole. Errors from `recall authkey` are signed
   `recall authkey:`, not `recall devices:`. `--json`, flags and exit codes
   are unchanged.
+- **`recall status` reads like `recall doctor`.** Sections (the
+  connection, this project, scopes, history), a `✓ ! ✗ ○` mark on every
+  line, the command to run under every problem, home shown as `~`, hashes
+  cut short, and a closing line. `--json` is unchanged. `recall doctor`
+  aligns within each section and folds long lines to 100 columns.
+  `recall init` names the project once and ends with what to run next,
+  and no longer says "No token yet" on a machine with a device key or an
+  authkey. `recall backfill` leaves out counts of zero and ends with one
+  line. `recall connect`, `recall disconnect` and `recall promote` use the
+  same marks and end with what happens next.
 
 ## 0.4.9 — 2026-09-29
 

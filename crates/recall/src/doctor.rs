@@ -1115,14 +1115,8 @@ fn tone_of(f: &Finding) -> ui::Tone {
 }
 
 fn print_text(cfg: &ClientConfig, rep: &Report, found: &[Finding]) {
-    let server = cfg
-        .url
-        .split_once("://")
-        .map(|(_, rest)| rest.trim_end_matches('/'))
-        .unwrap_or("no server");
-    ui::title("recall doctor", &format!("{} → {server}", cfg.source_env));
+    ui::title("recall doctor", &status::about(cfg));
 
-    let width = found.iter().map(|f| f.check.len()).max().unwrap_or(0);
     let names = SECTIONS.iter().map(|(n, _)| *n).chain([OTHER]);
     for name in names {
         let items: Vec<&Finding> = found
@@ -1138,13 +1132,17 @@ fn print_text(cfg: &ClientConfig, rep: &Report, found: &[Finding]) {
             ""
         };
         ui::section(name, about);
+        // Aligned within the section rather than across the report: one
+        // long name, `CLAUDE_CODE_REMOTE_MEMORY_DIR`, would otherwise push
+        // every detail in every section thirty columns to the right.
+        let width = items.iter().map(|f| f.check.len()).max().unwrap_or(0);
         for f in items {
-            ui::check(
+            ui::check_fitted(
                 tone_of(f),
                 f.check,
                 width,
-                &ui::tilde(&f.detail),
-                f.fix.as_deref().map(ui::tilde).as_deref(),
+                &shown(rep, &f.detail),
+                f.fix.as_deref().map(|fix| shown(rep, fix)).as_deref(),
             );
         }
     }
@@ -1157,12 +1155,16 @@ fn print_text(cfg: &ClientConfig, rep: &Report, found: &[Finding]) {
         // look identical to a healthy one.
         (0, w) => ui::verdict(
             ui::Tone::Warn,
-            &format!("Nothing broken. {w} thing(s) worth a look."),
+            &format!(
+                "Nothing broken. {w} {} worth a look.",
+                if w == 1 { "thing" } else { "things" }
+            ),
         ),
         (f, _) => ui::verdict(
             ui::Tone::Bad,
             &format!(
-                "{f} problem(s). {}",
+                "{f} {}. {}",
+                if f == 1 { "problem" } else { "problems" },
                 if cfg.url.is_empty() {
                     "Nothing syncs here."
                 } else {
@@ -1173,8 +1175,22 @@ fn print_text(cfg: &ClientConfig, rep: &Report, found: &[Finding]) {
     }
 }
 
+/// A finding's text as a person reads it: home as `~`, and the audit
+/// checkpoint and the server's commit cut short. The findings themselves,
+/// and so `--json`, keep every value whole.
+fn shown(rep: &Report, text: &str) -> String {
+    let mut text = ui::tilde(text);
+    if let Some(newest) = rep.audit.as_ref().and_then(|a| a.newest.as_deref()) {
+        text = text.replace(newest, &status::short_checkpoint(newest));
+    }
+    if let Some(commit) = rep.git_commit.as_deref().filter(|c| !c.is_empty()) {
+        text = text.replace(commit, &status::short_commit(commit));
+    }
+    text
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::status::{KeySource, MiscasedDir};
 
@@ -1183,7 +1199,7 @@ mod tests {
     /// Built healthy rather than empty on purpose: a fixture that starts
     /// broken makes it far too easy to write a test that passes because of
     /// a failure it was not looking at.
-    fn healthy() -> Report {
+    pub(crate) fn healthy() -> Report {
         Report {
             project: "/w/app".into(),
             project_key: "acme/app".into(),
@@ -2196,6 +2212,32 @@ mod tests {
                 assert!(!text.contains("  "), "a run of spaces in {text:?}");
             }
         }
+    }
+
+    // ---------------------------------------------------------------- text
+
+    /// The text shows the audit checkpoint and the server's commit cut
+    /// short; the finding, which is what `--json` prints, keeps both whole.
+    /// Mutation: shorten them in the finding instead.
+    #[test]
+    fn a_finding_is_shown_short_and_kept_whole() {
+        let mut rep = healthy();
+        rep.git_commit = Some("0fa9e05aa1b2c3d4e5f60718293a4b5c6d7e8f90".into());
+        let found = findings(&rep);
+        let audit = find(&found, "audit log").unwrap();
+        assert!(
+            audit
+                .detail
+                .contains("newest 1042 CsUYapGGPo4dkMgIAUqom/Xajj7h2fB2MPA3j2jxq2I="),
+            "{}",
+            audit.detail
+        );
+        let text = shown(&rep, &audit.detail);
+        assert!(text.ends_with("newest 1042 CsUYapGGPo4d…)"), "{text}");
+        assert_eq!(
+            shown(&rep, "commit 0fa9e05aa1b2c3d4e5f60718293a4b5c6d7e8f90"),
+            "commit 0fa9e05aa1b2"
+        );
     }
 
     // ---------------------------------------------------------------- Git Bash

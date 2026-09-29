@@ -397,13 +397,32 @@ fn init_is_idempotent_and_says_so() {
 
     let first = run(&["init"], repo.path(), &[], None);
     assert_eq!(first.code, 0, "stderr: {}", first.stderr);
-    assert!(first.stdout.contains("wired hooks into"));
+    assert!(
+        first.stdout.contains("✓ Wired Recall's hooks into"),
+        "{}",
+        first.stdout
+    );
+    // What to do next, as one command, run where the person already is:
+    // the path is not repeated in it.
+    assert!(
+        first
+            .stdout
+            .contains("→ git add .claude/settings.json && git commit"),
+        "{}",
+        first.stdout
+    );
+    assert!(!first.stdout.contains("git -C"), "{}", first.stdout);
 
     let second = run(&["init"], repo.path(), &[], None);
     assert_eq!(second.code, 0);
     assert!(
         second.stdout.contains("already wired"),
         "a second run should not claim to have done work: {:?}",
+        second.stdout
+    );
+    assert!(
+        !second.stdout.contains("git add"),
+        "nothing new to commit: {}",
         second.stdout
     );
 
@@ -425,6 +444,29 @@ fn init_warns_about_unset_variables_without_failing() {
     assert_eq!(r.code, 0);
     assert!(r.stdout.contains("RECALL_URL"), "stdout: {}", r.stdout);
     assert!(r.stdout.contains("RECALL_TOKEN"), "stdout: {}", r.stdout);
+    assert!(
+        r.stdout.contains("→ recall connect https://"),
+        "and what supplies them: {}",
+        r.stdout
+    );
+}
+
+/// The `→` line under the line containing `marked`: the fix a problem
+/// carries, which has to be there for the problem to be worth printing.
+fn fix_after<'a>(out: &'a str, marked: &str) -> Option<&'a str> {
+    out.lines()
+        .skip_while(|l| !l.contains(marked))
+        .skip(1)
+        .take_while(|l| l.starts_with("    "))
+        .map(str::trim)
+        .find(|l| l.starts_with('→'))
+}
+
+/// `out` with every run of whitespace made one space: a report folds its
+/// long lines to fit a terminal, and where the fold falls is not what a
+/// test that looks for a phrase is asking about.
+fn words(out: &str) -> String {
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 // ---------------------------------------------------------------------------
@@ -439,10 +481,38 @@ fn status_reports_rather_than_fails_when_unconfigured() {
     let r = run(&["status"], repo.path(), &[], None);
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
     assert!(r.stdout.contains("acme/app"), "stdout: {}", r.stdout);
-    assert!(r.stdout.contains("(unset)"), "stdout: {}", r.stdout);
     assert!(
-        r.stdout.contains("hooks wired  : NO"),
+        r.stdout.contains("✗ RECALL_URL") && r.stdout.contains("not set"),
+        "stdout: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("✗ hooks"),
         "an unwired project should say so plainly: {}",
+        r.stdout
+    );
+    // Each problem carries what to run, as doctor's do.
+    assert_eq!(
+        fix_after(&r.stdout, "✗ hooks"),
+        Some("→ recall init"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        fix_after(&r.stdout, "✗ RECALL_URL").is_some_and(|f| f.contains("recall connect")),
+        "{}",
+        r.stdout
+    );
+    // `run` makes the repository the home directory, so every path in the
+    // report is under it, and none is spelled out.
+    assert!(
+        !r.stdout.contains(&repo.path().display().to_string()),
+        "home is shown as ~: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains(" problems. ") || r.stdout.contains(" problem. "),
+        "a closing line: {}",
         r.stdout
     );
 }
@@ -529,8 +599,13 @@ fn status_says_when_a_declared_project_key_was_refused() {
         r.stdout
     );
     assert!(
-        r.stdout.contains("SET BUT UNUSABLE"),
+        words(&r.stdout).contains("RECALL_PROJECT_KEY is set but unusable"),
         "a refused declaration has to be visible: {}",
+        r.stdout
+    );
+    assert!(
+        fix_after(&r.stdout, "✗ key").is_some_and(|f| f.contains("RECALL_PROJECT_KEY")),
+        "and says what would make it usable: {}",
         r.stdout
     );
 }
@@ -784,18 +859,19 @@ fn the_text_report_names_the_file_that_overrides_the_shell() {
         None,
     );
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let text = words(&r.stdout);
     assert!(
-        r.stdout.contains(&file),
+        text.contains(&file),
         "the settings file has to appear by path: {}",
         r.stdout
     );
     assert!(
-        r.stdout.contains("overrides the value set in this shell"),
+        text.contains("overrides the value set in this shell"),
         "the shell value being dead has to be said, not implied: {}",
         r.stdout
     );
     assert!(
-        r.stdout.contains(&format!("set by {file}")),
+        text.contains(&format!("set by {file}")),
         "the project_key line should attribute the key to that file too: {}",
         r.stdout
     );
@@ -1669,7 +1745,11 @@ fn doctor_suggests_connect_for_a_shell_token_on_a_laptop() {
         None,
     );
     assert!(r.stdout.contains("! token storage"), "stdout: {}", r.stdout);
-    assert!(r.stdout.contains("recall connect"), "stdout: {}", r.stdout);
+    assert!(
+        fix_after(&r.stdout, "! token storage").is_some_and(|f| f.contains("recall connect")),
+        "stdout: {}",
+        r.stdout
+    );
 }
 
 /// Removing the saved copy is all `disconnect` can do, and it must not
@@ -1707,10 +1787,15 @@ fn disconnect_removes_the_saved_token_and_is_honest_about_the_shell() {
         "{}",
         r.stdout
     );
-    assert!(
-        r.stdout.contains("Your shell still supplies RECALL_TOKEN")
-            && r.stdout.contains("Remove it from your shell profile"),
+    assert_eq!(
+        fix_after(&r.stdout, "! Your shell still supplies RECALL_TOKEN"),
+        Some("→ remove it from your shell profile"),
         "{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("! Removed what was saved here"),
+        "and the closing line does not claim more than that: {}",
         r.stdout
     );
     assert!(
@@ -1980,6 +2065,12 @@ fn connect_with_a_working_saved_token_sets_the_machine_up_without_asking() {
     assert!(settings.contains("recall push"), "wired: {settings}");
     // No memory here yet, so there is no first sync to offer.
     assert!(!r.stderr.contains("Uploaded"), "stderr: {}", r.stderr);
+    assert!(
+        r.stderr
+            .contains("syncs from its next Claude Code session."),
+        "the closing line says what happens next: {}",
+        r.stderr
+    );
 
     // And a second run finds nothing left to do in the project.
     let again = run(
@@ -1998,6 +2089,88 @@ fn connect_with_a_working_saved_token_sets_the_machine_up_without_asking() {
         again.stderr.contains("jarvis"),
         "keeps the name: {}",
         again.stderr
+    );
+}
+
+/// A backfill says in one line what it came to, and says a zero only when
+/// the zero is the answer: a column of zeros reads as though something
+/// happened when nothing did.
+#[test]
+fn backfill_sums_up_in_one_line_and_hides_the_zeros() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let env = [
+        ("RECALL_URL", server.url.as_str()),
+        ("RECALL_TOKEN", "right"),
+    ];
+    let memory_dir = status_json(repo.path(), &env)["memory_dir"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    std::fs::create_dir_all(&memory_dir).unwrap();
+    for name in ["a", "b"] {
+        std::fs::write(
+            Path::new(&memory_dir).join(format!("{name}.md")),
+            format!("---\nname: {name}\ndescription: a fact\n---\n\nA fact.\n"),
+        )
+        .unwrap();
+    }
+
+    let first = run(&["backfill"], repo.path(), &env, None);
+    assert_eq!(first.code, 0, "stderr: {}", first.stderr);
+    assert!(
+        first.stdout.contains("✓ Sent all 2 files here."),
+        "{}",
+        first.stdout
+    );
+    let again = run(&["backfill"], repo.path(), &env, None);
+    assert_eq!(again.code, 0, "stderr: {}", again.stderr);
+    assert!(
+        again
+            .stdout
+            .contains("✓ Nothing to send: the server already has all 2 files."),
+        "{}",
+        again.stdout
+    );
+    for out in [&first.stdout, &again.stdout] {
+        assert!(!out.contains(" 0 "), "a zero that is not the answer: {out}");
+    }
+}
+
+/// A promotion says where the note went, one step a line, and closes with
+/// who will see it now.
+#[test]
+fn promote_says_where_the_note_went_and_who_sees_it() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let env = [
+        ("RECALL_URL", server.url.as_str()),
+        ("RECALL_TOKEN", "right"),
+        ("RECALL_GLOBAL_KEY", "eko"),
+    ];
+    let memory_dir = status_json(repo.path(), &env)["memory_dir"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    std::fs::create_dir_all(&memory_dir).unwrap();
+    std::fs::write(
+        Path::new(&memory_dir).join("user.md"),
+        "---\nname: user\ndescription: who I am\n---\n\nA person.\n",
+    )
+    .unwrap();
+
+    let r = run(&["promote", "user.md"], repo.path(), &env, None);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(
+        r.stdout.contains("✓ Moved user.md to global/user.md"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout
+            .contains("✓ Every other project picks it up at its next session start."),
+        "{}",
+        r.stdout
     );
 }
 
@@ -4156,7 +4329,14 @@ fn a_server_that_rewrote_its_history_is_caught_and_stays_caught() {
     assert_eq!(status["audit"]["extends"], false);
     let r = run(&["status"], repo.path(), &env, None);
     assert!(
-        r.stdout.contains("audit log    : REWRITTEN"),
+        r.stdout.contains("✗ audit log")
+            && words(&r.stdout).contains("rewritten: the server's log no longer extends"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        fix_after(&r.stdout, "✗ audit log").is_some()
+            && words(&r.stdout).contains("recall audit reset"),
         "{}",
         r.stdout
     );
