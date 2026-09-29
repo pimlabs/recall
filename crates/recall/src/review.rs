@@ -2135,16 +2135,14 @@ fn under_claim(mark: &str, text: &str) {
     );
 }
 
-/// What a stale claim can do next: its suggested edit, or where to get one.
-fn next_for_stale(c: &Claim, asked_claude: bool) -> String {
+/// What a stale claim can do next: its suggested edit, or the lines to
+/// edit. `--claude` is not offered here: it is asked only about what the
+/// checks could not decide, so a claim they found stale never gets a
+/// suggestion from it.
+fn next_for_stale(c: &Claim) -> String {
     match &c.suggested_edit {
         Some(_) => format!("recall review apply {}", c.id),
-        None if asked_claude => format!("edit {} {} yourself", c.file, lines_desc(&c.lines)),
-        None => format!(
-            "recall review run --claude, for a suggested rewrite; or edit {} {} yourself",
-            c.file,
-            lines_desc(&c.lines)
-        ),
+        None => format!("edit {} {}", c.file, lines_desc(&c.lines)),
     }
 }
 
@@ -2224,11 +2222,16 @@ fn print_text(rep: &Report) {
             &format!("! {conflicts} conflict(s)"),
         ));
     }
-    parts.push(ui::dim(&format!("{records} record(s)")));
-    parts.push(ui::dim(&format!("{undecided} not decided")));
+    // The three verdicts are the answer even at zero; these two are only
+    // counts, and a zero there says nothing.
+    if records > 0 {
+        parts.push(ui::dim(&format!("{records} record(s)")));
+    }
+    if undecided > 0 {
+        parts.push(ui::dim(&format!("{undecided} not decided")));
+    }
     anstream::println!("  {}", parts.join("   "));
 
-    let asked_claude = rep.evidence.claude.is_some();
     let mut by_file: BTreeMap<&str, Vec<&Claim>> = BTreeMap::new();
     for c in &rep.claims {
         by_file.entry(c.file.as_str()).or_default().push(c);
@@ -2312,7 +2315,7 @@ fn print_text(rep: &Report) {
                                 &format!("suggested: {}", edit.replacement.trim()),
                             );
                         }
-                        let step = next_for_stale(c, asked_claude);
+                        let step = next_for_stale(c);
                         under_claim(&ui::accent("→"), &step);
                         if c.suggested_edit.is_some() {
                             next.push(step);
@@ -2331,24 +2334,27 @@ fn print_text(rep: &Report) {
                     || (c.class == Class::Present && c.verdict.is_none())
             })
             .count();
-        if file_records + file_undecided > 0 {
-            anstream::println!(
-                "  {}",
-                ui::dim(&format!(
-                    "· {file_records} record(s), {file_undecided} not decided by any check"
-                ))
-            );
+        let mut counted = Vec::new();
+        if file_records > 0 {
+            counted.push(format!("{file_records} record(s)"));
+        }
+        if file_undecided > 0 {
+            counted.push(format!("{file_undecided} not decided by any check"));
+        }
+        if !counted.is_empty() {
+            anstream::println!("  {}", ui::dim(&format!("· {}", counted.join(", "))));
         }
         // The worker's findings on this file, each with the claims it
         // covers.
-        let mut found: BTreeMap<(&str, &str), (&reports::EvalFinding, Vec<&str>)> = BTreeMap::new();
+        let mut found: BTreeMap<(&str, &str), (&reports::EvalFinding, Vec<String>)> =
+            BTreeMap::new();
         for c in claims.iter() {
             for e in &c.eval {
                 found
                     .entry((e.evaluation.as_str(), e.finding.as_str()))
                     .or_insert((e, Vec::new()))
                     .1
-                    .push(c.id.as_str());
+                    .push(format!("{} ({})", c.id, lines_desc(&c.lines)));
             }
         }
         for (e, ids) in found.values() {

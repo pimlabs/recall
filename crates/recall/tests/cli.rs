@@ -4691,10 +4691,18 @@ fn the_phase1_deploy_fixture_gets_the_documented_verdicts() {
     assert_eq!(text.code, 0);
     assert!(text.stdout.contains("stale"), "{}", text.stdout);
     assert!(
-        text.stdout.contains("record(s), ") && text.stdout.contains("not decided by any check"),
+        text.stdout.contains("· 1 record(s)"),
         "records are counted, not listed: {}",
         text.stdout
     );
+    // A count of nothing is left out rather than printed as a zero.
+    assert!(
+        !text.stdout.contains(" 0 record(s)") && !text.stdout.contains(" 0 not decided"),
+        "{}",
+        text.stdout
+    );
+    // A stale claim says what to do about it, on the line under it.
+    assert!(text.stdout.contains("→ edit "), "{}", text.stdout);
     // The record's own text — "Not the old `hooks/recall-pull` script" —
     // must not appear on a line the report marks stale.
     assert!(
