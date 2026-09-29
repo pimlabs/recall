@@ -150,8 +150,8 @@ RUN cargo build --release --locked -p recall-worker \
 FROM alpine:3 AS release
 RUN apk add --no-cache curl
 ARG RECALL_VERSION=
-# Where the v<version>/ release directories are. Only CI changes it, to a
-# local copy of a release it assembled itself.
+# RECALL_RELEASES_URL: where the v<version>/ release directories are. Only
+# CI changes it, to a local copy of a release it assembled itself.
 ARG RECALL_RELEASES_URL=https://github.com/pimlabs/recall/releases/download
 # Set by BuildKit to the platform being built for (amd64, arm64).
 ARG TARGETARCH

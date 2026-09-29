@@ -156,7 +156,8 @@ pub const CHANNEL_RELEASE: &str = "release";
 /// machine.
 pub const CHANNEL_DEV: &str = "dev";
 
-/// This build's channel, decided at compile time by `build.rs`:
+/// This build's channel, decided at compile time by `build.rs`, which
+/// passes it on as `RECALL_RESOLVED_CHANNEL`:
 /// `RECALL_BUILD_CHANNEL` when set, otherwise `dev` for a git checkout and
 /// `release` for a crate built from crates.io, which is what
 /// `cargo install recall` compiles.
@@ -172,7 +173,8 @@ pub fn revision() -> Option<&'static str> {
     option_env!("RECALL_GIT_COMMIT").filter(|r| !r.is_empty())
 }
 
-/// When this build was made, when the build recorded it.
+/// When this build was made, when the build recorded it: the release
+/// workflow sets `RECALL_BUILD_CREATED` at compile time.
 pub fn created() -> Option<&'static str> {
     option_env!("RECALL_BUILD_CREATED").filter(|c| !c.is_empty())
 }

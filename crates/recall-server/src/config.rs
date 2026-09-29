@@ -90,12 +90,12 @@ pub enum ConfigError {
 ///
 /// | Field | Variable | Default |
 /// |---|---|---|
-/// | [`addr`] | `RECALL_HOST`, `RECALL_PORT` | `0.0.0.0:8787` |
+/// | [`addr`] | `RECALL_PORT` (the host is always `0.0.0.0`) | `0.0.0.0:8787` |
 /// | [`token`] | `RECALL_TOKEN` | *required* |
 /// | [`db_path`] | `RECALL_DB_PATH` | `data/recall.db` |
 /// | [`git_commit`] | `RECALL_GIT_COMMIT` | the commit the binary was built from, else `unknown` |
 /// | [`backup_dir`] | `RECALL_BACKUP_DIR` | off |
-/// | [`backup_interval`] | `RECALL_BACKUP_INTERVAL_MS` | 24h |
+/// | [`backup_interval`] | `RECALL_BACKUP_INTERVAL_HOURS` | 24h |
 /// | [`backup_keep`] | `RECALL_BACKUP_KEEP` | 7 |
 /// | [`rate_limit_window`] | `RECALL_RATE_LIMIT_WINDOW_MS` | 60s |
 /// | [`rate_limit_max`] | `RECALL_RATE_LIMIT_MAX` | 60 |
@@ -134,7 +134,8 @@ pub enum ConfigError {
 /// [`tls_max_connections`]: Config::tls_max_connections
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// The socket to bind, assembled from host and port.
+    /// The socket to bind: every interface, on `RECALL_PORT`. What can
+    /// reach it is decided by the compose file, not by the address.
     pub addr: String,
     /// The single bearer token. There is no second one, by design.
     pub token: String,
