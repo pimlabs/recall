@@ -634,7 +634,7 @@ pub(super) fn evidence_for_env_name(
 ) -> Option<Observed> {
     if facts.known_vars.contains(&name) {
         return Some(observed(
-            Signal::Confirms,
+            Signal::Exists,
             "environment",
             format!("`{name}` is a variable the recall client reads"),
         ));
@@ -644,7 +644,7 @@ pub(super) fn evidence_for_env_name(
     }
     let (_, service) = facts.compose.as_ref()?.vars.get_key_value(name)?;
     Some(observed(
-        Signal::Confirms,
+        Signal::Exists,
         "compose",
         format!("`{name}` is passed to {service}"),
     ))
@@ -656,7 +656,7 @@ pub(super) fn evidence_for_env_name(
 pub(super) fn evidence_for_name(value: &str, facts: &Facts, is_project: bool) -> Option<Observed> {
     if facts.server.capabilities.iter().any(|c| c == value) {
         return Some(observed(
-            Signal::Confirms,
+            Signal::Exists,
             "server",
             format!("the server lists the `{value}` capability"),
         ));
@@ -665,7 +665,7 @@ pub(super) fn evidence_for_name(value: &str, facts: &Facts, is_project: bool) ->
         return None;
     }
     let what = facts.compose.as_ref()?.names.get(value)?;
-    Some(observed(Signal::Confirms, "compose", what.clone()))
+    Some(observed(Signal::Exists, "compose", what.clone()))
 }
 
 /// A version in a claim about the server, against the version the server
@@ -919,7 +919,7 @@ mod tests {
         let facts = cloud();
         assert!(evidence_for_env_value("RECALL_TOKEN=s3cret", "", &facts).is_none());
         let o = evidence_for_env_name("RECALL_TOKEN", &facts, true).unwrap();
-        assert_eq!(o.signal, Signal::Confirms, "{}", o.detail);
+        assert_eq!(o.signal, Signal::Exists, "{}", o.detail);
         assert!(!o.detail.contains("s3cret"), "{}", o.detail);
     }
 
@@ -966,7 +966,7 @@ mod tests {
         };
         for name in ["cloudflared", "recall-server", "traefik"] {
             let o = evidence_for_name(name, &facts, true).unwrap();
-            assert_eq!(o.signal, Signal::Confirms, "{name}: {}", o.detail);
+            assert_eq!(o.signal, Signal::Exists, "{name}: {}", o.detail);
             assert_eq!(o.source, "compose");
         }
         let o = evidence_for_env_name("TUNNEL_TOKEN", &facts, true).unwrap();
@@ -984,10 +984,12 @@ mod tests {
         assert!(!read_compose_file("version: 3\n", "x.yml", &mut c));
     }
 
+    /// Listed, in any scope, and so a fact layer 3 may cite; but a claim
+    /// about what the capability does is not confirmed by its being there.
     #[test]
-    fn a_capability_the_server_lists_is_still_true_in_any_scope() {
+    fn a_capability_the_server_lists_exists_in_any_scope() {
         let o = evidence_for_name("evaluation", &connected(), false).unwrap();
-        assert_eq!(o.signal, Signal::Confirms, "{}", o.detail);
+        assert_eq!(o.signal, Signal::Exists, "{}", o.detail);
         assert_eq!(o.source, "server");
     }
 

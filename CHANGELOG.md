@@ -16,6 +16,17 @@ break will be described here in full rather than smoothed over.
 
 ## Unreleased
 
+- **`recall review` no longer calls a claim true because what it names
+  exists.** A path at HEAD, a name in the code, a variable the client
+  reads, a compose service or a server capability used to make a present
+  claim `still_true` on its own, so "`RECALL_HOST` sets the bind address"
+  passed while false (the name is in the code; nothing reads it). Such
+  evidence is still shown, and `--claude` may still cite it, but the claim
+  is now `cant_tell` unless a value it states matches: a version, a
+  variable's value, the configured server's host. Expect fewer `still_true`
+  and more `can't tell` on the next run, and `recall review apply` no
+  longer refuses to edit a line only because existence vouched for it.
+  A rule's anchors are unchanged: existence is what they are checked for.
 - **Windows installs through `install.ps1` no longer crawl.** Windows
   PowerShell 5.1 redraws a download's progress bar for every chunk it
   reads, which made fetching the archive take many times as long as the

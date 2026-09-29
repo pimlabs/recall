@@ -173,7 +173,9 @@ pub enum Class {
 pub enum Verdict {
     /// Evidence contradicts it.
     Stale,
-    /// Evidence confirms it.
+    /// Evidence confirms it: a value it states matches what is observed.
+    /// That what it names exists is never enough, except for a rule's
+    /// anchor, which is only ever checked for that.
     StillTrue,
     /// Nothing here can decide it, or it concerns another machine or scope.
     CantTell,
@@ -193,6 +195,13 @@ pub struct Evidence {
     /// its own verdict rather than the claim as a whole one, since a rule's
     /// substance is never judged.
     pub verdict: Verdict,
+    /// Whether layer 3 may cite this as a fact: true for whatever decided
+    /// something or showed that what an anchor names exists, false for what
+    /// decided nothing ("not found on this machine"). Layer 2 sets it on
+    /// every run, and nothing reads it from a saved report, so it is never
+    /// written out.
+    #[serde(skip)]
+    pub citable: bool,
 }
 
 /// One claim: a list item, a sentence, or a fenced block, with the line
@@ -738,9 +747,10 @@ fn fact_sheet(
             }
         } else {
             for e in c.evidence.iter().filter(|e| e.source != claude::SOURCE) {
-                match e.verdict {
-                    Verdict::CantTell => context.push(e.detail.clone()),
-                    _ => facts.push(e.detail.clone()),
+                if e.citable {
+                    facts.push(e.detail.clone());
+                } else {
+                    context.push(e.detail.clone());
                 }
             }
         }
@@ -1099,7 +1109,8 @@ fn judge(
         .map(|o| Evidence {
             source: o.source.clone(),
             detail: o.detail.clone(),
-            verdict: verdict_of_signal(o.signal),
+            verdict: verdict_of_signal(o.signal, class),
+            citable: o.signal != Signal::Unknown,
         })
         .collect();
     let verdict = match class {
@@ -1690,16 +1701,28 @@ fn anchors(text: &str) -> Vec<Anchor> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Signal {
+    /// A value the claim states matches what is observed.
     Confirms,
     Contradicts,
+    /// What the anchor names is there: a path at HEAD or on this machine, a
+    /// name in the tracked tree, a variable something reads. That is what a
+    /// rule's anchor asks, and all it gets. It says nothing about what a
+    /// `present` claim asserts *of* the thing: "`RECALL_HOST` sets the bind
+    /// address" names a variable that appears in the code and is still
+    /// false. So it never makes a present claim `still_true`, but it is
+    /// still a fact layer 3 may cite, either way.
+    Exists,
     Unknown,
 }
 
-fn verdict_of_signal(s: Signal) -> Verdict {
+/// One anchor's own verdict. [`Signal::Exists`] decides a rule's anchor and
+/// nothing else.
+fn verdict_of_signal(s: Signal, class: Class) -> Verdict {
     match s {
         Signal::Confirms => Verdict::StillTrue,
+        Signal::Exists if class == Class::Rule => Verdict::StillTrue,
         Signal::Contradicts => Verdict::Stale,
-        Signal::Unknown => Verdict::CantTell,
+        Signal::Exists | Signal::Unknown => Verdict::CantTell,
     }
 }
 
@@ -1899,7 +1922,7 @@ fn evidence_for_path(repo: &Repo, value: &str, is_project: bool) -> Observed {
     if is_machine_absolute(value) {
         return if machine_path_exists(value) {
             observed(
-                Signal::Confirms,
+                Signal::Exists,
                 "machine",
                 format!("`{value}` exists on this machine"),
             )
@@ -1932,7 +1955,7 @@ fn evidence_for_path(repo: &Repo, value: &str, is_project: bool) -> Observed {
     }
     if repo.tracked(value) {
         return observed(
-            Signal::Confirms,
+            Signal::Exists,
             "repository",
             format!("`{value}` exists at HEAD"),
         );
@@ -2026,7 +2049,7 @@ fn evidence_for_code(repo: &Repo, value: &str, is_project: bool) -> Observed {
         // grep-able (a different casing, a generated file) — so it is
         // never enough on its own to call a claim stale.
         Some(true) => observed(
-            Signal::Confirms,
+            Signal::Exists,
             "git",
             format!("`{value}` is still referenced in the tracked tree, outside documentation"),
         ),
@@ -2083,9 +2106,12 @@ fn verdict_from(observed: &[Observed]) -> Option<Verdict> {
     if observed.is_empty() {
         return None;
     }
-    if observed.iter().any(|o| o.signal == Signal::Contradicts) {
+    let any = |s: Signal| observed.iter().any(|o| o.signal == s);
+    if any(Signal::Contradicts) {
         Some(Verdict::Stale)
-    } else if observed.iter().all(|o| o.signal == Signal::Confirms) {
+    } else if any(Signal::Confirms) && !any(Signal::Unknown) {
+        // At least one stated value matched, and every other anchor is at
+        // least there. Existence alone, however many anchors, is not enough.
         Some(Verdict::StillTrue)
     } else {
         Some(Verdict::CantTell)
@@ -2763,6 +2789,53 @@ mod tests {
         assert_eq!(evidence[0].verdict, Verdict::Stale, "{evidence:?}");
     }
 
+    /// Existence answers a rule's anchor and nothing more. The case that
+    /// found this: "`RECALL_HOST` sets the bind address" named a variable
+    /// that appears in the code, only in a doc comment, and was
+    /// `still_true` while false. A present claim whose anchors only exist
+    /// is `cant_tell`, and each anchor stays a fact layer 3 may cite; the
+    /// same anchor in a rule is `still_true`. Mutation: let
+    /// [`Signal::Exists`] count as [`Signal::Confirms`] in [`verdict_from`].
+    #[test]
+    fn existence_decides_a_rule_anchor_but_not_a_present_claim() {
+        let dir = git_fixture();
+        std::fs::write(dir.path().join("config.rs"), "// RECALL_HOST\n").unwrap();
+        git_commit(dir.path(), "add");
+        let repo = Repo::at(Some(dir.path().to_path_buf()));
+        let judged =
+            |class, text| judge(class, text, &repo, true, &None, &sources::Facts::default());
+
+        let (verdict, _, evidence) = judged(
+            Class::Present,
+            "`config.rs` reads `RECALL_HOST` to pick the bind address.",
+        );
+        assert_eq!(verdict, Some(Verdict::CantTell), "{evidence:?}");
+        assert_eq!(evidence.len(), 2, "{evidence:?}");
+        for e in &evidence {
+            assert_eq!(e.verdict, Verdict::CantTell, "{e:?}");
+            assert!(e.citable, "existence is still a fact: {e:?}");
+        }
+
+        let (verdict, _, evidence) = judged(Class::Rule, "Keep `config.rs` as it is.");
+        assert_eq!(verdict, None);
+        assert_eq!(evidence[0].verdict, Verdict::StillTrue, "{evidence:?}");
+    }
+
+    /// A stated value that matches decides a present claim, and anchors that
+    /// merely exist beside it do not hold it back; one anchor nothing here
+    /// can speak to does.
+    #[test]
+    fn a_matching_value_decides_a_present_claim_whose_other_anchors_exist() {
+        let exists = observed(Signal::Exists, "repository", String::new());
+        let confirms = observed(Signal::Confirms, "git", String::new());
+        let unknown = observed(Signal::Unknown, "git", String::new());
+        let both = [exists, confirms];
+        assert_eq!(verdict_from(&both), Some(Verdict::StillTrue));
+        assert_eq!(verdict_from(&both[..1]), Some(Verdict::CantTell));
+        let [_, confirms] = both;
+        assert_eq!(verdict_from(&[confirms, unknown]), Some(Verdict::CantTell));
+    }
+
     /// Scope gating: a global or machine note is not about this
     /// repository, so a repository-shaped check on it is `cant_tell`
     /// whatever the checkout actually shows.
@@ -2853,9 +2926,9 @@ mod tests {
     }
 
     /// A flag this codebase actually uses is found — proving `references`
-    /// can say `Confirms` at all, not just fail safe.
+    /// can say a name exists at all, not just fail safe.
     #[test]
-    fn a_flag_that_is_still_referenced_is_confirmed() {
+    fn a_flag_that_is_still_referenced_is_found() {
         let dir = git_fixture();
         std::fs::write(dir.path().join("code.rs"), "let flag = \"--keep-open\";\n").unwrap();
         git_commit(dir.path(), "x");
@@ -2869,7 +2942,7 @@ mod tests {
     /// read as still true because the note itself (or the ROADMAP, or
     /// history docs) says its name somewhere.
     #[test]
-    fn a_name_mentioned_only_in_markdown_is_not_confirmed() {
+    fn a_name_mentioned_only_in_markdown_is_not_found() {
         let dir = git_fixture();
         std::fs::write(
             dir.path().join("notes.md"),
