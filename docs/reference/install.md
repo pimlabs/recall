@@ -870,7 +870,7 @@ red when memory stops syncing.
 whether what was synced is still *true*: a note can be perfectly delivered and
 still be wrong, the way `project_phase1_deploy.md` named a server this project
 no longer runs on six weeks after it moved. `recall review` is the other
-half — see [the design](../design/memory-truth.md) for the fuller reasoning.
+half — see [the design](../history/memory-truth.md) for the fuller reasoning.
 
 ```sh
 recall review run

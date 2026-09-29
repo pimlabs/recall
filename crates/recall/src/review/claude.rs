@@ -1,5 +1,5 @@
 //! Layer 3: the local `claude` CLI, over what layers 1 and 2 left
-//! undecided. See `docs/design/memory-truth.md`'s Layer 3 section.
+//! undecided. See `docs/history/memory-truth.md`'s Layer 3 section.
 //!
 //! **Only with `--claude`** (design decision 5): it spends the owner's
 //! Claude usage. Nothing here runs otherwise, and layers 1 and 2 never

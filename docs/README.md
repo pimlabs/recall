@@ -25,7 +25,7 @@ first, which is the point: the server is a prerequisite, not an alternative.
 
 | Document | Read it when |
 |---|---|
-| [`../deploy/README.md`](../deploy/README.md) | **Start here if you have no server.** Standing it up in Docker behind either ingress (Cloudflare Tunnel or an existing Traefik), enabling merge, backups, and cleaning up a project stored under the wrong key. |
+| [`../deploy/README.md`](../deploy/README.md) | **Start here if you have no server.** Standing it up in Docker behind Cloudflare Tunnel or an existing Traefik, or terminating TLS itself with no ingress at all; enabling merge, backups, and cleaning up a project stored under the wrong key. |
 | [`reference/token-setup.md`](reference/token-setup.md) | Generating `RECALL_TOKEN` — the server checks it, every environment sends it. Step 1 belongs to the server; the rest belongs to the machines. |
 
 ### Connecting a machine
@@ -35,7 +35,7 @@ design, so there is no third party here.
 
 | Document | Read it when |
 |---|---|
-| [`reference/install.md`](reference/install.md) | Installing the `recall` CLI (npm, Homebrew, curl, cargo), opting a project in with `recall init`, sending memory that predates the install with `recall backfill`, declaring a `project_key` by hand, and promoting a note into the global scope. |
+| [`reference/install.md`](reference/install.md) | Installing the `recall` CLI (npm, Homebrew, curl, `install.ps1` on Windows, cargo), connecting and enrolling the machine with `recall connect`, opting a project in with `recall init`, sending memory that predates the install with `recall backfill`, declaring a `project_key` by hand, promoting a note into the global or machine scope, and checking what memory claims with `recall review` and the server's history with `recall audit`. |
 | [`reference/api.md`](reference/api.md) | Talking to the server directly instead: endpoints, schemas, status codes, `curl` examples. |
 
 ### Keeping it running
@@ -55,23 +55,24 @@ it against a running server on every CI run, so it cannot quietly drift.
 | [`history/rust-rewrite.md`](history/rust-rewrite.md) | Why Rust, honestly — what it cost, what it caught, and the bugs this project has actually shipped and fixed. |
 | [`history/memory-loading-findings.md`](history/memory-loading-findings.md) | What Claude Code actually does with memory files — the entry point, subdirectories, and why a single failed probe means nothing. |
 | [`history/phase-0-findings.md`](history/phase-0-findings.md) | What the Claude Code CLI *actually* does, verified by running it, versus what the original design assumed. Still the source of several load-bearing constraints. |
+| [`history/memory-truth.md`](history/memory-truth.md) | The design `recall review` was built from (0.4.9): why a claim and not a file is what gets checked, the three layers cheapest first, and the owner's six decisions. What the command does today is in `reference/install.md`. |
 
 These are cited from the code: `recall-hooks` points at `phase-0-findings.md`
 for why its path derivation looks the way it does. That is the value of not
 maintaining them — a comment can point at what was known *then*, and the
 answer stays put.
 
-## Design — proposals under discussion
+## Design — agreed, and not finished
 
-| Document | What it proposes |
+| Document | What it proposes, and how much of it is built |
 |---|---|
-| [`design/handshake.md`](design/handshake.md) | Version discovery (`/.well-known/recall`), server identity for release-based deploys, per-device keys in place of the one shared token, a passkey admin page, splitting out `recall-server`, and encrypted storage with a worker that merges and evaluates memory. Not built. |
-| [`design/part5-plan.md`](design/part5-plan.md) | How Part 5 of the above gets built: seven pull requests in order, with their wire contracts, storage, key management, the worker, tests and the owner's open decisions. Not built. |
-| [`design/memory-truth.md`](design/memory-truth.md) | `recall review`: checking each claim in memory against the repository, `recall doctor` and the running server, cheapest first, with the local `claude` CLI last; stale, still true or can't tell, with evidence. Not built. |
+| [`design/handshake.md`](design/handshake.md) | Version discovery (`/.well-known/recall`), server identity for release-based deploys, per-device keys in place of the one shared token, a passkey admin page, splitting out `recall-server`, and encrypted storage with a worker that merges and evaluates memory. **Mostly built:** everything but encryption, which is parked. |
+| [`design/part5-plan.md`](design/part5-plan.md) | How Part 5 of the above gets built: seven pull requests in order, with their wire contracts, storage, key management, the worker, tests and the owner's open decisions. **Partly built:** PRs 1, 2 and 6 (audit log, `recall-worker`, evaluation reports without encryption); PRs 3, 4, 5 and 7, the encryption, were parked on 2026-09-25. |
 
-A proposal is neither kept true nor a record yet. When one is built, the
-reference docs become the authority for what shipped and the proposal moves
-to `history/`.
+A design is neither kept true nor a record yet. For the parts that are
+built, the reference docs are the authority, not the design. When the whole
+of one is built, or its unbuilt rest is dropped, it moves to `history/`, as
+`memory-truth.md` did.
 
 ## Neither — the shape of the thing
 

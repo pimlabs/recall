@@ -31,7 +31,7 @@ recall-worker = { path = "crates/recall-worker", version = "0.4.10", default-fea
 anyhow = "1"
 thiserror = "2"
 # `recall review` reads deploy/docker-compose*.yml as YAML rather than by
-# pattern, per docs/design/memory-truth.md: which services, images, labels
+# pattern, per docs/history/memory-truth.md: which services, images, labels
 # and variables the project's compose files carry. Pure Rust and maintained,
 # unlike serde_yaml; no serde needed for reading four kinds of key.
 yaml-rust2 = "0.13"

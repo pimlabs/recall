@@ -2,7 +2,7 @@
 //!
 //! Split out of the evaluation (behind the `client` feature) so
 //! [`Redactor`], and the local `claude` call in [`crate::merge`], are
-//! usable without the worker's HTTP client: `docs/design/memory-truth.md`
+//! usable without the worker's HTTP client: `docs/history/memory-truth.md`
 //! decision 2. `recall-server` already depends on this crate the same way
 //! for the merge; this module is exactly as unconditional.
 //!

@@ -17,7 +17,7 @@
 //! `recall`'s own CLI can use them without the job loop: [`merge`] is the
 //! merge itself, the prompt and the flags that keep it cheap, and
 //! [`redact`] finds and masks secrets in memory text
-//! (`docs/design/memory-truth.md` decision 2). Everything else is behind
+//! (`docs/history/memory-truth.md` decision 2). Everything else is behind
 //! the `client` feature (on by default): enrolling, signing requests, and
 //! the job loop, with the HTTP client they need. The server turns it off.
 
