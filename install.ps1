@@ -200,6 +200,19 @@ try {
     # A newer runtime that no longer exposes the knob. Nothing to do.
 }
 
+# --- progress bars ------------------------------------------------------
+# Windows PowerShell 5.1 redraws Invoke-WebRequest's progress bar for every
+# chunk it reads, and that redrawing can cost many times what the transfer
+# does: in CI a run of this script took 5 to 12 seconds, where
+# npm/install.js fetched and unpacked the same archive in a third of one.
+# So progress is turned off around the downloads below and the unpacking.
+# Piped through `iex` this script runs in the caller's own session, where a
+# bare assignment would outlive the install and leave their progress bars
+# off as well. The setting found here is kept instead, and each block that
+# turns progress off puts it back in a `finally`, which runs whether the
+# block finishes or throws.
+$callerProgress = $ProgressPreference
+
 # --- detect the architecture --------------------------------------------
 # PROCESSOR_ARCHITECTURE describes the *process*, so a 32-bit PowerShell on
 # 64-bit Windows reports x86 and would fetch the wrong archive.
@@ -226,9 +239,12 @@ switch ($archRaw) {
 $version = $env:RECALL_VERSION
 if (-not $version) {
     try {
+        $ProgressPreference = "SilentlyContinue"
         $response = Invoke-WebRequest -Uri "$Releases/latest" -Method Head -UseBasicParsing
     } catch {
         Stop-WithError "could not look up the latest release at $Releases/latest: $($_.Exception.Message)"
+    } finally {
+        $ProgressPreference = $callerProgress
     }
     # Where the redirect ended: HttpWebResponse.ResponseUri on Windows
     # PowerShell 5.1, the final request's URI on PowerShell 7.
@@ -264,6 +280,7 @@ $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("recall-install-" + [System.
 New-Item -ItemType Directory -Path $tmp -Force | Out-Null
 
 try {
+    $ProgressPreference = "SilentlyContinue"
     $archivePath = Join-Path $tmp $archiveName
     $checksumPath = Join-Path $tmp "checksums.txt"
 
@@ -373,5 +390,6 @@ try {
     Write-Info ""
     Write-Info "Next: recall connect https://your-recall-host"
 } finally {
+    $ProgressPreference = $callerProgress
     Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }

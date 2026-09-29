@@ -14,6 +14,15 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
+## Unreleased
+
+- **Windows installs through `install.ps1` no longer crawl.** Windows
+  PowerShell 5.1 redraws a download's progress bar for every chunk it
+  reads, which made fetching the archive take many times as long as the
+  transfer itself; the installer now turns progress off while it
+  downloads and unpacks, and puts your session's progress setting back as
+  it was when it finishes or fails.
+
 ## 0.4.10 — 2026-09-29
 
 - **`recall review run` reads at a glance.** A summary line first, then the
