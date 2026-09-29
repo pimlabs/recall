@@ -153,15 +153,14 @@ jobs:
 
           # .github/actions/ too: the windows jobs set up Rust through the
           # local rust-setup action, so a change there is only proven on
-          # Windows by running them; and .config/nextest.toml, which is how
-          # `test-windows` runs the tests. And what the Windows installer
+          # Windows by running them. And what the Windows installer
           # test runs: install.ps1, its own script, the packer release.yml
           # uses and the stand-in release server.
-          if printf '%s\n' "$changed" | grep -Eq '^(crates/|Cargo\.(toml|lock)$|\.config/nextest\.toml$|install\.ps1$|npm/install\.js$|scripts/(installer-test\.ps1|package-release\.py|fake-release-server\.py)$|\.github/workflows/(ci|release)\.yml$|\.github/actions/)'; then
+          if printf '%s\n' "$changed" | grep -Eq '^(crates/|Cargo\.(toml|lock)$|install\.ps1$|npm/install\.js$|scripts/(installer-test\.ps1|package-release\.py|fake-release-server\.py)$|\.github/workflows/(ci|release)\.yml$|\.github/actions/)'; then
             echo "windows=true" >> "$GITHUB_OUTPUT"
           else
             echo "windows=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Nothing under crates/, .github/actions/, Cargo.toml, Cargo.lock, .config/nextest.toml, install.ps1, npm/install.js, the installer test's scripts, release.yml or this workflow changed, so the Windows jobs were skipped. They run unconditionally on every push to main."
+            echo "::notice::Nothing under crates/, .github/actions/, Cargo.toml, Cargo.lock, install.ps1, npm/install.js, the installer test's scripts, release.yml or this workflow changed, so the Windows jobs were skipped. They run unconditionally on every push to main."
           fi
 
   # Eight checks that are plain scripts against files already in the
@@ -827,15 +826,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Toolchain (stable, and clippy where it runs) and Swatinem/rust-cache,
-      # saved only from main (see .github/actions/rust-setup for why), and
-      # cargo-nextest. Keyed by matrix.os since the two OSes must not share
-      # one cache entry.
-      - name: Set up Rust (stable), cargo-nextest and the cache
+      # saved only from main (see .github/actions/rust-setup for why). Keyed
+      # by matrix.os since the two OSes must not share one cache entry.
+      - name: Set up Rust (stable) and the cache
         uses: ./.github/actions/rust-setup
         with:
           components: ${{ matrix.arch == 'x64' && 'clippy' || '' }}
           cache-key: ${{ matrix.os }}
-          nextest: 'true'
 
       # No `cargo fmt`: formatting is the same on every platform, and `lint`
       # checks it. Clippy is here for the code only Windows compiles
@@ -848,16 +845,16 @@ jobs:
         if: matrix.arch == 'x64'
         run: cargo clippy --workspace --exclude recall-server --exclude recall-worker --all-targets --locked -- -D warnings
 
-      # nextest, as in `test-linux` and for the same reason. --no-fail-fast
-      # (and the `ci` profile's fail-fast = false): a Windows failure in one
-      # crate otherwise hides every failure in the crates after it, and each
-      # round trip is a CI run.
-      - name: cargo nextest
-        run: cargo nextest run --workspace --exclude recall-server --exclude recall-worker --locked --profile ci --no-fail-fast
-
-      # The doctests nextest does not run, as in `test-linux`.
-      - name: cargo test --doc
-        run: cargo test --doc --workspace --exclude recall-server --exclude recall-worker --locked --no-fail-fast
+      # `cargo test`, not nextest as on Linux. Measured on this PR's own run:
+      # nextest took 63 s to run what `cargo test` runs in about 50 on
+      # windows-11-arm, and no less on x64. It starts a process per test,
+      # Windows starts processes slowly, and the CLI tests start several
+      # each, so running them side by side traded one cost for a bigger one.
+      # --no-fail-fast: a Windows failure in one crate otherwise hides every
+      # failure in the crates after it, and each round trip is a CI run.
+      # The doctests run as part of it.
+      - name: cargo test
+        run: cargo test --workspace --exclude recall-server --exclude recall-worker --locked --no-fail-fast
 
   # install.ps1, on both architectures: parsed, then run against a release
   # built around this checkout's recall.exe. Split from `test-windows`

@@ -1,5 +1,6 @@
 # cargo-nextest's settings, read from here by `cargo nextest run` in this
-# workspace. CI runs the suite with nextest (ci.yml, `--profile ci`); a plain
+# workspace. CI's Linux job runs the suite with nextest (ci.yml, `--profile
+# ci`); the Windows jobs keep `cargo test`, measured faster there; a plain
 # `cargo test --workspace` still runs the same tests and is what
 # CONTRIBUTING.md asks of a developer, so nothing here is needed locally.
 #
