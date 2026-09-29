@@ -205,6 +205,15 @@ jobs:
       - name: Documentation links still resolve
         run: python3 scripts/link-check.py
 
+      # The documents drifted without anyone noticing: a configuration table
+      # naming a variable nothing reads, an index calling shipped designs
+      # "Not built". Every RECALL_* variable read is named in a document and
+      # every one named is read; every doc under docs/ is in its index; and
+      # the version in Cargo.toml has its CHANGELOG section, so a bump
+      # without notes fails before Start a release will tag it.
+      - name: Documentation still matches the code
+        run: python3 scripts/docs-check.py
+
       # A tag like `@v5` is a pointer the action's owner can move, and a
       # moved tag runs new code with this repository's secrets. Every
       # `uses:` names a full commit SHA with its version in a comment, which
@@ -424,6 +433,12 @@ jobs:
             echo "::error::target/debug/recall-server is missing: the test build no longer builds it, and the checks below run it."
             exit 1
           fi
+
+      # Every command and long flag in `recall help` is in a document. The
+      # other half of scripts/docs-check.py runs in check-scripts, which has
+      # no build; this half needs the binary the tests just built.
+      - name: Every CLI command and flag is documented
+        run: python3 scripts/docs-check.py --cli target/debug/recall
 
       # docs/reference/api.md describes a frozen compatibility surface, so it is
       # asserted rather than trusted: status codes, error wording, field

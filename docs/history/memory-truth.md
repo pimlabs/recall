@@ -1,9 +1,11 @@
 # Design: reviewing whether memory is still true
 
-Status: **agreed 2026-09-28**, not built yet. Nothing here describes today's behaviour;
-when a part of it is built, [`../reference/`](../reference/) and the
-[CHANGELOG](../../CHANGELOG.md) become the authority for it and this file
-moves to `history/` as the record of why. It answers the open entry in
+Status: **built.** Agreed 2026-09-28; all six pull requests in the
+[Plan](#plan) shipped in 0.4.9 (#152, #153, #156, #157, #158, #159), and
+0.4.10 reworked the output (#162). This file is now the record of why, kept
+as it was agreed. What `recall review` does today is in
+[`../reference/install.md`](../reference/install.md#checking-whether-memory-is-still-true-recall-review)
+and the [CHANGELOG](../../CHANGELOG.md). It answers the open entry in
 [`ROADMAP.md`](../../ROADMAP.md) that begins "Recall moves memory faithfully
 and has no idea whether any of it is still true".
 
@@ -21,7 +23,7 @@ read it, because the heading above it was false. Three of the four files
 were mostly right: the errors were a line or two inside notes that
 otherwise held.
 
-0.4.5's evaluation reports ([PR 6](part5-plan.md#pr-6-evaluation)) already
+0.4.5's evaluation reports ([PR 6](../design/part5-plan.md#pr-6-evaluation)) already
 cover part of this, from the server side. The worker finds secrets,
 duplicate paragraphs, broken `MEMORY.md` links, `type: user` notes in a
 project, and notes that name a path or command and have not changed in

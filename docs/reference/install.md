@@ -338,6 +338,12 @@ the server removes it after a day without a request, and if a session
 outlives that, its next hook enrols again once and carries on. Hooks that
 start at once enrol one device between them.
 
+Two options change what an authkey enrols. `--max-devices N` caps how
+many devices it may have enrolled at once. `--persistent` makes those
+devices stay until they are revoked, instead of being removed once idle:
+for a long-lived machine with no terminal to run `recall connect` in. A
+cloud session does not need it.
+
 A **revoked** device is different: no hook enrols again after a
 revocation, with an authkey or without one, and the key is left where it
 is. That is what makes `recall devices revoke` cut a machine off, a laptop
@@ -584,7 +590,8 @@ From inside the project:
 recall init
 ```
 
-That merges the hook wiring into the project's own `.claude/settings.json`
+(Or `recall init --path <project>` from anywhere else; without it, the
+project is the git root of the working directory.) That merges the hook wiring into the project's own `.claude/settings.json`
 — idempotently, appending to any hooks already there rather than replacing
 them, and preserving the file's existing key order so the diff stays small.
 Then commit it:
@@ -870,7 +877,7 @@ red when memory stops syncing.
 whether what was synced is still *true*: a note can be perfectly delivered and
 still be wrong, the way `project_phase1_deploy.md` named a server this project
 no longer runs on six weeks after it moved. `recall review` is the other
-half — see [the design](../design/memory-truth.md) for the fuller reasoning.
+half — see [the design](../history/memory-truth.md) for the fuller reasoning.
 
 ```sh
 recall review run
@@ -1154,7 +1161,8 @@ recall audit verify audit.jsonl          # offline: every leaf, every signature,
 recall audit reset                       # forget what was saved for this server, finding included
 ```
 
-`export` writes the format `scripts/audit-verify.py` reads (a checkpoint
+`export` writes to standard output unless `-o`/`--output FILE` names a
+file, in the format `scripts/audit-verify.py` reads (a checkpoint
 line, then one leaf per line), and checks the checkpoints saved here
 against the leaves it fetched. `verify FILE` makes the script's checks,
 with no network: each leaf's shape, the tree's root against the file's

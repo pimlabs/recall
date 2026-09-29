@@ -239,6 +239,40 @@ grep '"version"' npm/package.json
 grep 'refs/tags' Formula/recall.rb
 ```
 
+### The documents
+
+**Before the tag, in the pull request that bumps the version, not after.**
+Two reasons: the READMEs that npm and crates.io show come from the tagged
+commit and cannot be changed without another version, and
+[`install.md`](install.md) is what someone reads to install the version
+that has just been released. A document fixed a day later has already been
+wrong for everyone who installed in that day.
+
+Names are checked on every pull request (`scripts/docs-check.py`: variables,
+the docs index, commands and flags; see `CONTRIBUTING.md`), and CI refuses a
+bump whose `CHANGELOG.md` has no section for the new version, so Start a
+release refuses it too. What no script can check is meaning, so read:
+
+1. **This version's `CHANGELOG.md` section, entry by entry.** For each,
+   open the document that describes that behaviour and confirm it now says
+   what the entry says: [`install.md`](install.md) for the CLI and the
+   client, [`api.md`](api.md) for the HTTP API,
+   [`../../deploy/README.md`](../../deploy/README.md) for running the
+   server, [`token-setup.md`](token-setup.md) for credentials,
+   `ARCHITECTURE.md` for how the parts fit. An entry that needs no document
+   is fine; a document still describing the old behaviour is not.
+2. **[`../README.md`](../README.md), the docs index.** Each design's status
+   says what has shipped. A design built in full, or whose unbuilt rest was
+   dropped, moves to `docs/history/`.
+3. **`ROADMAP.md`.** Tick what this version shipped.
+4. **The pages the registries show.** The top-level `README.md` (crates.io's
+   page for `recall`), `npm/README.md` (npm's), and each other crate's
+   `README.md`: their install commands and what they say Recall is still
+   hold.
+
+The bump pull request says what was read and what changed, in one line
+each, so the release carries its own record of the check.
+
 ## 1. Tag
 
 ```sh

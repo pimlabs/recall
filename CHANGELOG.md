@@ -73,7 +73,7 @@ break will be described here in full rather than smoothed over.
   true, not just whether it synced.** The worker's evaluation reports
   (0.4.5) can say a note is old; they have no repository and no git, so they
   cannot say it is wrong. This is the other half, from
-  [the design](docs/design/memory-truth.md), and the first of six planned
+  [the design](docs/history/memory-truth.md), and the first of six planned
   pull requests: it pulls every checkable claim out of memory (a list item,
   a sentence, a fenced block), classifies each as a present-tense statement
   of state, a record of what used to be true, a rule from the owner's own
