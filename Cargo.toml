@@ -48,7 +48,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # or RECALL_TLS_ACME_DOMAINS is set). `ring`, not the default `aws-lc-rs`:
 # aws-lc-rs needs cmake and a C++ toolchain to build its own copy of
 # BoringSSL, and the server's release build is static musl, cross-compiled
-# with nothing but musl-gcc (release.yml). Nothing may bring aws-lc-rs or
+# with nothing but musl-gcc (build-release.yml). Nothing may bring aws-lc-rs or
 # OpenSSL back in: `cargo tree -p recall-server -e normal | grep -iE "aws|openssl"`
 # must print nothing.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

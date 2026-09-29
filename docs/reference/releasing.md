@@ -1,8 +1,8 @@
 # Cutting a release
 
-Four channels ship the same binary. Tagging publishes the GitHub Release;
-npm, crates.io and the Homebrew tap are then published by the same workflow,
-once the owner approves it.
+Four channels ship the same binary. Tagging builds the GitHub Release;
+npm, crates.io and the Homebrew tap are then published by a second workflow,
+run afterwards and approved by the owner.
 
 Order matters, because three of the four depend on the release existing.
 
@@ -65,13 +65,22 @@ git tag -a v0.3.1 -m "recall 0.3.1" && git push origin v0.3.1
 Both end in the same place. *Start a release*
 (`.github/workflows/start-release.yml`) reads the version from `main`, refuses
 if any CI job (Linux or Windows) did not pass on that commit or if the tag
-already exists somewhere else, creates the tag, and starts the Release workflow on it. It dispatches
-Release explicitly because a tag pushed with the workflow's own token starts
-no workflow by itself, and it dispatches it *on the tag* because the
-`release` environment only admits tag refs. Run it twice and the second run
-either refuses or resumes; it never moves a tag.
+already exists somewhere else, creates the tag, and starts *Build a release*
+on it. It dispatches Build a release explicitly because a tag pushed with the
+workflow's own token starts no workflow by itself, and it dispatches it *on
+the tag* so what is built is exactly what the tag names. Run it twice and the
+second run either refuses or resumes; it never moves a tag.
 
-`.github/workflows/release.yml` then does the rest, in this order:
+A release is then two workflows, one after the other:
+
+> **Build a release** (`.github/workflows/build-release.yml`) starts on its
+> own, asks nobody anything, and takes about seven minutes.
+>
+> **Publish a release** (`.github/workflows/publish-release.yml`) is started
+> afterwards, by you or by an agent working for you, and publishes nothing
+> until you approve it.
+
+Build a release does steps 1 to 3:
 
 1. **Versions agree** — the tag, `Cargo.toml` and `npm/package.json`, before
    any runner time is spent.
@@ -89,14 +98,21 @@ either refuses or resumes; it never moves a tag.
    an approval, deliberately: the image holds nothing the Release did not
    already make public, a package version can be deleted, and a deploy is
    undone by deploying the previous version.
-4. **Stop and wait for you.** The `publish-npm`, `publish-crates`,
-   `publish-homebrew` and `publish-winget` jobs run in the `release`
+
+Publish a release does steps 4 to 7:
+
+4. **Start it on the tag, then approve.** *Actions → Publish a release → Run
+   workflow*, with *Use workflow from* set to the tag (not `main`), or
+   `gh workflow run publish-release.yml --ref v<version>`. Its first job,
+   `check-release`, refuses a run that is not on the tag or whose GitHub
+   Release has no `checksums.txt` yet. The `publish-npm`, `publish-crates`,
+   `publish-homebrew` and `publish-winget` jobs then run in the `release`
    environment, whose required reviewer is the owner. GitHub notifies you;
    *Review deployments → Approve* releases all four.
 5. **npm** and **crates.io** publish through *trusted publishing*: each
-   registry trusts this workflow's OIDC identity and issues a credential that
-   lasts for the job. No npm or crates.io token is stored anywhere — not in
-   the repository, not in a cloud environment, not on a laptop.
+   registry trusts Publish a release's OIDC identity and issues a credential
+   that lasts for the job. No npm or crates.io token is stored anywhere — not
+   in the repository, not in a cloud environment, not on a laptop.
 6. **Homebrew**: the formula is rewritten from the release's own checksums
    and pushed to `pimlabs/homebrew-tap`. The rewritten file is attached to the
    run; it lands in this repository through a PR like every other change.
@@ -120,8 +136,18 @@ re-running the job.
 back: npm refuses to unpublish after 72 hours, and crates.io can yank a
 version but never delete it. Whoever cuts the tag — you, or an agent
 working for you — can build and draft everything; only a person can make it
-public. From a phone that is the whole release: *Run workflow*, then, about
-ten minutes later, *Approve* on the notification.
+public. From a phone that is the whole release: *Start a release*, then,
+once it is built, *Publish a release* on the tag and *Approve* on the
+notification.
+
+**Why two workflows.** Until 0.4.11 the publish jobs were part of the one
+Release workflow, waiting for approval inside its run. GitHub counts a run's
+duration up to its last job, waiting included, so a seven-minute build whose
+approval came four hours later read as a four-hour release, and no run said
+how long the release took. Split, each run starts when its work starts and
+lasts as long as that work. Nothing is lost by it: the publish jobs never
+used the build's artifacts, only its GitHub Release, which `check-release`
+requires.
 
 ### One-time setup
 
@@ -136,14 +162,20 @@ Done once per repository; nothing here needs repeating per release.
      would run with no approval at all.
 2. **npm** — on npmjs.com, `@pimlabs/recall` → *Settings → Trusted
    publishing* → GitHub Actions: organization `pimlabs`, repository `recall`,
-   workflow `release.yml`, environment `release`.
+   workflow `publish-release.yml`, environment `release`.
 3. **crates.io** — for **each** of `recall-wire`, `recall-hooks`,
    `recall-worker`, `recall-server` and `recall`: the crate's *Settings →
    Trusted Publishing → Add*, with repository owner `pimlabs`, repository
-   `recall`, workflow `release.yml`, environment `release`. A crate's first
+   `recall`, workflow `publish-release.yml`, environment `release`. A crate's first
    version has no settings page yet, so `recall-worker`, new with the merge
    queue, is published once from a laptop (below) and then given its
    trusted publisher like the others; the name was free on 2026-09-23.
+
+   Both registries match the workflow by its file name. Up to 0.4.11 that
+   was `release.yml`; since the split it is `publish-release.yml`, and a
+   publisher still registered under the old name makes npm and crates.io
+   refuse the credential. Replace it (add the new one, remove the old one)
+   on npm and on each of the five crates before the first Publish a release.
 4. **Homebrew tap** — a fine-grained personal access token with *Contents:
    read and write* on `pimlabs/homebrew-tap` **only**, saved as the secret
    `HOMEBREW_TAP_TOKEN` on the `release` environment (not the repository),
@@ -186,9 +218,10 @@ walks the irreversible steps — tag, `npm publish`, `cargo publish`, the tap �
 nothing is published by accident. It needs npm and crates.io credentials on
 the machine running it, and cargo 1.90 or later, which it checks first.
 
-Pushing the tag from the script also starts the workflow above. Its publish
-jobs will wait for approval and then find every version already published,
-so approving or rejecting them makes no difference.
+Pushing the tag from the script also starts Build a release, which builds
+the GitHub Release and the server's images and deploys them. There is then
+no need to run Publish a release: the script has already published, and a
+run would find every version there and skip it.
 
 **Run it again if it stops part-way.** It reads each registry before
 publishing anything, so a channel that already has this version is skipped
@@ -280,7 +313,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-`.github/workflows/release.yml` fires on `v*`. It builds the client for six
+`.github/workflows/build-release.yml` fires on `v*`. It builds the client for six
 targets, each on a **native runner** except Intel macOS — `rusqlite`
 compiles SQLite from C, so cross-compiling needs a C toolchain for the
 target, and only Xcode on the arm64 macOS runner already has one for both
@@ -376,8 +409,8 @@ matrix on `main` and re-dispatching builds the tagged code with the corrected
 runners:
 
 1. Cancel the stuck run.
-2. Fix the label in `.github/workflows/release.yml`, land it on `main`.
-3. Actions → Release → Run workflow, with `tag` set to the tag in question.
+2. Fix the label in `.github/workflows/build-release.yml`, land it on `main`.
+3. Actions → Build a release → Run workflow, with `tag` set to the tag in question.
 
 Check the label against [`actions/runner-images`](https://github.com/actions/runner-images)
 before assuming anything else is wrong.
@@ -579,7 +612,7 @@ step is deliberate rather than automated.
 ## 5. winget (first submission only)
 
 Package identifier `PimLabs.Recall`, publisher `pimlabs`, license `MIT`,
-moniker `recall`. The `publish-winget` job in `.github/workflows/release.yml`
+moniker `recall`. The `publish-winget` job in `.github/workflows/publish-release.yml`
 (`vedantmgoyal9/winget-releaser`, which drives
 [komac](https://github.com/russellbanks/Komac) under the hood) keeps this up
 to date automatically from then on — **but it updates an existing package,

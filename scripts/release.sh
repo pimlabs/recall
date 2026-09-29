@@ -14,9 +14,10 @@
 # deprecated but not removed, and a crates.io version can be yanked but never
 # deleted.
 #
-# The ordinary path is now the release workflow, which publishes through
-# trusted publishing once the owner approves it; this script is the fallback
-# for when that cannot run, and needs npm and crates.io credentials locally.
+# The ordinary path is now Build a release and then Publish a release,
+# which publishes through trusted publishing once the owner approves it;
+# this script is the fallback for when that cannot run, and needs npm and
+# crates.io credentials locally.
 # See docs/reference/releasing.md for both, and for what each step does and
 # why the order matters.
 set -uo pipefail
@@ -279,7 +280,7 @@ if $RESUMING; then
 elif confirm "create and push $TAG (this publishes a GitHub Release)"; then
   git tag -a "$TAG" -m "recall $VERSION" || die "could not create the tag"
   git push origin "$TAG" || { git tag -d "$TAG"; die "could not push the tag (local tag removed)"; }
-  ok "pushed $TAG — the release workflow is now building the client and the server"
+  ok "pushed $TAG — Build a release is now building the client and the server"
   echo "    https://github.com/$REPO/actions"
 else
   warn "skipped — nothing after this point can run"
@@ -358,7 +359,7 @@ fi
 step "8/9  crates.io"
 # --------------------------------------------------------------------------
 # One `cargo publish` for every crate not on the index yet, the same call
-# as the release workflow's publish-crates job. cargo keeps the bottom-up
+# as Publish a release's publish-crates job. cargo keeps the bottom-up
 # order itself: it packages every crate named and verifies each by building
 # it, the unpublished ones served to each other from a local registry under
 # target/package, and only when all of them build does it upload them, each
@@ -415,7 +416,7 @@ checksums_file="$(mktemp)"
 curl -fsSL "$release_url/checksums.txt" -o "$checksums_file" \
   || die "could not download checksums.txt"
 # The rewrite itself lives in scripts/update-formula.py, shared with the
-# release workflow so a release cut from CI and one cut from here cannot
+# Publish a release so a release cut from CI and one cut from here cannot
 # write different formulas.
 python3 scripts/update-formula.py "$VERSION" "$checksums_file" \
   || die "could not update Formula/recall.rb"
@@ -427,8 +428,8 @@ git --no-pager diff --stat Formula/recall.rb
 step "9b/9  Publish the formula to the tap"
 # --------------------------------------------------------------------------
 # The formula has to reach $TAP for `brew install pimlabs/tap/recall` to see
-# it. The push itself is scripts/push-tap.sh, shared with the release
-# workflow.
+# it. The push itself is scripts/push-tap.sh, shared with
+# Publish a release.
 if confirm "push the formula to $TAP"; then
   if ./scripts/push-tap.sh "$VERSION"; then
     ok "tap updated"

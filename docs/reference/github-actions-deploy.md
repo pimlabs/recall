@@ -34,8 +34,8 @@ Two workflows are involved:
   green in every job. One job, `ci-passed`, stands for the whole run: it
   is green when every other job succeeded or was deliberately skipped, and
   it is the single check to require if `main` ever gets branch protection.
-- **`.github/workflows/deploy.yml`** puts a release on the server. The
-  Release workflow calls it once the GitHub Release exists, so **every
+- **`.github/workflows/deploy.yml`** puts a release on the server. Build
+  a release (`build-release.yml`) calls it once the GitHub Release exists, so **every
   release deploys itself**. It can also be run by hand, **Actions → Deploy a release
   → Run workflow** with a version such as `0.4.0`, from anywhere including
   the GitHub mobile app: that is how to roll back, or retry a deploy that
@@ -275,7 +275,7 @@ authentication, which is why this works without the deploy secrets.
 
 ## The image: published by the release, pulled by the server
 
-The Release workflow builds the server's image once, from the release's own
+Build a release (`build-release.yml`) builds the server's image once, from the release's own
 `recall-server` and `recall-worker` (downloaded from the GitHub Release and
 checked against its `checksums.txt`, exactly as a server built it for itself
 before), and pushes it, in three jobs:
@@ -328,12 +328,14 @@ pass. And
 ```sh
 gh attestation verify oci://ghcr.io/pimlabs/recall-server@sha256:<digest> \
   --repo pimlabs/recall \
-  --cert-identity https://github.com/pimlabs/recall/.github/workflows/release.yml@refs/tags/v<version>
+  --cert-identity https://github.com/pimlabs/recall/.github/workflows/build-release.yml@refs/tags/v<version>
 ```
 
-must pass: the image was attested by this repository's Release workflow,
+must pass: the image was attested by this repository's Build a release,
 running on that version's own tag, which is the only way a release runs
-(`start-release.yml` dispatches it with `--ref` set to the tag). Either
+(`start-release.yml` dispatches it with `--ref` set to the tag). For 0.4.11
+and older the identity names `release.yml`, the one workflow a release was
+before it was split in two; the script picks the right one by version. Either
 failing stops the deploy before the server is touched. ci.yml's
 `check-release-image` runs the same script on a real runner against the
 newest release, and once more with a version the image does not claim,
@@ -342,7 +344,7 @@ workflows it depends on. The worker's image is checked whether or not the server
 runs it, since the runner cannot see `COMPOSE_PROFILES`; one that cannot be
 read at all only warns, and the server then refuses to deploy a stack that
 runs the worker. The job needs `attestations: read` for this, beside
-`contents: read`, and release.yml's `deploy` job grants both.
+`contents: read`, and build-release.yml's `deploy` job grants both.
 
 On the server it pulls every image of ours the stack runs (the worker's
 only when `COMPOSE_PROFILES` turns the worker on) **by that digest**,

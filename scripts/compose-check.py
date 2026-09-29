@@ -24,7 +24,7 @@ default of 10. `recall-worker` keeps the container name `recall-worker` too,
 in whichever of the two files defines it, since deploy/README.md's worker
 procedures stop, restart and read its logs by that name the same way.
 
-And the image each of those two services runs: the name release.yml's
+And the image each of those two services runs: the name build-release.yml's
 `publish-image` pushes (scripts/release-image.sh), tagged by RECALL_VERSION,
 which is what deploy.yml pulls, and `:local` without it; with a `build:`
 beside it, so `docker compose up -d --build` still builds it from the
@@ -72,7 +72,7 @@ CONTAINER_NAMES = {SERVER: 'recall-server', SQLITE_WEB: 'recall-sqlite-web'}
 # no worker service, so it has nothing to name here.
 WORKER_CONTAINER_NAME = 'recall-worker'
 GRACE_SECONDS = 60
-# The images release.yml publishes, as the compose files must name them.
+# The images build-release.yml publishes, as the compose files must name them.
 IMAGES = {
     SERVER: 'ghcr.io/pimlabs/recall-server:${RECALL_VERSION:-local}',
     WORKER: 'ghcr.io/pimlabs/recall-worker:${RECALL_VERSION:-local}',
@@ -224,7 +224,7 @@ def server_problems(doc):
             continue
         got = services[service].get('image')
         if got != image:
-            found.append(f'{service} is image: {image}, the name release.yml publishes '
+            found.append(f'{service} is image: {image}, the name build-release.yml publishes '
                          f'and deploy.yml pulls, not {got!r}')
         if not services[service].get('build'):
             found.append(f'{service} keeps its build:, so --build still builds it from '

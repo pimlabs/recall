@@ -3,21 +3,22 @@ name: Deploy a release
 # Puts a release on the server. A server runs releases, not `main`: its
 # image holds the recall-server that release published, checked against the
 # release's own checksums (deploy/Dockerfile). Every release after 0.4.6
-# builds that image once, in the Release workflow, and publishes it to GHCR
-# (release.yml's `publish-image`); the server pulls it. 0.4.6 and older have
+# builds that image once, in its release's build (build-release.yml's
+# `publish-image`; release.yml's up to 0.4.11) and publishes it to GHCR; the
+# server pulls it. 0.4.6 and older have
 # no published image, and the server builds theirs for itself, as it always
 # did. LAST_BUILT_ON_SERVER below is where the two meet.
 #
 # A pulled image is trusted for its bytes, not its tag: the runner resolves
-# each tag to a digest, checks that digest's attestation says release.yml
-# built it, and the server pulls that digest and nothing else. After a
+# each tag to a digest, checks that digest's attestation says the release's
+# build built it, and the server pulls that digest and nothing else. After a
 # pull deploy the server keeps the version it runs and the one before it,
 # and removes older tags of our two images, so disk does not fill with
 # every version ever deployed.
 #
 # Two ways in:
 #
-#   - release.yml calls it once the GitHub Release and its images exist,
+#   - build-release.yml calls it once the GitHub Release and its images exist,
 #     with that release's version. Every release deploys itself.
 #   - Actions → Deploy a release → Run workflow, with a version. For a rollback, or to
 #     retry a deploy that failed, from anywhere including the GitHub mobile
@@ -41,7 +42,7 @@ on:
         required: true
 
 # attestations: read is for `gh attestation verify` below, which reads this
-# repository's attestations through the API. release.yml's `deploy` job
+# repository's attestations through the API. build-release.yml's `deploy` job
 # grants the same two, since a called workflow gets no more than its
 # caller's job has.
 permissions:
@@ -154,7 +155,8 @@ jobs:
       # the bytes. So each tag is resolved here, once, to a digest, and that
       # digest is checked and is the only thing the server pulls: its index
       # must say it is this version, and its attestation must verify as
-      # made by release.yml on the tag v$VERSION.
+      # made by the release's build (build-release.yml, release.yml up to
+      # 0.4.11) on the tag v$VERSION.
       # scripts/verify-release-image.sh does both, and says how; ci.yml's
       # check-release-image runs it on a real runner against the newest
       # release, so a change to it is proven before a deploy depends on it.

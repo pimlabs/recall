@@ -4,22 +4,22 @@
 #
 #   ./scripts/installer-test.sh
 #
-# A release's archive names are a contract between release.yml, which
+# A release's archive names are a contract between build-release.yml, which
 # writes them, and everything that downloads them: install.sh,
 # npm/install.js, deploy/fetch-release.sh (and through it the server image),
 # install.ps1 (scripts/installer-test.ps1, on Windows), the Homebrew
 # formula and the winget manifest. A mismatch used to surface only at the
-# next real release. So this builds two releases the way release.yml does:
+# next real release. So this builds two releases the way build-release.yml does:
 #
 #   v0.4.6  the names and layout every release after v0.4.5 has, written
-#           by release.yml's own Package steps, run as release.yml has them
+#           by build-release.yml's own Package steps, run as build-release.yml has them
 #           (scripts/run-package-steps.py), for every matrix entry, and
 #           checked against the names scripts/package-release.py --name gives
 #   v0.4.5  the names and layout v0.4.5 and older have, packed the way
 #           release.yml packed them then
 #
 # Each holds a tiny fake binary per archive that prints which archive it
-# came from, plus a checksums.txt made by the same command release.yml's
+# came from, plus a checksums.txt made by the same command build-release.yml's
 # publish job runs. scripts/fake-release-server.py serves them on loopback
 # at GitHub's URLs, and each installer is pointed at it with
 # RECALL_TEST_RELEASES_URL (fetch-release.sh takes the URL as an argument),
@@ -93,29 +93,29 @@ fake() { # path, what it prints
   chmod 755 "$1"
 }
 # first_line <command...>: the first line the command prints. The server's
-# fakes also print the `features:` line release.yml's Package step checks.
+# fakes also print the `features:` line build-release.yml's Package step checks.
 first_line() { "$@" | head -1; }
 
-# ---- v0.4.6: packed by release.yml's own Package steps ----------------------
+# ---- v0.4.6: packed by build-release.yml's own Package steps ----------------------
 # Not a copy of them: scripts/run-package-steps.py reads each step's `run:`
-# from release.yml and runs it, per matrix entry, against fake binaries.
+# from build-release.yml and runs it, per matrix entry, against fake binaries.
 # Whatever those steps name or pack is what the installers are given.
 rel_new="$WORK/root/releases/download/v$NEW"
 mkdir -p "$rel_new"
 package_steps() {
-  python3 scripts/run-package-steps.py .github/workflows/release.yml "$WORK/build" "$NEW" "$rel_new" \
+  python3 scripts/run-package-steps.py .github/workflows/build-release.yml "$WORK/build" "$NEW" "$rel_new" \
     >"$WORK/packed"
 }
-echo "== release.yml's Package steps"
+echo "== build-release.yml's Package steps"
 check "run for every matrix entry" package_steps
-# The same command release.yml's publish job runs.
+# The same command build-release.yml's publish job runs.
 # shellcheck disable=SC2035 # every name here starts with "recall"
 (cd "$rel_new" && sha256sum *.tar.gz *.zip >checksums.txt)
 
 # What should have been published: one archive per binary per matrix
 # target, each named by package-release.py --name, the one place a name is
 # made.
-python3 - .github/workflows/release.yml >"$WORK/expected-targets" <<'PY'
+python3 - .github/workflows/build-release.yml >"$WORK/expected-targets" <<'PY'
 import sys, yaml
 jobs = yaml.safe_load(open(sys.argv[1]))["jobs"]
 for e in jobs["build-client"]["strategy"]["matrix"]["include"]:
@@ -212,7 +212,7 @@ for v in 0.4.7 0.4.8; do
 done
 sed 's/^[0-9a-f]*/'"$(printf '0%.0s' $(seq 64))"'/' "$rel_new/checksums.txt" \
   >"$WORK/root/releases/download/v0.4.7/checksums.txt"
-# `|| true`: when release.yml's steps are broken there may be nothing left,
+# `|| true`: when build-release.yml's steps are broken there may be nothing left,
 # and the checks above have already said so; carry on to say what else.
 grep -v ' recall-[xa]' "$rel_new/checksums.txt" >"$WORK/root/releases/download/v0.4.8/checksums.txt" || true
 

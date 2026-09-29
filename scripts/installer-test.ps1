@@ -11,7 +11,7 @@
     what is installed can be run. It builds two releases around it:
 
       v0.4.6  recall-<rust target>.zip holding recall-<rust target>\recall.exe,
-              packed by scripts/package-release.py, the script release.yml runs
+              packed by scripts/package-release.py, the script build-release.yml runs
       v0.4.5  recall_windows_<arch>.zip holding a bare recall.exe, as v0.4.5
               and older were packed
 
@@ -73,7 +73,7 @@ function Check {
 }
 
 function Write-Checksums {
-    # The format release.yml's `sha256sum *.tar.gz *.zip` writes: lowercase
+    # The format build-release.yml's `sha256sum *.tar.gz *.zip` writes: lowercase
     # hex, two spaces, the file name.
     param([string]$Dir)
     $lines = Get-ChildItem -Path $Dir -Filter *.zip | Sort-Object Name | ForEach-Object {
@@ -87,7 +87,7 @@ $root = Join-Path $work "root"
 $server = $null
 
 try {
-    # ---- v0.4.6, packed by the script release.yml runs ----------------------
+    # ---- v0.4.6, packed by the script build-release.yml runs ----------------------
     $relNew = Join-Path $root "releases\download\v$new"
     New-Item -ItemType Directory -Force -Path $relNew | Out-Null
     & python $packer $Binary $target $relNew

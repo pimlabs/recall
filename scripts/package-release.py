@@ -9,7 +9,7 @@ Usage: package-release.py <binary> <rust target> <output dir>
 
 The archive's name is decided here and nowhere else: `<binary>-<target>`,
 where <binary> is the file's name without `.exe`, as a `.zip` for a Windows
-target and a `.tar.gz` for every other. release.yml passes only the binary
+target and a `.tar.gz` for every other. build-release.yml passes only the binary
 and the target; `--name` prints the name without packing anything, for
 anything else that needs to know it (scripts/installer-test.sh).
 
@@ -23,7 +23,7 @@ README.md from the repository root, as uv and ripgrep ship theirs:
 
 Python rather than `tar` and PowerShell's Compress-Archive so the six client
 archives and the four server and worker ones come out of one piece of code
-on every runner, and so CI runs exactly this code, from release.yml's own
+on every runner, and so CI runs exactly this code, from build-release.yml's own
 steps, to build the release its installer test serves
 (scripts/installer-test.sh). zipfile also writes `/` between path
 components on Windows, which the zip format requires and Windows

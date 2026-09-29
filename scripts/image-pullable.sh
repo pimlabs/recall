@@ -20,7 +20,7 @@
 #     never pushed;
 #   - the tag is missing a platform.
 #
-# Run by release.yml's `publish-image` job after it pushes, and by
+# Run by build-release.yml's `publish-image` job after it pushes, and by
 # deploy.yml before it deploys.
 set -euo pipefail
 

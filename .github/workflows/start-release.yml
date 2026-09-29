@@ -4,19 +4,19 @@ name: Start a release
 #
 # It exists because a tag is the one step of a release that needed a laptop.
 # This reads the version from main, creates `v<version>` there, and starts
-# the Release workflow on that tag. Everything that makes the release public
-# on a registry still waits in Release's `release` environment for the
-# owner's approval — this only saves typing a git command.
+# Build a release (build-release.yml) on that tag. Nothing reaches a
+# registry from here: that is Publish a release (publish-release.yml), run
+# afterwards and approved in the `release` environment by the owner. This
+# only saves typing a git command.
 #
 # Two things GitHub does are load-bearing here:
 #
 #   - A tag pushed with GITHUB_TOKEN starts no workflow at all, deliberately,
-#     so pushing it alone would produce a tag and nothing else. Release is
-#     therefore dispatched explicitly — `workflow_dispatch` is the documented
+#     so pushing it alone would produce a tag and nothing else. Build a
+#     release is therefore dispatched explicitly — `workflow_dispatch` is the documented
 #     exception to that rule.
-#   - It is dispatched *on the tag*, so the run's ref is `refs/tags/v…`. The
-#     `release` environment only admits tags matching `v*`; a run on `main`
-#     would be refused before it could ask for approval.
+#   - It is dispatched *on the tag*, so the run's ref is `refs/tags/v…`, and
+#     what it builds is exactly what the tag names.
 on:
   workflow_dispatch:
 
@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # push the tag
-      actions: write # dispatch Release
+      actions: write # dispatch Build a release
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -110,16 +110,17 @@ jobs:
           git tag -a "$TAG" -m "recall ${TAG#v}" "$GITHUB_SHA"
           git push origin "refs/tags/$TAG"
 
-      - name: Start the Release workflow on the tag
+      - name: Start Build a release on the tag
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
         run: |
-          gh workflow run release.yml --ref "$TAG" -f tag="$TAG"
+          gh workflow run build-release.yml --ref "$TAG" -f tag="$TAG"
           {
             echo "### $TAG is tagged and building"
             echo ""
-            echo "The **Release** workflow is running on \`$TAG\`. In about ten minutes it"
-            echo "asks for approval of the \`release\` environment — GitHub Mobile notifies"
-            echo "you, and approving there publishes npm, crates.io and the Homebrew tap."
+            echo "**Build a release** is running on \`$TAG\`: the binaries, the GitHub"
+            echo "Release, the server's images and the deploy, in about seven minutes."
+            echo "Then **Publish a release** on \`$TAG\`, approved in the \`release\`"
+            echo "environment, publishes npm, crates.io and the Homebrew tap."
           } >> "$GITHUB_STEP_SUMMARY"
