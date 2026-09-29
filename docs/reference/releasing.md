@@ -76,7 +76,7 @@ A release is then two workflows, one after the other:
 > **Build a release** (`.github/workflows/build-release.yml`) starts on its
 > own, asks nobody anything, and takes about seven minutes.
 >
-> **Publish a release** (`.github/workflows/publish-release.yml`) is started
+> **Publish a release** (`.github/workflows/release.yml`) is started
 > afterwards, by you or by an agent working for you, and publishes nothing
 > until you approve it.
 
@@ -103,7 +103,7 @@ Publish a release does steps 4 to 7:
 
 4. **Start it on the tag, then approve.** *Actions → Publish a release → Run
    workflow*, with *Use workflow from* set to the tag (not `main`), or
-   `gh workflow run publish-release.yml --ref v<version>`. Its first job,
+   `gh workflow run release.yml --ref v<version>`. Its first job,
    `check-release`, refuses a run that is not on the tag or whose GitHub
    Release has no `checksums.txt` yet. The `publish-npm`, `publish-crates`,
    `publish-homebrew` and `publish-winget` jobs then run in the `release`
@@ -147,7 +147,8 @@ approval came four hours later read as a four-hour release, and no run said
 how long the release took. Split, each run starts when its work starts and
 lasts as long as that work. Nothing is lost by it: the publish jobs never
 used the build's artifacts, only its GitHub Release, which `check-release`
-requires.
+requires. So `release.yml` runs up to 0.4.11 built and published; from
+0.4.12 its runs only publish.
 
 ### One-time setup
 
@@ -162,20 +163,20 @@ Done once per repository; nothing here needs repeating per release.
      would run with no approval at all.
 2. **npm** — on npmjs.com, `@pimlabs/recall` → *Settings → Trusted
    publishing* → GitHub Actions: organization `pimlabs`, repository `recall`,
-   workflow `publish-release.yml`, environment `release`.
+   workflow `release.yml`, environment `release`.
 3. **crates.io** — for **each** of `recall-wire`, `recall-hooks`,
    `recall-worker`, `recall-server` and `recall`: the crate's *Settings →
    Trusted Publishing → Add*, with repository owner `pimlabs`, repository
-   `recall`, workflow `publish-release.yml`, environment `release`. A crate's first
+   `recall`, workflow `release.yml`, environment `release`. A crate's first
    version has no settings page yet, so `recall-worker`, new with the merge
    queue, is published once from a laptop (below) and then given its
    trusted publisher like the others; the name was free on 2026-09-23.
 
-   Both registries match the workflow by its file name. Up to 0.4.11 that
-   was `release.yml`; since the split it is `publish-release.yml`, and a
-   publisher still registered under the old name makes npm and crates.io
-   refuse the credential. Replace it (add the new one, remove the old one)
-   on npm and on each of the five crates before the first Publish a release.
+   Both registries match the workflow by its file name, which is why
+   Publish a release is still `release.yml`: when the build moved out to
+   `build-release.yml`, the publish jobs kept the file they were registered
+   under. Renaming it means registering the new name on npm and on each of
+   the five crates first.
 4. **Homebrew tap** — a fine-grained personal access token with *Contents:
    read and write* on `pimlabs/homebrew-tap` **only**, saved as the secret
    `HOMEBREW_TAP_TOKEN` on the `release` environment (not the repository),
@@ -612,7 +613,7 @@ step is deliberate rather than automated.
 ## 5. winget (first submission only)
 
 Package identifier `PimLabs.Recall`, publisher `pimlabs`, license `MIT`,
-moniker `recall`. The `publish-winget` job in `.github/workflows/publish-release.yml`
+moniker `recall`. The `publish-winget` job in `.github/workflows/release.yml`
 (`vedantmgoyal9/winget-releaser`, which drives
 [komac](https://github.com/russellbanks/Komac) under the hood) keeps this up
 to date automatically from then on — **but it updates an existing package,

@@ -7,7 +7,7 @@ name: Build a release
 # asked anything.
 #
 # The registries are not here. npm, crates.io, the Homebrew tap and winget
-# are published by publish-release.yml ("Publish a release"), run once a
+# are published by release.yml ("Publish a release"), run once a
 # person decides, behind the `release` environment's approval. They used to
 # be jobs of this workflow, waiting for that approval inside its run, and
 # GitHub counts a run's duration to its last job: a release that waited four

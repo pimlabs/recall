@@ -4,18 +4,21 @@ name: Publish a release
 # build-release.yml ("Build a release") has already built and whose GitHub
 # Release exists. Run by hand when the owner decides: Actions > Publish a
 # release > Run workflow, *Use workflow from* the tag (or `gh workflow run
-# publish-release.yml --ref v<version>`), then approve the `release`
-# environment.
+# release.yml --ref v<version>`), then approve the `release` environment.
 #
 # npm and crates.io publish without a stored token for either: both trust
 # this workflow's OIDC identity ("trusted publishing"), registered against
-# this file's name, publish-release.yml, and the `release` environment, and
+# this file's name, release.yml, and the `release` environment, and
 # hand it a credential that lives for the length of the job. Every job that
 # publishes sits behind that environment, whose required reviewer is the
 # owner, so an agent can start this and nothing still reaches a registry
 # until a person approves it. Publishing cannot be undone (npm: no unpublish
 # after 72h; crates.io: yank, never delete), which is why that gate is a
 # person and not a check.
+#
+# The file keeps the name release.yml, which the publish jobs always had,
+# so both registries keep trusting it with nothing re-registered; the build
+# they used to share a run with moved out to build-release.yml.
 #
 # A workflow of its own, rather than jobs waiting inside the build, so that
 # its run starts when a person decides and lasts as long as the publishing:

@@ -774,10 +774,16 @@ jobs:
             | { cat; echo 0.4.6; } | sort -Vr); do
             [ "$v" = 0.4.6 ] && break
             # The tag's build run: build-release.yml's, or release.yml's for
-            # 0.4.11 and older. Found by the run's path rather than asked of
-            # one workflow, since release.yml no longer exists as a file.
-            run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?branch=v$v&per_page=100" \
-              --jq '[.workflow_runs[] | select(.path == ".github/workflows/build-release.yml" or .path == ".github/workflows/release.yml")][0].id // empty')
+            # 0.4.11 and older, when release.yml still built as well as
+            # published. From 0.4.12 release.yml only publishes, so asking it
+            # would find a run with no publish-image job.
+            if [ "$(printf '%s\n' "$v" 0.4.11 | sort -V | tail -1)" = 0.4.11 ]; then
+              workflow=release.yml
+            else
+              workflow=build-release.yml
+            fi
+            run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?branch=v$v&per_page=1" \
+              --jq '.workflow_runs[0].id // empty')
             published=
             if [ -n "$run" ]; then
               published=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/jobs?filter=latest&per_page=100" \

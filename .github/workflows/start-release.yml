@@ -5,7 +5,7 @@ name: Start a release
 # It exists because a tag is the one step of a release that needed a laptop.
 # This reads the version from main, creates `v<version>` there, and starts
 # Build a release (build-release.yml) on that tag. Nothing reaches a
-# registry from here: that is Publish a release (publish-release.yml), run
+# registry from here: that is Publish a release (release.yml), run
 # afterwards and approved in the `release` environment by the owner. This
 # only saves typing a git command.
 #
