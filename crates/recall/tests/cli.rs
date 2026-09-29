@@ -975,8 +975,22 @@ fn promote_is_loud_about_missing_configuration() {
 /// Every command the CLI offers. A new one added without a line here is a
 /// command the help tests below will not notice is missing from the help.
 const COMMANDS: &[&str] = &[
-    "init", "backfill", "promote", "status", "doctor", "audit", "eval", "review", "push", "pull",
-    "version", "help",
+    "connect",
+    "init",
+    "backfill",
+    "disconnect",
+    "status",
+    "doctor",
+    "promote",
+    "review",
+    "eval",
+    "devices",
+    "authkey",
+    "audit",
+    "push",
+    "pull",
+    "version",
+    "help",
 ];
 
 #[test]
@@ -1023,10 +1037,14 @@ fn help_answers_to_every_form_and_names_every_command() {
     for form in [vec!["--help"], vec!["-h"], vec!["help"]] {
         let r = run(&form, dir.path(), &[], None);
         assert_eq!(r.code, 0, "{form:?} exited {}: {}", r.code, r.stderr);
+        // Listed, as a line of its own, not merely mentioned: `init` is in
+        // plenty of other commands' summaries.
         for command in COMMANDS {
             assert!(
-                r.stdout.contains(command),
-                "{form:?} does not mention `{command}`: {}",
+                r.stdout
+                    .lines()
+                    .any(|l| l.starts_with("  ") && l.split_whitespace().next() == Some(command)),
+                "{form:?} does not list `{command}`: {}",
                 r.stdout
             );
         }
@@ -1070,6 +1088,112 @@ fn no_arguments_prints_help_and_does_not_look_successful() {
     assert!(
         combined.contains("Usage") && combined.contains("init"),
         "it should print the help it is refusing to guess at: {combined}"
+    );
+}
+
+/// Every way of asking for help answers with the version first: the line
+/// `recall version` prints, byte for byte, so a pasted help carries what a
+/// bug report needs first. Pinned to `version` rather than to a literal,
+/// the way the three ways to ask for the version are pinned to each other.
+#[test]
+fn every_way_of_asking_for_help_starts_with_the_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let version = run(&["version"], dir.path(), &[], None).stdout;
+    let version = version.trim_end();
+    assert!(version.starts_with("recall "), "{version}");
+
+    let forms: &[&[&str]] = &[
+        &["--help"],
+        &["-h"],
+        &["help"],
+        &[],
+        &["status", "--help"],
+        &["status", "-h"],
+        &["help", "status"],
+        &["devices", "approve", "--help"],
+        &["help", "devices", "approve"],
+        &["devices"],
+    ];
+    for form in forms {
+        let r = run(form, dir.path(), &[], None);
+        // `recall` and `recall devices` alone print their help as an error,
+        // on stderr, so that they exit non-zero.
+        let text = if r.stdout.is_empty() {
+            &r.stderr
+        } else {
+            &r.stdout
+        };
+        assert_eq!(
+            text.lines().next(),
+            Some(version),
+            "recall {form:?}:\n{text}"
+        );
+    }
+}
+
+/// The top-level help lists the commands by what they are for, starting
+/// with the one a new machine needs, and ends by saying where to start.
+#[test]
+fn the_top_level_help_groups_the_commands_and_says_where_to_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = run(&["--help"], dir.path(), &[], None);
+    let out = &r.stdout;
+
+    let headings: Vec<&str> = out
+        .lines()
+        .filter(|l| !l.starts_with(' ') && l.ends_with(':'))
+        .collect();
+    assert_eq!(
+        headings,
+        [
+            "Get started:",
+            "Every day:",
+            "Memory quality:",
+            "Your server:",
+            "Run by Claude Code (hooks):",
+            "Other:",
+            "Options:",
+        ],
+        "{out}"
+    );
+    let first = out.lines().skip_while(|l| *l != "Get started:").nth(1);
+    assert!(
+        first.is_some_and(|l| l.split_whitespace().next() == Some("connect")),
+        "{out}"
+    );
+    assert!(out.contains("recall connect https://"), "{out}");
+    assert!(out.contains("recall help <command>"), "{out}");
+    assert!(
+        !out.lines()
+            .any(|l| l.split_whitespace().next() == Some("serve")),
+        "the hidden command should stay hidden: {out}"
+    );
+}
+
+/// `-h` is the summary and `--help` the whole story: the one-line summary
+/// is in both, and only `--help` goes on to explain.
+#[test]
+fn short_help_summarises_and_long_help_explains() {
+    let dir = tempfile::tempdir().unwrap();
+    let short = run(&["connect", "-h"], dir.path(), &[], None);
+    let long = run(&["connect", "--help"], dir.path(), &[], None);
+    assert_eq!(short.code, 0, "stderr: {}", short.stderr);
+    assert_eq!(long.code, 0, "stderr: {}", long.stderr);
+
+    // The version line, a blank line, then the summary.
+    let summary = short.stdout.lines().nth(2).unwrap_or_default();
+    assert!(!summary.is_empty(), "{}", short.stdout);
+    assert!(long.stdout.contains(summary), "{}", long.stdout);
+    assert!(
+        long.stdout.lines().count() > short.stdout.lines().count(),
+        "--help should say more than -h:\n{}\n{}",
+        short.stdout,
+        long.stdout
+    );
+    assert!(
+        short.stdout.contains("see more with '--help'"),
+        "{}",
+        short.stdout
     );
 }
 

@@ -77,7 +77,12 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         ["help" | "--help" | "-h"] => {
-            println!("{USAGE}");
+            // The version first, as `recall`'s help has it: the first line
+            // of what `version` prints, so the two cannot disagree. The
+            // features line is left to `version`.
+            let version = version_line();
+            let first = version.lines().next().unwrap_or_default();
+            println!("{first}\n\n{USAGE}");
             return ExitCode::SUCCESS;
         }
         // Handled before anything the server needs is read: an admin
