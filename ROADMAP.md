@@ -782,7 +782,7 @@ arriving new**, and **it has to stay cheap**.
       what is the cheapest thing that removes the need to own a VPS, without
       putting anyone else's memory in your hands?
 
-- [ ] **Recall moves memory faithfully and has no idea whether any of it is
+- [x] **Recall moves memory faithfully and has no idea whether any of it is
       still true.** It is transport. Transport is invisible when it works and
       replaceable when someone ships it natively, and its ceiling is set by
       the quality of what it carries rather than by anything Recall does.
@@ -902,6 +902,8 @@ arriving new**, and **it has to stay cheap**.
       **Built in 0.4.9 (#152, #153, #156 to #159):** `recall review run`,
       `show` and `apply`, with `--claude` for what the local checks cannot
       decide. The design moved to `docs/history/` once all of it shipped.
+      Corrected after 0.4.10 (#176): that what a claim names exists no
+      longer makes it `still_true` on its own; a stated value has to match.
 
 ## Agreed 2026-09-23: versions, devices, two binaries, encryption
 
@@ -970,6 +972,23 @@ See `docs/design/handshake.md` for the reasoning.
       binstall recall` was checked against the real 0.4.6 on 2026-09-28:
       it downloaded the prebuilt `x86_64-unknown-linux-gnu` archive from
       the GitHub Release with compiling disabled, no configuration needed.
+- [x] CI in about 3.5 minutes instead of 5 (2026-09-29):
+      - Rust jobs split into `lint`, `test-linux` (nextest), `test-windows`
+        and `install-windows`, run in parallel (#170).
+      - Fixed waits taken out of the slowest tests (#171).
+      - `install.ps1` stops redrawing progress bars, which took an install
+        on x64 from 90 s to 15 s (#168).
+      - Defender is woken in the background on arm64 Windows (#172).
+      - The throwaway source image builds without LTO (#174).
+      - Release: useless tag caches dropped, all crates published in one
+        `cargo publish` (#169).
+      - Measured, and not repeated: nextest is slower on Windows, and
+        Defender cannot be turned off on the runner.
+- [x] The documents are checked against the code on every pull request
+      (`scripts/docs-check.py`: variables, commands and flags, the docs
+      index, a CHANGELOG section for the version), and read against the
+      CHANGELOG in the bump pull request before each tag (`releasing.md`,
+      "The documents"). PR #175.
 - Parked, not agreed: a claude.ai connector (remote MCP) for Recall
   memory; see the design doc's 'Future idea' section.
 
