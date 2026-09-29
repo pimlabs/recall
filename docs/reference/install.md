@@ -291,7 +291,7 @@ does not claim that protection. The reasoning and the measurements are in
 On a machine enrolled as admin (or with `RECALL_TOKEN` set):
 
 ```sh
-recall devices list                          # name, scope, ephemeral, last seen, agent
+recall devices list                          # name, scope, last seen, key fingerprint, agent
 recall devices approve WDJB-MJHT             # shows name, agent, fingerprint; asks first
 recall devices approve WDJB-MJHT --admin     # an admin device, which can approve others
 recall devices approve WDJB-MJHT --worker    # a recall-worker, which only merges

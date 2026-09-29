@@ -42,7 +42,10 @@ use recall_hooks::{exit, ClientConfig};
 use recall_wire::audit::merkle::{self, Tree};
 use recall_wire::audit::verify;
 
+use crate::devices::{count, done, next_line, relative, short_hash, title_on_stderr, wrap};
+use crate::edit::printable;
 use crate::project as proj;
+use crate::ui::{self, Tone};
 
 /// Something did not check out.
 const FAILED: i32 = 1;
@@ -183,51 +186,67 @@ async fn export(cfg: &ClientConfig, output: Option<&Path>) -> i32 {
         return stop.report(output, cfg);
     }
 
+    // Said on stderr, all of it: standard output may be the export itself.
+    let wrote = format!(
+        "wrote {} to {}",
+        count(current.size as usize, "leaf", "leaves"),
+        describe(output)
+    );
+    let at = format!("at {}", describe_checkpoint(&current));
     if tree.root() != current.root {
-        eprintln!(
-            "recall audit: FAIL: the leaves the server sent do not hash to its own checkpoint \
-             ({}): the export was written, and recall audit verify will say the same",
-            current.header()
+        title_on_stderr("recall audit export", witness.origin());
+        eprintln!();
+        mark_line(Tone::Good, &wrote);
+        detail(&at);
+        mark_line(
+            Tone::Bad,
+            "the leaves the server sent do not hash to its own checkpoint",
         );
+        detail("recall audit verify says the same of the file.");
         return FAILED;
     }
-    let said = match witness.witness_export(&tree, current) {
-        Ok(Witnessed::Extends { proved, .. }) => match proved {
-            0 => "no checkpoint was saved here to hold it to; this one now is".to_string(),
-            n => format!("it extends the {n} checkpoint(s) saved here"),
-        },
+    let held = match witness.witness_export(&tree, current) {
+        Ok(Witnessed::Extends { proved, .. }) => proved,
         Ok(Witnessed::Inconsistent { finding, unsaved }) => {
-            eprintln!(
-                "recall audit: wrote {} leaves to {}",
-                current.size,
-                describe(output)
-            );
-            report_inconsistency(&finding, unsaved.as_deref());
+            title_on_stderr("recall audit export", witness.origin());
+            eprintln!();
+            mark_line(Tone::Good, &wrote);
+            detail(&at);
+            let kept = describe(output);
+            report_inconsistency(&finding, unsaved.as_deref(), Some(&kept));
             return FAILED;
         }
         Err(e) => {
             // The export is whole; what it could not be held to is the
             // checkpoints saved here, which is not a clean answer.
             eprintln!(
-                "recall audit: wrote {} leaves at checkpoint {} to {}, but the checkpoints \
-                 saved here could not be checked against it: {e}",
-                current.size,
-                current.header(),
-                describe(output)
+                "recall audit: {wrote}, {at}, but the checkpoints saved here could not be \
+                 checked against it: {e}"
             );
             return UNUSABLE;
         }
     };
-    eprintln!(
-        "recall audit: wrote {} leaves at checkpoint {} to {}; {said}.",
-        current.size,
-        current.header(),
-        describe(output)
-    );
+    title_on_stderr("recall audit export", witness.origin());
+    eprintln!();
+    mark_line(Tone::Good, &wrote);
+    detail(&at);
+    match held {
+        0 => mark_line(
+            Tone::Quiet,
+            "no checkpoint was saved here to hold it to; this one now is",
+        ),
+        n => mark_line(
+            Tone::Good,
+            &format!(
+                "it extends the {} saved here",
+                count(n, "checkpoint", "checkpoints")
+            ),
+        ),
+    }
     if let Some(path) = output {
-        eprintln!(
-            "  Check it offline with: recall audit verify {}",
-            path.display()
+        next_on_stderr(
+            &format!("recall audit verify {}", path.display()),
+            "checks it offline",
         );
     }
     exit::OK
@@ -495,39 +514,95 @@ fn verify_file(cfg: &ClientConfig, file: &Path, args: &[String]) -> i32 {
         .collect();
 
     let verdict = verify::verify_export(&export, &saved);
+    let file_name = file.display().to_string();
     if !verdict.ok() {
+        // The answer, on stderr as the script says it: every problem, each
+        // hash in it cut short, then how many.
+        title_on_stderr("recall audit verify", &file_name);
+        eprintln!();
         for problem in &verdict.problems {
-            eprintln!("FAIL: {problem}");
+            mark_line(Tone::Bad, &printable(&shorten_hashes(problem)));
         }
+        verdict_on_stderr(
+            Tone::Bad,
+            &format!(
+                "The export does not check out: {}.",
+                count(verdict.problems.len(), "problem", "problems")
+            ),
+        );
         return FAILED;
     }
     let mut held_to = Vec::new();
     if let Some(origin) = &origin {
         if !covered.is_empty() {
             held_to.push(format!(
-                "the {} checkpoint(s) saved here for {origin}",
-                covered.len()
+                "the {} saved here for {origin}",
+                count(covered.len(), "checkpoint", "checkpoints")
             ));
         }
     }
     if !given.is_empty() {
         held_to.push(format!("the {} given with --checkpoint", given.len()));
     }
-    let held_to = match held_to.is_empty() {
-        true => "no saved checkpoint to hold it to".to_string(),
-        false => format!("it extends {}", held_to.join(" and ")),
-    };
-    println!(
-        "OK: checkpoint {}; {} leaves, {} signed, every signature checked; {held_to}",
-        verdict.checkpoint, verdict.leaves, verdict.signed
+
+    ui::title("recall audit verify", &file_name);
+    anstream::println!();
+    // Checked, so it reads; the line as written should it somehow not.
+    let root = Checkpoint::from_header(&verdict.checkpoint)
+        .map(|cp| checkpoint_root(&cp))
+        .unwrap_or_else(|| verdict.checkpoint.clone());
+    ui::check(
+        Tone::Good,
+        "leaves",
+        LABEL_WIDTH,
+        &format!(
+            "{}, whose root is the checkpoint's: {}",
+            verdict.leaves,
+            short_hash(&root)
+        ),
+        None,
     );
-    if !newer.is_empty() {
-        println!(
-            "  {} checkpoint(s) saved here are newer than this export; recall audit verify, \
-             with no file, checks those against the server",
-            newer.len()
+    ui::check(
+        Tone::Good,
+        "signatures",
+        LABEL_WIDTH,
+        &format!(
+            "every one checked, on {}",
+            count(verdict.signed as usize, "signed leaf", "signed leaves")
+        ),
+        None,
+    );
+    if held_to.is_empty() {
+        ui::check(
+            Tone::Quiet,
+            "checkpoints",
+            LABEL_WIDTH,
+            "none saved here or given to hold it to",
+            None,
+        );
+    } else {
+        ui::check(
+            Tone::Good,
+            "checkpoints",
+            LABEL_WIDTH,
+            &format!("it extends {}", held_to.join(" and ")),
+            None,
         );
     }
+    if !newer.is_empty() {
+        ui::check(
+            Tone::Quiet,
+            "newer",
+            LABEL_WIDTH,
+            &format!(
+                "{} saved here {} newer than this export",
+                count(newer.len(), "checkpoint", "checkpoints"),
+                if newer.len() == 1 { "is" } else { "are" }
+            ),
+            Some("recall audit verify (no file) checks them against the server"),
+        );
+    }
+    ui::verdict(Tone::Good, "The export checks out.");
     exit::OK
 }
 
@@ -558,22 +633,34 @@ async fn check(cfg: &ClientConfig) -> i32 {
     match witness.check(&client, CHECK_DEADLINE).await {
         Ok(Witnessed::Extends { current, proved }) => {
             let kept = witness.load().map(|s| s.checkpoints.len()).unwrap_or(0);
-            println!(
-                "OK: the log at {} has {} leaves (root {}) and extends every checkpoint saved \
-                 here: {proved} proven now, {kept} kept",
-                witness.origin(),
-                current.size,
-                checkpoint_root(&current)
+            ui::title("recall audit verify", witness.origin());
+            anstream::println!();
+            anstream::println!(
+                "  {} The server's log extends every checkpoint saved here.",
+                ui::toned(Tone::Good, Tone::Good.mark())
+            );
+            anstream::println!(
+                "    {}",
+                ui::dim(&format!(
+                    "{proved} proven now, {kept} kept · the log now: {}",
+                    describe_checkpoint(&current)
+                ))
             );
             exit::OK
         }
         Ok(Witnessed::Inconsistent { finding, unsaved }) => {
-            report_inconsistency(&finding, unsaved.as_deref());
+            title_on_stderr("recall audit verify", witness.origin());
+            eprintln!();
+            report_inconsistency(&finding, unsaved.as_deref(), None);
             FAILED
         }
         // A log this machine witnessed and the server no longer keeps is a
         // history lost, as `recall doctor` says; one never kept is not.
-        Err(e) if e.no_log() && saved > 0 => lost_log(saved),
+        Err(e) if e.no_log() && saved > 0 => {
+            title_on_stderr("recall audit verify", witness.origin());
+            eprintln!();
+            lost_log(saved)
+        }
         Err(e) if e.no_log() => no_log(),
         Err(e) if e.unreadable() => unreadable(&e.to_string()),
         // Before `unanswered`, which it is part of: what to do is about
@@ -596,9 +683,13 @@ async fn check(cfg: &ClientConfig) -> i32 {
         }
         // The server answered, with something that is not a proof.
         Err(e) => {
-            eprintln!(
-                "FAIL: the server did not prove its log extends the checkpoints saved here: {e}"
+            title_on_stderr("recall audit verify", witness.origin());
+            eprintln!();
+            mark_line(
+                Tone::Bad,
+                "the server did not prove its log extends the checkpoints saved here",
             );
+            detail(&e.to_string());
             FAILED
         }
     }
@@ -628,20 +719,63 @@ fn checkpoint_root(cp: &Checkpoint) -> String {
         .unwrap_or_default()
 }
 
+/// `checkpoint 17 · root P7nycHqp…`: a checkpoint for a person to read,
+/// its root cut short. [`Checkpoint::header`] is the whole of it.
+fn describe_checkpoint(cp: &Checkpoint) -> String {
+    format!(
+        "checkpoint {} · root {}",
+        cp.size,
+        short_hash(&checkpoint_root(cp))
+    )
+}
+
 /// What an inconsistency looks like on a terminal, and what to do about
-/// it, which depends on whether the owner knows why.
-pub(crate) fn report_inconsistency(found: &Inconsistency, unsaved: Option<&str>) {
-    eprintln!(
-        "FAIL: the server's audit log no longer extends a checkpoint this machine saved: {}",
-        found.detail
+/// it, which depends on whether the owner knows why. The checkpoints are
+/// written whole, and the time it was found exactly as well: they are the
+/// evidence, and this may be the only copy of it.
+pub(crate) fn report_inconsistency(
+    found: &Inconsistency,
+    unsaved: Option<&str>,
+    kept: Option<&str>,
+) {
+    mark_line(
+        Tone::Bad,
+        "the server's audit log no longer extends a checkpoint this machine saved",
     );
-    eprintln!("  found  {}", found.found_at);
-    eprintln!("  saved  {}", found.saved_header());
-    eprintln!("  seen   {}", found.seen_header());
-    if let Some(why) = unsaved {
-        eprintln!("  NOT SAVED to audit.json ({why}): keep this output");
+    detail(&found.detail);
+    let at = format!("{} ({})", relative(&found.found_at), found.found_at);
+    for (label, value) in [
+        ("found", at),
+        ("saved", found.saved_header()),
+        ("seen", found.seen_header()),
+    ] {
+        anstream::eprintln!("    {}  {value}", ui::dim(&format!("{label:<5}")));
     }
-    eprintln!("  {}", AFTER_A_REWRITE);
+    if let Some(why) = unsaved {
+        mark_line(
+            Tone::Warn,
+            &format!("NOT SAVED to audit.json ({why}): keep this output"),
+        );
+    }
+    after_a_rewrite(kept);
+}
+
+/// [`AFTER_A_REWRITE`], as the two next steps it names. An export has
+/// just written the evidence to `kept`, so it says to keep that rather
+/// than to export again.
+fn after_a_rewrite(kept: Option<&str>) {
+    eprintln!();
+    detail("If the server was restored from a backup, that is why:");
+    next_on_stderr("recall audit reset", "starts again from the log as it is");
+    match kept {
+        Some(kept) => detail(&format!(
+            "If not, its history was rewritten: keep {kept}, the evidence."
+        )),
+        None => {
+            detail("If not, its history was rewritten. Keep the evidence first:");
+            next_on_stderr("recall audit export -o audit-evidence.jsonl", "");
+        }
+    }
 }
 
 /// The two ways a log that no longer extends a checkpoint came to be.
@@ -664,7 +798,11 @@ fn reset(cfg: &ClientConfig, yes: bool) -> i32 {
         Err(e) => return unreadable(&e.to_string()),
     };
     if held.is_empty() {
-        println!("Nothing is saved here for {}.", witness.origin());
+        anstream::println!(
+            "{} Nothing to forget: nothing is saved here for {}.",
+            ui::toned(Tone::Quiet, Tone::Quiet.mark()),
+            witness.origin()
+        );
         return exit::OK;
     }
     let what = describe_saved(&held);
@@ -684,10 +822,8 @@ fn reset(cfg: &ClientConfig, yes: bool) -> i32 {
     }
     match witness.reset() {
         Ok(_) => {
-            println!(
-                "Forgot {what} for {}. The next pull saves a first checkpoint again.",
-                witness.origin()
-            );
+            done(&format!("Forgot {what}, for {}.", witness.origin()));
+            anstream::println!("  The next pull saves a first checkpoint again.");
             exit::OK
         }
         Err(e) => refuse(&e.to_string(), ""),
@@ -696,9 +832,12 @@ fn reset(cfg: &ClientConfig, yes: bool) -> i32 {
 
 fn describe_saved(held: &Saved) -> String {
     let n = held.checkpoints.len() + held.unchecked.len();
-    let mut what = format!("{n} checkpoint(s)");
+    let mut what = count(n, "checkpoint", "checkpoints");
     if let Some(found) = &held.inconsistent {
-        what.push_str(&format!(" and the rewrite found on {}", found.found_at));
+        what.push_str(&format!(
+            " and the rewrite found {}",
+            relative(&found.found_at)
+        ));
     }
     what
 }
@@ -728,7 +867,11 @@ fn no_log() -> i32 {
 /// as `verify` and `recall doctor` say.
 fn no_log_to_export(witness: &Witness) -> i32 {
     match witness.load() {
-        Ok(saved) if !saved.all().is_empty() => lost_log(saved.all().len()),
+        Ok(saved) if !saved.all().is_empty() => {
+            title_on_stderr("recall audit export", witness.origin());
+            eprintln!();
+            lost_log(saved.all().len())
+        }
         Ok(_) => no_log(),
         Err(e) => unreadable(&e.to_string()),
     }
@@ -737,11 +880,15 @@ fn no_log_to_export(witness: &Witness) -> i32 {
 /// A log this machine saved `saved` checkpoints of, which the server no
 /// longer keeps: 1.
 fn lost_log(saved: usize) -> i32 {
-    eprintln!(
-        "FAIL: the server keeps no audit log, and this machine saved {saved} checkpoint(s) of \
-         one: a server that went back to before 0.4.2 lost it"
+    mark_line(
+        Tone::Bad,
+        &format!(
+            "the server keeps no audit log, and this machine saved {} of one",
+            count(saved, "checkpoint", "checkpoints")
+        ),
     );
-    eprintln!("  {AFTER_A_REWRITE}");
+    detail("A server that went back to before 0.4.2 lost it.");
+    after_a_rewrite(None);
     FAILED
 }
 
@@ -753,4 +900,93 @@ fn server_error(e: &client::Error) -> i32 {
         eprintln!("  Check the server is up: recall doctor");
     }
     UNUSABLE
+}
+
+// ---------------------------------------------------------------------------
+// how an answer reads
+// ---------------------------------------------------------------------------
+
+/// How wide an answer's lines may run before they wrap.
+const WIDTH: usize = 100;
+
+/// How wide the labels of `recall audit verify FILE`'s checks are: as wide
+/// as `checkpoints`, the widest.
+const LABEL_WIDTH: usize = 11;
+
+/// One marked line of an answer on stderr, wrapped under its own text.
+fn mark_line(tone: Tone, text: &str) {
+    for (i, line) in wrap(text, WIDTH - 4).iter().enumerate() {
+        match i {
+            0 => anstream::eprintln!("  {} {line}", ui::toned(tone, tone.mark())),
+            _ => anstream::eprintln!("    {line}"),
+        }
+    }
+}
+
+/// A dimmed line under a marked one, on stderr.
+fn detail(text: &str) {
+    for line in wrap(text, WIDTH - 4) {
+        anstream::eprintln!("    {}", ui::dim(&line));
+    }
+}
+
+/// The command to run next, and what it does, on stderr.
+fn next_on_stderr(command: &str, what: &str) {
+    anstream::eprintln!("{}", next_line(command, what));
+}
+
+/// [`ui::verdict`], on stderr: the closing line of an answer that did not
+/// check out.
+fn verdict_on_stderr(tone: Tone, text: &str) {
+    anstream::eprintln!();
+    anstream::eprintln!("{} {}", ui::toned(tone, tone.mark()), ui::bold(text));
+}
+
+/// `text` with every tree hash in it, 32 bytes in standard base64, cut to
+/// its first eight characters: a problem `verify_export` found reads in a
+/// line, and the hashes are there in full in the file and in `audit.json`
+/// to look at again.
+fn shorten_hashes(text: &str) -> String {
+    let is_b64 = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=');
+    let mut out = String::with_capacity(text.len());
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        if word.len() == 44 && word.ends_with('=') && verify::root_hash(word).is_some() {
+            out.push_str(&short_hash(word));
+        } else {
+            out.push_str(word);
+        }
+        word.clear();
+    };
+    for c in text.chars() {
+        if is_b64(c) {
+            word.push(c);
+        } else {
+            flush(&mut word, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A problem reads in a line: its roots are cut short, and nothing else
+    /// in it is touched, a word of base64 that is not a root included.
+    #[test]
+    fn a_problems_roots_are_cut_short_and_nothing_else() {
+        let problem = "the root over the first 16 leaves is \
+                       A9eynh+FB8idl91nn/0ibY0DxDqTpcrMv7JstDslA+g=, the saved checkpoint says \
+                       gBzXgBzaYCPdFUGxq2R1UtJhM9rS104gua1Tw/Xp/Q8=: the log does not extend it";
+        assert_eq!(
+            shorten_hashes(problem),
+            "the root over the first 16 leaves is A9eynh+F…, the saved checkpoint says \
+             gBzXgBza…: the log does not extend it"
+        );
+        let other = "leaf 3: signature x4bsQ2 does not verify";
+        assert_eq!(shorten_hashes(other), other);
+    }
 }

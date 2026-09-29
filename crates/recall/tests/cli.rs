@@ -2307,6 +2307,21 @@ fn connect_enrolls_the_first_machine_and_approves_it_with_the_operator_token() {
         "{}",
         text.stdout
     );
+    // A table under its header, no line ending in spaces, and the key's
+    // fingerprint cut short: it is whole in --json.
+    assert!(text.stdout.contains("NAME"), "{}", text.stdout);
+    assert!(
+        text.stdout.lines().all(|l| l == l.trim_end()),
+        "{}",
+        text.stdout
+    );
+    let fingerprint = doc["devices"][0]["fingerprint"].as_str().unwrap();
+    let bare = fingerprint.trim_start_matches("SHA256:");
+    assert!(
+        text.stdout.contains(&format!("{}…", &bare[..8])) && !text.stdout.contains(bare),
+        "{}",
+        text.stdout
+    );
 
     let rep = status_json(repo.path(), &env);
     assert_eq!(rep["auth"], "device", "{rep}");
@@ -2517,6 +2532,91 @@ fn devices_approve_refuses_a_key_whose_fingerprint_is_not_the_one_given() {
         Poll::Approved(approved) => assert_eq!(approved.scope, "sync"),
         other => panic!("expected approval, got {other:?}"),
     }
+}
+
+/// `authkey create` shows the key once, alone on a line of its own so it
+/// can be copied whole, and says how to revoke it; `list` puts the keys
+/// that still enrol first and a revoked one after them, marked; `revoke`
+/// names the command that revokes its devices too.
+#[test]
+fn authkey_create_shows_the_key_alone_and_list_marks_a_revoked_one() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let env = [
+        ("RECALL_URL", server.url.as_str()),
+        ("RECALL_TOKEN", "right"),
+    ];
+
+    let made = run(
+        &["authkey", "create", "--tag", "cloud", "--expires", "90d"],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(made.code, 0, "stderr: {}", made.stderr);
+    let keys = block_on(operator(&server).authkeys()).unwrap().authkeys;
+    let id = keys[0].id.clone();
+    let key = made
+        .stdout
+        .lines()
+        .find(|l| l.starts_with("recall-ak-"))
+        .unwrap_or_else(|| panic!("the key on a line of its own: {}", made.stdout));
+    assert_eq!(key.trim_end(), key, "{}", made.stdout);
+    assert!(
+        made.stdout.contains("expires in 90 days"),
+        "{}",
+        made.stdout
+    );
+    assert!(
+        made.stdout
+            .contains(&format!("→ recall authkey revoke {id}")),
+        "{}",
+        made.stdout
+    );
+
+    let other = block_on(
+        operator(&server).create_authkey(&recall_wire::AuthkeyRequest {
+            tag: "old".into(),
+            expires_in_days: 1,
+            ephemeral: true,
+            max_devices: None,
+        }),
+    )
+    .unwrap();
+    let revoked = run(&["authkey", "revoke", &other.id], repo.path(), &env, None);
+    assert_eq!(revoked.code, 0, "stderr: {}", revoked.stderr);
+    assert!(
+        revoked.stdout.contains(&format!(
+            "→ recall authkey revoke {} --revoke-devices",
+            other.id
+        )),
+        "{}",
+        revoked.stdout
+    );
+
+    let list = run(&["authkey", "list"], repo.path(), &env, None);
+    assert_eq!(list.code, 0, "stderr: {}", list.stderr);
+    let live = list.stdout.find(&id).expect("the live key is listed");
+    let gone = list
+        .stdout
+        .find(&other.id)
+        .expect("the revoked key is listed");
+    assert!(live < gone, "the live key first: {}", list.stdout);
+    let row = list.stdout.lines().find(|l| l.contains(&other.id)).unwrap();
+    assert!(
+        row.trim_start().starts_with('○') && row.contains("revoked just now"),
+        "{}",
+        list.stdout
+    );
+    assert!(list.stdout.contains("1 in use"), "{}", list.stdout);
+
+    let missing = run(&["authkey", "revoke", "ak_nope"], repo.path(), &env, None);
+    assert_eq!(missing.code, 2, "{}", missing.stderr);
+    assert!(
+        missing.stderr.starts_with("recall authkey: "),
+        "named after the command run: {}",
+        missing.stderr
+    );
 }
 
 /// A cloud session holds `RECALL_AUTHKEY` and nothing else. Its first
@@ -3850,10 +3950,15 @@ fn an_export_verifies_here_and_with_the_script_and_tampering_does_not() {
 
     let r = run(&["audit", "verify", &file_str], repo.path(), &env, None);
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
-    assert!(r.stdout.starts_with("OK: checkpoint "), "{}", r.stdout);
-    assert!(r.stdout.contains("every signature checked"), "{}", r.stdout);
+    assert!(r.stdout.starts_with("recall audit verify"), "{}", r.stdout);
+    assert!(r.stdout.contains("every one checked"), "{}", r.stdout);
     assert!(
         r.stdout.contains("saved here for 127.0.0.1:"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.trim_end().ends_with("✓ The export checks out."),
         "{}",
         r.stdout
     );
@@ -3883,7 +3988,17 @@ fn an_export_verifies_here_and_with_the_script_and_tampering_does_not() {
         let path_str = path.to_string_lossy().to_string();
         let r = run(&["audit", "verify", &path_str], repo.path(), &env, None);
         assert_eq!(r.code, 1, "{what} was accepted: {}", r.stdout);
-        assert!(r.stderr.contains("FAIL: "), "{what}: {}", r.stderr);
+        assert!(
+            r.stderr.contains("✗ The export does not check out"),
+            "{what}: {}",
+            r.stderr
+        );
+        // Each root in a problem is cut short, so the problem reads in a
+        // line: none of the checkpoints' 44 characters of base64 is left.
+        for cp in saved.all() {
+            let root = cp.header().split_once(' ').unwrap().1.to_string();
+            assert!(!r.stderr.contains(&root), "{what}: {}", r.stderr);
+        }
         let (code, out) = audit_verify_py(&path, &checkpoints);
         assert_eq!(code, 1, "{what}, the script: {out}");
     }
@@ -3928,8 +4043,13 @@ fn a_file_the_script_accepts_is_accepted_here() {
     assert_eq!(code, 0, "{out}");
     let r = run(&["audit", "verify", &file_str], dir.path(), &[], None);
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
-    assert!(r.stdout.contains("10 leaves, 1 signed"), "{}", r.stdout);
-    assert!(r.stdout.contains("no saved checkpoint"), "{}", r.stdout);
+    assert!(r.stdout.contains("leaves       10,"), "{}", r.stdout);
+    assert!(r.stdout.contains("on 1 signed leaf"), "{}", r.stdout);
+    assert!(
+        r.stdout.contains("none saved here or given"),
+        "{}",
+        r.stdout
+    );
 
     // A saved checkpoint given by hand, as to the script.
     let early = format!(
@@ -4052,7 +4172,20 @@ fn a_server_that_rewrote_its_history_is_caught_and_stays_caught() {
 
     let r = run(&["audit", "verify"], repo.path(), &env, None);
     assert_eq!(r.code, 1, "stdout: {}", r.stdout);
-    assert!(r.stderr.contains("FAIL: "), "{}", r.stderr);
+    assert!(
+        r.stderr
+            .contains("✗ the server's audit log no longer extends a checkpoint"),
+        "{}",
+        r.stderr
+    );
+    // The two ways out, each a command of its own.
+    assert!(
+        r.stderr.contains("→ recall audit reset")
+            && r.stderr
+                .contains("→ recall audit export -o audit-evidence.jsonl"),
+        "{}",
+        r.stderr
+    );
 
     // Kept through a server that looks fine again, until reset.
     assert!(witnessed(home.path(), &server).inconsistent.is_some());
@@ -4062,7 +4195,7 @@ fn a_server_that_rewrote_its_history_is_caught_and_stays_caught() {
     let r = run(&["audit", "reset", "--yes"], repo.path(), &env, None);
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
     assert!(
-        r.stdout.contains("and the rewrite found on"),
+        r.stdout.contains("Forgot") && r.stdout.contains("and the rewrite found"),
         "{}",
         r.stdout
     );
@@ -4436,16 +4569,28 @@ fn eval_apply_makes_the_suggested_edit_and_pushes_it() {
         "{}",
         list.stdout
     );
+    assert!(
+        list.stdout.contains("! eval_cli") && list.stdout.contains("→ recall eval show eval_cli"),
+        "{}",
+        list.stdout
+    );
     let show = run(&["eval", "show", "eval_cli"], repo.path(), &env, None);
     assert_eq!(show.code, 0, "{}", show.stderr);
     for want in [
-        "f1  secret (high)",
-        "deploy.md, line 2",
-        "abc1… (masked)",
-        "recall eval apply f1 --eval eval_cli",
+        // The summary first, then the finding by its id, its severity
+        // marked, then what it quotes and the command that applies it.
+        "✗ 1 high   ! 0 medium   ○ 0 low",
+        "✗ f1  secret  deploy.md L2",
+        "│ - key: abc1… (masked)",
+        "→ recall eval apply f1 --eval eval_cli",
     ] {
         assert!(show.stdout.contains(want), "{want:?} in {}", show.stdout);
     }
+    assert!(
+        show.stdout.lines().all(|l| l == l.trim_end()),
+        "{}",
+        show.stdout
+    );
 
     let applied = run(&["eval", "apply", "f1", "--yes"], repo.path(), &env, None);
     assert_eq!(applied.code, 0, "{}", applied.stderr);
