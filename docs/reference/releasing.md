@@ -1,8 +1,8 @@
 # Cutting a release
 
-Four channels ship the same binary. Tagging publishes the GitHub Release;
-npm, crates.io and the Homebrew tap are then published by the same workflow,
-once the owner approves it.
+Four channels ship the same binary. Tagging builds the GitHub Release;
+npm, crates.io and the Homebrew tap are then published by a second workflow,
+run afterwards and approved by the owner.
 
 Order matters, because three of the four depend on the release existing.
 
@@ -65,13 +65,22 @@ git tag -a v0.3.1 -m "recall 0.3.1" && git push origin v0.3.1
 Both end in the same place. *Start a release*
 (`.github/workflows/start-release.yml`) reads the version from `main`, refuses
 if any CI job (Linux or Windows) did not pass on that commit or if the tag
-already exists somewhere else, creates the tag, and starts the Release workflow on it. It dispatches
-Release explicitly because a tag pushed with the workflow's own token starts
-no workflow by itself, and it dispatches it *on the tag* because the
-`release` environment only admits tag refs. Run it twice and the second run
-either refuses or resumes; it never moves a tag.
+already exists somewhere else, creates the tag, and starts *Build a release*
+on it. It dispatches Build a release explicitly because a tag pushed with the
+workflow's own token starts no workflow by itself, and it dispatches it *on
+the tag* so what is built is exactly what the tag names. Run it twice and the
+second run either refuses or resumes; it never moves a tag.
 
-`.github/workflows/release.yml` then does the rest, in this order:
+A release is then two workflows, one after the other:
+
+> **Build a release** (`.github/workflows/build-release.yml`) starts on its
+> own, asks nobody anything, and takes about seven minutes.
+>
+> **Publish a release** (`.github/workflows/publish.yml`) is started
+> afterwards, by you or by an agent working for you, and publishes nothing
+> until you approve it.
+
+Build a release does steps 1 to 3:
 
 1. **Versions agree** — the tag, `Cargo.toml` and `npm/package.json`, before
    any runner time is spent.
@@ -89,14 +98,23 @@ either refuses or resumes; it never moves a tag.
    an approval, deliberately: the image holds nothing the Release did not
    already make public, a package version can be deleted, and a deploy is
    undone by deploying the previous version.
-4. **Stop and wait for you.** The `publish-npm`, `publish-crates`,
-   `publish-homebrew` and `publish-winget` jobs run in the `release`
-   environment, whose required reviewer is the owner. GitHub notifies you;
-   *Review deployments → Approve* releases all four.
+
+Publish a release does steps 4 to 7:
+
+4. **Start it on the tag, then approve.** *Actions → Publish a release → Run
+   workflow*, with *Use workflow from* set to the tag (not `main`), or
+   `gh workflow run publish.yml --ref v<version>`. Its first job,
+   `check-release`, refuses a run that is not on the tag or whose GitHub
+   Release has no `checksums.txt` yet. Each publishing job then waits in its
+   own environment: `publish-npm` in `release-npm`, `publish-crates` in
+   `release-crates`, `publish-homebrew` in `release-homebrew`,
+   `publish-winget` in `release-winget`, each with the owner as required
+   reviewer. GitHub notifies you once; *Review deployments* lists all four,
+   tick them and *Approve* releases them together.
 5. **npm** and **crates.io** publish through *trusted publishing*: each
-   registry trusts this workflow's OIDC identity and issues a credential that
-   lasts for the job. No npm or crates.io token is stored anywhere — not in
-   the repository, not in a cloud environment, not on a laptop.
+   registry trusts Publish a release's OIDC identity and issues a credential
+   that lasts for the job. No npm or crates.io token is stored anywhere — not
+   in the repository, not in a cloud environment, not on a laptop.
 6. **Homebrew**: the formula is rewritten from the release's own checksums
    and pushed to `pimlabs/homebrew-tap`. The rewritten file is attached to the
    run; it lands in this repository through a PR like every other change.
@@ -120,43 +138,84 @@ re-running the job.
 back: npm refuses to unpublish after 72 hours, and crates.io can yank a
 version but never delete it. Whoever cuts the tag — you, or an agent
 working for you — can build and draft everything; only a person can make it
-public. From a phone that is the whole release: *Run workflow*, then, about
-ten minutes later, *Approve* on the notification.
+public. From a phone that is the whole release: *Start a release*, then,
+once it is built, *Publish a release* on the tag and *Approve* on the
+notification.
+
+**Why two workflows.** Until 0.4.11 the publish jobs were part of the one
+Release workflow, waiting for approval inside its run. GitHub counts a run's
+duration up to its last job, waiting included, so a seven-minute build whose
+approval came four hours later read as a four-hour release, and no run said
+how long the release took. Split, each run starts when its work starts and
+lasts as long as that work. Nothing is lost by it: the publish jobs never
+used the build's artifacts, only its GitHub Release, which `check-release`
+requires. Runs of `release.yml`, up to 0.4.11, built and published in one;
+from 0.4.12 the build is `build-release.yml` and the publishing is
+`publish.yml`.
+
+**Why an environment per registry.** Every publishing job can ask GitHub for
+an OIDC token, and a registry checks only the repository, the workflow file
+and the environment the token names. With one environment shared by all
+four, the crates job, which compiles every dependency it publishes, could
+have been handed an npm credential, and the npm job a crates.io one. With its
+own, a token from any other job names the wrong environment and the
+registry refuses it. The two stored tokens are split the same way: each is
+readable only by the one job whose environment holds it. Each environment is
+named for where it publishes, `release-<registry>`, not for the job, because
+the name is part of what npm and crates.io have registered: a job can be
+renamed freely, a registry cannot.
 
 ### One-time setup
 
 Done once per repository; nothing here needs repeating per release.
 
-1. **GitHub environment** — *Settings → Environments → New environment*,
-   named exactly `release`:
-   - **Required reviewers**: yourself.
-   - **Deployment branches and tags**: *Selected*, add the tag rule `v*`.
-   - **Create it before the first tag.** A job naming an environment that
-     does not exist makes GitHub create it — unprotected — and the publish
-     would run with no approval at all.
+1. **Four GitHub environments**, one per registry. For each of
+   `release-npm`, `release-crates`, `release-homebrew` and `release-winget`:
+   *Settings → Environments → New environment*, named exactly that, then
+   - **Required reviewers**: yourself. Leave *Prevent self-review* off: the
+     run is started under your own account, by you or by an agent, and
+     with it on nobody could approve.
+   - **Allow administrators to bypass configured protection rules**: off,
+     so the approval cannot be skipped.
+   - **Deployment branches and tags**: *Selected branches and tags → Add
+     deployment branch or tag rule*, type *Tag*, pattern `v*`.
+   - **Create all four before the first Publish a release.** A job naming an
+     environment that does not exist makes GitHub create it, unprotected,
+     and that job would publish with no approval at all.
+     `scripts/check-release-environments.sh` checks each of these settings,
+     for every environment `publish.yml` names: Publish a release runs it
+     before anything publishes, and CI runs it on every push to `main`, so
+     a missing environment or a setting changed later shows up red.
 2. **npm** — on npmjs.com, `@pimlabs/recall` → *Settings → Trusted
    publishing* → GitHub Actions: organization `pimlabs`, repository `recall`,
-   workflow `release.yml`, environment `release`.
+   workflow `publish.yml`, environment `release-npm`.
 3. **crates.io** — for **each** of `recall-wire`, `recall-hooks`,
    `recall-worker`, `recall-server` and `recall`: the crate's *Settings →
    Trusted Publishing → Add*, with repository owner `pimlabs`, repository
-   `recall`, workflow `release.yml`, environment `release`. A crate's first
-   version has no settings page yet, so `recall-worker`, new with the merge
-   queue, is published once from a laptop (below) and then given its
+   `recall`, workflow `publish.yml`, environment `release-crates`. A crate's
+   first version has no settings page yet, so `recall-worker`, new with the
+   merge queue, was published once from a laptop (below) and then given its
    trusted publisher like the others; the name was free on 2026-09-23.
+
+   Both registries match the workflow by its file name and the environment
+   by its name, so renaming either means registering the new one on npm and
+   on each of the five crates before the next publish. Until 0.4.11 they
+   were `release.yml` and `release`; remove those entries once a publish
+   under the new ones has worked.
 4. **Homebrew tap** — a fine-grained personal access token with *Contents:
    read and write* on `pimlabs/homebrew-tap` **only**, saved as the secret
-   `HOMEBREW_TAP_TOKEN` on the `release` environment (not the repository),
-   so only an approved job can read it. Without it the `publish-homebrew`
-   job warns and skips; everything else still publishes.
+   `HOMEBREW_TAP_TOKEN` on the `release-homebrew` environment (not the
+   repository), so only the approved `publish-homebrew` job can read it.
+   Without it that job warns and skips; everything else still publishes.
 5. **winget** — a *classic* personal access token with the `public_repo` and
    `workflow` scopes (the second so a workflow-file change upstream in
    `microsoft/winget-pkgs` doesn't fail the job intermittently — a fine-grained
    token is not accepted here), saved as the secret `WINGET_TOKEN` on the
-   `release` environment. Without it the `publish-winget` job warns and skips;
-   everything else still publishes. This alone is not enough to make the
-   `publish-winget` job do anything, though — it also needs the fork and the
-   first submission below, done once, by hand.
+   `release-winget` environment. Without it the `publish-winget` job warns
+   and skips; everything else still publishes. winget is shelved (see
+   `ROADMAP.md`), so the environment exists with no token and the job skips.
+   A token alone would not make it do anything either — it also needs the
+   fork and the first submission below, done once, by hand.
 6. **GHCR packages, after the first release that publishes images** (the one
    after 0.4.6). `publish-image` creates `recall-server` and `recall-worker`
    under the `pimlabs` organization with `GITHUB_TOKEN`, and a new package is
@@ -186,9 +245,10 @@ walks the irreversible steps — tag, `npm publish`, `cargo publish`, the tap �
 nothing is published by accident. It needs npm and crates.io credentials on
 the machine running it, and cargo 1.90 or later, which it checks first.
 
-Pushing the tag from the script also starts the workflow above. Its publish
-jobs will wait for approval and then find every version already published,
-so approving or rejecting them makes no difference.
+Pushing the tag from the script also starts Build a release, which builds
+the GitHub Release and the server's images and deploys them. There is then
+no need to run Publish a release: the script has already published, and a
+run would find every version there and skip it.
 
 **Run it again if it stops part-way.** It reads each registry before
 publishing anything, so a channel that already has this version is skipped
@@ -280,7 +340,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-`.github/workflows/release.yml` fires on `v*`. It builds the client for six
+`.github/workflows/build-release.yml` fires on `v*`. It builds the client for six
 targets, each on a **native runner** except Intel macOS — `rusqlite`
 compiles SQLite from C, so cross-compiling needs a C toolchain for the
 target, and only Xcode on the arm64 macOS runner already has one for both
@@ -376,8 +436,8 @@ matrix on `main` and re-dispatching builds the tagged code with the corrected
 runners:
 
 1. Cancel the stuck run.
-2. Fix the label in `.github/workflows/release.yml`, land it on `main`.
-3. Actions → Release → Run workflow, with `tag` set to the tag in question.
+2. Fix the label in `.github/workflows/build-release.yml`, land it on `main`.
+3. Actions → Build a release → Run workflow, with `tag` set to the tag in question.
 
 Check the label against [`actions/runner-images`](https://github.com/actions/runner-images)
 before assuming anything else is wrong.
@@ -579,7 +639,7 @@ step is deliberate rather than automated.
 ## 5. winget (first submission only)
 
 Package identifier `PimLabs.Recall`, publisher `pimlabs`, license `MIT`,
-moniker `recall`. The `publish-winget` job in `.github/workflows/release.yml`
+moniker `recall`. The `publish-winget` job in `.github/workflows/publish.yml`
 (`vedantmgoyal9/winget-releaser`, which drives
 [komac](https://github.com/russellbanks/Komac) under the hood) keeps this up
 to date automatically from then on — **but it updates an existing package,
@@ -597,10 +657,10 @@ This is a few one-time steps, done once total, not once per release:
 2. **Fork `microsoft/winget-pkgs`** under the `pimlabs` account — the same
    account that owns this repository, which is what lets the action push to
    it without a `fork-user` input. **Browser-only, works from any machine.**
-3. **Add the token as `WINGET_TOKEN`** on this repository's `release`
-   environment (*Settings → Environments → release → Environment secrets*),
+3. **Add the token as `WINGET_TOKEN`** on this repository's `release-winget`
+   environment (*Settings → Environments → release-winget → Environment secrets*),
    not the repository's own secrets — same reasoning as
-   `HOMEBREW_TAP_TOKEN` above: only an approved job can read it.
+   `HOMEBREW_TAP_TOKEN` above: only the approved `publish-winget` job can read it.
 4. **The first submission itself.** This is the one step that touches a real
    manifest, and it is where a mistake is most likely — the nested-zip shape
    below is easy to get wrong by hand and easy to verify with

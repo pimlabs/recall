@@ -17,7 +17,7 @@
 #
 # RECALL_FAST_BUILD=1 makes a source build skip the release profile's LTO,
 # for CI's throwaway images only; see the `source` stage. A deployment leaves
-# it unset, and so compiles with the profile release.yml ships.
+# it unset, and so compiles with the profile build-release.yml ships.
 #
 # The server is the last stage, so a build that names no target builds it,
 # as every build did before the worker existed. The worker is
@@ -95,7 +95,7 @@ FROM chef AS source
 # CARGO_HOME, not /src/.cargo, because cook writes /src/.cargo/config.toml
 # itself when the recipe carries one. Unset, as the compose files and
 # every deployment leave it, nothing is written, and cargo reads exactly
-# what it read before this switch existed. (release.yml never builds this
+# what it read before this switch existed. (build-release.yml never builds this
 # stage: it compiles its binaries with cargo directly, and its images
 # fetch them.)
 ARG RECALL_FAST_BUILD=

@@ -30,7 +30,7 @@ permissions:
   contents: read
 
 # Only ever applies to the dev/test profile — [profile.release] in
-# Cargo.toml (what release.yml ships and what the Docker "release" build
+# Cargo.toml (what build-release.yml ships and what the Docker "release" build
 # fetches) is untouched by any of these.
 #
 # CARGO_INCREMENTAL=0: incremental compilation earns its keep by reusing
@@ -126,11 +126,11 @@ jobs:
           echo "$changed"
 
           # Asked of the diff even in a public repository; see above.
-          if printf '%s\n' "$changed" | grep -Eq '^(scripts/verify-release-image\.sh|\.github/workflows/(ci|deploy|release)\.yml)$'; then
+          if printf '%s\n' "$changed" | grep -Eq '^(scripts/(verify-release-image|check-release-environments)\.sh|\.github/workflows/(ci|deploy|build-release|publish)\.yml)$'; then
             echo "deploy=true" >> "$GITHUB_OUTPUT"
           else
             echo "deploy=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Nothing in scripts/verify-release-image.sh, deploy.yml, release.yml or this workflow changed, so check-release-image was skipped. It runs unconditionally on every push to main."
+            echo "::notice::Nothing in scripts/verify-release-image.sh, scripts/check-release-environments.sh, deploy.yml, build-release.yml, publish.yml or this workflow changed, so check-release-image was skipped. It runs unconditionally on every push to main."
           fi
 
           if [ "${{ github.event.repository.private }}" != "true" ]; then
@@ -142,25 +142,25 @@ jobs:
 
           # This workflow itself counts for both: a change to either gate
           # below, or to the jobs it feeds, is only proven by running them.
-          if printf '%s\n' "$changed" | grep -Eq '^(crates/|deploy/|Cargo\.(toml|lock)$|scripts/(release-image|image-pullable)\.sh$|\.github/workflows/(ci|release)\.yml$)'; then
+          if printf '%s\n' "$changed" | grep -Eq '^(crates/|deploy/|Cargo\.(toml|lock)$|scripts/(release-image|image-pullable)\.sh$|\.github/workflows/(ci|build-release)\.yml$)'; then
             echo "image=true" >> "$GITHUB_OUTPUT"
           else
             echo "image=false" >> "$GITHUB_OUTPUT"
             # One line on purpose: a `\` continuation inside a quoted
             # string keeps the next line's indentation in the annotation.
-            echo "::notice::Nothing under crates/, deploy/, Cargo.toml, Cargo.lock, scripts/release-image.sh, scripts/image-pullable.sh, release.yml or this workflow changed, so the server image builds were skipped. They run unconditionally on every push to main."
+            echo "::notice::Nothing under crates/, deploy/, Cargo.toml, Cargo.lock, scripts/release-image.sh, scripts/image-pullable.sh, build-release.yml or this workflow changed, so the server image builds were skipped. They run unconditionally on every push to main."
           fi
 
           # .github/actions/ too: the windows jobs set up Rust through the
           # local rust-setup action, so a change there is only proven on
           # Windows by running them. And what the Windows installer
-          # test runs: install.ps1, its own script, the packer release.yml
+          # test runs: install.ps1, its own script, the packer build-release.yml
           # uses and the stand-in release server.
-          if printf '%s\n' "$changed" | grep -Eq '^(crates/|Cargo\.(toml|lock)$|install\.ps1$|npm/install\.js$|scripts/(installer-test\.ps1|package-release\.py|fake-release-server\.py)$|\.github/workflows/(ci|release)\.yml$|\.github/actions/)'; then
+          if printf '%s\n' "$changed" | grep -Eq '^(crates/|Cargo\.(toml|lock)$|install\.ps1$|npm/install\.js$|scripts/(installer-test\.ps1|package-release\.py|fake-release-server\.py)$|\.github/workflows/(ci|build-release)\.yml$|\.github/actions/)'; then
             echo "windows=true" >> "$GITHUB_OUTPUT"
           else
             echo "windows=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Nothing under crates/, .github/actions/, Cargo.toml, Cargo.lock, install.ps1, npm/install.js, the installer test's scripts, release.yml or this workflow changed, so the Windows jobs were skipped. They run unconditionally on every push to main."
+            echo "::notice::Nothing under crates/, .github/actions/, Cargo.toml, Cargo.lock, install.ps1, npm/install.js, the installer test's scripts, build-release.yml or this workflow changed, so the Windows jobs were skipped. They run unconditionally on every push to main."
           fi
 
   # Eight checks that are plain scripts against files already in the
@@ -267,14 +267,14 @@ jobs:
       - name: Off-box backup never asks rclone to delete
         run: ./scripts/backup-offbox-check.sh
 
-  # A release's archive names are a contract between release.yml and every
+  # A release's archive names are a contract between build-release.yml and every
   # installer, and until this job a mistake in it showed only at the next
   # real release (0.4.3 failed that way, on a different step). So each pull
-  # request builds a release here by running release.yml's own Package
+  # request builds a release here by running build-release.yml's own Package
   # steps, as that file has them, for every matrix entry, against tiny fake
   # binaries (scripts/run-package-steps.py), and checks that what they wrote
   # is exactly the set of names scripts/package-release.py --name gives. A
-  # checksums.txt is made the way release.yml makes it, and one more release
+  # checksums.txt is made the way build-release.yml makes it, and one more release
   # in the layout v0.4.5 and older have. It serves both on 127.0.0.1
   # (scripts/fake-release-server.py, python3's http.server plus GitHub's
   # /releases/latest redirect), then runs install.sh, npm/install.js and
@@ -423,7 +423,7 @@ jobs:
       # what the server says on the wire, which the optimisation level does
       # not change; the dev build also has the debug assertions and overflow
       # checks the release build leaves out. `build-image` still compiles
-      # an optimised binary, inside Docker, and runs it, and release.yml
+      # an optimised binary, inside Docker, and runs it, and build-release.yml
       # compiles the release profile's own on every release. Asserted
       # first, so a test build that one day stops leaving the binary behind
       # fails here, by name, and not as a server that never came up.
@@ -545,7 +545,7 @@ jobs:
       # a deployment runs, and there is no release of an unmerged change to
       # point it at, so this assembles one: the binary the source build just
       # made (musl, static, the same kind the release publishes), packed and
-      # checksummed the way release.yml packs it, served from a local
+      # checksummed the way build-release.yml packs it, served from a local
       # directory. The download, the checksum check and the runtime around
       # them are then exercised exactly as a deploy exercises them. A
       # tampered checksum must stop the build, so that is tried too.
@@ -579,7 +579,7 @@ jobs:
       # profile. On a change to server code, compiling the workspace's own
       # crates took about 85 seconds with the release profile and about 20
       # without its LTO, measured on four cores. The shipped profile is
-      # still compiled on every release, by release.yml's own
+      # still compiled on every release, by build-release.yml's own
       # `cargo build --release`, which never reads this argument.
       - name: Server image builds, from source and from a release
         env:
@@ -611,7 +611,7 @@ jobs:
 
           # A version after v0.4.5, so deploy/fetch-release.sh asks for the
           # archive names and layout every release since has: packed by
-          # scripts/package-release.py, as release.yml packs them.
+          # scripts/package-release.py, as build-release.yml packs them.
           # (The names v0.4.5 and older have are fetched in
           # `test-installers`.)
           ci_version=9.9.9-ci
@@ -682,7 +682,7 @@ jobs:
           # impossible without anyone noticing.
           docker run --rm --entrypoint sh recall-server-rel -c 'command -v wget'
 
-  # The images release.yml publishes, built here the way its `build-image`
+  # The images build-release.yml publishes, built here the way its `build-image`
   # legs build them: the same script, Dockerfile targets, build arguments
   # and provenance, one leg per architecture on a runner of that
   # architecture, with push=false, then each image's claude CLI and binary
@@ -733,13 +733,13 @@ jobs:
   # attestation, with `gh attestation verify` and this job's token, which
   # is why this job, alone here, has `attestations: read`. Run on a real
   # runner against the newest published release, so a change to the script,
-  # to the deploy, or to how release.yml attests is proven here and not
+  # to the deploy, or to how build-release.yml attests is proven here and not
   # first found by a deploy. Then once more with a version the image does
   # not claim, which must fail, and fail for that reason, so the check is
   # shown able to fail.
   #
   # The newest release is the newest v* tag after 0.4.6 (the last with no
-  # image; deploy.yml's LAST_BUILT_ON_SERVER), by sort -V, whose release
+  # image; deploy.yml's LAST_BUILT_ON_SERVER), by sort -V, whose build
   # run's publish-image job has succeeded: a release in progress has its
   # tag before its images, and main must not go red in between. Reading
   # the run is why this job also has `actions: read`. Gated on
@@ -766,15 +766,24 @@ jobs:
           # Newest first. A tag exists from the moment a release starts,
           # minutes before its publish-image job pushes the images, so a
           # push to main in between would find nothing to verify. A tag
-          # counts once the latest attempt of publish-image in its release
+          # counts once the latest attempt of publish-image in its build
           # run succeeded; until then, the release before it is checked.
           newest=
           for v in $(git ls-remote --tags --refs origin 'v*' \
             | sed -n 's|.*refs/tags/v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$|\1|p' \
             | { cat; echo 0.4.6; } | sort -Vr); do
             [ "$v" = 0.4.6 ] && break
-            run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/runs?branch=v$v&per_page=1" \
-              --jq '.workflow_runs[0].id // empty')
+            # The tag's build run: build-release.yml's, or, for 0.4.11 and
+            # older, release.yml's, which built and published in one run.
+            # Picked out by the run's path rather than asked of the workflow
+            # by file name, since release.yml no longer exists as a file.
+            if [ "$(printf '%s\n' "$v" 0.4.11 | sort -V | tail -1)" = 0.4.11 ]; then
+              workflow=release.yml
+            else
+              workflow=build-release.yml
+            fi
+            run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?branch=v$v&per_page=100" \
+              --jq "[.workflow_runs[] | select(.path == \".github/workflows/$workflow\")][0].id // empty")
             published=
             if [ -n "$run" ]; then
               published=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/jobs?filter=latest&per_page=100" \
@@ -784,7 +793,7 @@ jobs:
               newest=$v
               break
             fi
-            echo "::notice::v$v's release run (${run:-none found}) has not published its images, so the release before it is checked instead."
+            echo "::notice::v$v's build run (${run:-none found}) has not published its images, so the release before it is checked instead."
           done
           if [ -z "$newest" ]; then
             echo "::error::No release after 0.4.6 has published its images, so there is no image to verify."
@@ -814,13 +823,20 @@ jobs:
           fi
           echo "Refused as 0.0.0, as it must be."
 
+      # Publish a release's environments, checked here too so a setting
+      # changed in the web UI turns main red now, not the next release.
+      - name: The release-* environments are protected
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/check-release-environments.sh
+
   # The client only — recall-server and recall-worker are Linux-only by
   # design (see deploy/Dockerfile and their own crate docs), so they are
   # excluded rather than tested and ignored. `recall`'s own integration tests still pull it in as
   # a dev-dependency (it runs a real server in-process), which is why this
   # needs a C toolchain: rusqlite's `bundled` feature compiles SQLite from
   # source, and windows-latest carries the MSVC toolchain cc-rs needs for
-  # that automatically — the same reason release.yml's msvc builds need
+  # that automatically — the same reason build-release.yml's msvc builds need
   # nothing extra either.
   #
   # Both architectures the release builds. arm64 is here rather than first

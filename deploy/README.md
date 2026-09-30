@@ -627,7 +627,7 @@ docker compose up -d --no-build     # with your -f files
 
 The automatic deploy does this more carefully: it pulls each image by the
 digest its tag named when the deploy checked it, after verifying that
-digest's attestation from this repository's Release workflow, and tags it
+digest's attestation from this repository's Build a release, and tags it
 as the version and as `:local`, so a later `docker compose up -d` without
 `RECALL_VERSION` runs the same version rather than building one. Once the
 new version is healthy it removes older version tags of the two images,

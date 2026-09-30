@@ -14,8 +14,10 @@
 #     org.opencontainers.image.version into it, and the digest covers it,
 #     so a tag pointed at an older release's image, attested too, fails;
 #   - its GitHub attestation must verify, for this repository, signed by
-#     release.yml running on the tag v<version> exactly, the identity
-#     publish-image's actions/attest signs with.
+#     the release's build running on the tag v<version> exactly, the
+#     identity publish-image's actions/attest signs with: build-release.yml,
+#     or release.yml for 0.4.11 and older, built before the release workflow
+#     was split in two.
 #
 # Prints each verified digest, and under GitHub Actions writes them as the
 # step outputs server_digest and worker_digest. deploy.yml hands those to
@@ -43,7 +45,15 @@ if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
   echo "usage: $0 <version> [<tag>], each like 0.4.7" >&2
   exit 2
 fi
-identity="https://github.com/$REPOSITORY/.github/workflows/release.yml@refs/tags/v$version"
+# The last release release.yml built. A signer is fixed when it signs, so
+# an older release keeps verifying against the workflow that built it.
+LAST_BUILT_BY_RELEASE_YML=0.4.11
+if [ "$(printf '%s\n' "$version" "$LAST_BUILT_BY_RELEASE_YML" | sort -V | tail -1)" = "$LAST_BUILT_BY_RELEASE_YML" ]; then
+  workflow=release.yml
+else
+  workflow=build-release.yml
+fi
+identity="https://github.com/$REPOSITORY/.github/workflows/$workflow@refs/tags/v$version"
 
 # Under GitHub Actions, an annotation; anywhere else, a plain line.
 say() {

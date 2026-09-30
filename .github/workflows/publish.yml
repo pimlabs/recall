@@ -1,0 +1,313 @@
+name: Publish a release
+
+# The registries: npm, crates.io, the Homebrew tap and winget, for a tag that
+# build-release.yml ("Build a release") has already built and whose GitHub
+# Release exists. Run by hand when the owner decides: Actions > Publish a
+# release > Run workflow, *Use workflow from* the tag (or `gh workflow run
+# publish.yml --ref v<version>`), then approve the environments it waits on.
+#
+# One environment per registry, each named for where it publishes and each
+# with the owner as required reviewer and a `v*` tag rule:
+#
+#   publish-npm       release-npm       trusted publishing, no token
+#   publish-crates    release-crates    trusted publishing, no token
+#   publish-homebrew  release-homebrew  HOMEBREW_TAP_TOKEN
+#   publish-winget    release-winget    WINGET_TOKEN
+#
+# npm and crates.io publish without a stored token: both trust this
+# workflow's OIDC identity ("trusted publishing"), registered against this
+# file's name, publish.yml, and that registry's own environment, and hand it
+# a credential that lives for the length of the job. The environment is
+# what keeps the registries apart: every job here can ask GitHub for an OIDC
+# token, and with one shared environment the crates job, which compiles
+# every dependency, could have been handed an npm credential too. With its
+# own, a token from any other job names the wrong environment and the
+# registry refuses it. The same goes for the two stored tokens: each is
+# readable only by the one job whose environment holds it.
+#
+# Nothing reaches a registry until a person approves it: an agent can start
+# this, and every publishing job still waits for the owner. Publishing
+# cannot be undone (npm: no unpublish after 72h; crates.io: yank, never
+# delete), which is why that gate is a person and not a check. GitHub shows
+# every environment a run waits on in one Review deployments dialog, so the
+# four are still one approval.
+#
+# Until 0.4.11 these jobs were in release.yml, beside the build and behind
+# one shared `release` environment.
+#
+# A workflow of its own, rather than jobs waiting inside the build, so that
+# its run starts when a person decides and lasts as long as the publishing:
+# GitHub counts a run's duration to its last job, waits for approval
+# included. Setup is in docs/reference/releasing.md.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish, which is also the ref to run on; defaults to that ref"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  # What is published has to be what was built: the run's own ref must be
+  # the tag (each environment admits `v*` tags only, and the jobs check it
+  # out), and Build a release must have made its GitHub Release, since
+  # npm's postinstall and the formula download from it.
+  check-release:
+    name: check-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run on the tag, after its GitHub Release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -eu
+          if [ "$GITHUB_REF" != "refs/tags/$TAG" ]; then
+            echo "::error::Run this on the tag itself (Use workflow from: $TAG), not $GITHUB_REF: what is published must be what $TAG built."
+            exit 1
+          fi
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[].name' | grep -qx checksums.txt; then
+            echo "::error::$TAG has no GitHub Release with checksums.txt yet. Run Build a release on it first, or wait for it to finish."
+            exit 1
+          fi
+          echo "$TAG is built and released; publishing."
+
+      # Every run, before any publishing job starts: an environment a job
+      # names but that does not exist is created by GitHub, unprotected, and
+      # that job would publish with nobody's approval. The script says more.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Each release-* environment exists and needs an approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/check-release-environments.sh
+
+  # ---- The registries. Each waits for check-release, because npm's
+  # postinstall and the Homebrew formula both download the GitHub Release's
+  # archives, and each waits for its environment's approval. They are separate jobs
+  # because they have nothing to do with each other: a failure in one must
+  # not stop the others, which is what left v0.2.0 with four crates
+  # unpublished. Each skips a version its registry already has, so re-running
+  # a failed job is always safe.
+
+  publish-npm:
+    name: publish-npm
+    needs: check-release
+    runs-on: ubuntu-latest
+    environment: release-npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      # No `registry-url`: that writes an .npmrc expecting NODE_AUTH_TOKEN,
+      # and there is deliberately no token to give it. npm finds the OIDC
+      # credential on its own.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      # Trusted publishing needs npm 11.5.1 or later; do not rely on
+      # whichever npm the runner's Node happens to ship. An exact version,
+      # not `latest`: this job can mint an npm publish credential, so what it
+      # runs is chosen here, not by whoever publishes npm next. Raise it by
+      # hand (npm 12 needs Node 24.15 or later).
+      - run: npm install -g npm@11.20.0
+      - name: npm publish
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          v="${TAG#v}"
+          if curl -sf "https://registry.npmjs.org/@pimlabs%2Frecall/$v" >/dev/null; then
+            echo "npm already has $v — nothing to do"
+            exit 0
+          fi
+          cd npm
+          # Scoped packages default to private. Provenance is attached
+          # automatically under trusted publishing.
+          npm publish --access public
+
+  publish-crates:
+    name: publish-crates
+    needs: check-release
+    runs-on: ubuntu-latest
+    environment: release-crates
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      # No Swatinem/rust-cache: this job runs on the tag too, so, as
+      # build-client explains, it could only miss; it used to upload 535 MB
+      # after every publish for nothing to read.
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
+      # Exchanges this job's OIDC token for a crates.io token that lasts 30
+      # minutes and is revoked when the job ends.
+      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        id: auth
+      # One `cargo publish` for every crate still to publish, not one per
+      # crate with a 20-second sleep between them. Since cargo 1.90 a single
+      # call takes several -p: it packages every crate named, and verifies
+      # each by building it from its package, with the crates not yet on
+      # crates.io served to each other from a local registry cargo makes
+      # under target/package. Only when all of them build does it upload,
+      # in dependency order, waiting for each crate to reach the index
+      # before it uploads one that depends on it. So the bottom-up order
+      # (recall-wire, recall-hooks, recall-worker, recall-server, which uses
+      # the worker's merge code, then recall) is now kept by cargo rather
+      # than by this list, and the sleeps, which dated from before
+      # `cargo publish` waited for the index by itself (cargo 1.66), are
+      # gone. A crate that fails to build now stops the publish before
+      # anything is uploaded, rather than after the crates below it are
+      # already public for good.
+      #
+      # Re-running is still safe. A crate the index already has at this
+      # version is left out, and has to be: cargo refuses the whole call,
+      # before uploading anything, if any crate it names is already
+      # published. If an upload fails part way, the crates before it are
+      # public, and a re-run publishes only the rest, against those.
+      - name: cargo publish, in dependency order
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          # The verification builds are dev-profile builds whose output is
+          # thrown away when the job ends, so debug info and incremental
+          # state are time spent on nothing. rust-cache used to set
+          # CARGO_INCREMENTAL=0 here; debug info has no bearing on whether
+          # a package compiles, which is all the verification asks.
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: |
+          v="${TAG#v}"
+          todo=()
+          for n in recall-wire recall-hooks recall-worker recall-server recall; do
+            if curl -sf "https://index.crates.io/${n:0:2}/${n:2:2}/$n" | grep -q "\"vers\":\"$v\""; then
+              echo "$n already at $v"
+            else
+              todo+=(-p "$n")
+            fi
+          done
+          # Never a bare `cargo publish`: at a virtual workspace's root that
+          # means every member, and it is not what an empty list asked for.
+          if [ "${#todo[@]}" -eq 0 ]; then
+            echo "crates.io already has every crate at $v; nothing to do"
+            exit 0
+          fi
+          cargo publish --locked "${todo[@]}"
+
+  publish-homebrew:
+    name: publish-homebrew
+    needs: check-release
+    runs-on: ubuntu-latest
+    environment: release-homebrew
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      # The one credential this workflow stores: a fine-grained token that
+      # can write to pimlabs/homebrew-tap and nothing else. It lives on the
+      # `release-homebrew` environment, so only this job can read it, and
+      # only once approved. Missing is reported, not failed — the laptop
+      # path can still push the tap.
+      - name: Is the tap token configured?
+        id: token
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -n "$TAP_TOKEN" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::HOMEBREW_TAP_TOKEN is not set on the release-homebrew environment, so the tap was not updated. See docs/reference/releasing.md."
+          fi
+      - name: Rewrite the formula from this release's checksums
+        if: steps.token.outputs.configured == 'true'
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          curl -fsSL "https://github.com/$REPO/releases/download/$TAG/checksums.txt" -o "$RUNNER_TEMP/checksums.txt"
+          python3 scripts/update-formula.py "${TAG#v}" "$RUNNER_TEMP/checksums.txt"
+          git --no-pager diff --stat Formula/recall.rb
+      - name: Push it to the tap
+        if: steps.token.outputs.configured == 'true'
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          ./scripts/push-tap.sh "${TAG#v}" "https://x-access-token:${TAP_TOKEN}@github.com/pimlabs/homebrew-tap.git"
+      # This repository's copy of the formula is the source the tap is
+      # generated from, so it has to follow — but a job that can push to
+      # main is a larger grant than this one needs. The rewritten file is
+      # kept as an artifact, and the step summary says a PR is owed.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.token.outputs.configured == 'true'
+        with:
+          name: formula
+          path: Formula/recall.rb
+      - name: Say what is left
+        if: steps.token.outputs.configured == 'true'
+        run: |
+          {
+            echo "### Homebrew tap updated"
+            echo ""
+            echo "\`Formula/recall.rb\` in this repository still has the previous release's"
+            echo "checksums. The rewritten file is attached to this run as the \`formula\`"
+            echo "artifact; it lands on \`main\` through a pull request like every other change."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # winget, via vedantmgoyal9/winget-releaser (which drives komac under the
+  # hood). Unlike the homebrew job above, this does not write to this
+  # repository — it opens a pull request against microsoft/winget-pkgs from
+  # a fork of it. That fork, and at least one version of the package already
+  # present in winget-pkgs, are both one-time setup done by hand; this job
+  # cannot create either. See docs/reference/releasing.md.
+  publish-winget:
+    name: publish-winget
+    needs: check-release
+    runs-on: ubuntu-latest
+    environment: release-winget
+    permissions:
+      contents: read
+    steps:
+      # The one credential this job stores: a classic PAT with the
+      # `public_repo` scope (to open the pull request) and, so a workflow
+      # file change upstream in winget-pkgs doesn't fail this job
+      # intermittently, `workflow`. It lives on the `release-winget`
+      # environment, so only this job can read it, and only once approved.
+      # Missing is reported, not failed — the first submission and any
+      # later one done by hand still work without it.
+      - name: Is the winget token configured?
+        id: token
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if [ -n "$WINGET_TOKEN" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::WINGET_TOKEN is not set on the release-winget environment, so winget-pkgs was not updated. See docs/reference/releasing.md."
+          fi
+      # The default installers-regex only matches .exe/.msi/.msix/.appx —
+      # build-release.yml's Windows archives are .zip (see the `build-client` job's
+      # "Package (Windows)" step), so it has to be widened or the action
+      # finds no installers to publish at all.
+      - name: Publish to winget-pkgs
+        if: steps.token.outputs.configured == 'true'
+        uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
+        with:
+          identifier: PimLabs.Recall
+          installers-regex: '\.zip$'
+          release-tag: ${{ github.event.inputs.tag || github.ref_name }}
+          token: ${{ secrets.WINGET_TOKEN }}

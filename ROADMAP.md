@@ -948,7 +948,7 @@ See `docs/design/handshake.md` for the reasoning.
       one-time `winget-pkgs` setup (fork ownership, manual first submission,
       moderation) was too much friction for a single-owner tool. Windows
       installs with `install.ps1` or npm instead. The `publish-winget` job stays in
-      `release.yml` and skips while `WINGET_TOKEN` is unset on the `release`
+      `publish.yml` and skips while `WINGET_TOKEN` is unset on the `release-winget`
       environment. The token left over from the attempt made that job fail on
       0.4.4 and 0.4.6; it was deleted on 2026-09-28, so the next release
       skips it.
@@ -961,8 +961,21 @@ See `docs/design/handshake.md` for the reasoning.
       PR #137. On a public repository every CI job runs on every pull
       request, and one `ci-passed` job is the check to require. PR #141.
       Splitting `release.yml` into `build-*`/`publish-*` files was
-      considered and left alone: npm and crates.io trusted publishing are
-      registered against `release.yml`.
+      considered and left alone at first: npm and crates.io trusted
+      publishing are registered against `release.yml`.
+- [x] The release as two workflows: "Build a release" (`build-release.yml`:
+      binaries, GitHub Release, images, deploy, about seven minutes, no
+      approval) and "Publish a release" (`publish.yml`: npm, crates.io, the
+      tap and winget, started on the tag afterwards). Decided 2026-09-29:
+      with the publish jobs inside the one `release.yml` run, GitHub counted
+      the wait for approval as run time, so 0.4.8 read as 4h13m and 0.4.11
+      as 2h22m for about seven minutes of building each. Each publishing job
+      has its own environment, `release-npm`, `release-crates`,
+      `release-homebrew` and `release-winget`, in place of the one shared
+      `release`, so no job can obtain another registry's credential; npm
+      and crates.io trusted publishing are registered against `publish.yml`
+      and those names. Image attestations are signed by `build-release.yml`
+      from 0.4.12; 0.4.11 and older still verify against `release.yml`.
 - [x] Release archives named for their Rust target
       (`recall-<triple>.tar.gz`, `.zip` on Windows), each holding a
       directory with the binary under its own name. 0.4.5 and older keep

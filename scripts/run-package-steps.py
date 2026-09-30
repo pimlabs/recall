@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Run release.yml's own packaging steps against fake binaries.
+"""Run build-release.yml's own packaging steps against fake binaries.
 
-Usage: run-package-steps.py <release.yml> <work dir> <version> <out dir>
+Usage: run-package-steps.py <build-release.yml> <work dir> <version> <out dir>
 
 For scripts/installer-test.sh, which serves what this writes as a release
 and installs from it. The point is that the archives are named and packed
-by release.yml's own `run:` text, not by a copy of it in the test: for each
+by build-release.yml's own `run:` text, not by a copy of it in the test: for each
 entry of the `build` and `build-server` matrices, every step whose name
 starts with "Package" and whose `if:` holds for that entry's runner is run
 with bash, `${{ matrix.* }}` filled in from the entry, in a scratch

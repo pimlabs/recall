@@ -24,7 +24,7 @@
 # `manifest` joins the two into one multi-platform tag, Docker's pattern for
 # distributing a build across runners.
 #
-# release.yml, in order:
+# build-release.yml, in order:
 #
 #   status    (`check-image`) Is each image's tag already published? Asked
 #             with the job's login, so a package that is still private is
