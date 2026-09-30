@@ -5,8 +5,8 @@ name: Start a release
 # It exists because a tag is the one step of a release that needed a laptop.
 # This reads the version from main, creates `v<version>` there, and starts
 # Build a release (build-release.yml) on that tag. Nothing reaches a
-# registry from here: that is Publish a release (release.yml), run
-# afterwards and approved in the `release` environment by the owner. This
+# registry from here: that is Publish a release (publish.yml), run
+# afterwards and approved in its release-* environments by the owner. This
 # only saves typing a git command.
 #
 # Two things GitHub does are load-bearing here:
@@ -121,6 +121,6 @@ jobs:
             echo ""
             echo "**Build a release** is running on \`$TAG\`: the binaries, the GitHub"
             echo "Release, the server's images and the deploy, in about seven minutes."
-            echo "Then **Publish a release** on \`$TAG\`, approved in the \`release\`"
-            echo "environment, publishes npm, crates.io and the Homebrew tap."
+            echo "Then **Publish a release** on \`$TAG\`, approved in its release-*"
+            echo "environments, publishes npm, crates.io and the Homebrew tap."
           } >> "$GITHUB_STEP_SUMMARY"

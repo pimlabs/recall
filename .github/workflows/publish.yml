@@ -4,21 +4,36 @@ name: Publish a release
 # build-release.yml ("Build a release") has already built and whose GitHub
 # Release exists. Run by hand when the owner decides: Actions > Publish a
 # release > Run workflow, *Use workflow from* the tag (or `gh workflow run
-# release.yml --ref v<version>`), then approve the `release` environment.
+# publish.yml --ref v<version>`), then approve the environments it waits on.
 #
-# npm and crates.io publish without a stored token for either: both trust
-# this workflow's OIDC identity ("trusted publishing"), registered against
-# this file's name, release.yml, and the `release` environment, and
-# hand it a credential that lives for the length of the job. Every job that
-# publishes sits behind that environment, whose required reviewer is the
-# owner, so an agent can start this and nothing still reaches a registry
-# until a person approves it. Publishing cannot be undone (npm: no unpublish
-# after 72h; crates.io: yank, never delete), which is why that gate is a
-# person and not a check.
+# One environment per registry, each named for where it publishes and each
+# with the owner as required reviewer and a `v*` tag rule:
 #
-# The file keeps the name release.yml, which the publish jobs always had,
-# so both registries keep trusting it with nothing re-registered; the build
-# they used to share a run with moved out to build-release.yml.
+#   publish-npm       release-npm       trusted publishing, no token
+#   publish-crates    release-crates    trusted publishing, no token
+#   publish-homebrew  release-homebrew  HOMEBREW_TAP_TOKEN
+#   publish-winget    release-winget    WINGET_TOKEN
+#
+# npm and crates.io publish without a stored token: both trust this
+# workflow's OIDC identity ("trusted publishing"), registered against this
+# file's name, publish.yml, and that registry's own environment, and hand it
+# a credential that lives for the length of the job. The environment is
+# what keeps the registries apart: every job here can ask GitHub for an OIDC
+# token, and with one shared environment the crates job, which compiles
+# every dependency, could have been handed an npm credential too. With its
+# own, a token from any other job names the wrong environment and the
+# registry refuses it. The same goes for the two stored tokens: each is
+# readable only by the one job whose environment holds it.
+#
+# Nothing reaches a registry until a person approves it: an agent can start
+# this, and every publishing job still waits for the owner. Publishing
+# cannot be undone (npm: no unpublish after 72h; crates.io: yank, never
+# delete), which is why that gate is a person and not a check. GitHub shows
+# every environment a run waits on in one Review deployments dialog, so the
+# four are still one approval.
+#
+# Until 0.4.11 these jobs were in release.yml, beside the build and behind
+# one shared `release` environment.
 #
 # A workflow of its own, rather than jobs waiting inside the build, so that
 # its run starts when a person decides and lasts as long as the publishing:
@@ -36,8 +51,8 @@ permissions:
 
 jobs:
   # What is published has to be what was built: the run's own ref must be
-  # the tag (the `release` environment admits tags only, and the jobs check
-  # it out), and Build a release must have made its GitHub Release, since
+  # the tag (each environment admits `v*` tags only, and the jobs check it
+  # out), and Build a release must have made its GitHub Release, since
   # npm's postinstall and the formula download from it.
   check-release:
     name: check-release
@@ -62,7 +77,7 @@ jobs:
 
   # ---- The registries. Each waits for check-release, because npm's
   # postinstall and the Homebrew formula both download the GitHub Release's
-  # archives, and each waits for the `release` environment's approval. They are separate jobs
+  # archives, and each waits for its environment's approval. They are separate jobs
   # because they have nothing to do with each other: a failure in one must
   # not stop the others, which is what left v0.2.0 with four crates
   # unpublished. Each skips a version its registry already has, so re-running
@@ -72,7 +87,7 @@ jobs:
     name: publish-npm
     needs: check-release
     runs-on: ubuntu-latest
-    environment: release
+    environment: release-npm
     permissions:
       contents: read
       id-token: write
@@ -87,8 +102,11 @@ jobs:
         with:
           node-version: 24
       # Trusted publishing needs npm 11.5.1 or later; do not rely on
-      # whichever npm the runner's Node happens to ship.
-      - run: npm install -g npm@latest
+      # whichever npm the runner's Node happens to ship. An exact version,
+      # not `latest`: this job can mint an npm publish credential, so what it
+      # runs is chosen here, not by whoever publishes npm next. Raise it by
+      # hand (npm 12 needs Node 24.15 or later).
+      - run: npm install -g npm@11.20.0
       - name: npm publish
         env:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
@@ -107,7 +125,7 @@ jobs:
     name: publish-crates
     needs: check-release
     runs-on: ubuntu-latest
-    environment: release
+    environment: release-crates
     permissions:
       contents: read
       id-token: write
@@ -177,7 +195,7 @@ jobs:
     name: publish-homebrew
     needs: check-release
     runs-on: ubuntu-latest
-    environment: release
+    environment: release-homebrew
     permissions:
       contents: read
     steps:
@@ -186,8 +204,8 @@ jobs:
           ref: ${{ github.event.inputs.tag || github.ref }}
       # The one credential this workflow stores: a fine-grained token that
       # can write to pimlabs/homebrew-tap and nothing else. It lives on the
-      # `release` environment, so it is only readable by a job that has
-      # already been approved. Missing is reported, not failed — the laptop
+      # `release-homebrew` environment, so only this job can read it, and
+      # only once approved. Missing is reported, not failed — the laptop
       # path can still push the tap.
       - name: Is the tap token configured?
         id: token
@@ -198,7 +216,7 @@ jobs:
             echo "configured=true" >> "$GITHUB_OUTPUT"
           else
             echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::HOMEBREW_TAP_TOKEN is not set on the release environment, so the tap was not updated. See docs/reference/releasing.md."
+            echo "::warning::HOMEBREW_TAP_TOKEN is not set on the release-homebrew environment, so the tap was not updated. See docs/reference/releasing.md."
           fi
       - name: Rewrite the formula from this release's checksums
         if: steps.token.outputs.configured == 'true'
@@ -248,15 +266,15 @@ jobs:
     name: publish-winget
     needs: check-release
     runs-on: ubuntu-latest
-    environment: release
+    environment: release-winget
     permissions:
       contents: read
     steps:
       # The one credential this job stores: a classic PAT with the
       # `public_repo` scope (to open the pull request) and, so a workflow
       # file change upstream in winget-pkgs doesn't fail this job
-      # intermittently, `workflow`. It lives on the `release` environment,
-      # so it is only readable by a job that has already been approved.
+      # intermittently, `workflow`. It lives on the `release-winget`
+      # environment, so only this job can read it, and only once approved.
       # Missing is reported, not failed — the first submission and any
       # later one done by hand still work without it.
       - name: Is the winget token configured?
@@ -268,7 +286,7 @@ jobs:
             echo "configured=true" >> "$GITHUB_OUTPUT"
           else
             echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::WINGET_TOKEN is not set on the release environment, so winget-pkgs was not updated. See docs/reference/releasing.md."
+            echo "::warning::WINGET_TOKEN is not set on the release-winget environment, so winget-pkgs was not updated. See docs/reference/releasing.md."
           fi
       # The default installers-regex only matches .exe/.msi/.msix/.appx —
       # build-release.yml's Windows archives are .zip (see the `build-client` job's

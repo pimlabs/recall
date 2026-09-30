@@ -4,7 +4,7 @@
 Usage: generate_manifest.py <version> <checksums.txt> [<output dir>]
 
 winget-pkgs wants a package's *first* version submitted by hand — the
-`publish-winget` job in .github/workflows/release.yml (vedantmgoyal9/winget-releaser)
+`publish-winget` job in .github/workflows/publish.yml (vedantmgoyal9/winget-releaser)
 only updates a package that already exists there, it does not create one.
 This script exists for that one-time submission, and for anyone who wants to
 inspect or hand-edit what a release's manifest will look like without

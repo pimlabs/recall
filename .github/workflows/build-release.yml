@@ -7,8 +7,8 @@ name: Build a release
 # asked anything.
 #
 # The registries are not here. npm, crates.io, the Homebrew tap and winget
-# are published by release.yml ("Publish a release"), run once a
-# person decides, behind the `release` environment's approval. They used to
+# are published by publish.yml ("Publish a release"), run once a
+# person decides, behind an approval per registry. They used to
 # be jobs of this workflow, waiting for that approval inside its run, and
 # GitHub counts a run's duration to its last job: a release that waited four
 # hours for a tap read as a four-hour release. Two workflows, and each run
@@ -362,7 +362,7 @@ jobs:
   #   publish-image  joins the two digests into the version's tag, attests
   #                  it, and checks a server can pull it with no credentials.
   #
-  # None is behind the `release` environment, deliberately. The image holds
+  # None is behind a release-* environment, deliberately. The image holds
   # nothing that is not already public and unapproved in the GitHub Release,
   # a package version can be deleted (npm and crates.io cannot be undone),
   # and `deploy` below needs it: gating it would make every deploy wait for
@@ -562,7 +562,7 @@ jobs:
 
   # The server runs the release that was just published: it pulls the
   # images `publish-image` pushed, which hold the recall-server above,
-  # checked against checksums.txt. Not behind the `release` environment: a
+  # checked against checksums.txt. Not behind a release-* environment: a
   # deploy can be undone by deploying the previous version (Actions → Deploy
   # a release), which a registry publish cannot. Skips, and says so, where
   # no server is configured.
@@ -603,5 +603,5 @@ jobs:
             echo "The GitHub Release exists, so install.sh and install.ps1 already install it."
             echo "npm, crates.io and the Homebrew tap wait for **Publish a release**: Actions >"
             echo "Publish a release > Run workflow, *Use workflow from* \`$TAG\`, then approve"
-            echo "the \`release\` environment."
+            echo "its release-* environments in one Review deployments."
           } >> "$GITHUB_STEP_SUMMARY"
