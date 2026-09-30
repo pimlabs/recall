@@ -5060,17 +5060,22 @@ fn the_phase1_deploy_fixture_gets_the_documented_verdicts() {
     // fix it when it is about now, dismiss it when it is history.
     for wanted in [
         "Why: this reads as how things are now",
-        "→ If it is about now, fix it: edit L6 and write what is true now, then recall sync",
-        "→ If it is history, right as written: recall review dismiss t2",
+        "What to do: step 1 at the end.",
         "project_phase1_deploy.md  ",
         "What to do now",
-        "1. t2 project_phase1_deploy.md L6: edit it (write what is true now),",
-        "or recall review dismiss t2 if it is history",
+        "1. t2  project_phase1_deploy.md L6",
+        "If it is about now, fix it: in L6, write what is true now.",
+        "If it is history, right as written, stop flagging it:",
+        // A command is on a line of its own, after `$ `, never inside a
+        // sentence: which line is a command is never in doubt.
+        "\n       $ recall review dismiss t2\n",
+        "\n       $ recall sync\n",
+        "\n    $ recall review run\n",
         // What each of those commands does, once, at the end.
         "Commands",
-        "recall review apply tN         Writes tN's suggested fix",
-        "recall review dismiss tN       Marks tN as history",
-        "recall sync                    Sends a note you edited outside Claude Code.",
+        "\n  $ recall review apply tN\n      Writes tN's suggested fix",
+        "\n  $ recall review dismiss tN\n      Marks tN as history",
+        "\n  $ recall sync\n      Sends a note you edited outside Claude Code.",
     ] {
         assert!(text.stdout.contains(wanted), "{wanted:?}: {}", text.stdout);
     }
@@ -5113,7 +5118,7 @@ fn a_dismissed_claim_stops_needing_you_until_its_text_changes() {
     assert_eq!(d.code, 0, "{}", d.stderr);
     assert!(d.stdout.contains("Dismissed t1"), "{}", d.stdout);
     assert!(
-        d.stdout.contains("recall review dismiss t1 --undo"),
+        d.stdout.contains("$ recall review dismiss t1 --undo"),
         "{}",
         d.stdout
     );
@@ -5146,7 +5151,7 @@ fn a_dismissed_claim_stops_needing_you_until_its_text_changes() {
     assert!(
         details
             .stdout
-            .contains("dismissed as history; recall review dismiss t1 --undo flags it again"),
+            .contains("dismissed as history. To flag it again:\n             $ recall review dismiss t1 --undo"),
         "{}",
         details.stdout
     );
@@ -5259,7 +5264,7 @@ fn a_renamed_path_says_what_to_write_instead() {
     );
     assert!(
         text.stdout
-            .contains("edit L5 and replace `cut-release.yml` with `start-release.yml`"),
+            .contains("in L5, replace `cut-release.yml` with `start-release.yml`"),
         "{}",
         text.stdout
     );

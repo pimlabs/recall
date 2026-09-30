@@ -14,6 +14,16 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
+## Unreleased
+
+- **`recall review` puts every command on a line of its own.** A command
+  now always stands alone after `$ `, in the accent colour, under the
+  sentence that says what it does; no command sits inside a sentence any
+  more. The choices for each stale claim (fix it, or `recall review
+  dismiss`) are given once, in the numbered **What to do now** at the end,
+  and the claim itself says which step is its own. `recall review
+  dismiss` and the Commands list use the same layout.
+
 ## 0.4.14 — 2026-09-30
 
 - **`recall review` says what to do about each stale claim.** Under the

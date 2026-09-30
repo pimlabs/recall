@@ -1283,7 +1283,14 @@ fn dismiss(id: &str, undo: bool) -> anyhow::Result<i32> {
         ui::step(
             ui::Tone::Warn,
             &format!("{id} ({at}) is flagged again."),
-            Some("recall review show"),
+            None,
+        );
+        print_lines(
+            4,
+            &[
+                Line::Say("To see it:".into()),
+                Line::Run("recall review show".into()),
+            ],
         );
     } else {
         ui::step(
@@ -1292,7 +1299,14 @@ fn dismiss(id: &str, undo: bool) -> anyhow::Result<i32> {
                 "Dismissed {id} ({at}) as history. The review will not flag it again while its \
                  text stays the same; the note is unchanged."
             ),
-            Some(&format!("to undo: recall review dismiss {id} --undo")),
+            None,
+        );
+        print_lines(
+            4,
+            &[
+                Line::Say("To undo:".into()),
+                Line::Run(format!("recall review dismiss {id} --undo")),
+            ],
         );
     }
     Ok(exit::OK)
@@ -2595,7 +2609,7 @@ fn flagged(c: &Claim) -> bool {
 /// that makes every verdict below it less trustworthy, with what to do.
 struct Warning {
     text: String,
-    fix: String,
+    fix: Vec<Line>,
 }
 
 /// What makes this report less trustworthy than it looks: a checkout that
@@ -2625,11 +2639,14 @@ fn warnings(rep: &Report) -> Vec<Warning> {
                 "This checkout is {at}{lag}. Claims are checked against it, not against the \
                  code as it is now, so a verdict below can be wrong."
             ),
-            fix: if ev.repository_detached {
-                format!("git switch {branch} && git pull, then review again")
-            } else {
-                "git pull, then review again".to_string()
-            },
+            fix: vec![
+                Line::Say("Bring the checkout up to date first:".into()),
+                Line::Run(if ev.repository_detached {
+                    format!("git switch {branch} && git pull")
+                } else {
+                    "git pull".to_string()
+                }),
+            ],
         });
     }
     if let Some(run) = &ev.claude {
@@ -2644,9 +2661,16 @@ fn warnings(rep: &Report) -> Vec<Warning> {
                 text: format!(
                     "claude could not answer, so {not_asked} file(s) got no answer: {why}.{ran}"
                 ),
-                fix: "claude -p \"hello\" in this terminal shows the same error; fix it there \
-                      (a login is /login in claude), then recall review run --claude"
-                    .to_string(),
+                fix: vec![
+                    Line::Say(
+                        "See the same error in this terminal, and fix it there (a login is \
+                         /login inside claude):"
+                            .into(),
+                    ),
+                    Line::Run("claude -p \"hello\"".into()),
+                    Line::Say("Then ask again:".into()),
+                    Line::Run("recall review run --claude".into()),
+                ],
             });
         } else if !run.skipped.is_empty() {
             out.push(Warning {
@@ -2655,87 +2679,109 @@ fn warnings(rep: &Report) -> Vec<Warning> {
                     run.skipped.len(),
                     run.skipped[0].reason
                 ),
-                fix: "recall review show --details lists them".to_string(),
+                fix: vec![
+                    Line::Say("To see which:".into()),
+                    Line::Run("recall review show --details".into()),
+                ],
             });
         }
     }
     out
 }
 
-/// One step under a claim, folded rather than clipped: a command cut short
-/// no longer works when it is copied.
-fn under_claim_step(mark: &str, text: &str) {
-    let text = sanitize_for_terminal(text);
-    for (i, line) in ui::fold(&text, DETAIL_WIDTH).into_iter().enumerate() {
-        if i == 0 {
-            anstream::println!("           {mark} {line}");
-        } else {
-            anstream::println!("             {line}");
+/// One line of what to do: a sentence, or a command to run exactly as it
+/// is written.
+#[derive(Clone)]
+enum Line {
+    Say(String),
+    Run(String),
+}
+
+/// Prints `lines` starting `indent` columns in. A sentence is folded to
+/// fit; a command gets a line of its own, after `$ ` and in the accent
+/// colour, and is never folded. So which line is a command and which says
+/// what it does is never in doubt, and a command copies whole.
+fn print_lines(indent: usize, lines: &[Line]) {
+    let pad = " ".repeat(indent);
+    for line in lines {
+        match line {
+            Line::Say(text) => {
+                let width = ui::WIDTH.saturating_sub(indent).max(40);
+                for part in ui::fold(&sanitize_for_terminal(text), width) {
+                    anstream::println!("{pad}{part}");
+                }
+            }
+            Line::Run(command) => anstream::println!(
+                "{pad}  {}",
+                ui::accent(&format!("$ {}", sanitize_for_terminal(command)))
+            ),
         }
     }
 }
 
-/// What a flagged claim asks of the owner: the choices printed under it,
-/// and its one line in "What to do now".
-struct Todo {
-    choices: Vec<String>,
-    summary: String,
+/// One numbered step of "What to do now": a title, then its lines.
+struct Step {
+    title: String,
+    lines: Vec<Line>,
 }
 
-/// A stale claim is either meant as how things are now, and needs an edit,
-/// or history the checks read as a claim about now, and is dismissed. Both
-/// are offered, since only the owner knows which it is. `--claude` is not:
-/// it is asked only about what the checks could not decide, so a claim
-/// they found stale never gets a suggestion from it.
-fn todo_for(c: &Claim) -> Todo {
-    let at = format!("{} {}", c.file, lines_desc(&c.lines));
+/// What a flagged claim asks of the owner. A stale claim is either meant as
+/// how things are now, and needs an edit, or history the checks read as a
+/// claim about now, and is dismissed. Both are offered, since only the owner
+/// knows which it is. `--claude` is not: it is asked only about what the
+/// checks could not decide, so a claim they found stale never gets a
+/// suggestion from it.
+fn step_for(c: &Claim) -> Step {
+    let title = format!("{}  {} {}", c.id, c.file, lines_desc(&c.lines));
     let lines = lines_desc(&c.lines);
+    let send = Line::Run("recall sync".into());
     if c.class == Class::Conflict {
-        return Todo {
-            choices: vec![format!(
-                "edit {lines} to keep one version and delete the marker, then recall sync"
-            )],
-            summary: format!(
-                "{} {at}: a merge conflict; edit it to keep one version",
-                c.id
-            ),
+        return Step {
+            title,
+            lines: vec![
+                Line::Say(format!(
+                    "A merge left both versions here. Edit {lines} to keep one and delete the \
+                     [CONFLICT: ...] marker. If you edited it outside Claude Code, send it:"
+                )),
+                send,
+            ],
         };
     }
-    let renames: Vec<String> = c
-        .evidence
-        .iter()
-        .filter(|e| e.verdict == Verdict::Stale)
-        .filter_map(|e| e.renamed.as_ref())
-        .map(|r| format!("replace `{}` with `{}`", r.from, r.to))
-        .collect();
-    let dismiss = format!("recall review dismiss {}", c.id);
-    let (fix, short) = match &c.suggested_edit {
-        Some(_) => (
-            format!(
-                "recall review apply {} (writes the suggested line and sends it)",
-                c.id
+    let fix = match &c.suggested_edit {
+        Some(_) => vec![
+            Line::Say(
+                "If it is about now, fix it. This writes the suggested line and sends it:".into(),
             ),
-            format!("recall review apply {}", c.id),
-        ),
+            Line::Run(format!("recall review apply {}", c.id)),
+        ],
         None => {
+            let renames: Vec<String> = c
+                .evidence
+                .iter()
+                .filter(|e| e.verdict == Verdict::Stale)
+                .filter_map(|e| e.renamed.as_ref())
+                .map(|r| format!("replace `{}` with `{}`", r.from, r.to))
+                .collect();
             let what = if renames.is_empty() {
                 "write what is true now".to_string()
             } else {
                 renames.join(" and ")
             };
-            (
-                format!("edit {lines} and {what}, then recall sync"),
-                format!("edit it ({what})"),
-            )
+            vec![
+                Line::Say(format!(
+                    "If it is about now, fix it: in {lines}, {what}. If you edited it outside \
+                     Claude Code, send it:"
+                )),
+                send,
+            ]
         }
     };
-    Todo {
-        choices: vec![
-            format!("If it is about now, fix it: {fix}"),
-            format!("If it is history, right as written: {dismiss}"),
-        ],
-        summary: format!("{} {at}: {short}, or {dismiss} if it is history", c.id),
-    }
+    let mut lines = fix;
+    lines.push(Line::Say(
+        "If it is history, right as written, stop flagging it:".into(),
+    ));
+    lines.push(Line::Run(format!("recall review dismiss {}", c.id)));
+    Step { title, lines }
 }
 
 /// Why a stale claim is flagged, in words, below the evidence that says so.
@@ -2769,7 +2815,7 @@ fn print_text(rep: &Report, details: bool, memory_dir: Option<&Path>) {
             ui::toned(ui::Tone::Warn, "!"),
             sanitize_for_terminal(&w.text)
         );
-        anstream::println!("  {}", ui::accent(&format!("→ {}", w.fix)));
+        print_lines(2, &w.fix);
     }
 
     if rep.claims.is_empty() {
@@ -2810,8 +2856,8 @@ fn print_text(rep: &Report, details: bool, memory_dir: Option<&Path>) {
             ui::toned(
                 ui::Tone::Bad,
                 &format!(
-                    "{to_act} claim(s) need you: they say something that is no longer so. Under \
-                     each is what to do."
+                    "{to_act} claim(s) need you: they say something that is no longer so. What \
+                     to do is at the end."
                 )
             )
         );
@@ -2893,7 +2939,13 @@ fn print_text(rep: &Report, details: bool, memory_dir: Option<&Path>) {
     let mut files: Vec<(&str, &Vec<&Claim>)> = by_file.iter().map(|(f, c)| (*f, c)).collect();
     files.sort_by_key(|(f, c)| (worst(c), *f));
 
-    let mut todos: Vec<String> = Vec::new();
+    let mut steps: Vec<Step> = warned
+        .iter()
+        .map(|w| Step {
+            title: "First, the warning at the top.".into(),
+            lines: w.fix.clone(),
+        })
+        .collect();
     let mut quiet_files = Vec::new();
     let mut cant_tell_files = 0;
     for (file, claims) in &files {
@@ -2949,12 +3001,10 @@ fn print_text(rep: &Report, details: bool, memory_dir: Option<&Path>) {
         for c in order {
             if c.dismissed {
                 claim_line(&ui::dim("–"), c);
-                under_claim(
-                    &ui::dim("–"),
-                    &format!(
-                        "dismissed as history; recall review dismiss {} --undo flags it again",
-                        c.id
-                    ),
+                under_claim(&ui::dim("–"), "dismissed as history. To flag it again:");
+                print_lines(
+                    11,
+                    &[Line::Run(format!("recall review dismiss {} --undo", c.id))],
                 );
                 continue;
             }
@@ -3004,11 +3054,11 @@ fn print_text(rep: &Report, details: bool, memory_dir: Option<&Path>) {
                 if c.class != Class::Conflict {
                     under_claim(&ui::dim(" "), why_stale(c));
                 }
-                let todo = todo_for(c);
-                for choice in &todo.choices {
-                    under_claim_step(&ui::accent("→"), choice);
-                }
-                todos.push(todo.summary);
+                steps.push(step_for(c));
+                under_claim(
+                    &ui::dim(" "),
+                    &format!("What to do: step {} at the end.", steps.len()),
+                );
             }
         }
 
@@ -3052,17 +3102,17 @@ fn print_text(rep: &Report, details: bool, memory_dir: Option<&Path>) {
                 _ => ui::Tone::Quiet,
             };
             anstream::println!(
-                "  {} {} {} {} ({}), on {}  {}",
+                "  {} {} {} {} ({}), on {}. To read it:",
                 ui::toned(tone, "◆"),
                 sanitize_for_terminal(&e.evaluation),
                 sanitize_for_terminal(&e.finding),
                 ui::toned(tone, &sanitize_for_terminal(&e.kind)),
                 sanitize_for_terminal(&e.severity),
                 ids.join(", "),
-                ui::accent(&format!(
-                    "→ recall eval show {}",
-                    sanitize_for_terminal(&e.evaluation)
-                ))
+            );
+            print_lines(
+                2,
+                &[Line::Run(format!("recall eval show {}", e.evaluation))],
             );
         }
     }
@@ -3128,30 +3178,25 @@ fn print_text(rep: &Report, details: bool, memory_dir: Option<&Path>) {
         if still_true > 0 {
             hidden.push(format!("{still_true} still hold"));
         }
-        anstream::println!(
-            "{}",
-            ui::dim(&format!(
-                "{}. Nothing to do about them; recall review show --details lists each with why.",
+        for part in ui::fold(
+            &format!(
+                "{}. Nothing to do about them. To list each with why:",
                 hidden.join(", and ")
-            ))
-        );
+            ),
+            ui::WIDTH,
+        ) {
+            anstream::println!("{}", ui::dim(&part));
+        }
+        print_lines(0, &[Line::Run("recall review show --details".into())]);
     }
 
     // What to do now, in order, in one place: the warnings first, since a
     // verdict can be wrong until they are dealt with, then each claim.
-    let mut steps: Vec<String> = warned.iter().map(|w| format!("First: {}", w.fix)).collect();
-    steps.extend(todos);
     let waiting = rep
         .evidence
         .unavailable
         .iter()
         .any(|u| u.source == "claude");
-    let optional = (waiting && undecided > 0).then(|| {
-        format!(
-            "Optional: recall review run --claude asks your claude CLI about the {undecided} \
-             claim(s) no check can test. It uses your Claude usage."
-        )
-    });
     anstream::println!();
     anstream::println!("{}", ui::bold("What to do now"));
     if steps.is_empty() {
@@ -3165,33 +3210,48 @@ fn print_text(rep: &Report, details: bool, memory_dir: Option<&Path>) {
     } else {
         const SHOWN: usize = 8;
         for (i, step) in steps.iter().take(SHOWN).enumerate() {
-            let text = sanitize_for_terminal(step);
-            for (j, line) in ui::fold(&text, ui::WIDTH - 5).into_iter().enumerate() {
-                if j == 0 {
-                    anstream::println!("  {}", ui::accent(&format!("{}. {line}", i + 1)));
-                } else {
-                    anstream::println!("     {}", ui::accent(&line));
-                }
-            }
+            anstream::println!();
+            anstream::println!(
+                "  {}",
+                ui::bold(&format!(
+                    "{}. {}",
+                    i + 1,
+                    sanitize_for_terminal(&step.title)
+                ))
+            );
+            print_lines(5, &step.lines);
         }
         if steps.len() > SHOWN {
+            anstream::println!();
             anstream::println!(
                 "  {}",
                 ui::dim(&format!(
-                    "… and {} more, each under its claim above",
+                    "… and {} more; recall review show --details lists every claim",
                     steps.len() - SHOWN
                 ))
             );
         }
-        anstream::println!(
-            "  {}",
-            ui::dim("Then recall review run again: what you fixed or dismissed is gone from it.")
+        anstream::println!();
+        print_lines(
+            2,
+            &[
+                Line::Say("When you are done, check again:".into()),
+                Line::Run("recall review run".into()),
+            ],
         );
     }
-    if let Some(optional) = optional {
-        for line in ui::fold(&optional, ui::WIDTH - 2) {
-            anstream::println!("  {}", ui::dim(&line));
-        }
+    if waiting && undecided > 0 {
+        anstream::println!();
+        print_lines(
+            2,
+            &[
+                Line::Say(format!(
+                    "Optional: ask your claude CLI about the {undecided} claim(s) no check can \
+                     test. It uses your Claude usage."
+                )),
+                Line::Run("recall review run --claude".into()),
+            ],
+        );
     }
 
     // What each command the steps name does, once, at the end: a step says
@@ -3201,14 +3261,9 @@ fn print_text(rep: &Report, details: bool, memory_dir: Option<&Path>) {
         anstream::println!();
         anstream::println!("{}", ui::bold("Commands"));
         for (command, what) in COMMANDS {
-            let mut lines = ui::fold(what, ui::WIDTH - 33).into_iter();
-            anstream::println!(
-                "  {}  {}",
-                ui::accent(&format!("{command:<29}")),
-                lines.next().unwrap_or_default()
-            );
-            for line in lines {
-                anstream::println!("  {:<29}  {line}", "");
+            print_lines(0, &[Line::Run(command.to_string())]);
+            for part in ui::fold(what, ui::WIDTH - 6) {
+                anstream::println!("      {}", ui::dim(&part));
             }
         }
     }
