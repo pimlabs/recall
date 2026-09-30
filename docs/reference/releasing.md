@@ -182,6 +182,10 @@ Done once per repository; nothing here needs repeating per release.
    - **Create all four before the first Publish a release.** A job naming an
      environment that does not exist makes GitHub create it, unprotected,
      and that job would publish with no approval at all.
+     `scripts/check-release-environments.sh` checks each of these settings,
+     for every environment `publish.yml` names: Publish a release runs it
+     before anything publishes, and CI runs it on every push to `main`, so
+     a missing environment or a setting changed later shows up red.
 2. **npm** — on npmjs.com, `@pimlabs/recall` → *Settings → Trusted
    publishing* → GitHub Actions: organization `pimlabs`, repository `recall`,
    workflow `publish.yml`, environment `release-npm`.

@@ -126,11 +126,11 @@ jobs:
           echo "$changed"
 
           # Asked of the diff even in a public repository; see above.
-          if printf '%s\n' "$changed" | grep -Eq '^(scripts/verify-release-image\.sh|\.github/workflows/(ci|deploy|build-release)\.yml)$'; then
+          if printf '%s\n' "$changed" | grep -Eq '^(scripts/(verify-release-image|check-release-environments)\.sh|\.github/workflows/(ci|deploy|build-release|publish)\.yml)$'; then
             echo "deploy=true" >> "$GITHUB_OUTPUT"
           else
             echo "deploy=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Nothing in scripts/verify-release-image.sh, deploy.yml, build-release.yml or this workflow changed, so check-release-image was skipped. It runs unconditionally on every push to main."
+            echo "::notice::Nothing in scripts/verify-release-image.sh, scripts/check-release-environments.sh, deploy.yml, build-release.yml, publish.yml or this workflow changed, so check-release-image was skipped. It runs unconditionally on every push to main."
           fi
 
           if [ "${{ github.event.repository.private }}" != "true" ]; then
@@ -822,6 +822,13 @@ jobs:
             exit 1
           fi
           echo "Refused as 0.0.0, as it must be."
+
+      # Publish a release's environments, checked here too so a setting
+      # changed in the web UI turns main red now, not the next release.
+      - name: The release-* environments are protected
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/check-release-environments.sh
 
   # The client only — recall-server and recall-worker are Linux-only by
   # design (see deploy/Dockerfile and their own crate docs), so they are

@@ -75,6 +75,17 @@ jobs:
           fi
           echo "$TAG is built and released; publishing."
 
+      # Every run, before any publishing job starts: an environment a job
+      # names but that does not exist is created by GitHub, unprotected, and
+      # that job would publish with nobody's approval. The script says more.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Each release-* environment exists and needs an approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/check-release-environments.sh
+
   # ---- The registries. Each waits for check-release, because npm's
   # postinstall and the Homebrew formula both download the GitHub Release's
   # archives, and each waits for its environment's approval. They are separate jobs
