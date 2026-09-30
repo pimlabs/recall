@@ -14,7 +14,7 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
-## Unreleased
+## 0.4.13 — 2026-09-30
 
 - **`recall review` says first whether anything needs you.** The line
   after the title now reads `Nothing to fix: no claim is stale.`, or how
