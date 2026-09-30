@@ -91,12 +91,21 @@ pub enum Cmd {
         /// decide where this machine sends requests.
         #[arg(long, verbatim_doc_comment)]
         probe_hosts: bool,
+        /// List every claim checked, not only what needs you
+        ///
+        /// Also what no check could decide, each rule with its anchors, and
+        /// what claude read as no claim at all, each with its evidence.
+        #[arg(long, verbatim_doc_comment)]
+        details: bool,
         /// Machine-readable output, for scripts
         #[arg(long)]
         json: bool,
     },
     /// Show the last report again
     Show {
+        /// List every claim checked, not only what needs you
+        #[arg(long)]
+        details: bool,
         /// Machine-readable output, for scripts
         #[arg(long)]
         json: bool,
@@ -124,12 +133,14 @@ pub async fn run(cmd: Cmd) -> anyhow::Result<i32> {
             claude,
             max_calls,
             probe_hosts,
+            details,
             json,
         } => {
             let layer3 = claude.then_some(max_calls);
-            run_review(&files, all, layer3, probe_hosts, json).await
+            let output = Output::of(json, details);
+            run_review(&files, all, layer3, probe_hosts, output).await
         }
-        Cmd::Show { json } => show_last(json),
+        Cmd::Show { details, json } => show_last(Output::of(json, details)),
         Cmd::Apply { claim, yes } => apply::run(&claim, yes).await,
     }
 }
@@ -265,6 +276,18 @@ pub struct SourcesRead {
     /// repository.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repository_head: Option<String>,
+    /// Whether that `HEAD` is detached rather than on a branch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub repository_detached: bool,
+    /// What the checkout is compared with: its branch's upstream, or, when
+    /// `HEAD` is detached, the remote's default branch (`origin/HEAD`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_upstream: Option<String>,
+    /// How many commits `repository_upstream`, as last fetched, has that
+    /// the checkout does not. Claims are checked against the checkout, so
+    /// a checkout behind is one reason a verdict can be wrong.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_behind: Option<u32>,
     /// The version the configured server's discovery document reports.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_version: Option<String>,
@@ -303,6 +326,15 @@ pub struct ClaudeRun {
     /// Files with claims to decide that were not asked about, and why.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<SkippedFile>,
+    /// Why `claude` could not answer at all, when it could not: not
+    /// installed, or the CLI itself failing (a login, a usage limit). The
+    /// rest of the files are then not asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+    /// The `claude` binary that was run: the first on `PATH`, resolved to
+    /// a full path, so a failure says which one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
 }
 
 /// A file layer 3 did not ask about, and why.
@@ -401,7 +433,7 @@ async fn run_review(
     all: bool,
     layer3: Option<u32>,
     probe_hosts: bool,
-    json: bool,
+    output: Output,
 ) -> anyhow::Result<i32> {
     let here = proj::resolve();
     let cfg = here.config();
@@ -624,10 +656,14 @@ async fn run_review(
             ),
         );
     }
+    let lag = repo.lag();
     let report = Report {
         reviewed_at: now_rfc3339(),
         evidence: SourcesRead {
             repository_head: repo.head_short(),
+            repository_detached: lag.detached,
+            repository_upstream: lag.upstream,
+            repository_behind: lag.behind,
             server_version: facts.server.version.clone(),
             server_commit: facts.server.commit.clone(),
             compose_files: facts
@@ -660,12 +696,33 @@ async fn run_review(
         );
     }
     let report = saved.report.as_ref().expect("just set");
-    if json {
-        println!("{}", serde_json::to_string_pretty(report)?);
-    } else {
-        print_text(report);
-    }
+    output.print(report)?;
     Ok(exit::OK)
+}
+
+/// How a report is printed: `--json`, or text with or without `--details`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Output {
+    Json,
+    Text { details: bool },
+}
+
+impl Output {
+    fn of(json: bool, details: bool) -> Self {
+        if json {
+            Output::Json
+        } else {
+            Output::Text { details }
+        }
+    }
+
+    fn print(self, report: &Report) -> anyhow::Result<()> {
+        match self {
+            Output::Json => println!("{}", serde_json::to_string_pretty(report)?),
+            Output::Text { details } => print_text(report, details),
+        }
+        Ok(())
+    }
 }
 
 /// What layer 3 reads besides the claims themselves.
@@ -916,6 +973,10 @@ async fn layer_three(
                     .to_string(),
             );
         }
+        if cannot_run.is_some() {
+            run.failure = cannot_run.clone();
+            run.binary = claude::binary();
+        }
     }
     let redactor = asking.then(|| {
         // Every file this run read teaches the redactor its secrets, so one
@@ -993,6 +1054,8 @@ async fn layer_three(
                             }
                             Err(recall_worker::merge::Error::Unavailable(why)) => {
                                 let why = format!("claude cannot run on this machine: {why}");
+                                run.failure = Some(why.clone());
+                                run.binary = claude::binary();
                                 cannot_run = Some(why.clone());
                                 Err(why)
                             }
@@ -1003,6 +1066,8 @@ async fn layer_three(
                                 // fails every file the same way: the rest
                                 // are not asked, and say why.
                                 let why = e.to_string();
+                                run.failure = Some(why.clone());
+                                run.binary = claude::binary();
                                 cannot_run =
                                     Some(format!("not asked, after claude failed on {rel}"));
                                 Err(why)
@@ -1055,7 +1120,7 @@ async fn layer_three(
     Layer3Done { run, waiting }
 }
 
-fn show_last(json: bool) -> anyhow::Result<i32> {
+fn show_last(output: Output) -> anyhow::Result<i32> {
     let here = proj::resolve();
     let saved = load_state(&here.review_file());
     let Some(report) = saved.report else {
@@ -1063,18 +1128,14 @@ fn show_last(json: bool) -> anyhow::Result<i32> {
         // and a script that reads `recall review show --json` before any
         // run has happened sees exactly that rather than an empty string or
         // an error.
-        if json {
+        if output == Output::Json {
             println!("null");
         } else {
             println!("No review yet. recall review run makes one.");
         }
         return Ok(exit::OK);
     };
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        print_text(&report);
-    }
+    output.print(&report)?;
     Ok(exit::OK)
 }
 
@@ -1710,7 +1771,9 @@ enum Signal {
     /// `present` claim asserts *of* the thing: "`RECALL_HOST` sets the bind
     /// address" names a variable that appears in the code and is still
     /// false. So it never makes a present claim `still_true`, but it is
-    /// still a fact layer 3 may cite, either way.
+    /// still a fact layer 3 may cite, either way. A path the note itself
+    /// says is gone, which git agrees was deleted, is the same kind of fact:
+    /// it matches what the note says of the thing, and decides no more.
     Exists,
     Unknown,
 }
@@ -1772,6 +1835,14 @@ struct Repo {
     root: Option<PathBuf>,
 }
 
+/// Where the checkout stands against what it tracks. See [`Repo::lag`].
+#[derive(Default)]
+struct Lag {
+    detached: bool,
+    upstream: Option<String>,
+    behind: Option<u32>,
+}
+
 impl Repo {
     fn at(root: Option<PathBuf>) -> Self {
         Repo { root }
@@ -1795,6 +1866,37 @@ impl Repo {
         self.git(&["rev-parse", "--short", "HEAD"])
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
+    }
+
+    /// Whether `HEAD` is detached, and how far behind it is: behind its
+    /// branch's upstream, or behind the remote's default branch when it is
+    /// on no branch. As last fetched: nothing here touches the network.
+    fn lag(&self) -> Lag {
+        if self.root.is_none() || self.head_short().is_none() {
+            return Lag::default();
+        }
+        let detached = self.git(&["symbolic-ref", "-q", "HEAD"]).is_none();
+        let upstream = if detached {
+            self.git(&["rev-parse", "--abbrev-ref", "origin/HEAD"])
+        } else {
+            self.git(&[
+                "rev-parse",
+                "--abbrev-ref",
+                "--symbolic-full-name",
+                "@{upstream}",
+            ])
+        }
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s != "origin/HEAD");
+        let behind = upstream.as_deref().and_then(|u| {
+            self.git(&["rev-list", "--count", &format!("HEAD..{u}")])
+                .and_then(|s| s.trim().parse().ok())
+        });
+        Lag {
+            detached,
+            upstream,
+            behind,
+        }
     }
 
     /// Whether `path` is tracked at `HEAD`.
@@ -1918,7 +2020,52 @@ fn machine_path_exists(p: &str) -> bool {
     Path::new(&expanded).exists()
 }
 
-fn evidence_for_path(repo: &Repo, value: &str, is_project: bool) -> Observed {
+/// Whether a sentence of `claim` that names `value` also says it is gone:
+/// retired, deleted, removed, renamed, moved, replaced, superseded, or no
+/// longer there. Only the sentences naming the path count, so a paragraph
+/// that retires one file does not excuse another it still relies on.
+fn says_it_is_gone(claim: &str, value: &str) -> bool {
+    const GONE: [&str; 9] = [
+        "retired",
+        "deleted",
+        "removed",
+        "renamed",
+        "moved",
+        "replaced",
+        "superseded",
+        "no longer",
+        "gone",
+    ];
+    // A sentence ends at `.`, `!` or `?` followed by whitespace, or at a
+    // line break: the `.` inside `PROMPT.md` ends nothing.
+    let mut sentences = Vec::new();
+    let mut start = 0;
+    let mut chars = claim.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let next_is_space = chars.peek().is_none_or(|(_, n)| n.is_whitespace());
+        if c == '\n' || (matches!(c, '.' | '!' | '?') && next_is_space) {
+            sentences.push(&claim[start..i + c.len_utf8()]);
+            start = i + c.len_utf8();
+        }
+    }
+    sentences.push(&claim[start..]);
+    sentences
+        .into_iter()
+        .filter(|sentence| sentence.contains(value))
+        .any(|sentence| {
+            let lower = sentence.to_lowercase();
+            GONE.iter().any(|w| {
+                lower.match_indices(w).any(|(i, _)| {
+                    let before = lower[..i].chars().next_back();
+                    let after = lower[i + w.len()..].chars().next();
+                    !before.is_some_and(char::is_alphanumeric)
+                        && !after.is_some_and(char::is_alphanumeric)
+                })
+            })
+        })
+}
+
+fn evidence_for_path(repo: &Repo, value: &str, is_project: bool, claim_text: &str) -> Observed {
     if is_machine_absolute(value) {
         return if machine_path_exists(value) {
             observed(
@@ -1961,6 +2108,13 @@ fn evidence_for_path(repo: &Repo, value: &str, is_project: bool) -> Observed {
         );
     }
     match repo.deleted(value) {
+        // "It lived in `PROMPT.md`; that file was retired" is not made stale
+        // by the deletion it reports.
+        Some((hash, date)) if says_it_is_gone(claim_text, value) => observed(
+            Signal::Exists,
+            "git",
+            format!("`{value}` was deleted in {hash} ({date}), as the note says"),
+        ),
         Some((hash, date)) => observed(
             Signal::Contradicts,
             "git",
@@ -2079,7 +2233,7 @@ fn evidence_for(
 ) -> Observed {
     let value = anchor.value.as_str();
     match anchor.kind {
-        AnchorKind::Path => evidence_for_path(repo, value, is_project),
+        AnchorKind::Path => evidence_for_path(repo, value, is_project, claim_text),
         // A version in a claim about the server is about what the server
         // runs, whatever the scope: the server is this machine's, not the
         // project's. Any other version is about this project's releases.
@@ -2184,7 +2338,99 @@ fn next_for_stale(c: &Claim) -> String {
     }
 }
 
-fn print_text(rep: &Report) {
+/// Which of a claim's verdicts count toward the summary: a present claim's
+/// one verdict, or each of a rule's anchors.
+fn verdicts_of(c: &Claim) -> Vec<Verdict> {
+    match c.class {
+        Class::Present => c.verdict.into_iter().collect(),
+        Class::Rule => c.evidence.iter().map(|e| e.verdict).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether a claim is something the owner has to act on: a merge conflict,
+/// a stale present claim, or a rule with a stale anchor.
+fn needs_action(c: &Claim) -> bool {
+    match c.class {
+        Class::Conflict => true,
+        Class::Present => c.verdict == Some(Verdict::Stale),
+        Class::Rule => c.evidence.iter().any(|e| e.verdict == Verdict::Stale),
+        _ => false,
+    }
+}
+
+/// A warning about the run itself, printed before any claim: something
+/// that makes every verdict below it less trustworthy, with what to do.
+struct Warning {
+    text: String,
+    fix: String,
+}
+
+/// What makes this report less trustworthy than it looks: a checkout that
+/// is not the code as it is now, and a `claude` that could not answer.
+fn warnings(rep: &Report) -> Vec<Warning> {
+    let mut out = Vec::new();
+    let ev = &rep.evidence;
+    let behind = ev.repository_behind.unwrap_or(0);
+    if behind > 0 || (ev.repository_detached && ev.repository_behind.is_none()) {
+        let head = ev.repository_head.as_deref().unwrap_or("HEAD");
+        let at = if ev.repository_detached {
+            format!("a detached HEAD at {head}")
+        } else {
+            format!("at {head}")
+        };
+        let lag = match (&ev.repository_upstream, behind) {
+            (Some(up), n) if n > 0 => format!(", {n} commit(s) behind {up} as last fetched"),
+            _ => String::new(),
+        };
+        let branch = ev
+            .repository_upstream
+            .as_deref()
+            .and_then(|u| u.split_once('/').map(|(_, b)| b.to_string()))
+            .unwrap_or_else(|| "main".to_string());
+        out.push(Warning {
+            text: format!(
+                "This checkout is {at}{lag}. Claims are checked against it, not against the \
+                 code as it is now, so a verdict below can be wrong."
+            ),
+            fix: if ev.repository_detached {
+                format!("git switch {branch} && git pull, then review again")
+            } else {
+                "git pull, then review again".to_string()
+            },
+        });
+    }
+    if let Some(run) = &ev.claude {
+        if let Some(why) = &run.failure {
+            let not_asked = run.skipped.len();
+            let ran = run
+                .binary
+                .as_deref()
+                .map(|b| format!(" It ran {b} on this machine."))
+                .unwrap_or_default();
+            out.push(Warning {
+                text: format!(
+                    "claude could not answer, so {not_asked} file(s) got no answer: {why}.{ran}"
+                ),
+                fix: "claude -p \"hello\" in this terminal shows the same error; fix it there \
+                      (a login is /login in claude), then recall review run --claude"
+                    .to_string(),
+            });
+        } else if !run.skipped.is_empty() {
+            out.push(Warning {
+                text: format!(
+                    "claude was not asked about {} file(s): {}.",
+                    run.skipped.len(),
+                    run.skipped[0].reason
+                ),
+                fix: "recall review show --details lists them".to_string(),
+            });
+        }
+    }
+    out
+}
+
+fn print_text(rep: &Report, details: bool) {
     let mut about = Vec::new();
     if let Some(head) = &rep.evidence.repository_head {
         about.push(format!("checkout {head}"));
@@ -2196,6 +2442,20 @@ fn print_text(rep: &Report) {
         about.push(format!("report {id}"));
     }
     ui::title("recall review", &about.join(" · "));
+
+    // What undermines the whole report comes before any of it.
+    let warned = warnings(rep);
+    let mut next: Vec<String> = Vec::new();
+    for w in &warned {
+        anstream::println!();
+        anstream::println!(
+            "{} {}",
+            ui::toned(ui::Tone::Warn, "!"),
+            sanitize_for_terminal(&w.text)
+        );
+        anstream::println!("  {}", ui::accent(&format!("→ {}", w.fix)));
+    }
+
     if rep.claims.is_empty() {
         anstream::println!();
         anstream::println!("Nothing to review: no memory files with checkable content were found.");
@@ -2203,13 +2463,6 @@ fn print_text(rep: &Report) {
     }
 
     let count = |f: &dyn Fn(&Claim) -> bool| rep.claims.iter().filter(|c| f(c)).count();
-    let verdicts_of = |c: &Claim| -> Vec<Verdict> {
-        match c.class {
-            Class::Present => c.verdict.into_iter().collect(),
-            Class::Rule => c.evidence.iter().map(|e| e.verdict).collect(),
-            _ => Vec::new(),
-        }
-    };
     let tally = |v: Verdict| {
         rep.claims
             .iter()
@@ -2223,11 +2476,26 @@ fn print_text(rep: &Report) {
     );
     let records = count(&|c| c.class == Class::Record);
     let conflicts = count(&|c| c.class == Class::Conflict);
+    let to_act = count(&needs_action);
     let undecided =
         count(&|c| c.class == Class::Unsure || (c.class == Class::Present && c.verdict.is_none()));
 
-    // The summary first: what a person wants to know before any detail.
+    // The answer first, in words: whether anything needs the owner.
     anstream::println!();
+    if to_act == 0 {
+        anstream::println!(
+            "{}",
+            ui::toned(ui::Tone::Good, "Nothing to fix: no claim is stale.")
+        );
+    } else {
+        anstream::println!(
+            "{}",
+            ui::toned(
+                ui::Tone::Bad,
+                &format!("{to_act} claim(s) need a look: they say something that is no longer so.")
+            )
+        );
+    }
     let mut parts = vec![
         ui::toned(
             if stale > 0 {
@@ -2260,29 +2528,40 @@ fn print_text(rep: &Report) {
             &format!("! {conflicts} conflict(s)"),
         ));
     }
-    // The three verdicts are the answer even at zero; these two are only
-    // counts, and a zero there says nothing.
+    anstream::println!("  {}", parts.join("   "));
+    // What the three counts leave out, said in words rather than as two
+    // more numbers to decode.
+    let mut rest = Vec::new();
     if records > 0 {
-        parts.push(ui::dim(&format!("{records} record(s)")));
+        rest.push(format!("{records} line(s) of history"));
     }
     if undecided > 0 {
-        parts.push(ui::dim(&format!("{undecided} not decided")));
+        rest.push(format!("{undecided} with nothing a check can test"));
     }
-    anstream::println!("  {}", parts.join("   "));
+    if !rest.is_empty() {
+        anstream::println!(
+            "  {}",
+            ui::dim(&format!(
+                "Also read, and left as written: {}.",
+                rest.join(", ")
+            ))
+        );
+    }
 
     let mut by_file: BTreeMap<&str, Vec<&Claim>> = BTreeMap::new();
     for c in &rep.claims {
         by_file.entry(c.file.as_str()).or_default().push(c);
     }
+    let has_findings = |claims: &[&Claim]| claims.iter().any(|c| !c.eval.is_empty());
     // Files with something to act on first, the worst first; files with
     // nothing any check could decide are one line at the end.
     let worst = |claims: &[&Claim]| -> u8 {
         let vs: Vec<Verdict> = claims.iter().flat_map(|c| verdicts_of(c)).collect();
-        if vs.contains(&Verdict::Stale) || claims.iter().any(|c| c.class == Class::Conflict) {
+        if claims.iter().any(|c| needs_action(c)) {
             0
         } else if vs.contains(&Verdict::CantTell) {
             1
-        } else if !vs.is_empty() || claims.iter().any(|c| !c.eval.is_empty()) {
+        } else if !vs.is_empty() || has_findings(claims) {
             2
         } else {
             3
@@ -2292,10 +2571,20 @@ fn print_text(rep: &Report) {
     files.sort_by_key(|(f, c)| (worst(c), *f));
 
     let mut quiet_files = Vec::new();
-    let mut next: Vec<String> = Vec::new();
+    let mut cant_tell_files = 0;
     for (file, claims) in &files {
         if worst(claims) == 3 {
             quiet_files.push(*file);
+            continue;
+        }
+        if claims
+            .iter()
+            .any(|c| verdicts_of(c).contains(&Verdict::CantTell))
+        {
+            cant_tell_files += 1;
+        }
+        // Without --details, a file is shown only for what needs the owner.
+        if !details && worst(claims) != 0 && !has_findings(claims) {
             continue;
         }
         anstream::println!();
@@ -2304,6 +2593,9 @@ fn print_text(rep: &Report) {
         let mut order: Vec<&&Claim> = claims
             .iter()
             .filter(|c| {
+                if !details {
+                    return needs_action(c);
+                }
                 matches!(c.class, Class::Conflict | Class::Rule)
                     || (c.class == Class::Present && c.verdict.is_some())
                     || (c.class == Class::Unsure && c.layer == Some(3))
@@ -2331,8 +2623,18 @@ fn print_text(rep: &Report) {
                 }
                 (Class::Rule, _) => {
                     claim_line(&ui::dim("§"), c);
-                    for e in &c.evidence {
+                    // Without --details, only the anchors that are why it
+                    // is shown.
+                    for e in c
+                        .evidence
+                        .iter()
+                        .filter(|e| details || e.verdict == Verdict::Stale)
+                    {
                         under_claim(&verdict_mark(e.verdict), &e.detail);
+                    }
+                    if c.evidence.iter().any(|e| e.verdict == Verdict::Stale) {
+                        let step = format!("edit {} {}", c.file, lines_desc(&c.lines));
+                        under_claim(&ui::accent("→"), &step);
                     }
                 }
                 (Class::Unsure, _) => {
@@ -2343,7 +2645,13 @@ fn print_text(rep: &Report) {
                 }
                 (_, Some(v)) => {
                     claim_line(&verdict_mark(v), c);
-                    for e in &c.evidence {
+                    // The evidence that decided it; the rest is --details.
+                    let shown: Vec<&Evidence> = c
+                        .evidence
+                        .iter()
+                        .filter(|e| details || e.verdict == v)
+                        .collect();
+                    for e in &shown {
                         under_claim(&verdict_mark(e.verdict), &e.detail);
                     }
                     if v == Verdict::Stale {
@@ -2355,32 +2663,32 @@ fn print_text(rep: &Report) {
                         }
                         let step = next_for_stale(c);
                         under_claim(&ui::accent("→"), &step);
-                        if c.suggested_edit.is_some() {
-                            next.push(step);
-                        }
+                        next.push(step);
                     }
                 }
                 _ => {}
             }
         }
 
-        let file_records = claims.iter().filter(|c| c.class == Class::Record).count();
-        let file_undecided = claims
-            .iter()
-            .filter(|c| {
-                (c.class == Class::Unsure && c.layer != Some(3))
-                    || (c.class == Class::Present && c.verdict.is_none())
-            })
-            .count();
-        let mut counted = Vec::new();
-        if file_records > 0 {
-            counted.push(format!("{file_records} record(s)"));
-        }
-        if file_undecided > 0 {
-            counted.push(format!("{file_undecided} not decided by any check"));
-        }
-        if !counted.is_empty() {
-            anstream::println!("  {}", ui::dim(&format!("· {}", counted.join(", "))));
+        if details {
+            let file_records = claims.iter().filter(|c| c.class == Class::Record).count();
+            let file_undecided = claims
+                .iter()
+                .filter(|c| {
+                    (c.class == Class::Unsure && c.layer != Some(3))
+                        || (c.class == Class::Present && c.verdict.is_none())
+                })
+                .count();
+            let mut counted = Vec::new();
+            if file_records > 0 {
+                counted.push(format!("{file_records} line(s) of history"));
+            }
+            if file_undecided > 0 {
+                counted.push(format!("{file_undecided} with nothing a check can test"));
+            }
+            if !counted.is_empty() {
+                anstream::println!("  {}", ui::dim(&format!("· also {}", counted.join(", "))));
+            }
         }
         // The worker's findings on this file, each with the claims it
         // covers.
@@ -2417,41 +2725,74 @@ fn print_text(rep: &Report) {
         }
     }
 
-    if !quiet_files.is_empty() {
+    if details {
+        if !quiet_files.is_empty() {
+            anstream::println!();
+            anstream::println!(
+                "{}",
+                ui::dim(&format!(
+                    "Nothing a check could decide in: {}",
+                    quiet_files
+                        .iter()
+                        .map(|f| sanitize_for_terminal(f))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            );
+        }
+        // Layer 3's own account: what it asked, and what it did not, never
+        // silently cut.
+        if let Some(run) = &rep.evidence.claude {
+            anstream::println!();
+            anstream::println!(
+                "{}  {}",
+                ui::bold("claude"),
+                ui::dim(&format!(
+                    "{} call(s), {} file(s) unchanged since it was last asked",
+                    run.calls, run.reused
+                ))
+            );
+            for s in &run.skipped {
+                anstream::println!(
+                    "  {} {}: {}",
+                    ui::toned(ui::Tone::Warn, "!"),
+                    sanitize_for_terminal(&s.file),
+                    sanitize_for_terminal(&ui::clip(&s.reason, DETAIL_WIDTH))
+                );
+            }
+        }
+        for u in rep
+            .evidence
+            .unavailable
+            .iter()
+            .filter(|u| !matches!(u.source.as_str(), "claude" | "compose"))
+        {
+            anstream::println!(
+                "{} {} {}",
+                ui::toned(ui::Tone::Quiet, "○"),
+                ui::dim(&format!("{} not read:", u.source)),
+                ui::dim(&sanitize_for_terminal(&ui::clip(&u.reason, DETAIL_WIDTH)))
+            );
+        }
+    } else if cant_tell > 0 || still_true > 0 {
+        // Everything not shown, in one line, and how to see it.
         anstream::println!();
+        let mut hidden = Vec::new();
+        if cant_tell > 0 {
+            hidden.push(format!(
+                "{cant_tell} claim(s) in {cant_tell_files} file(s) could not be checked from here"
+            ));
+        }
+        if still_true > 0 {
+            hidden.push(format!("{still_true} still hold"));
+        }
         anstream::println!(
             "{}",
             ui::dim(&format!(
-                "No check could decide anything in: {}",
-                quiet_files
-                    .iter()
-                    .map(|f| sanitize_for_terminal(f))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                "{}. Nothing to do about them; recall review show --details lists each with why.",
+                hidden.join(", and ")
             ))
         );
-    }
-
-    // Layer 3's own account: what it asked, and what it did not, never
-    // silently cut.
-    if let Some(run) = &rep.evidence.claude {
-        anstream::println!();
-        anstream::println!(
-            "{}  {}",
-            ui::bold("claude"),
-            ui::dim(&format!(
-                "{} call(s), {} file(s) unchanged since it was last asked",
-                run.calls, run.reused
-            ))
-        );
-        for s in &run.skipped {
-            anstream::println!(
-                "  {} {}: {}",
-                ui::toned(ui::Tone::Warn, "!"),
-                sanitize_for_terminal(&s.file),
-                sanitize_for_terminal(&ui::clip(&s.reason, DETAIL_WIDTH))
-            );
-        }
     }
 
     // What to run next, in one place.
@@ -2459,25 +2800,11 @@ fn print_text(rep: &Report) {
         .evidence
         .unavailable
         .iter()
-        .find(|u| u.source == "claude")
-        .is_some();
+        .any(|u| u.source == "claude");
     if waiting && undecided > 0 {
         next.push(format!(
             "recall review run --claude, to decide what no check could ({undecided} claim(s))"
         ));
-    }
-    for u in rep
-        .evidence
-        .unavailable
-        .iter()
-        .filter(|u| !matches!(u.source.as_str(), "claude" | "compose"))
-    {
-        anstream::println!(
-            "{} {} {}",
-            ui::toned(ui::Tone::Quiet, "○"),
-            ui::dim(&format!("{} not read:", u.source)),
-            ui::dim(&sanitize_for_terminal(&ui::clip(&u.reason, DETAIL_WIDTH)))
-        );
     }
     if !next.is_empty() {
         anstream::println!();
@@ -2847,13 +3174,48 @@ mod tests {
         std::fs::remove_file(dir.path().join("lib.sh")).unwrap();
         git_commit(dir.path(), "remove");
         let repo = Repo::at(Some(dir.path().to_path_buf()));
-        let o = evidence_for_path(&repo, "lib.sh", false);
+        let o = evidence_for_path(&repo, "lib.sh", false, "Run `lib.sh`.");
         assert_eq!(
             o.signal,
             Signal::Unknown,
             "{o:?}",
             o = (o.source.clone(), o.detail.clone())
         );
+    }
+
+    /// A note that reports a file's retirement is not made stale by that
+    /// file being gone; one that still relies on it is. Seen live: "It
+    /// lived in `PROMPT.md` when this was written; that file was retired"
+    /// came back `stale` because `PROMPT.md` was deleted.
+    #[test]
+    fn a_deleted_path_the_note_says_is_gone_is_not_stale() {
+        let dir = git_fixture();
+        std::fs::write(dir.path().join("PROMPT.md"), "brief\n").unwrap();
+        git_commit(dir.path(), "add");
+        std::fs::remove_file(dir.path().join("PROMPT.md")).unwrap();
+        git_commit(dir.path(), "remove");
+        let repo = Repo::at(Some(dir.path().to_path_buf()));
+
+        let retired = "It lived in `PROMPT.md` when this was written; that file was \
+                       retired on 2026-08-12 once the project was built.";
+        let o = evidence_for_path(&repo, "PROMPT.md", true, retired);
+        assert_eq!(o.signal, Signal::Exists, "{}", o.detail);
+        assert!(o.detail.contains("as the note says"), "{}", o.detail);
+
+        let relied_on = "The ground rules live in `PROMPT.md`.";
+        let o = evidence_for_path(&repo, "PROMPT.md", true, relied_on);
+        assert_eq!(o.signal, Signal::Contradicts, "{}", o.detail);
+
+        // Only the sentence naming the path counts: retiring something else
+        // in the same paragraph excuses nothing.
+        let other = "The old brief was retired. The ground rules live in `PROMPT.md`.";
+        let o = evidence_for_path(&repo, "PROMPT.md", true, other);
+        assert_eq!(o.signal, Signal::Contradicts, "{}", o.detail);
+
+        // A word that merely contains one of the markers is not one.
+        let unmoved = "The rules in `PROMPT.md` are unmoved.";
+        let o = evidence_for_path(&repo, "PROMPT.md", true, unmoved);
+        assert_eq!(o.signal, Signal::Contradicts, "{}", o.detail);
     }
 
     /// A version mentioned as history ("shipped in an older version") must

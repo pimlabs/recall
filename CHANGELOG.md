@@ -14,6 +14,30 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
+## Unreleased
+
+- **`recall review` says first whether anything needs you.** The line
+  after the title now reads `Nothing to fix: no claim is stale.`, or how
+  many claims need a look, and by default only those are listed: stale
+  claims with the evidence that makes them stale, rules with a stale
+  anchor, merge conflicts. What could not be checked from this machine,
+  and what still holds, is one line. `recall review run --details` and
+  `recall review show --details` list everything, as before. "record(s)"
+  and "not decided" are gone from the summary, replaced by one plain
+  line.
+- **Two things that make a review doubtful now come first.** A checkout
+  on a detached `HEAD`, or behind what it tracks, is named with how far
+  behind, since every repository check reads it. With `--claude`, a
+  `claude` that could not answer (a login, not installed, the CLI's own
+  error) is said up front, with the path of the `claude` that was run
+  and how many files got no answer, rather than in the last lines.
+  `--json` adds `repository_detached`, `repository_upstream`,
+  `repository_behind`, and `claude.failure` and `claude.binary`.
+- **A note that reports a file's retirement is no longer called stale for
+  it.** "It lived in `PROMPT.md`; that file was retired" came back stale
+  because `PROMPT.md` was deleted. A deleted path now makes a claim stale
+  only when the sentence naming it does not itself say it is gone.
+
 ## 0.4.12 — 2026-09-30
 
 - **A memory change made outside Claude's Edit and Write is no longer lost.**
