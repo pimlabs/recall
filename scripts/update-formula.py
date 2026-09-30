@@ -4,7 +4,7 @@
 Usage: update-formula.py <version> <checksums.txt> [<formula path>]
 
 Shared by scripts/release.sh (a release cut from a laptop) and
-.github/workflows/build-release.yml (one cut by CI), so the two cannot drift: the
+.github/workflows/publish.yml (one published by CI), so the two cannot drift: the
 formula is the one channel whose failure arrives later, on someone else's
 machine, as a checksum error that says nothing about why.
 
