@@ -14,7 +14,7 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
-## Unreleased
+## 0.4.12 — 2026-09-30
 
 - **A memory change made outside Claude's Edit and Write is no longer lost.**
   A note edited, created or removed through the shell, a script or your
