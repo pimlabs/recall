@@ -5044,11 +5044,7 @@ fn the_phase1_deploy_fixture_gets_the_documented_verdicts() {
     assert_eq!(text.code, 0);
     assert!(text.stdout.contains("stale"), "{}", text.stdout);
     // The answer comes first, in words.
-    assert!(
-        text.stdout.contains("claim(s) need a look"),
-        "{}",
-        text.stdout
-    );
+    assert!(text.stdout.contains("claim(s) need you"), "{}", text.stdout);
     assert!(
         text.stdout.contains("1 line(s) of history"),
         "records are counted, not listed: {}",
@@ -5060,12 +5056,205 @@ fn the_phase1_deploy_fixture_gets_the_documented_verdicts() {
         "{}",
         text.stdout
     );
-    // A stale claim says what to do about it, on the line under it.
-    assert!(text.stdout.contains("→ edit "), "{}", text.stdout);
+    // A stale claim says why, and both things to do about it, under it:
+    // fix it when it is about now, dismiss it when it is history.
+    for wanted in [
+        "Why: this reads as how things are now",
+        "→ If it is about now, fix it: edit L6 and write what is true now, then recall sync",
+        "→ If it is history, right as written: recall review dismiss t2",
+        "project_phase1_deploy.md  ",
+        "What to do now",
+        "1. t2 project_phase1_deploy.md L6: edit it (write what is true now),",
+        "or recall review dismiss t2 if it is history",
+    ] {
+        assert!(text.stdout.contains(wanted), "{wanted:?}: {}", text.stdout);
+    }
     // The record's own text — "Not the old `hooks/recall-pull` script" —
     // must not appear on a line the report marks stale.
     assert!(
         !text.stdout.contains("stale") || !text.stdout.contains("Not the old"),
+        "{}",
+        text.stdout
+    );
+}
+
+/// `recall review dismiss`: a stale claim that is history, set aside. It
+/// stays set aside across runs, is counted rather than listed, comes back
+/// with `--undo`, and comes back by itself once its text changes.
+#[test]
+fn a_dismissed_claim_stops_needing_you_until_its_text_changes() {
+    let repo = review_repo();
+    let env: Vec<(&str, &str)> = vec![];
+    let note = |line: &str| format!("---\nname: n\n---\n\n- {line}\n");
+    write_memory(
+        repo.path(),
+        &env,
+        "project_hooks.md",
+        &note("Run `lib.sh` to start the hooks."),
+    );
+    let first = run(&["review", "run"], repo.path(), &env, None);
+    assert!(
+        first.stdout.contains("1 claim(s) need you"),
+        "{}",
+        first.stdout
+    );
+
+    // Nothing to dismiss before a review, or for an id it does not hold.
+    let unknown = run(&["review", "dismiss", "t9"], repo.path(), &env, None);
+    assert_ne!(unknown.code, 0);
+    assert!(unknown.stderr.contains("no claim t9"), "{}", unknown.stderr);
+
+    let d = run(&["review", "dismiss", "t1"], repo.path(), &env, None);
+    assert_eq!(d.code, 0, "{}", d.stderr);
+    assert!(d.stdout.contains("Dismissed t1"), "{}", d.stdout);
+    assert!(
+        d.stdout.contains("recall review dismiss t1 --undo"),
+        "{}",
+        d.stdout
+    );
+
+    // `show` sees it at once, and a new run keeps it.
+    for args in [&["review", "show"][..], &["review", "run"][..]] {
+        let r = run(args, repo.path(), &env, None);
+        assert!(
+            r.stdout.contains("Nothing to fix"),
+            "{args:?}: {}",
+            r.stdout
+        );
+        assert!(
+            r.stdout.contains("1 you dismissed as history"),
+            "{args:?}: {}",
+            r.stdout
+        );
+        assert!(r.stdout.contains("✗ 0 stale"), "{args:?}: {}", r.stdout);
+        assert!(r.stdout.contains("Nothing."), "{args:?}: {}", r.stdout);
+    }
+    let json = run(&["review", "show", "--json"], repo.path(), &env, None);
+    let report: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
+    let claim = claim_containing(&report["claims"], "Run `lib.sh`");
+    assert_eq!(claim["dismissed"], true, "{claim}");
+    assert_eq!(
+        claim["verdict"], "stale",
+        "the verdict itself is kept: {claim}"
+    );
+    let details = run(&["review", "show", "--details"], repo.path(), &env, None);
+    assert!(
+        details
+            .stdout
+            .contains("dismissed as history; recall review dismiss t1 --undo flags it again"),
+        "{}",
+        details.stdout
+    );
+
+    // Undo brings it back.
+    let undo = run(
+        &["review", "dismiss", "t1", "--undo"],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_eq!(undo.code, 0, "{}", undo.stderr);
+    let back = run(&["review", "show"], repo.path(), &env, None);
+    assert!(
+        back.stdout.contains("1 claim(s) need you"),
+        "{}",
+        back.stdout
+    );
+    let again = run(
+        &["review", "dismiss", "t1", "--undo"],
+        repo.path(),
+        &env,
+        None,
+    );
+    assert_ne!(again.code, 0);
+    assert!(again.stderr.contains("not dismissed"), "{}", again.stderr);
+
+    // A change to the words is a new claim, checked again.
+    run(&["review", "dismiss", "t1"], repo.path(), &env, None);
+    write_memory(
+        repo.path(),
+        &env,
+        "project_hooks.md",
+        &note("Run `lib.sh` to start every hook."),
+    );
+    let changed = run(&["review", "run"], repo.path(), &env, None);
+    assert!(
+        changed.stdout.contains("1 claim(s) need you"),
+        "{}",
+        changed.stdout
+    );
+    // Only a flagged claim can be dismissed.
+    write_memory(
+        repo.path(),
+        &env,
+        "project_hooks.md",
+        &note("Run `docs/plan.md` first."),
+    );
+    run(&["review", "run"], repo.path(), &env, None);
+    let not_stale = run(&["review", "dismiss", "t1"], repo.path(), &env, None);
+    assert_ne!(not_stale.code, 0);
+    assert!(
+        not_stale.stderr.contains("not stale"),
+        "{}",
+        not_stale.stderr
+    );
+}
+
+/// A path git renamed, not only deleted, says what it is called now, and
+/// the fix names both: the owner's `cut-release.yml`, which became
+/// `start-release.yml`.
+#[test]
+fn a_renamed_path_says_what_to_write_instead() {
+    let repo = review_repo();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+    };
+    let workflows = repo.path().join(".github").join("workflows");
+    std::fs::create_dir_all(&workflows).unwrap();
+    std::fs::write(
+        workflows.join("cut-release.yml"),
+        "name: Cut a release\non: workflow_dispatch\njobs:\n  tag:\n    runs-on: ubuntu-latest\n",
+    )
+    .unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "add cut-release.yml"]);
+    git(&[
+        "mv",
+        ".github/workflows/cut-release.yml",
+        ".github/workflows/start-release.yml",
+    ]);
+    git(&["commit", "-q", "-m", "rename it"]);
+
+    let env: Vec<(&str, &str)> = vec![];
+    write_memory(
+        repo.path(),
+        &env,
+        "project_release.md",
+        "---\nname: r\n---\n\n- The release workflow lives in `cut-release.yml` on main.\n",
+    );
+    let r = run(&["review", "run", "--json"], repo.path(), &env, None);
+    let report: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    let claim = claim_containing(&report["claims"], "The release workflow");
+    assert_eq!(claim["verdict"], "stale", "{claim}");
+    let renamed = &claim["evidence"][0]["renamed"];
+    assert_eq!(renamed["from"], "cut-release.yml", "{claim}");
+    assert_eq!(renamed["to"], "start-release.yml", "{claim}");
+
+    let text = run(&["review", "show"], repo.path(), &env, None);
+    assert!(
+        text.stdout
+            .contains("`cut-release.yml` was renamed to `start-release.yml`"),
+        "{}",
+        text.stdout
+    );
+    assert!(
+        text.stdout
+            .contains("edit L5 and replace `cut-release.yml` with `start-release.yml`"),
         "{}",
         text.stdout
     );

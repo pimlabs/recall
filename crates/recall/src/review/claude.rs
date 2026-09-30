@@ -359,6 +359,7 @@ pub(super) fn decide(answer: &str, asked: &[Asked], facts: &[String]) -> Option<
             detail,
             verdict,
             citable: false,
+            renamed: None,
         };
         decided[i] = Some(match a.class.trim() {
             "record" => Decided {
@@ -650,6 +651,7 @@ mod tests {
                     detail: "d".into(),
                     verdict: Verdict::Stale,
                     citable: false,
+                    renamed: None,
                 },
                 cites: vec![fact.clone()],
                 rewrite: None,
@@ -679,6 +681,7 @@ mod tests {
                 detail: "d".into(),
                 verdict: verdict.unwrap_or(Verdict::CantTell),
                 citable: false,
+                renamed: None,
             },
             cites: Vec::new(),
             rewrite: None,

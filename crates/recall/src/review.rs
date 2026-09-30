@@ -18,7 +18,9 @@
 //! read; this file opens no connection of its own
 //! (`this_module_never_touches_the_network`). `recall review apply`, in
 //! [`apply`], makes one stale claim's suggested edit, and is the only
-//! thing here that ever changes a note. [`reports`] shows the worker's
+//! thing here that ever changes a note; `recall review dismiss` sets a
+//! stale claim that is history aside, in `.recall-review.json` only
+//! ([`dismiss`]). [`reports`] shows the worker's
 //! newest evaluation report beside the claims its findings cover.
 //!
 //! Layer 3, only with `--claude`, lives in [`claude`]: the local `claude`
@@ -122,6 +124,19 @@ pub enum Cmd {
         #[arg(long, short)]
         yes: bool,
     },
+    /// Stop flagging a stale claim that is history, not a mistake
+    ///
+    /// For a line that is right as written: it tells what used to be, and
+    /// the check read it as a claim about now. Kept on this machine, until
+    /// the line's text changes.
+    #[command(verbatim_doc_comment)]
+    Dismiss {
+        /// The claim, such as t3, as recall review show lists it
+        claim: String,
+        /// Flag it again
+        #[arg(long)]
+        undo: bool,
+    },
 }
 
 /// Runs one `recall review` command.
@@ -142,6 +157,7 @@ pub async fn run(cmd: Cmd) -> anyhow::Result<i32> {
         }
         Cmd::Show { details, json } => show_last(Output::of(json, details)),
         Cmd::Apply { claim, yes } => apply::run(&claim, yes).await,
+        Cmd::Dismiss { claim, undo } => dismiss(&claim, undo),
     }
 }
 
@@ -213,6 +229,20 @@ pub struct Evidence {
     /// written out.
     #[serde(skip)]
     pub citable: bool,
+    /// For a path git shows was renamed rather than deleted: what it is
+    /// called now, so the fix can say what to write instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed: Option<Rename>,
+}
+
+/// A path git renamed: the name a note gives it, and the one at `HEAD`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rename {
+    /// The name as the note writes it.
+    pub from: String,
+    /// What it is called at `HEAD`, written the same way: a bare file name
+    /// for a bare file name, a path for a path.
+    pub to: String,
 }
 
 /// One claim: a list item, a sentence, or a fenced block, with the line
@@ -257,6 +287,11 @@ pub struct Claim {
     /// duplicate, a dead link, a wrong scope or a contradiction.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub eval: Vec<reports::EvalFinding>,
+    /// Whether `recall review dismiss` set this claim aside on this
+    /// machine: its text was read as history, so however it was judged,
+    /// it no longer needs the owner. Only until its text changes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dismissed: bool,
 }
 
 /// A source this design names that was not consulted, and why.
@@ -373,6 +408,29 @@ struct SavedState {
     /// re-reading memory.
     #[serde(default)]
     report: Option<Report>,
+    /// The claims `recall review dismiss` set aside.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    dismissed: Vec<Dismissal>,
+}
+
+/// One claim set aside by `recall review dismiss`: by its file and the
+/// hash of its text, not its id (reassigned every run) or its lines (which
+/// move when a line above is added). A change to the text brings it back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Dismissal {
+    file: String,
+    text_sha256: String,
+    /// When, RFC 3339.
+    at: String,
+}
+
+impl SavedState {
+    fn is_dismissed(&self, c: &Claim) -> bool {
+        let sha = recall_wire::content_sha256(&c.text);
+        self.dismissed
+            .iter()
+            .any(|d| d.file == c.file && d.text_sha256 == sha)
+    }
 }
 
 /// One file's bookkeeping in [`SavedState`].
@@ -538,6 +596,7 @@ async fn run_review(
             evidence,
             suggested_edit: None,
             eval: Vec::new(),
+            dismissed: false,
         });
     }
 
@@ -578,6 +637,18 @@ async fn run_review(
     }
     for (rel, state) in new_file_states {
         saved.files.insert(rel, state);
+    }
+    // A dismissal lasts while its words do: one in a file this run read,
+    // whose words are no longer a claim there, is dropped, so the same
+    // words written again later are checked again.
+    saved.dismissed.retain(|d| {
+        !processed.contains(d.file.as_str())
+            || claims
+                .iter()
+                .any(|c| c.file == d.file && recall_wire::content_sha256(&c.text) == d.text_sha256)
+    });
+    for c in claims.iter_mut() {
+        c.dismissed = saved.is_dismissed(c);
     }
 
     // The worker's newest report, beside every claim this review holds,
@@ -696,7 +767,7 @@ async fn run_review(
         );
     }
     let report = saved.report.as_ref().expect("just set");
-    output.print(report)?;
+    output.print(report, &memory_dir)?;
     Ok(exit::OK)
 }
 
@@ -716,10 +787,11 @@ impl Output {
         }
     }
 
-    fn print(self, report: &Report) -> anyhow::Result<()> {
+    /// `memory_dir` makes each file's full path, to open in an editor.
+    fn print(self, report: &Report, memory_dir: &Path) -> anyhow::Result<()> {
         match self {
             Output::Json => println!("{}", serde_json::to_string_pretty(report)?),
-            Output::Text { details } => print_text(report, details),
+            Output::Text { details } => print_text(report, details, Some(memory_dir)),
         }
         Ok(())
     }
@@ -1135,7 +1207,94 @@ fn show_last(output: Output) -> anyhow::Result<i32> {
         }
         return Ok(exit::OK);
     };
-    output.print(&report)?;
+    output.print(&report, &here.memory_dir())?;
+    Ok(exit::OK)
+}
+
+/// `recall review dismiss <id>`, or with `--undo`, flags it again. Changes
+/// only `.recall-review.json`: the note itself is never touched.
+fn dismiss(id: &str, undo: bool) -> anyhow::Result<i32> {
+    const COMMAND: &str = "recall review";
+    let here = proj::resolve();
+    let review_file = here.review_file();
+    let mut saved = load_state(&review_file);
+    let Some(report) = &saved.report else {
+        return Ok(crate::edit::said(
+            COMMAND,
+            crate::edit::refused("there is no review yet.", "recall review run makes one."),
+        ));
+    };
+    let Some(claim) = report.claims.iter().find(|c| c.id == id).cloned() else {
+        return Ok(crate::edit::said(
+            COMMAND,
+            crate::edit::refused(
+                format!("the last review has no claim {id}."),
+                "recall review show lists them.",
+            ),
+        ));
+    };
+    let at = format!("{}, {}", claim.file, lines_desc(&claim.lines));
+    let sha = recall_wire::content_sha256(&claim.text);
+    if undo {
+        if !saved.is_dismissed(&claim) {
+            return Ok(crate::edit::said(
+                COMMAND,
+                crate::edit::refused(format!("{id} ({at}) is not dismissed."), ""),
+            ));
+        }
+        saved
+            .dismissed
+            .retain(|d| !(d.file == claim.file && d.text_sha256 == sha));
+    } else {
+        if claim.class == Class::Conflict {
+            return Ok(crate::edit::said(
+                COMMAND,
+                crate::edit::refused(
+                    format!("{id} ({at}) is a merge conflict, which is in the file itself."),
+                    "Edit the file to keep one version.",
+                ),
+            ));
+        }
+        if !flagged(&claim) {
+            return Ok(crate::edit::said(
+                COMMAND,
+                crate::edit::refused(
+                    format!("{id} ({at}) is not stale, so there is nothing to dismiss."),
+                    "",
+                ),
+            ));
+        }
+        if !saved.is_dismissed(&claim) {
+            saved.dismissed.push(Dismissal {
+                file: claim.file.clone(),
+                text_sha256: sha,
+                at: now_rfc3339(),
+            });
+        }
+    }
+    let state = saved.clone();
+    if let Some(report) = saved.report.as_mut() {
+        for c in report.claims.iter_mut() {
+            c.dismissed = state.is_dismissed(c);
+        }
+    }
+    save_state(&review_file, &saved)?;
+    if undo {
+        ui::step(
+            ui::Tone::Warn,
+            &format!("{id} ({at}) is flagged again."),
+            Some("recall review show"),
+        );
+    } else {
+        ui::step(
+            ui::Tone::Good,
+            &format!(
+                "Dismissed {id} ({at}) as history. The review will not flag it again while its \
+                 text stays the same; the note is unchanged."
+            ),
+            Some(&format!("to undo: recall review dismiss {id} --undo")),
+        );
+    }
     Ok(exit::OK)
 }
 
@@ -1172,6 +1331,7 @@ fn judge(
             detail: o.detail.clone(),
             verdict: verdict_of_signal(o.signal, class),
             citable: o.signal != Signal::Unknown,
+            renamed: o.renamed.clone(),
         })
         .collect();
     let verdict = match class {
@@ -1793,6 +1953,7 @@ struct Observed {
     signal: Signal,
     source: String,
     detail: String,
+    renamed: Option<Rename>,
 }
 
 fn observed(signal: Signal, source: &str, detail: String) -> Observed {
@@ -1800,6 +1961,7 @@ fn observed(signal: Signal, source: &str, detail: String) -> Observed {
         signal,
         source: source.to_string(),
         detail,
+        renamed: None,
     }
 }
 
@@ -1925,6 +2087,33 @@ impl Repo {
         Some((hash.to_string(), date.to_string()))
     }
 
+    /// What `path` was renamed to in `commit`, when git's rename detection
+    /// pairs it with a path that is tracked at `HEAD`: `cut-release.yml`
+    /// deleted in the commit that added `start-release.yml` from it. The
+    /// deletion alone cannot say: `git log -- <path>` never sees the path
+    /// it was renamed to.
+    fn renamed_in(&self, commit: &str, path: &str) -> Option<String> {
+        let out = self.git(&["show", "--format=", "--name-status", "-M", commit, "--"])?;
+        let bare = !path.contains('/');
+        out.lines().find_map(|line| {
+            let mut cols = line.split('\t');
+            let status = cols.next()?;
+            let (old, new) = (cols.next()?, cols.next()?);
+            let same = if bare {
+                old.rsplit('/').next() == Some(path)
+            } else {
+                old == path
+            };
+            (status.starts_with('R') && same && self.tracked(new)).then(|| {
+                if bare {
+                    new.rsplit('/').next().unwrap_or(new).to_string()
+                } else {
+                    new.to_string()
+                }
+            })
+        })
+    }
+
     /// Whether `term` still appears anywhere in the tracked tree, outside
     /// Markdown documentation: a name mentioned only in `docs/**`,
     /// `ROADMAP.md` or `CHANGELOG.md` — including in the sentence *this*
@@ -2020,12 +2209,26 @@ fn machine_path_exists(p: &str) -> bool {
     Path::new(&expanded).exists()
 }
 
-/// Whether a sentence of `claim` that names `value` also says it is gone:
-/// retired, deleted, removed, renamed, moved, replaced, superseded, or no
-/// longer there. Only the sentences naming the path count, so a paragraph
-/// that retires one file does not excuse another it still relies on.
+/// Where `word` starts in `text` as a whole word (or phrase), never inside
+/// a longer one: `moved` is not in `unmoved`.
+fn whole_word_at<'a>(text: &'a str, word: &'a str) -> impl Iterator<Item = usize> + 'a {
+    text.match_indices(word).filter_map(move |(i, _)| {
+        let before = text[..i].chars().next_back();
+        let after = text[i + word.len()..].chars().next();
+        (!before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric))
+            .then_some(i)
+    })
+}
+
+/// Whether a sentence of `claim` that names `value` also says it is gone
+/// or tells its history: retired, deleted, removed, renamed, moved,
+/// replaced, superseded, no longer there, formerly or previously so, what
+/// it used to be, was called or originally was, its old name, or "it was
+/// `X` before #137" (a `was` or `were` with a later `before` or `until`).
+/// Only the sentences naming the path count, so a paragraph that retires
+/// one file does not excuse another it still relies on.
 fn says_it_is_gone(claim: &str, value: &str) -> bool {
-    const GONE: [&str; 9] = [
+    const GONE: [&str; 16] = [
         "retired",
         "deleted",
         "removed",
@@ -2035,6 +2238,13 @@ fn says_it_is_gone(claim: &str, value: &str) -> bool {
         "superseded",
         "no longer",
         "gone",
+        "formerly",
+        "previously",
+        "originally",
+        "used to",
+        "was called",
+        "were called",
+        "old name",
     ];
     // A sentence ends at `.`, `!` or `?` followed by whitespace, or at a
     // line break: the `.` inside `PROMPT.md` ends nothing.
@@ -2054,14 +2264,24 @@ fn says_it_is_gone(claim: &str, value: &str) -> bool {
         .filter(|sentence| sentence.contains(value))
         .any(|sentence| {
             let lower = sentence.to_lowercase();
-            GONE.iter().any(|w| {
-                lower.match_indices(w).any(|(i, _)| {
-                    let before = lower[..i].chars().next_back();
-                    let after = lower[i + w.len()..].chars().next();
-                    !before.is_some_and(char::is_alphanumeric)
-                        && !after.is_some_and(char::is_alphanumeric)
-                })
-            })
+            let first = |words: &[&str]| {
+                words
+                    .iter()
+                    .filter_map(|w| whole_word_at(&lower, w).next())
+                    .min()
+            };
+            let last = |words: &[&str]| {
+                words
+                    .iter()
+                    .filter_map(|w| whole_word_at(&lower, w).last())
+                    .max()
+            };
+            GONE.iter()
+                .any(|w| whole_word_at(&lower, w).next().is_some())
+                || matches!(
+                    (first(&["was", "were"]), last(&["before", "until"])),
+                    (Some(was), Some(before)) if was < before
+                )
         })
 }
 
@@ -2115,11 +2335,24 @@ fn evidence_for_path(repo: &Repo, value: &str, is_project: bool, claim_text: &st
             "git",
             format!("`{value}` was deleted in {hash} ({date}), as the note says"),
         ),
-        Some((hash, date)) => observed(
-            Signal::Contradicts,
-            "git",
-            format!("`{value}` was deleted in {hash} ({date}) and is not at HEAD"),
-        ),
+        Some((hash, date)) => match repo.renamed_in(&hash, value) {
+            Some(to) => Observed {
+                renamed: Some(Rename {
+                    from: value.to_string(),
+                    to: to.clone(),
+                }),
+                ..observed(
+                    Signal::Contradicts,
+                    "git",
+                    format!("`{value}` was renamed to `{to}` in {hash} ({date})"),
+                )
+            },
+            None => observed(
+                Signal::Contradicts,
+                "git",
+                format!("`{value}` was deleted in {hash} ({date}) and is not at HEAD"),
+            ),
+        },
         None => observed(
             Signal::Unknown,
             "git",
@@ -2327,20 +2560,13 @@ fn under_claim(mark: &str, text: &str) {
     );
 }
 
-/// What a stale claim can do next: its suggested edit, or the lines to
-/// edit. `--claude` is not offered here: it is asked only about what the
-/// checks could not decide, so a claim they found stale never gets a
-/// suggestion from it.
-fn next_for_stale(c: &Claim) -> String {
-    match &c.suggested_edit {
-        Some(_) => format!("recall review apply {}", c.id),
-        None => format!("edit {} {}", c.file, lines_desc(&c.lines)),
-    }
-}
-
 /// Which of a claim's verdicts count toward the summary: a present claim's
-/// one verdict, or each of a rule's anchors.
+/// one verdict, or each of a rule's anchors. None for a dismissed claim,
+/// which is counted on its own.
 fn verdicts_of(c: &Claim) -> Vec<Verdict> {
+    if c.dismissed {
+        return Vec::new();
+    }
     match c.class {
         Class::Present => c.verdict.into_iter().collect(),
         Class::Rule => c.evidence.iter().map(|e| e.verdict).collect(),
@@ -2348,9 +2574,15 @@ fn verdicts_of(c: &Claim) -> Vec<Verdict> {
     }
 }
 
-/// Whether a claim is something the owner has to act on: a merge conflict,
-/// a stale present claim, or a rule with a stale anchor.
+/// Whether a claim is something the owner has to act on: one the checks
+/// flag, and that was not dismissed.
 fn needs_action(c: &Claim) -> bool {
+    flagged(c) && !c.dismissed
+}
+
+/// Whether the checks flag a claim, dismissed or not: a merge conflict, a
+/// stale present claim, or a rule with a stale anchor.
+fn flagged(c: &Claim) -> bool {
     match c.class {
         Class::Conflict => true,
         Class::Present => c.verdict == Some(Verdict::Stale),
@@ -2430,7 +2662,92 @@ fn warnings(rep: &Report) -> Vec<Warning> {
     out
 }
 
-fn print_text(rep: &Report, details: bool) {
+/// One step under a claim, folded rather than clipped: a command cut short
+/// no longer works when it is copied.
+fn under_claim_step(mark: &str, text: &str) {
+    let text = sanitize_for_terminal(text);
+    for (i, line) in ui::fold(&text, DETAIL_WIDTH).into_iter().enumerate() {
+        if i == 0 {
+            anstream::println!("           {mark} {line}");
+        } else {
+            anstream::println!("             {line}");
+        }
+    }
+}
+
+/// What a flagged claim asks of the owner: the choices printed under it,
+/// and its one line in "What to do now".
+struct Todo {
+    choices: Vec<String>,
+    summary: String,
+}
+
+/// A stale claim is either meant as how things are now, and needs an edit,
+/// or history the checks read as a claim about now, and is dismissed. Both
+/// are offered, since only the owner knows which it is. `--claude` is not:
+/// it is asked only about what the checks could not decide, so a claim
+/// they found stale never gets a suggestion from it.
+fn todo_for(c: &Claim) -> Todo {
+    let at = format!("{} {}", c.file, lines_desc(&c.lines));
+    let lines = lines_desc(&c.lines);
+    if c.class == Class::Conflict {
+        return Todo {
+            choices: vec![format!(
+                "edit {lines} to keep one version and delete the marker, then recall sync"
+            )],
+            summary: format!(
+                "{} {at}: a merge conflict; edit it to keep one version",
+                c.id
+            ),
+        };
+    }
+    let renames: Vec<String> = c
+        .evidence
+        .iter()
+        .filter(|e| e.verdict == Verdict::Stale)
+        .filter_map(|e| e.renamed.as_ref())
+        .map(|r| format!("replace `{}` with `{}`", r.from, r.to))
+        .collect();
+    let dismiss = format!("recall review dismiss {}", c.id);
+    let (fix, short) = match &c.suggested_edit {
+        Some(_) => (
+            format!(
+                "recall review apply {} (writes the suggested line and sends it)",
+                c.id
+            ),
+            format!("recall review apply {}", c.id),
+        ),
+        None => {
+            let what = if renames.is_empty() {
+                "write what is true now".to_string()
+            } else {
+                renames.join(" and ")
+            };
+            (
+                format!("edit {lines} and {what}, then recall sync"),
+                format!("edit it ({what})"),
+            )
+        }
+    };
+    Todo {
+        choices: vec![
+            format!("If it is about now, fix it: {fix}"),
+            format!("If it is history, right as written: {dismiss}"),
+        ],
+        summary: format!("{} {at}: {short}, or {dismiss} if it is history", c.id),
+    }
+}
+
+/// Why a stale claim is flagged, in words, below the evidence that says so.
+fn why_stale(c: &Claim) -> &'static str {
+    if c.class == Class::Rule {
+        "Why: this is your own rule, and something it names is no longer there as it says."
+    } else {
+        "Why: this reads as how things are now, and the check above says they are not."
+    }
+}
+
+fn print_text(rep: &Report, details: bool, memory_dir: Option<&Path>) {
     let mut about = Vec::new();
     if let Some(head) = &rep.evidence.repository_head {
         about.push(format!("checkout {head}"));
@@ -2445,7 +2762,6 @@ fn print_text(rep: &Report, details: bool) {
 
     // What undermines the whole report comes before any of it.
     let warned = warnings(rep);
-    let mut next: Vec<String> = Vec::new();
     for w in &warned {
         anstream::println!();
         anstream::println!(
@@ -2476,6 +2792,7 @@ fn print_text(rep: &Report, details: bool) {
     );
     let records = count(&|c| c.class == Class::Record);
     let conflicts = count(&|c| c.class == Class::Conflict);
+    let dismissed = count(&|c| c.dismissed);
     let to_act = count(&needs_action);
     let undecided =
         count(&|c| c.class == Class::Unsure || (c.class == Class::Present && c.verdict.is_none()));
@@ -2492,7 +2809,10 @@ fn print_text(rep: &Report, details: bool) {
             "{}",
             ui::toned(
                 ui::Tone::Bad,
-                &format!("{to_act} claim(s) need a look: they say something that is no longer so.")
+                &format!(
+                    "{to_act} claim(s) need you: they say something that is no longer so. Under \
+                     each is what to do."
+                )
             )
         );
     }
@@ -2538,6 +2858,9 @@ fn print_text(rep: &Report, details: bool) {
     if undecided > 0 {
         rest.push(format!("{undecided} with nothing a check can test"));
     }
+    if dismissed > 0 {
+        rest.push(format!("{dismissed} you dismissed as history"));
+    }
     if !rest.is_empty() {
         anstream::println!(
             "  {}",
@@ -2561,7 +2884,7 @@ fn print_text(rep: &Report, details: bool) {
             0
         } else if vs.contains(&Verdict::CantTell) {
             1
-        } else if !vs.is_empty() || has_findings(claims) {
+        } else if !vs.is_empty() || has_findings(claims) || claims.iter().any(|c| c.dismissed) {
             2
         } else {
             3
@@ -2570,6 +2893,7 @@ fn print_text(rep: &Report, details: bool) {
     let mut files: Vec<(&str, &Vec<&Claim>)> = by_file.iter().map(|(f, c)| (*f, c)).collect();
     files.sort_by_key(|(f, c)| (worst(c), *f));
 
+    let mut todos: Vec<String> = Vec::new();
     let mut quiet_files = Vec::new();
     let mut cant_tell_files = 0;
     for (file, claims) in &files {
@@ -2588,7 +2912,15 @@ fn print_text(rep: &Report, details: bool) {
             continue;
         }
         anstream::println!();
-        anstream::println!("{}", ui::bold(&sanitize_for_terminal(file)));
+        // The file as it is on this machine, to open in an editor.
+        let full = memory_dir
+            .map(|d| format!("  {}", ui::tilde(&join_relative(d, file).to_string_lossy())))
+            .unwrap_or_default();
+        anstream::println!(
+            "{}{}",
+            ui::bold(&sanitize_for_terminal(file)),
+            ui::dim(&sanitize_for_terminal(&full))
+        );
 
         let mut order: Vec<&&Claim> = claims
             .iter()
@@ -2596,12 +2928,14 @@ fn print_text(rep: &Report, details: bool) {
                 if !details {
                     return needs_action(c);
                 }
-                matches!(c.class, Class::Conflict | Class::Rule)
+                c.dismissed
+                    || matches!(c.class, Class::Conflict | Class::Rule)
                     || (c.class == Class::Present && c.verdict.is_some())
                     || (c.class == Class::Unsure && c.layer == Some(3))
             })
             .collect();
         let rank = |c: &Claim| match (c.class, c.verdict) {
+            _ if c.dismissed => 6,
             (Class::Conflict, _) => 0,
             (_, Some(Verdict::Stale)) => 1,
             (Class::Rule, _) if c.evidence.iter().any(|e| e.verdict == Verdict::Stale) => 1,
@@ -2613,12 +2947,24 @@ fn print_text(rep: &Report, details: bool) {
         order.sort_by_key(|c| (rank(c), c.lines[0]));
 
         for c in order {
+            if c.dismissed {
+                claim_line(&ui::dim("–"), c);
+                under_claim(
+                    &ui::dim("–"),
+                    &format!(
+                        "dismissed as history; recall review dismiss {} --undo flags it again",
+                        c.id
+                    ),
+                );
+                continue;
+            }
+            let stale_here = needs_action(c);
             match (c.class, c.verdict) {
                 (Class::Conflict, _) => {
                     claim_line(&ui::toned(ui::Tone::Warn, "!"), c);
                     under_claim(
                         &ui::toned(ui::Tone::Warn, "!"),
-                        "a merge left a conflict here; edit the file to keep one version",
+                        "a merge left a conflict here, with both versions in the file",
                     );
                 }
                 (Class::Rule, _) => {
@@ -2632,10 +2978,6 @@ fn print_text(rep: &Report, details: bool) {
                     {
                         under_claim(&verdict_mark(e.verdict), &e.detail);
                     }
-                    if c.evidence.iter().any(|e| e.verdict == Verdict::Stale) {
-                        let step = format!("edit {} {}", c.file, lines_desc(&c.lines));
-                        under_claim(&ui::accent("→"), &step);
-                    }
                 }
                 (Class::Unsure, _) => {
                     claim_line(&ui::dim("·"), c);
@@ -2646,27 +2988,27 @@ fn print_text(rep: &Report, details: bool) {
                 (_, Some(v)) => {
                     claim_line(&verdict_mark(v), c);
                     // The evidence that decided it; the rest is --details.
-                    let shown: Vec<&Evidence> = c
-                        .evidence
-                        .iter()
-                        .filter(|e| details || e.verdict == v)
-                        .collect();
-                    for e in &shown {
+                    for e in c.evidence.iter().filter(|e| details || e.verdict == v) {
                         under_claim(&verdict_mark(e.verdict), &e.detail);
                     }
-                    if v == Verdict::Stale {
-                        if let Some(edit) = &c.suggested_edit {
-                            under_claim(
-                                &ui::accent("→"),
-                                &format!("suggested: {}", edit.replacement.trim()),
-                            );
-                        }
-                        let step = next_for_stale(c);
-                        under_claim(&ui::accent("→"), &step);
-                        next.push(step);
+                    if let (Verdict::Stale, Some(edit)) = (v, &c.suggested_edit) {
+                        under_claim(
+                            &ui::accent("→"),
+                            &format!("suggested: {}", edit.replacement.trim()),
+                        );
                     }
                 }
                 _ => {}
+            }
+            if stale_here {
+                if c.class != Class::Conflict {
+                    under_claim(&ui::dim(" "), why_stale(c));
+                }
+                let todo = todo_for(c);
+                for choice in &todo.choices {
+                    under_claim_step(&ui::accent("→"), choice);
+                }
+                todos.push(todo.summary);
             }
         }
 
@@ -2795,25 +3137,60 @@ fn print_text(rep: &Report, details: bool) {
         );
     }
 
-    // What to run next, in one place.
+    // What to do now, in order, in one place: the warnings first, since a
+    // verdict can be wrong until they are dealt with, then each claim.
+    let mut steps: Vec<String> = warned.iter().map(|w| format!("First: {}", w.fix)).collect();
+    steps.extend(todos);
     let waiting = rep
         .evidence
         .unavailable
         .iter()
         .any(|u| u.source == "claude");
-    if waiting && undecided > 0 {
-        next.push(format!(
-            "recall review run --claude, to decide what no check could ({undecided} claim(s))"
-        ));
-    }
-    if !next.is_empty() {
-        anstream::println!();
-        anstream::println!("{}", ui::bold("Next"));
-        for step in next.iter().take(8) {
-            anstream::println!("  {}", ui::accent(&format!("→ {step}")));
+    let optional = (waiting && undecided > 0).then(|| {
+        format!(
+            "Optional: recall review run --claude asks your claude CLI about the {undecided} \
+             claim(s) no check can test. It uses your Claude usage."
+        )
+    });
+    anstream::println!();
+    anstream::println!("{}", ui::bold("What to do now"));
+    if steps.is_empty() {
+        anstream::println!(
+            "  {}",
+            ui::toned(
+                ui::Tone::Good,
+                "Nothing. Every claim a check could decide still holds."
+            )
+        );
+    } else {
+        const SHOWN: usize = 8;
+        for (i, step) in steps.iter().take(SHOWN).enumerate() {
+            let text = sanitize_for_terminal(step);
+            for (j, line) in ui::fold(&text, ui::WIDTH - 5).into_iter().enumerate() {
+                if j == 0 {
+                    anstream::println!("  {}", ui::accent(&format!("{}. {line}", i + 1)));
+                } else {
+                    anstream::println!("     {}", ui::accent(&line));
+                }
+            }
         }
-        if next.len() > 8 {
-            anstream::println!("  {}", ui::dim(&format!("… and {} more", next.len() - 8)));
+        if steps.len() > SHOWN {
+            anstream::println!(
+                "  {}",
+                ui::dim(&format!(
+                    "… and {} more, each under its claim above",
+                    steps.len() - SHOWN
+                ))
+            );
+        }
+        anstream::println!(
+            "  {}",
+            ui::dim("Then recall review run again: what you fixed or dismissed is gone from it.")
+        );
+    }
+    if let Some(optional) = optional {
+        for line in ui::fold(&optional, ui::WIDTH - 2) {
+            anstream::println!("  {}", ui::dim(&line));
         }
     }
 }
@@ -3216,6 +3593,35 @@ mod tests {
         let unmoved = "The rules in `PROMPT.md` are unmoved.";
         let o = evidence_for_path(&repo, "PROMPT.md", true, unmoved);
         assert_eq!(o.signal, Signal::Contradicts, "{}", o.detail);
+    }
+
+    /// A sentence that tells a name's history, not only its removal, is
+    /// history too. Seen live in the owner's own feedback note: "it was
+    /// "Cut a release" / `cut-release.yml` before #137" came back stale.
+    #[test]
+    fn a_sentence_telling_a_names_history_is_not_a_claim_about_now() {
+        let t17 = "For a release: once the bump PR is merged and main's CI is green, I \
+                   dispatch **Start a release** myself (`start-release.yml` on main; it was \
+                   \"Cut a release\" / `cut-release.yml` before #137).";
+        assert!(says_it_is_gone(t17, "cut-release.yml"));
+        for history in [
+            "The workflow was formerly `cut-release.yml`.",
+            "It previously lived in `cut-release.yml`.",
+            "Releases used to start from `cut-release.yml`.",
+            "It was called `cut-release.yml` at first.",
+            "Its old name, `cut-release.yml`, is in older notes.",
+            "It was originally `cut-release.yml`.",
+            "Releases were cut by `cut-release.yml` until 0.4.6.",
+        ] {
+            assert!(says_it_is_gone(history, "cut-release.yml"), "{history}");
+        }
+        for now in [
+            "Run `cut-release.yml` before a deploy.",
+            "A release starts from `cut-release.yml`; it was fast.",
+            "Before a release, `cut-release.yml` was run.",
+        ] {
+            assert!(!says_it_is_gone(now, "cut-release.yml"), "{now}");
+        }
     }
 
     /// A version mentioned as history ("shipped in an older version") must

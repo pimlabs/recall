@@ -132,6 +132,7 @@ mod tests {
             evidence: Vec::new(),
             suggested_edit: None,
             eval: Vec::new(),
+            dismissed: false,
         }
     }
 
