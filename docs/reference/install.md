@@ -933,7 +933,7 @@ a few environment variables:
 ```
 recall review  checkout 9f2c1ab · server 0.4.12
 
-2 claim(s) need you: they say something that is no longer so. Under each is what to do.
+2 claim(s) need you: they say something that is no longer so. What to do is at the end.
   ✗ 2 stale   ✓ 1 still true   ? 3 can't tell
   Also read, and left as written: 1 line(s) of history, 4 with nothing a check can test.
 
@@ -941,34 +941,49 @@ project_release.md  ~/.claude/projects/-Users-you-app/memory/project_release.md
   ✗ t1    L5       The release workflow lives in `cut-release.yml` on main.
            ✗ `cut-release.yml` was renamed to `start-release.yml` in 7c6fcdc (2026-09-27)
              Why: this reads as how things are now, and the check above says they are not.
-           → If it is about now, fix it: edit L5 and replace `cut-release.yml` with `start-release.yml`,
-             then recall sync
-           → If it is history, right as written: recall review dismiss t1
+             What to do: step 1 at the end.
   ✗ t2    L6       Run `lib.sh` to start the legacy hooks.
            ✗ `lib.sh` was deleted in 3a1c9de (2026-09-22) and is not at HEAD
              Why: this reads as how things are now, and the check above says they are not.
-           → If it is about now, fix it: edit L6 and write what is true now, then recall sync
-           → If it is history, right as written: recall review dismiss t2
+             What to do: step 2 at the end.
 
-3 claim(s) in 2 file(s) could not be checked from here, and 1 still hold. Nothing to do about them; recall review show --details lists each with why.
+3 claim(s) in 2 file(s) could not be checked from here, and 1 still hold. Nothing to do about
+them. To list each with why:
+  $ recall review show --details
 
 What to do now
-  1. t1 project_release.md L5: edit it (replace `cut-release.yml` with `start-release.yml`),
-     or recall review dismiss t1 if it is history
-  2. t2 project_release.md L6: edit it (write what is true now),
-     or recall review dismiss t2 if it is history
-  Then recall review run again: what you fixed or dismissed is gone from it.
-  Optional: recall review run --claude asks your claude CLI about the 4 claim(s) no check can test.
-  It uses your Claude usage.
+
+  1. t1  project_release.md L5
+     If it is about now, fix it: in L5, replace `cut-release.yml` with `start-release.yml`.
+     If you edited it outside Claude Code, send it:
+       $ recall sync
+     If it is history, right as written, stop flagging it:
+       $ recall review dismiss t1
+
+  2. t2  project_release.md L6
+     If it is about now, fix it: in L6, write what is true now.
+     If you edited it outside Claude Code, send it:
+       $ recall sync
+     If it is history, right as written, stop flagging it:
+       $ recall review dismiss t2
+
+  When you are done, check again:
+    $ recall review run
+
+  Optional: ask your claude CLI about the 4 claim(s) no check can test. It uses your Claude usage.
+    $ recall review run --claude
 
 Commands
-  recall review apply tN         Writes tN's suggested fix into the note and sends it,
-                                 after asking. Only for a claim with a "suggested:" line,
-                                 which --claude gives.
-  recall review dismiss tN       Marks tN as history, right as written: no longer flagged,
-                                 the note unchanged. --undo flags it again.
-  recall sync                    Sends a note you edited outside Claude Code.
-  recall review show --details   Lists every claim checked, with why.
+  $ recall review apply tN
+      Writes tN's suggested fix into the note and sends it, after asking.
+      Only for a claim with a "suggested:" line, which --claude gives.
+  $ recall review dismiss tN
+      Marks tN as history, right as written: no longer flagged, the note unchanged.
+      --undo flags it again.
+  $ recall sync
+      Sends a note you edited outside Claude Code.
+  $ recall review show --details
+      Lists every claim checked, with why.
 ```
 
 **Read it top down; it stops at what needs you.** The first line after the
@@ -983,9 +998,17 @@ with its full path on this machine, to open in an editor, and each claim
 line carries its id (`t1`, the one `recall review apply` and `recall
 review dismiss` take), its lines in the note and its text.
 
-**Under each stale claim: why, and what to do.** The evidence that makes
-it stale, a `Why:` line in words, and two `→` choices, because only you
-know which one it is:
+**A command is always on a line of its own, after `$ `**, and in the
+accent colour on a terminal; the sentence above it says what it does.
+Nothing else starts with `$`, so which line to copy is never in doubt.
+
+**Under each stale claim: why, and which step.** The evidence that makes
+it stale, a `Why:` line in words, and the number of its step at the end.
+
+**What to do now** ends the report, one numbered step per thing to do: a
+warning's fix first, since a verdict can be wrong until it is dealt with,
+then each claim, with its two choices, because only you know which one it
+is:
 
 - **It is about now, and wrong: fix it.** With a suggestion from
   `--claude`, `recall review apply t1` writes it. Otherwise edit those
@@ -996,14 +1019,12 @@ know which one it is:
 - **It is history, and right as written: dismiss it.** `recall review
   dismiss t1` (below).
 
-**What to do now** ends the report: the same steps as a numbered list,
-a warning's fix first, since a verdict can be wrong until it is dealt
-with, then one line per claim. It says `Nothing.` when nothing needs you.
-What could not be checked from this machine, and what still holds, is one
-line above it: there is nothing to do about either. `--claude` is only
-ever offered as optional. When a claim is stale, or one was dismissed,
-**Commands** closes the report: what `apply`, `dismiss`, `recall sync`
-and `show --details` each do, so a step's command is never a guess.
+It says `Nothing.` when nothing needs you. What could not be checked from
+this machine, and what still holds, is one line above it: there is
+nothing to do about either. `--claude` is only ever offered as optional.
+When a claim is stale, or one was dismissed, **Commands** closes the
+report: what `apply`, `dismiss`, `recall sync` and `show --details` each
+do.
 
 **`--details`** (on `run` and on `show`) lists everything instead: every
 claim with every piece of its evidence, each marked by what that piece
@@ -1015,8 +1036,8 @@ read. On a terminal the marks are coloured; piped, or with `NO_COLOR`
 set, the same text comes without colour.
 
 **What makes the whole report doubtful is said before any of it**, as a
-`!` line with what to do under it, and again as the first step of What
-to do now:
+`!` line with what to do under it (`$ git switch main && git pull`), and
+again as the first step of What to do now:
 
 - **A checkout behind the code as it is now.** Every repository check
   reads the checkout, so a checkout on a detached `HEAD` at an old
