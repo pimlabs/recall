@@ -22,7 +22,9 @@ break will be described here in full rather than smoothed over.
   otherwise which lines to edit, then `recall sync`); if it is history,
   dismiss it. Each file is shown with its full path, and the report ends
   with a numbered **What to do now** list, or `Nothing.`, replacing the
-  Next section.
+  Next section, then a short **Commands** list saying what `recall
+  review apply`, `recall review dismiss`, `recall sync` and `recall
+  review show --details` each do.
 - **`recall review dismiss <claim>`**, and `--undo`: stop flagging a stale
   claim that is history, right as written. Kept per machine in
   `.recall-review.json` until the line's words change; the note itself is

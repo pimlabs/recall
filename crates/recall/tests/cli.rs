@@ -5066,6 +5066,11 @@ fn the_phase1_deploy_fixture_gets_the_documented_verdicts() {
         "What to do now",
         "1. t2 project_phase1_deploy.md L6: edit it (write what is true now),",
         "or recall review dismiss t2 if it is history",
+        // What each of those commands does, once, at the end.
+        "Commands",
+        "recall review apply tN         Writes tN's suggested fix",
+        "recall review dismiss tN       Marks tN as history",
+        "recall sync                    Sends a note you edited outside Claude Code.",
     ] {
         assert!(text.stdout.contains(wanted), "{wanted:?}: {}", text.stdout);
     }

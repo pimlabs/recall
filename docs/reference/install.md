@@ -960,6 +960,15 @@ What to do now
   Then recall review run again: what you fixed or dismissed is gone from it.
   Optional: recall review run --claude asks your claude CLI about the 4 claim(s) no check can test.
   It uses your Claude usage.
+
+Commands
+  recall review apply tN         Writes tN's suggested fix into the note and sends it,
+                                 after asking. Only for a claim with a "suggested:" line,
+                                 which --claude gives.
+  recall review dismiss tN       Marks tN as history, right as written: no longer flagged,
+                                 the note unchanged. --undo flags it again.
+  recall sync                    Sends a note you edited outside Claude Code.
+  recall review show --details   Lists every claim checked, with why.
 ```
 
 **Read it top down; it stops at what needs you.** The first line after the
@@ -992,7 +1001,9 @@ a warning's fix first, since a verdict can be wrong until it is dealt
 with, then one line per claim. It says `Nothing.` when nothing needs you.
 What could not be checked from this machine, and what still holds, is one
 line above it: there is nothing to do about either. `--claude` is only
-ever offered as optional.
+ever offered as optional. When a claim is stale, or one was dismissed,
+**Commands** closes the report: what `apply`, `dismiss`, `recall sync`
+and `show --details` each do, so a step's command is never a guess.
 
 **`--details`** (on `run` and on `show`) lists everything instead: every
 claim with every piece of its evidence, each marked by what that piece

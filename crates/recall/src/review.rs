@@ -3193,7 +3193,48 @@ fn print_text(rep: &Report, details: bool, memory_dir: Option<&Path>) {
             anstream::println!("  {}", ui::dim(&line));
         }
     }
+
+    // What each command the steps name does, once, at the end: a step says
+    // which to run, this says what running it changes.
+    let stale_claims = count(&|c| needs_action(c) && c.class != Class::Conflict);
+    if stale_claims > 0 || dismissed > 0 {
+        anstream::println!();
+        anstream::println!("{}", ui::bold("Commands"));
+        for (command, what) in COMMANDS {
+            let mut lines = ui::fold(what, ui::WIDTH - 33).into_iter();
+            anstream::println!(
+                "  {}  {}",
+                ui::accent(&format!("{command:<29}")),
+                lines.next().unwrap_or_default()
+            );
+            for line in lines {
+                anstream::println!("  {:<29}  {line}", "");
+            }
+        }
+    }
 }
+
+/// The commands a stale claim's steps name, and what each changes.
+const COMMANDS: [(&str, &str); 4] = [
+    (
+        "recall review apply tN",
+        "Writes tN's suggested fix into the note and sends it, after asking. Only for a claim \
+         with a \"suggested:\" line, which --claude gives.",
+    ),
+    (
+        "recall review dismiss tN",
+        "Marks tN as history, right as written: no longer flagged, the note unchanged. --undo \
+         flags it again.",
+    ),
+    (
+        "recall sync",
+        "Sends a note you edited outside Claude Code.",
+    ),
+    (
+        "recall review show --details",
+        "Lists every claim checked, with why.",
+    ),
+];
 
 #[cfg(test)]
 mod tests {
