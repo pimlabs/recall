@@ -919,6 +919,13 @@ arriving new**, and **it has to stay cheap**.
       for the rest), a checkout behind `main` or a `claude` that could not
       answer is said before anything else, and a note that itself reports a
       file's retirement is no longer called stale for it.
+      Made actionable in 0.4.14 (#187, #188), after the owner still could
+      not tell what to do next: every stale claim says why and offers two
+      choices (fix it when it is about now, `recall review dismiss` when it
+      is history), a renamed path names what it is called now, the report
+      ends with a numbered What to do now and a Commands list saying what
+      each command does, and more phrasings of history
+      ("formerly", "used to", "it was `X` before #137") read as history.
 
 ## Agreed 2026-09-23: versions, devices, two binaries, encryption
 
