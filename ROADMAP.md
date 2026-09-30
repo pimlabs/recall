@@ -913,6 +913,12 @@ arriving new**, and **it has to stay cheap**.
       decide. The design moved to `docs/history/` once all of it shipped.
       Corrected after 0.4.10 (#176): that what a claim names exists no
       longer makes it `still_true` on its own; a stated value has to match.
+      Made readable in 0.4.13 (#183), after the owner ran it twice and could
+      not tell whether anything needed doing: the answer comes first in
+      words, only what needs acting on is listed by default (`--details`
+      for the rest), a checkout behind `main` or a `claude` that could not
+      answer is said before anything else, and a note that itself reports a
+      file's retirement is no longer called stale for it.
 
 ## Agreed 2026-09-23: versions, devices, two binaries, encryption
 
