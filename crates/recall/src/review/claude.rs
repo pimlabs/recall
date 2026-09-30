@@ -430,6 +430,22 @@ pub(super) fn merger() -> Merger {
     Merger::new("claude", CALL_TIMEOUT)
 }
 
+/// The full path of the `claude` [`merger`] runs: the first on `PATH`, as
+/// the shell would find it. Shown when it fails, so "which claude" is never
+/// a guess.
+pub(super) fn binary() -> Option<String> {
+    let names: &[&str] = if cfg!(windows) {
+        &["claude.exe", "claude.cmd", "claude"]
+    } else {
+        &["claude"]
+    };
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .flat_map(|dir| names.iter().map(move |n| dir.join(n)))
+        .find(|p| p.is_file())
+        .map(|p| p.display().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -5043,14 +5043,20 @@ fn the_phase1_deploy_fixture_gets_the_documented_verdicts() {
     let text = run(&["review", "run"], repo.path(), &env, None);
     assert_eq!(text.code, 0);
     assert!(text.stdout.contains("stale"), "{}", text.stdout);
+    // The answer comes first, in words.
     assert!(
-        text.stdout.contains("· 1 record(s)"),
+        text.stdout.contains("claim(s) need a look"),
+        "{}",
+        text.stdout
+    );
+    assert!(
+        text.stdout.contains("1 line(s) of history"),
         "records are counted, not listed: {}",
         text.stdout
     );
     // A count of nothing is left out rather than printed as a zero.
     assert!(
-        !text.stdout.contains(" 0 record(s)") && !text.stdout.contains(" 0 not decided"),
+        !text.stdout.contains(" 0 line(s) of history") && !text.stdout.contains(" 0 with nothing"),
         "{}",
         text.stdout
     );
@@ -5066,9 +5072,10 @@ fn the_phase1_deploy_fixture_gets_the_documented_verdicts() {
 }
 
 /// A present claim whose stated version matches the newest release tag
-/// gets `still_true`, and — the point of the test — it is printed, not
-/// silently dropped. Mutation (design's test table): printing only
-/// problems would make the `assert!` on human output fail.
+/// gets `still_true`, and — the point of the test — it is never silently
+/// dropped: counted in the default text, and listed with `--details`.
+/// Mutation (design's test table): dropping it from either would make an
+/// `assert!` on human output fail.
 #[test]
 fn a_still_true_claim_appears_in_both_outputs() {
     let repo = review_repo();
@@ -5095,6 +5102,11 @@ fn a_still_true_claim_appears_in_both_outputs() {
     let text = run(&["review", "show"], repo.path(), &env, None);
     assert_eq!(text.code, 0);
     assert!(text.stdout.contains("✓ 1 still true"), "{}", text.stdout);
+    assert!(text.stdout.contains("Nothing to fix"), "{}", text.stdout);
+    assert!(text.stdout.contains("1 still hold"), "{}", text.stdout);
+
+    let text = run(&["review", "show", "--details"], repo.path(), &env, None);
+    assert_eq!(text.code, 0);
     assert!(text.stdout.contains("docs/plan.md"), "{}", text.stdout);
 }
 
@@ -5654,8 +5666,15 @@ fn max_calls_bounds_the_calls_and_lists_what_it_skipped() {
         "{skipped}"
     );
 
-    // The text form says so too.
+    // The text form says so too: up front, and file by file with --details.
     let r = run(&["review", "show"], repo.path(), &env, None);
+    assert!(
+        r.stdout.contains("claude was not asked about 1 file(s)")
+            && r.stdout.contains("--max-calls 1"),
+        "{}",
+        r.stdout
+    );
+    let r = run(&["review", "show", "--details"], repo.path(), &env, None);
     assert!(r.stdout.contains("! b.md: --max-calls 1"), "{}", r.stdout);
 }
 
@@ -6283,4 +6302,86 @@ fn a_claude_failure_says_why_and_stops_asking() {
         skipped[1]["reason"].as_str().unwrap().contains("not asked"),
         "{skipped:?}"
     );
+    // The failure itself, and which claude it was, for the text to lead with.
+    let claude = &report["evidence"]["claude"];
+    assert!(
+        claude["failure"]
+            .as_str()
+            .unwrap()
+            .contains("Credit balance is too low"),
+        "{claude}"
+    );
+    let binary = claude["binary"].as_str().unwrap();
+    assert!(
+        binary.starts_with(&fake.path().display().to_string()),
+        "{binary}"
+    );
+
+    // Said before anything else in the text, with the binary and what to
+    // try, not as the last lines under the claims.
+    let text = run(&["review", "show"], repo.path(), &env, None);
+    let warning = text
+        .stdout
+        .find("claude could not answer, so 2 file(s) got no answer")
+        .unwrap_or_else(|| panic!("{}", text.stdout));
+    let summary = text
+        .stdout
+        .find("still true")
+        .unwrap_or_else(|| panic!("{}", text.stdout));
+    assert!(warning < summary, "{}", text.stdout);
+    assert!(text.stdout.contains(binary), "{}", text.stdout);
+    assert!(
+        text.stdout.contains("claude -p \"hello\""),
+        "{}",
+        text.stdout
+    );
+}
+
+/// A checkout behind what it tracks is said first: every verdict is
+/// checked against it. Seen live: a review run on a detached HEAD at an
+/// old release reported files "not at HEAD" that main has.
+#[test]
+fn a_checkout_behind_its_upstream_is_said_first() {
+    let upstream = review_repo();
+    let clone = tempfile::tempdir().unwrap();
+    let git = |dir: &Path, args: &[&str]| {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(
+        clone.path(),
+        &["clone", "-q", &upstream.path().display().to_string(), "."],
+    );
+    git(clone.path(), &["checkout", "-q", "--detach", "HEAD~1"]);
+    let env: Vec<(&str, &str)> = vec![];
+    write_memory(
+        clone.path(),
+        &env,
+        "plan.md",
+        "- The plan lives in `docs/plan.md`.\n",
+    );
+
+    let json = run(&["review", "run", "--json"], clone.path(), &env, None);
+    assert_eq!(json.code, 0, "{}", json.stderr);
+    let report: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
+    let ev = &report["evidence"];
+    assert_eq!(ev["repository_detached"], true, "{ev}");
+    assert_eq!(ev["repository_behind"], 1, "{ev}");
+
+    let text = run(&["review", "show"], clone.path(), &env, None);
+    assert!(
+        text.stdout.contains("This checkout is a detached HEAD at")
+            && text.stdout.contains("1 commit(s) behind"),
+        "{}",
+        text.stdout
+    );
+    assert!(text.stdout.contains("git switch "), "{}", text.stdout);
+
+    // On the branch, and up to date, nothing is said.
+    let text = run(&["review", "run"], upstream.path(), &env, None);
+    assert!(!text.stdout.contains("This checkout is"), "{}", text.stdout);
 }

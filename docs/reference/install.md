@@ -931,9 +931,11 @@ this machine and its server say they are, the project's compose files, and
 a few environment variables:
 
 ```
-recall review  checkout 9f2c1ab · server 0.4.9
+recall review  checkout 9f2c1ab · server 0.4.12
 
-  ✗ 2 stale   ✓ 0 still true   ? 0 can't tell   1 record(s)
+2 claim(s) need a look: they say something that is no longer so.
+  ✗ 2 stale   ✓ 1 still true   ? 3 can't tell
+  Also read, and left as written: 1 line(s) of history, 4 with nothing a check can test.
 
 project_phase1_deploy.md
   ✗ t1    L5       Recall's server is live at `recall.pimlabs.id`, deployed via OrbStack and a Cloudflare Tunnel.
@@ -942,19 +944,51 @@ project_phase1_deploy.md
   ✗ t2    L6       Run `lib.sh` to start the legacy hooks; `hooks/recall-pull` runs at session start.
            ✗ `lib.sh` was deleted in 3a1c9de (2026-09-22) and is not at HEAD
            → edit project_phase1_deploy.md L6
-  · 1 record(s)
+
+3 claim(s) in 2 file(s) could not be checked from here, and 1 still hold. Nothing to do about them; recall review show --details lists each with why.
+
+Next
+  → edit project_phase1_deploy.md L5
+  → edit project_phase1_deploy.md L6
 ```
 
-The summary comes first, then the files with something to act on, the
-worst first. Each claim line carries its id (`t1`, the one `recall review
-apply` takes), its lines in the note and its text; under it is each piece
-of evidence, marked by what that piece says: `✗` stale, `✓` still true,
-`?` can't tell. A rule's anchors are listed under a `§` line, and a merge
-conflict left in a note is marked `!`. What to do next is on a `→` line,
-and a short Next section at the end repeats the commands. A file where no
-check could decide anything is named on one line at the end rather than
-given a section. On a terminal the marks are coloured; piped, or with
-`NO_COLOR` set, the same text comes without colour.
+**Read it top down; it stops at what needs you.** The first line after the
+title says in words whether anything does: `Nothing to fix: no claim is
+stale.`, or how many claims need a look. Under it are the counts, and one
+line for what the counts leave out: lines of history, and lines with
+nothing a check can test (an instruction, a reason, a preference), all
+left as written. Then, by default, only the claims to act on: a stale
+claim with the evidence that makes it stale, a rule with a stale anchor,
+a merge conflict left in a note (`!`). Each claim line carries its id
+(`t1`, the one `recall review apply` takes), its lines in the note and its
+text; what to do is on a `→` line under it, and a short Next section at
+the end repeats the commands. What could not be checked from this machine,
+and what still holds, is one line: there is nothing to do about either.
+
+**`--details`** (on `run` and on `show`) lists everything instead: every
+claim with every piece of its evidence, each marked by what that piece
+says (`✗` stale, `✓` still true, `?` can't tell), each rule under a `§`
+line with all its anchors, what `claude` read as no claim at all (`·`),
+per file what was left as written, the files no check could decide
+anything in, what `claude` did file by file, and which sources were not
+read. On a terminal the marks are coloured; piped, or with `NO_COLOR`
+set, the same text comes without colour.
+
+**What makes the whole report doubtful is said before any of it**, as a
+`!` line with what to do under it:
+
+- **A checkout behind the code as it is now.** Every repository check
+  reads the checkout, so a checkout on a detached `HEAD` at an old
+  release, or a branch behind its upstream, gets claims about files
+  added since called "not at HEAD". The review says how far behind, as
+  last fetched (it never fetches), and to `git switch` and `git pull`
+  first.
+- **`claude` that could not answer**, with `--claude`: why (not
+  installed, not logged in, or what the CLI itself said), how many files
+  that left without an answer, and the full path of the `claude` it ran, the first
+  on `PATH`. `claude -p "hello"` in the same terminal shows the same
+  error; `recall review` runs `claude` on this machine, under this
+  shell's environment, never anywhere else.
 
 Every claim gets a class before anything judges it — a present-tense
 statement of state can go **stale**; a record of what used to be true (a
@@ -962,9 +996,9 @@ statement of state can go **stale**; a record of what used to be true (a
 and is only counted; a claim in a `type: user` or `type: feedback` note has
 each of its anchors checked and verdicted on its own, never the claim's
 wording as a whole (a record signal always wins first, even inside such a
-note). `still_true` claims are printed too, named rather than summarised
-away — the point is never to make it look like discarding a true line
-alongside a false one is free.
+note). `still_true` claims are counted by default and listed with
+`--details`, never dropped — the point is never to make it look like
+discarding a true line alongside a false one is free.
 
 **What `still_true` takes: a value that matches.** A version equal to the
 newest release tag or to what the server reports, a variable set to the
@@ -985,7 +1019,9 @@ machine-scope note is not about this repository, so the same check there
 reads `cant_tell` whatever the checkout shows. A bare filename
 (`lib.sh`) is found wherever it lives in the tree, not only at the
 repository root; a path that no longer exists tells you when and in which
-commit it was deleted; a script or flag name tells you whether it is still
+commit it was deleted, which makes the claim `stale` unless the sentence
+naming it already says it is gone ("that file was retired", "was
+removed", "no longer"…), in which case the deletion agrees with it; a script or flag name tells you whether it is still
 referenced anywhere in the tracked tree, *excluding* Markdown documentation,
 so a name merely discussed in `docs/`, `ROADMAP.md` or `CHANGELOG.md` is not
 mistaken for a name still in use — and absence there is weak evidence, so it
@@ -1135,12 +1171,15 @@ it already has an answer for.
 second time; before any run has happened, `--json` prints a bare `null`
 (itself a complete JSON document) and the text form says so in a line.
 `--json` otherwise prints the report machine-readably: `reviewed_at`, an
-`evidence` object naming the repository `HEAD`, the server's version and
+`evidence` object naming the repository `HEAD` (and, when it is
+detached or behind, `repository_detached`, `repository_upstream` and
+`repository_behind`), the server's version and
 commit, the compose files read, the hosts probed, and which sources this run
 could not read and why (`repository`, `server`, `compose`, `probe`,
 `claude`, `evaluation`), the report whose findings are shown
-(`evaluation`), with `--claude` a `claude` object (`calls`, `reused`, and each
-`skipped` file with its `reason`), and a `claims[]` array (`id`, `file`,
+(`evaluation`), with `--claude` a `claude` object (`calls`, `reused`, each
+`skipped` file with its `reason`, and, when `claude` could not answer at
+all, its `failure` and the `binary` that was run), and a `claims[]` array (`id`, `file`,
 `lines`, `class`, `text`, `verdict`, `layer`, `evidence[]`, the last with
 its own `source`, `detail` and `verdict` per anchor, `claude` for layer
 3's, a `stale` claim's optional `suggested_edit`, the shape `recall eval
