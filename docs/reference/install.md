@@ -933,37 +933,66 @@ a few environment variables:
 ```
 recall review  checkout 9f2c1ab · server 0.4.12
 
-2 claim(s) need a look: they say something that is no longer so.
+2 claim(s) need you: they say something that is no longer so. Under each is what to do.
   ✗ 2 stale   ✓ 1 still true   ? 3 can't tell
   Also read, and left as written: 1 line(s) of history, 4 with nothing a check can test.
 
-project_phase1_deploy.md
-  ✗ t1    L5       Recall's server is live at `recall.pimlabs.id`, deployed via OrbStack and a Cloudflare Tunnel.
-           ✗ RECALL_URL (credentials.toml) is https://recall-server.pimlabs.id; /health answers there
-           → edit project_phase1_deploy.md L5
-  ✗ t2    L6       Run `lib.sh` to start the legacy hooks; `hooks/recall-pull` runs at session start.
+project_release.md  ~/.claude/projects/-Users-you-app/memory/project_release.md
+  ✗ t1    L5       The release workflow lives in `cut-release.yml` on main.
+           ✗ `cut-release.yml` was renamed to `start-release.yml` in 7c6fcdc (2026-09-27)
+             Why: this reads as how things are now, and the check above says they are not.
+           → If it is about now, fix it: edit L5 and replace `cut-release.yml` with `start-release.yml`,
+             then recall sync
+           → If it is history, right as written: recall review dismiss t1
+  ✗ t2    L6       Run `lib.sh` to start the legacy hooks.
            ✗ `lib.sh` was deleted in 3a1c9de (2026-09-22) and is not at HEAD
-           → edit project_phase1_deploy.md L6
+             Why: this reads as how things are now, and the check above says they are not.
+           → If it is about now, fix it: edit L6 and write what is true now, then recall sync
+           → If it is history, right as written: recall review dismiss t2
 
 3 claim(s) in 2 file(s) could not be checked from here, and 1 still hold. Nothing to do about them; recall review show --details lists each with why.
 
-Next
-  → edit project_phase1_deploy.md L5
-  → edit project_phase1_deploy.md L6
+What to do now
+  1. t1 project_release.md L5: edit it (replace `cut-release.yml` with `start-release.yml`),
+     or recall review dismiss t1 if it is history
+  2. t2 project_release.md L6: edit it (write what is true now),
+     or recall review dismiss t2 if it is history
+  Then recall review run again: what you fixed or dismissed is gone from it.
+  Optional: recall review run --claude asks your claude CLI about the 4 claim(s) no check can test.
+  It uses your Claude usage.
 ```
 
 **Read it top down; it stops at what needs you.** The first line after the
 title says in words whether anything does: `Nothing to fix: no claim is
-stale.`, or how many claims need a look. Under it are the counts, and one
-line for what the counts leave out: lines of history, and lines with
-nothing a check can test (an instruction, a reason, a preference), all
-left as written. Then, by default, only the claims to act on: a stale
-claim with the evidence that makes it stale, a rule with a stale anchor,
-a merge conflict left in a note (`!`). Each claim line carries its id
-(`t1`, the one `recall review apply` takes), its lines in the note and its
-text; what to do is on a `→` line under it, and a short Next section at
-the end repeats the commands. What could not be checked from this machine,
-and what still holds, is one line: there is nothing to do about either.
+stale.`, or how many claims need you. Under it are the counts, and one
+line for what the counts leave out: lines of history, lines with nothing
+a check can test (an instruction, a reason, a preference), and lines you
+dismissed, all left as written. Then, by default, only the claims to act
+on: a stale claim with the evidence that makes it stale, a rule with a
+stale anchor, a merge conflict left in a note (`!`). Each file is shown
+with its full path on this machine, to open in an editor, and each claim
+line carries its id (`t1`, the one `recall review apply` and `recall
+review dismiss` take), its lines in the note and its text.
+
+**Under each stale claim: why, and what to do.** The evidence that makes
+it stale, a `Why:` line in words, and two `→` choices, because only you
+know which one it is:
+
+- **It is about now, and wrong: fix it.** With a suggestion from
+  `--claude`, `recall review apply t1` writes it. Otherwise edit those
+  lines yourself; when git shows the path was renamed rather than
+  deleted, the step names what to write instead ("replace
+  `cut-release.yml` with `start-release.yml`"). `recall sync` then sends
+  the edit, if you made it outside Claude Code.
+- **It is history, and right as written: dismiss it.** `recall review
+  dismiss t1` (below).
+
+**What to do now** ends the report: the same steps as a numbered list,
+a warning's fix first, since a verdict can be wrong until it is dealt
+with, then one line per claim. It says `Nothing.` when nothing needs you.
+What could not be checked from this machine, and what still holds, is one
+line above it: there is nothing to do about either. `--claude` is only
+ever offered as optional.
 
 **`--details`** (on `run` and on `show`) lists everything instead: every
 claim with every piece of its evidence, each marked by what that piece
@@ -975,7 +1004,8 @@ read. On a terminal the marks are coloured; piped, or with `NO_COLOR`
 set, the same text comes without colour.
 
 **What makes the whole report doubtful is said before any of it**, as a
-`!` line with what to do under it:
+`!` line with what to do under it, and again as the first step of What
+to do now:
 
 - **A checkout behind the code as it is now.** Every repository check
   reads the checkout, so a checkout on a detached `HEAD` at an old
@@ -1019,9 +1049,12 @@ machine-scope note is not about this repository, so the same check there
 reads `cant_tell` whatever the checkout shows. A bare filename
 (`lib.sh`) is found wherever it lives in the tree, not only at the
 repository root; a path that no longer exists tells you when and in which
-commit it was deleted, which makes the claim `stale` unless the sentence
-naming it already says it is gone ("that file was retired", "was
-removed", "no longer"…), in which case the deletion agrees with it; a script or flag name tells you whether it is still
+commit it was deleted (or what it was renamed to, when git pairs it with
+a path at HEAD), which makes the claim `stale` unless the sentence naming
+it already says it is gone or tells its history ("that file was retired",
+"was removed", "no longer", "formerly", "used to", "its old name", "it
+was `X` before #137"…), in which case the deletion agrees with it; a
+script or flag name tells you whether it is still
 referenced anywhere in the tracked tree, *excluding* Markdown documentation,
 so a name merely discussed in `docs/`, `ROADMAP.md` or `CHANGELOG.md` is not
 mistaken for a name still in use — and absence there is weak evidence, so it
@@ -1132,6 +1165,25 @@ it could not read, and the review goes on.
 
 Nothing is edited by a review: the report is evidence, not an action.
 
+**`recall review dismiss <claim>`: a stale claim that is history.** The
+checks read a sentence as a claim about now when it tells what used to
+be, in words they do not know as history. Dismissing it tells the review
+you read it and it is right as written:
+
+```sh
+recall review dismiss t2          # stop flagging t2
+recall review dismiss t2 --undo   # flag it again
+```
+
+The note is not touched. The dismissal is kept in `.recall-review.json`
+on this machine, by the claim's file and the hash of its words, not its
+id or lines, so it holds across runs and while lines above it move, and
+lapses as soon as its words change: an edited line is checked again. A
+dismissed claim leaves the stale count and What to do now, is counted as
+"you dismissed as history", and is listed with `--details`. Only a
+claim the checks flag can be dismissed; a merge conflict is in the file
+itself, and is fixed there.
+
 **`recall review apply <claim>`: one stale claim, rewritten into a record.**
 With `--claude`, a claim `claude` finds `stale` (citing a fact) can carry a
 suggestion: the claim rewritten as a record of what changed ("Until 2026-09
@@ -1182,7 +1234,9 @@ could not read and why (`repository`, `server`, `compose`, `probe`,
 all, its `failure` and the `binary` that was run), and a `claims[]` array (`id`, `file`,
 `lines`, `class`, `text`, `verdict`, `layer`, `evidence[]`, the last with
 its own `source`, `detail` and `verdict` per anchor, `claude` for layer
-3's, a `stale` claim's optional `suggested_edit`, the shape `recall eval
+3's, and a `renamed` object (`from`, `to`) when git shows a path was
+renamed, `dismissed: true` on a claim `recall review dismiss` set aside
+(its verdict is kept), a `stale` claim's optional `suggested_edit`, the shape `recall eval
 show --json` gives a finding's, and `eval[]`, each covering finding's
 `evaluation`, `finding`, `kind` and `severity`) — a stable contract from this
 release on, under [the Versioning rules](releasing.md#versioning). The exit

@@ -14,6 +14,28 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
+## Unreleased
+
+- **`recall review` says what to do about each stale claim.** Under the
+  evidence, a `Why:` line in words and two choices: if the line is about
+  now, fix it (`recall review apply tN` when `--claude` suggested an edit,
+  otherwise which lines to edit, then `recall sync`); if it is history,
+  dismiss it. Each file is shown with its full path, and the report ends
+  with a numbered **What to do now** list, or `Nothing.`, replacing the
+  Next section.
+- **`recall review dismiss <claim>`**, and `--undo`: stop flagging a stale
+  claim that is history, right as written. Kept per machine in
+  `.recall-review.json` until the line's words change; the note itself is
+  never touched. `--json` marks such a claim `dismissed: true`.
+- **A renamed path says what it is called now.** When git shows a path a
+  note names was renamed, not only deleted, the evidence and the fix name
+  both: "replace `cut-release.yml` with `start-release.yml`". `--json`
+  adds `renamed` (`from`, `to`) to that piece of evidence.
+- **More history is read as history.** A sentence naming a deleted path is
+  no longer stale when it says "formerly", "previously", "originally",
+  "used to", "was called", "old name", or "it was `X` before #137" (a
+  `was` or `were` followed by `before` or `until`).
+
 ## 0.4.13 — 2026-09-30
 
 - **`recall review` says first whether anything needs you.** The line
