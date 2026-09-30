@@ -35,7 +35,7 @@ design, so there is no third party here.
 
 | Document | Read it when |
 |---|---|
-| [`reference/install.md`](reference/install.md) | Installing the `recall` CLI (npm, Homebrew, curl, `install.ps1` on Windows, cargo), connecting and enrolling the machine with `recall connect`, opting a project in with `recall init`, sending memory that predates the install with `recall backfill`, declaring a `project_key` by hand, promoting a note into the global or machine scope, and checking what memory claims with `recall review` and the server's history with `recall audit`. |
+| [`reference/install.md`](reference/install.md) | Installing the `recall` CLI (npm, Homebrew, curl, `install.ps1` on Windows, cargo), connecting and enrolling the machine with `recall connect`, opting a project in with `recall init`, sending memory that predates the install with `recall backfill`, sending a memory change no hook saw, mid-session, with `recall sync`, declaring a `project_key` by hand, promoting a note into the global or machine scope, and checking what memory claims with `recall review` and the server's history with `recall audit`. |
 | [`reference/api.md`](reference/api.md) | Talking to the server directly instead: endpoints, schemas, status codes, `curl` examples. |
 
 ### Keeping it running

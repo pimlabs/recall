@@ -90,6 +90,15 @@ their own.
       stop, `DELETE` — plus the `UPDATE` rename variant, with the warning
       that the primary key is `(project_key, file_path)` so a rename onto an
       occupied key collides.
+- [x] **A pull overwrote memory changed outside Edit and Write.** Found
+      2026-09-29 when edits to memory made through the shell vanished: no
+      hook fires for them, and `SessionStart`, which runs `recall pull`,
+      fires again on resume and compaction, so the server's copy was
+      written over the change mid-session, without a word. A pull (and the
+      push hook, beside its own file) now first sends what changed since
+      the last sync, found by comparing each file with how that sync left
+      it, and `recall sync` does the same by hand. PR #180, shipped in
+      0.4.12.
 
 ## Phase 5 — One Go binary — done
 
