@@ -90,8 +90,9 @@ Build a release does steps 1 to 3:
 3. **Publish the server's images** (`check-image`, `build-image`,
    `publish-image`): `ghcr.io/pimlabs/recall-server:<version>` and
    `recall-worker:<version>`, for amd64 and arm64, built from the Release's
-   own binaries, each architecture on a native runner (never emulated), with
-   no `latest` tag, and attested (`actions/attest`). Then **deploy** them:
+   own binaries, each architecture on a native runner (never emulated), and
+   attested (`actions/attest`); `latest` then follows the newest release
+   (`tag-latest`), for pulling by hand only. Then **deploy** them:
    the deploy verifies each tag's digest against that attestation, and the
    production server pulls that digest rather than building it (`deploy.yml`; see
    [`github-actions-deploy.md`](github-actions-deploy.md)). Neither waits for

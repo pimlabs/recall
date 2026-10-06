@@ -299,9 +299,16 @@ before), and pushes it, in three jobs:
 
 Each is one multi-platform image, `linux/amd64` and `linux/arm64`, so the
 server's own architecture decides only which half `docker pull` fetches;
-nothing is built for it on the server. There is no `latest`: a deploy names the version it wants, and a tag that moves by
-itself would be a deploy nobody asked for. A version's tag is pushed once;
-re-running the job leaves one that is already there alone. Each carries
+nothing is built for it on the server. A version's tag is pushed once;
+re-running the job leaves one that is already there alone.
+
+`latest` is there too, for pulling by hand (`docker pull
+ghcr.io/pimlabs/recall-server:latest`): after each release, `tag-latest`
+points it at that version's own image, the same digest, so the same
+attestation covers it. It only moves forward: re-running an older release
+leaves it on the newest. A deploy never uses it and always names the
+version it wants, since a tag that moves by itself would be a deploy
+nobody asked for. Each carries
 provenance, from buildx and as a GitHub attestation, which anyone can check:
 
 ```sh
