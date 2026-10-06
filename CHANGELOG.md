@@ -14,6 +14,14 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
+## Unreleased
+
+- **The server images have a `latest` tag.** `ghcr.io/pimlabs/recall-server:latest`
+  and `recall-worker:latest` follow the newest release, the same image (and
+  digest) as its version tag, and never move back to an older one. For
+  pulling by hand; a deploy still names a version, and the compose files
+  still read `RECALL_VERSION`.
+
 ## 0.4.15 — 2026-10-06
 
 - **`recall review` puts every command on a line of its own.** A command

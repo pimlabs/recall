@@ -344,9 +344,10 @@ jobs:
   # binaries, downloaded from the GitHub Release above and checked against
   # its checksums.txt, exactly as `docker compose up -d --build` on a server
   # built them for itself up to 0.4.6: the same Dockerfile, targets and
-  # build arguments. Only a version tag, never `latest`: a deploy names the
-  # version it wants, and a tag that moves by itself is a deploy nobody
-  # asked for. scripts/release-image.sh does every part; ci.yml's
+  # build arguments. A deploy only ever names a version tag, never `latest`:
+  # a tag that moves by itself would be a deploy nobody asked for. `latest`
+  # is moved too, afterwards (`tag-latest`), for pulling by hand only.
+  # scripts/release-image.sh does every part; ci.yml's
   # `check-publish-image` runs its build on every pull request.
   #
   # Three jobs, Docker's pattern for a build spread across runners:
@@ -559,6 +560,57 @@ jobs:
             done
             exit 1
           fi
+
+  # `latest` for each image, moved to this version when it is the newest
+  # release, never back to an older one (scripts/release-image.sh's
+  # `latest`). For someone pulling by hand; a deploy names a version. Its
+  # own job, which `deploy` does not wait on: a registry that cannot move
+  # `latest` must not hold up the server running the release.
+  tag-latest:
+    name: tag-latest
+    needs: [check-versions, publish-image]
+    if: >-
+      !cancelled() && needs.publish-image.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # One at a time across versions: two releases at once must not each
+    # read `latest` before the other moves it.
+    concurrency:
+      group: tag-latest
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.check-versions.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Does this tag move latest?
+        id: scope
+        run: |
+          if [ -f scripts/release-image.sh ] && grep -q '^  latest)' scripts/release-image.sh; then
+            echo "skipped=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::v$VERSION predates the latest tag, so latest was not moved."
+          fi
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        if: steps.scope.outputs.skipped == 'false'
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        if: steps.scope.outputs.skipped == 'false'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Move latest to this version, if it is the newest
+        if: steps.scope.outputs.skipped == 'false'
+        run: scripts/release-image.sh latest "$VERSION"
 
   # The server runs the release that was just published: it pulls the
   # images `publish-image` pushed, which hold the recall-server above,

@@ -4,6 +4,7 @@
 #   scripts/release-image.sh status   <version>
 #   scripts/release-image.sh build    <version> <commit> <arch> push|check [<digest-dir>]
 #   scripts/release-image.sh manifest <version> <digest-dir>
+#   scripts/release-image.sh latest   <version>
 #
 # Two images, one per service in the compose files that is built from this
 # repository: ghcr.io/pimlabs/recall-server:<version> (the Dockerfile's
@@ -45,8 +46,17 @@
 #             digest becomes a step output (server_digest, worker_digest)
 #             for the provenance attestation after it.
 #
-# A published tag therefore never moves, and a re-run of a published
-# version builds nothing.
+#   latest    (`tag-latest`) Points each image's `latest` at <version>'s
+#             own index, byte for byte (the same digest, so the version's
+#             attestation covers it too), when <version> is the newest
+#             release published: the version `latest` points at now is read
+#             from its index's annotation, and an older or equal one is
+#             moved; a newer one is left alone, so re-running an old
+#             release never moves `latest` back. A convenience for pulling
+#             by hand; a deploy never reads it, and always names a version.
+#
+# A version's tag therefore never moves, a re-run of a published version
+# builds nothing, and `latest` only ever moves forward.
 #
 # `build ... check` is ci.yml's `check-publish-image`, one leg per arch: the
 # same build, arguments and provenance, with push=false, then the same run
@@ -68,7 +78,7 @@ die() {
 }
 
 usage() {
-  die "usage: $0 status <version> | build <version> <commit> <arch> push|check [<digest-dir>] | manifest <version> <digest-dir>"
+  die "usage: $0 status <version> | build <version> <commit> <arch> push|check [<digest-dir>] | manifest <version> <digest-dir> | latest <version>"
 }
 
 # Under GitHub Actions, a step output.
@@ -230,6 +240,45 @@ case "$mode" in
       digest=$(published "$ref") || die "$ref was just made, and is not there"
       echo "release-image: published $ref ($digest), from ${sources[*]}"
       output "${target}_digest" "$digest"
+    done
+    ;;
+
+  latest)
+    for entry in "${IMAGES[@]}"; do
+      read -r name _ _ <<<"$entry"
+      ref="$REGISTRY/$name:$version"
+      latest="$REGISTRY/$name:latest"
+      digest=$(published "$ref") || die "$ref is not published, so latest was not moved to it"
+      found=true
+      now=$(published "$latest") || {
+        status=$?
+        [ "$status" -eq 3 ] || exit "$status"
+        found=false
+      }
+      if [ "$found" = true ]; then
+        if [ "$now" = "$digest" ]; then
+          echo "release-image: $latest is already $version ($digest)"
+          continue
+        fi
+        raw=$(docker buildx imagetools inspect --raw "$latest") \
+          || die "could not read $latest, so it was not moved"
+        current=$(printf '%s' "$raw" \
+          | jq -r '.annotations["org.opencontainers.image.version"] // empty')
+        printf '%s' "$current" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+          || die "$latest names no release version ('$current'), so it was not moved"
+        newest=$(printf '%s\n%s\n' "$current" "$version" | sort -V | tail -n 1)
+        if [ "$newest" != "$version" ]; then
+          echo "release-image: $latest is $current, newer than $version; leaving it as it is"
+          continue
+        fi
+      fi
+      # One source and no annotations: buildx copies the index as it is, so
+      # latest is the version's own digest. Checked, not assumed.
+      docker buildx imagetools create --tag "$latest" "$REGISTRY/$name@$digest"
+      now=$(published "$latest") || die "$latest was just moved, and is not there"
+      [ "$now" = "$digest" ] \
+        || die "$latest is $now after the move, not $version's $digest"
+      echo "release-image: $latest is now $version ($digest)"
     done
     ;;
 
