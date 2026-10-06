@@ -926,6 +926,9 @@ arriving new**, and **it has to stay cheap**.
       ends with a numbered What to do now and a Commands list saying what
       each command does, and more phrasings of history
       ("formerly", "used to", "it was `X` before #137") read as history.
+      In 0.4.15 (#191), after the owner could not tell which lines were
+      commands: every command stands on a line of its own after `$ `, and
+      each claim's choices are given once, in What to do now.
 
 ## Agreed 2026-09-23: versions, devices, two binaries, encryption
 
