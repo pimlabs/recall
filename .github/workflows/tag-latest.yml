@@ -1,0 +1,66 @@
+name: Tag latest
+
+# Moves `latest` on the server images, ghcr.io/pimlabs/recall-server:latest
+# and recall-worker:latest, to a release's own images, when that release is
+# the newest published: the same index, so the same digest and the same
+# attestation. Never back to an older one (scripts/release-image.sh's
+# `latest`). For pulling by hand only: a deploy always names a version, so
+# nothing here changes what a server runs.
+#
+# Two ways in:
+#
+#   - build-release.yml calls it once a release's images are published.
+#   - Actions → Tag latest → Run workflow, with a version, for a release
+#     built before this workflow existed, or to retry. Only the registry is
+#     touched: nothing is built, and a version whose images are not
+#     published is refused.
+#
+# It runs the script from its own commit, not the release's tag: what it
+# does depends only on the registry, and a tag from before `latest` existed
+# has no such mode to run.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "The release to point latest at, without the v"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release to point latest at, e.g. 0.4.15 (its images must be published)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  tag-latest:
+    name: tag-latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # One at a time across versions: two releases at once must not each
+    # read `latest` before the other moves it.
+    concurrency:
+      group: tag-latest
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The script holds the version to a release's shape before it reaches
+      # a registry reference, and refuses one whose images are not there.
+      - name: Move latest to this version, if it is the newest
+        run: scripts/release-image.sh latest "$VERSION"
