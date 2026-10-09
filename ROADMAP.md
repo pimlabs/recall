@@ -653,6 +653,10 @@ arriving new**, and **it has to stay cheap**.
       and older (`LAST_BUILT_ON_SERVER`) still build on the server; the clone
       stays, for the compose files and those older tags.
 
+      Added after 0.4.15 (#193, #195): `latest` follows the newest release,
+      the same digest as its version tag and never moved back, for pulling
+      by hand; a deploy still names its version.
+
 - [x] **The server runs whatever the image tag holds, and keeps every image
       it ever pulled.** Two follow-ups left out of the pull deploy (#145) on
       purpose, so it stayed reviewable.
@@ -929,6 +933,9 @@ arriving new**, and **it has to stay cheap**.
       In 0.4.15 (#191), after the owner could not tell which lines were
       commands: every command stands on a line of its own after `$ `, and
       each claim's choices are given once, in What to do now.
+      In 0.4.16 (#196) that rule holds across the whole CLI: `status`,
+      `doctor`, `init`, `connect`, `eval`, `devices`, `authkey`, `audit`,
+      `backfill`, every refusal's next step, and `--help`.
 
 ## Agreed 2026-09-23: versions, devices, two binaries, encryption
 
