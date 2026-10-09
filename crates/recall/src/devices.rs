@@ -237,7 +237,10 @@ type Done = Result<i32, Failed>;
 /// what is missing better than a guess here could.
 pub(crate) fn admin_client(cfg: &ClientConfig) -> Result<Client, String> {
     if cfg.url.is_empty() {
-        return Err("no server: run recall connect first, or set RECALL_URL.".to_string());
+        return Err(
+            "no server yet. Set RECALL_URL, or connect this machine first: `recall connect`"
+                .to_string(),
+        );
     }
     let admin_device = cfg.device.as_ref().is_some_and(|d| d.scope == SCOPE_ADMIN);
     if !admin_device && !cfg.token.is_empty() {
@@ -245,8 +248,8 @@ pub(crate) fn admin_client(cfg: &ClientConfig) -> Result<Client, String> {
     }
     if cfg.device.is_none() {
         return Err(
-            "this needs a device enrolled as admin, or the server's RECALL_TOKEN. Run recall \
-             connect to enrol this machine."
+            "this needs a device enrolled as admin, or the server's RECALL_TOKEN. To enrol \
+             this machine: `recall connect`"
                 .to_string(),
         );
     }
@@ -263,10 +266,10 @@ fn server_error(command: &str, e: &client::Error) -> i32 {
              server's RECALL_TOKEN set."
                 .to_string()
         }
-        _ if e.device_gone() => "Run recall connect to enrol this machine again.".to_string(),
+        _ if e.device_gone() => "To enrol this machine again: `recall connect`".to_string(),
         client::Error::Status { code: 409, .. } if e.reason().contains("already exists") => {
-            "Nothing was approved. Revoke the device with that name first (recall devices \
-             revoke <name>), or have the machine enrol under another name."
+            "Nothing was approved. Have the machine enrol under another name, or revoke the \
+             device with that name first: `recall devices revoke <name>`"
                 .to_string()
         }
         client::Error::Status { code: 404, .. } if reason.contains("with that code") => format!(
@@ -274,15 +277,12 @@ fn server_error(command: &str, e: &client::Error) -> i32 {
             CODE_TTL_SECONDS / 60
         ),
         client::Error::Status { code: 404, .. } if reason.contains("no authkey") => {
-            "recall authkey list shows their ids.".to_string()
+            "To see their ids: `recall authkey list`".to_string()
         }
-        client::Error::Transport(_) => "Check the server is up: recall doctor".to_string(),
+        client::Error::Transport(_) => "Check the server is up: `recall doctor`".to_string(),
         _ => String::new(),
     };
-    eprintln!("{command}: {reason}");
-    if !then.is_empty() {
-        eprintln!("  {then}");
-    }
+    ui::refusal(command, &ui::plain(&reason), &then);
     match e {
         client::Error::Status { .. } => exit::SERVER,
         _ => exit::CONFIG,
@@ -292,10 +292,7 @@ fn server_error(command: &str, e: &client::Error) -> i32 {
 /// Stops with a reason, as `command`, and what to do when there is
 /// something.
 fn refuse(command: &str, what: &str, then: &str) -> i32 {
-    eprintln!("{command}: {what}");
-    if !then.is_empty() {
-        eprintln!("  {then}");
-    }
+    ui::refusal(command, what, then);
     exit::CONFIG
 }
 
@@ -333,7 +330,7 @@ async fn list(cfg: &ClientConfig, client: &Client, server: &str, json: bool) -> 
     anstream::println!();
     if list.devices.is_empty() {
         anstream::println!("  No devices yet.");
-        next("recall connect", "enrols this machine");
+        next("recall connect", "To enrol this machine:");
         return Ok(exit::OK);
     }
     // The ones in use first, in the server's order (newest first); the
@@ -494,7 +491,7 @@ async fn revoke(
         return refused(
             DEVICES,
             &format!("no device named {name} is enrolled on {server}."),
-            "recall devices list shows them.",
+            "To see them: `recall devices list`",
         );
     };
     let this = cfg
@@ -529,7 +526,7 @@ async fn revoke(
                 "  {} That was this machine, so it no longer syncs.",
                 ui::toned(Tone::Warn, "!")
             );
-            next("recall connect", "enrols it again");
+            next("recall connect", "To enrol it again:");
         }
     }
     Ok(exit::OK)
@@ -611,7 +608,7 @@ async fn create_key(
     );
     next(
         &format!("recall authkey revoke {}", created.id),
-        "if it leaks",
+        "If it leaks:",
     );
     Ok(exit::OK)
 }
@@ -628,7 +625,7 @@ async fn list_keys(client: &Client, server: &str, json: bool) -> Done {
         anstream::println!("  No authkeys.");
         next(
             "recall authkey create --tag cloud --expires 90d",
-            "makes one for cloud sessions",
+            "To make one for cloud sessions:",
         );
         return Ok(exit::OK);
     }
@@ -707,7 +704,7 @@ async fn revoke_key(client: &Client, id: &str, revoke_devices: bool, json: bool)
         anstream::println!("  Devices it already enrolled keep working.");
         next(
             &format!("recall authkey revoke {} --revoke-devices", key.id),
-            "revokes them too",
+            "To revoke them too:",
         );
     }
     Ok(exit::OK)
@@ -759,18 +756,20 @@ pub(crate) fn done(text: &str) {
     anstream::println!("{} {text}", ui::toned(Tone::Good, Tone::Good.mark()));
 }
 
-/// The command to run next, and what it does, on a line of its own.
+/// The command to run next, on a line of its own, under the sentence that
+/// says what it is for (`what`, which may be empty).
 pub(crate) fn next(command: &str, what: &str) {
-    anstream::println!("{}", next_line(command, what));
+    ui::print_lines(2, &next_lines(command, what));
 }
 
 /// The line [`next`] prints, for a command that says it on stderr.
-pub(crate) fn next_line(command: &str, what: &str) -> String {
-    let command = ui::accent(&format!("→ {command}"));
-    match what.is_empty() {
-        true => format!("  {command}"),
-        false => format!("  {command}   {}", ui::dim(what)),
+pub(crate) fn next_lines(command: &str, what: &str) -> Vec<ui::Line> {
+    let mut lines = Vec::new();
+    if !what.is_empty() {
+        lines.push(ui::Line::Say(what.to_string()));
     }
+    lines.push(ui::Line::Run(command.to_string()));
+    lines
 }
 
 /// When a timestamp in the API's format was, or will be, from now, in the

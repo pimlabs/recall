@@ -407,7 +407,7 @@ fn init_is_idempotent_and_says_so() {
     assert!(
         first
             .stdout
-            .contains("→ git add .claude/settings.json && git commit"),
+            .contains("$ git add .claude/settings.json && git commit"),
         "{}",
         first.stdout
     );
@@ -445,7 +445,7 @@ fn init_warns_about_unset_variables_without_failing() {
     assert!(r.stdout.contains("RECALL_URL"), "stdout: {}", r.stdout);
     assert!(r.stdout.contains("RECALL_TOKEN"), "stdout: {}", r.stdout);
     assert!(
-        r.stdout.contains("→ recall connect https://"),
+        r.stdout.contains("$ recall connect https://"),
         "and what supplies them: {}",
         r.stdout
     );
@@ -453,13 +453,15 @@ fn init_warns_about_unset_variables_without_failing() {
 
 /// The `→` line under the line containing `marked`: the fix a problem
 /// carries, which has to be there for the problem to be worth printing.
-fn fix_after<'a>(out: &'a str, marked: &str) -> Option<&'a str> {
-    out.lines()
+fn fix_after(out: &str, marked: &str) -> Option<String> {
+    let under: Vec<&str> = out
+        .lines()
         .skip_while(|l| !l.contains(marked))
         .skip(1)
         .take_while(|l| l.starts_with("    "))
         .map(str::trim)
-        .find(|l| l.starts_with('→'))
+        .collect();
+    (!under.is_empty()).then(|| under.join("\n"))
 }
 
 /// `out` with every run of whitespace made one space: a report folds its
@@ -492,9 +494,9 @@ fn status_reports_rather_than_fails_when_unconfigured() {
         r.stdout
     );
     // Each problem carries what to run, as doctor's do.
-    assert_eq!(
-        fix_after(&r.stdout, "✗ hooks"),
-        Some("→ recall init"),
+    // A command is on a line of its own, after `$ `.
+    assert!(
+        fix_after(&r.stdout, "✗ hooks").is_some_and(|f| f.lines().any(|l| l == "$ recall init")),
         "{}",
         r.stdout
     );
@@ -1217,6 +1219,7 @@ fn the_top_level_help_groups_the_commands_and_says_where_to_start() {
 
     let headings: Vec<&str> = out
         .lines()
+        .take_while(|l| !l.starts_with("New here?"))
         .filter(|l| !l.starts_with(' ') && l.ends_with(':'))
         .collect();
     assert_eq!(
@@ -1237,8 +1240,8 @@ fn the_top_level_help_groups_the_commands_and_says_where_to_start() {
         first.is_some_and(|l| l.split_whitespace().next() == Some("connect")),
         "{out}"
     );
-    assert!(out.contains("recall connect https://"), "{out}");
-    assert!(out.contains("recall help <command>"), "{out}");
+    assert!(out.contains("  $ recall connect https://"), "{out}");
+    assert!(out.contains("  $ recall help <command>"), "{out}");
     assert!(
         !out.lines()
             .any(|l| l.split_whitespace().next() == Some("serve")),
@@ -1787,9 +1790,9 @@ fn disconnect_removes_the_saved_token_and_is_honest_about_the_shell() {
         "{}",
         r.stdout
     );
-    assert_eq!(
-        fix_after(&r.stdout, "! Your shell still supplies RECALL_TOKEN"),
-        Some("→ remove it from your shell profile"),
+    assert!(
+        fix_after(&r.stdout, "! Your shell still supplies RECALL_TOKEN")
+            .is_some_and(|f| f.contains("remove it from your shell profile")),
         "{}",
         r.stdout
     );
@@ -2755,7 +2758,7 @@ fn authkey_create_shows_the_key_alone_and_list_marks_a_revoked_one() {
     );
     assert!(
         made.stdout
-            .contains(&format!("→ recall authkey revoke {id}")),
+            .contains(&format!("$ recall authkey revoke {id}")),
         "{}",
         made.stdout
     );
@@ -2773,7 +2776,7 @@ fn authkey_create_shows_the_key_alone_and_list_marks_a_revoked_one() {
     assert_eq!(revoked.code, 0, "stderr: {}", revoked.stderr);
     assert!(
         revoked.stdout.contains(&format!(
-            "→ recall authkey revoke {} --revoke-devices",
+            "$ recall authkey revoke {} --revoke-devices",
             other.id
         )),
         "{}",
@@ -4444,9 +4447,9 @@ fn a_server_that_rewrote_its_history_is_caught_and_stays_caught() {
     );
     // The two ways out, each a command of its own.
     assert!(
-        r.stderr.contains("→ recall audit reset")
+        r.stderr.contains("$ recall audit reset")
             && r.stderr
-                .contains("→ recall audit export -o audit-evidence.jsonl"),
+                .contains("$ recall audit export -o audit-evidence.jsonl"),
         "{}",
         r.stderr
     );
@@ -4834,7 +4837,7 @@ fn eval_apply_makes_the_suggested_edit_and_pushes_it() {
         list.stdout
     );
     assert!(
-        list.stdout.contains("! eval_cli") && list.stdout.contains("→ recall eval show eval_cli"),
+        list.stdout.contains("! eval_cli") && list.stdout.contains("$ recall eval show eval_cli"),
         "{}",
         list.stdout
     );
@@ -4846,7 +4849,7 @@ fn eval_apply_makes_the_suggested_edit_and_pushes_it() {
         "✗ 1 high   ! 0 medium   ○ 0 low",
         "✗ f1  secret  deploy.md L2",
         "│ - key: abc1… (masked)",
-        "→ recall eval apply f1 --eval eval_cli",
+        "$ recall eval apply f1 --eval eval_cli",
     ] {
         assert!(show.stdout.contains(want), "{want:?} in {}", show.stdout);
     }

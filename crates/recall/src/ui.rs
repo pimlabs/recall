@@ -11,6 +11,13 @@
 //!
 //! None of this is a contract. `--json` is the output meant for scripts, and
 //! it does not pass through here.
+//!
+//! **A command is always on a line of its own**, after `$ ` and in the
+//! accent colour, under the sentence that says what it does; nothing else
+//! starts with `$`. So which line is a command is never in doubt, with
+//! colour or without, and a command copies whole. Text that says what to do
+//! writes each command between backticks (`` enrol again: `recall connect` ``),
+//! and [`lines_of`] splits it; [`plain`] is the same text for `--json`.
 
 use anstyle::{AnsiColor, Style};
 
@@ -110,7 +117,8 @@ pub fn section(name: &str, about: &str) {
 }
 
 /// One checked thing: a mark, a label padded to `width`, what was found,
-/// and — when there is something to do — the fix on the line below.
+/// and — when there is something to do — the fix below it, in the column
+/// the detail starts in, its commands on lines of their own ([`lines_of`]).
 pub fn check(tone: Tone, label: &str, width: usize, detail: &str, fix: Option<&str>) {
     let detail = match tone {
         Tone::Quiet => paint(DIM, detail),
@@ -123,12 +131,7 @@ pub fn check(tone: Tone, label: &str, width: usize, detail: &str, fix: Option<&s
         detail
     );
     if let Some(fix) = fix {
-        anstream::println!(
-            "    {:<width$}  {} {}",
-            "",
-            paint(ACCENT, "→"),
-            paint(ACCENT, fix)
-        );
+        print_lines(width + 6, &lines_of(fix));
     }
 }
 
@@ -216,27 +219,19 @@ pub fn fold(text: &str, max: usize) -> Vec<String> {
     lines
 }
 
-/// [`check`], with `detail` and `fix` folded to fit [`WIDTH`], each line
-/// after the first starting in the column its text did.
+/// [`check`], with `detail` folded to fit [`WIDTH`], each line after the
+/// first starting in the column its text did. The fix folds itself.
 pub fn check_fitted(tone: Tone, label: &str, width: usize, detail: &str, fix: Option<&str>) {
-    // What `check` prints before each: "  ✓ label  " and "    label  → ".
-    let (detail_at, fix_at) = (width + 6, width + 8);
-    let fitted = |text: &str, at: usize| {
-        fold(text, WIDTH.saturating_sub(at).max(40)).join(&format!("\n{}", " ".repeat(at)))
-    };
-    let fix = fix.map(|f| fitted(f, fix_at));
-    check(
-        tone,
-        label,
-        width,
-        &fitted(detail, detail_at),
-        fix.as_deref(),
-    );
+    // What `check` prints before the detail: "  ✓ label  ".
+    let at = width + 6;
+    let detail =
+        fold(detail, WIDTH.saturating_sub(at).max(40)).join(&format!("\n{}", " ".repeat(at)));
+    check(tone, label, width, &detail, fix);
 }
 
 /// One thing a command did or found, said as a sentence: its mark, the text
 /// folded to fit [`WIDTH`], and, when there is something to do about it,
-/// what to run on the line below.
+/// what to do on the lines below ([`lines_of`]).
 pub fn step(tone: Tone, text: &str, next: Option<&str>) {
     let text = fold(text, WIDTH - 4).join("\n    ");
     let text = match tone {
@@ -245,30 +240,164 @@ pub fn step(tone: Tone, text: &str, next: Option<&str>) {
     };
     anstream::println!("  {} {text}", paint(tone.style(), tone.mark()));
     if let Some(next) = next {
-        anstream::println!("    {}", paint(ACCENT, &format!("→ {next}")));
+        print_lines(4, &lines_of(next));
     }
 }
 
-/// A "Next" section: each command to run, in the accent colour, with why
-/// dimmed beneath it when that is not obvious.
-pub fn next_steps(steps: &[(String, Option<String>)]) {
+/// A "Next" section: each step a sentence saying what it is for, and its
+/// commands on lines of their own ([`lines_of`]).
+pub fn next_steps(steps: &[String]) {
     if steps.is_empty() {
         return;
     }
     section("Next", "");
-    for (command, why) in steps {
-        anstream::println!("  {}", paint(ACCENT, &format!("→ {command}")));
-        if let Some(why) = why {
-            for line in fold(why, WIDTH - 4) {
-                anstream::println!("    {}", paint(DIM, &line));
+    for step in steps {
+        print_lines(2, &lines_of(step));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// What to do: sentences, and commands on lines of their own.
+// ---------------------------------------------------------------------------
+
+/// One line of what to do: a sentence, or a command to run exactly as it
+/// is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Line {
+    Say(String),
+    Run(String),
+}
+
+/// `text` read as what to do: each command in it, written between
+/// backticks, becomes a line of its own, and the words between commands
+/// are sentences. A comma or semicolon a command leaves at the start of the
+/// words after it goes with it.
+pub fn lines_of(text: &str) -> Vec<Line> {
+    let mut out = Vec::new();
+    for (i, part) in text.split('`').enumerate() {
+        if i % 2 == 1 {
+            let command = part.trim();
+            if !command.is_empty() {
+                out.push(Line::Run(command.to_string()));
+            }
+        } else {
+            let say = part.trim().trim_start_matches([',', ';']).trim();
+            if !say.is_empty() {
+                out.push(Line::Say(say.to_string()));
             }
         }
     }
+    out
+}
+
+/// `text` with the backticks around its commands dropped: what `--json`
+/// carries, and what reads right anywhere that is not this terminal.
+pub fn plain(text: &str) -> String {
+    text.replace('`', "")
+}
+
+/// Prints `lines` starting `indent` columns in, on standard output. A
+/// sentence is folded to fit [`WIDTH`]; a command gets a line of its own,
+/// after `$ ` and in the accent colour, and is never folded.
+pub fn print_lines(indent: usize, lines: &[Line]) {
+    for line in rendered(indent, lines) {
+        anstream::println!("{line}");
+    }
+}
+
+/// `text` ([`lines_of`]) as plain lines, for a prompt library that frames
+/// and colours its own messages: each command on a line of its own after
+/// `$ `, under the sentence before it.
+pub fn text_of(text: &str) -> String {
+    lines_of(text)
+        .into_iter()
+        .map(|line| match line {
+            Line::Say(text) => text,
+            Line::Run(command) => format!("  $ {command}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A refusal on standard error, as `command`: what happened after its
+/// name, then what to do, each command on a line of its own. Either may
+/// hold commands between backticks ([`lines_of`]).
+pub fn refusal(command: &str, what: &str, then: &str) {
+    let mut lines = lines_of(what);
+    let first = match lines.first() {
+        Some(Line::Say(text)) => {
+            let text = text.clone();
+            lines.remove(0);
+            text
+        }
+        _ => String::new(),
+    };
+    anstream::eprintln!("{command}: {first}");
+    lines.extend(lines_of(then));
+    eprint_lines(2, &lines);
+}
+
+/// [`print_lines`], on standard error: what to do after a refusal.
+pub fn eprint_lines(indent: usize, lines: &[Line]) {
+    for line in rendered(indent, lines) {
+        anstream::eprintln!("{line}");
+    }
+}
+
+fn rendered(indent: usize, lines: &[Line]) -> Vec<String> {
+    let pad = " ".repeat(indent);
+    let mut out = Vec::new();
+    for line in lines {
+        match line {
+            Line::Say(text) => {
+                for part in fold(text, WIDTH.saturating_sub(indent).max(40)) {
+                    out.push(format!("{pad}{part}"));
+                }
+            }
+            Line::Run(command) => {
+                out.push(format!("{pad}  {}", paint(ACCENT, &format!("$ {command}"))))
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_command_between_backticks_gets_a_line_of_its_own() {
+        assert_eq!(
+            lines_of("Move it aside, then enrol again: `recall connect`"),
+            vec![
+                Line::Say("Move it aside, then enrol again:".into()),
+                Line::Run("recall connect".into())
+            ]
+        );
+        assert_eq!(
+            lines_of("`recall init`"),
+            vec![Line::Run("recall init".into())]
+        );
+        assert_eq!(
+            lines_of("Run `recall pull`, then `recall doctor` again"),
+            vec![
+                Line::Say("Run".into()),
+                Line::Run("recall pull".into()),
+                Line::Say("then".into()),
+                Line::Run("recall doctor".into()),
+                Line::Say("again".into()),
+            ]
+        );
+        assert_eq!(
+            lines_of("quote the value"),
+            vec![Line::Say("quote the value".into())]
+        );
+        assert_eq!(
+            plain("Enrol again: `recall connect`"),
+            "Enrol again: recall connect"
+        );
+    }
 
     #[test]
     fn a_long_line_is_clipped_to_fit_and_says_so() {

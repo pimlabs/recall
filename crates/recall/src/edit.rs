@@ -162,7 +162,7 @@ pub(crate) fn make_edit(
     let changed = edit.apply_to(&local).map_err(|why| {
         refused(
             format!("{why}, here or on another machine, so the edit may no longer fit."),
-            format!("Pull, then make a new report: {}", hints.rerun),
+            format!("Pull, then make a new report: `{}`", hints.rerun),
         )
     })?;
     let shown = if edit.replacement.is_empty() {
@@ -185,7 +185,7 @@ pub(crate) fn make_edit(
                 path.display()
             ),
             format!(
-                "Run {} again; if the report no longer fits, make a new one.",
+                "Try it again, and if the report no longer fits, make a new one: `{}`",
                 hints.again
             ),
         ));
@@ -199,10 +199,7 @@ pub(crate) fn make_edit(
 /// and the exit code it comes to.
 pub(crate) fn said(command: &str, stop: Stop) -> i32 {
     if let Stop::Refused { what, then } = stop {
-        eprintln!("{command}: {what}");
-        if !then.is_empty() {
-            eprintln!("  {then}");
-        }
+        crate::ui::refusal(command, &what, &then);
     }
     exit::CONFIG
 }

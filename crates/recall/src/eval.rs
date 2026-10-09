@@ -105,10 +105,7 @@ impl From<client::Error> for Failed {
 type Done = Result<i32, Failed>;
 
 fn refuse(what: &str, then: &str) -> Failed {
-    eprintln!("recall eval: {what}");
-    if !then.is_empty() {
-        eprintln!("  {then}");
-    }
+    ui::refusal("recall eval", what, then);
     Failed::Said(exit::CONFIG)
 }
 
@@ -118,7 +115,7 @@ pub async fn run(cmd: Cmd) -> anyhow::Result<i32> {
     let client = match admin_client(&cfg) {
         Ok(client) => client,
         Err(why) => {
-            eprintln!("recall eval: {why}");
+            ui::refusal("recall eval", &why, "");
             return Ok(exit::CONFIG);
         }
     };
@@ -139,7 +136,6 @@ pub async fn run(cmd: Cmd) -> anyhow::Result<i32> {
     Ok(match outcome {
         Ok(code) | Err(Failed::Said(code)) => code,
         Err(Failed::Server(e)) => {
-            eprintln!("recall eval: {}", e.reason());
             let then = match &e {
                 client::Error::Status { code: 403, .. } => {
                     "This machine's device has the sync scope. Run this on an admin device, or \
@@ -148,16 +144,14 @@ pub async fn run(cmd: Cmd) -> anyhow::Result<i32> {
                 client::Error::Status { code: 404, .. } if e.reason() == "not found" => {
                     "The server is older than 0.4.5, which added evaluation reports."
                 }
-                client::Error::Status { code: 404, .. } => "recall eval list shows the reports.",
+                client::Error::Status { code: 404, .. } => "To see the reports: `recall eval list`",
                 client::Error::Status { code: 409, .. } if e.reason().contains("still") => {
-                    "recall eval list shows where it is."
+                    "To see where it is: `recall eval list`"
                 }
-                client::Error::Transport(_) => "Check the server is up: recall doctor",
+                client::Error::Transport(_) => "Check the server is up: `recall doctor`",
                 _ => "",
             };
-            if !then.is_empty() {
-                eprintln!("  {then}");
-            }
+            ui::refusal("recall eval", &ui::plain(&e.reason()), then);
             match e {
                 client::Error::Status { .. } => exit::SERVER,
                 _ => exit::CONFIG,
@@ -201,7 +195,7 @@ async fn ask(client: &Client, projects: Vec<String>, contradictions: bool, json:
     );
     next(
         &format!("recall eval show {}", created.id),
-        "once it is done",
+        "Once it is done:",
     );
     Ok(exit::OK)
 }
@@ -236,7 +230,7 @@ async fn list(client: &Client, server: &str, json: bool) -> Done {
     anstream::println!();
     if list.evaluations.is_empty() {
         anstream::println!("  No reports yet.");
-        next("recall eval run", "asks the worker for one");
+        next("recall eval run", "To ask the worker for one:");
         return Ok(exit::OK);
     }
 
@@ -296,7 +290,7 @@ async fn list(client: &Client, server: &str, json: bool) -> Done {
         anstream::println!();
         next(
             &format!("recall eval show {}", e.id),
-            "the newest report with findings",
+            "The newest report with findings:",
         );
     }
     Ok(exit::OK)
@@ -352,7 +346,7 @@ async fn fetch(client: &Client, id: Option<String>, finished: bool) -> Result<Ev
                         } else {
                             "there are no reports yet."
                         },
-                        "recall eval run asks for one; recall eval list shows them.",
+                        "To ask for one: `recall eval run` To see them: `recall eval list`",
                     ))
                 }
             }
@@ -429,7 +423,7 @@ async fn show(client: &Client, id: Option<String>, json: bool) -> Done {
         if e.contradictions {
             again.push_str(" --contradictions");
         }
-        next(&again, "asks for it again");
+        next(&again, "To ask for it again:");
         return Ok(exit::OK);
     }
     if e.state != STATE_DONE {
@@ -439,7 +433,7 @@ async fn show(client: &Client, id: Option<String>, json: bool) -> Done {
         );
         next(
             &format!("recall eval show {}", printable(&e.id)),
-            "again in a minute",
+            "Look again in a minute:",
         );
         return Ok(exit::OK);
     }
@@ -539,8 +533,9 @@ async fn show(client: &Client, id: Option<String>, json: bool) -> Done {
     if !steps.is_empty() {
         anstream::println!();
         anstream::println!("{}", ui::bold("Next"));
+        anstream::println!("  To make each finding's suggested edit:");
         for step in steps.iter().take(8) {
-            anstream::println!("  {}", ui::accent(&format!("→ {step}")));
+            ui::print_lines(2, &[ui::Line::Run(step.clone())]);
         }
         if steps.len() > 8 {
             anstream::println!("  {}", ui::dim(&format!("… and {} more", steps.len() - 8)));
@@ -647,9 +642,9 @@ fn print_finding(f: &Finding, details: &Details, evaluation: &str, widths: (usiz
             ui::toned(Tone::Good, line)
         });
     }
-    anstream::println!(
-        "{pad}{}",
-        ui::accent(&format!("→ {}", apply_command(f, evaluation)))
+    ui::print_lines(
+        pad.chars().count(),
+        &[ui::Line::Run(apply_command(f, evaluation))],
     );
 }
 
@@ -678,13 +673,13 @@ async fn apply(client: &Client, finding: &str, evaluation: Option<String>, yes: 
     if evaluation.state != STATE_DONE {
         return Err(refuse(
             &format!("{} has not finished.", evaluation.id),
-            &format!("recall eval show {} says where it is.", evaluation.id),
+            &format!("To see where it is: `recall eval show {}`", evaluation.id),
         ));
     }
     let Some(f) = evaluation.findings.iter().find(|f| f.id == finding) else {
         return Err(refuse(
             &format!("{} has no finding {finding}.", evaluation.id),
-            &format!("recall eval show {} lists them.", evaluation.id),
+            &format!("To see them: `recall eval show {}`", evaluation.id),
         ));
     };
     let details = details_of(&evaluation);
@@ -698,7 +693,7 @@ async fn apply(client: &Client, finding: &str, evaluation: Option<String>, yes: 
                 "{} ({}) has no edit to make: its reasoning says what to do.",
                 f.id, f.kind
             ),
-            &format!("recall eval show {}", evaluation.id),
+            &format!("To read it: `recall eval show {}`", evaluation.id),
         ));
     };
     // The shape `recall review apply` gives its heading: the id and what it

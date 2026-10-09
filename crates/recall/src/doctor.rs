@@ -51,9 +51,17 @@ pub struct Finding {
     pub detail: String,
     /// What to do about it. Present on anything that is not `Ok`, because a
     /// finding a reader cannot act on is a finding that trains them to skip
-    /// the output.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// the output. Its commands are between backticks, for the terminal to
+    /// put each on a line of its own ([`ui::lines_of`]); `--json` carries it
+    /// without them.
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "plain_fix")]
     pub fix: Option<String>,
+}
+
+/// A finding's fix as `--json` carries it: the same words, no backticks.
+fn plain_fix<S: serde::Serializer>(fix: &Option<String>, s: S) -> Result<S::Ok, S::Error> {
+    use serde::Serialize;
+    fix.as_deref().map(ui::plain).serialize(s)
 }
 
 fn ok(check: &'static str, detail: impl Into<String>) -> Finding {
@@ -85,8 +93,8 @@ fn fail(check: &'static str, detail: impl Into<String>, fix: impl Into<String>) 
 
 /// Where a variable has to be set, which differs by environment in a way
 /// that is not guessable and cost this project a day.
-const WHERE_TO_SET: &str =
-    "cloud environment: the \"Add/Edit cloud environment\" dialog; laptop: recall connect <url>";
+const WHERE_TO_SET: &str = "On a cloud environment, set it in the \"Add/Edit cloud environment\" \
+                            dialog. On a laptop: `recall connect <url>`";
 
 /// Reads the report into findings, most fundamental first.
 ///
@@ -162,21 +170,24 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
                  can merge them",
                 quiet.whole_minutes()
             ),
-            "on the server: docker logs recall-worker, and check it is running",
+            "On the server, check the merge worker is running, and read its log: \
+             `docker logs recall-worker`",
         ));
     } else if rep.server_ok && !rep.merge_ready && rep.merge_worker {
         out.push(warn(
             "merge",
             "the merge worker's Claude CLI is not logged in, so conflicting edits wait \
              in its queue unmerged",
-            "on the server: docker exec -it -u node recall-worker claude setup-token",
+            "On the server, log its Claude CLI in: \
+             `docker exec -it -u node recall-worker claude setup-token`",
         ));
     } else if rep.server_ok && !rep.merge_ready {
         out.push(warn(
             "merge",
             "the server's Claude CLI is not logged in, so conflicting edits use \
              last-write-wins",
-            "on the server: docker exec -it -u node recall-server claude setup-token",
+            "On the server, log its Claude CLI in: \
+             `docker exec -it -u node recall-server claude setup-token`",
         ));
     }
     if rep.server_ok {
@@ -194,7 +205,7 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
         (false, true) => out.push(fail(
             "hooks",
             "this project's .claude/settings.json has no Recall hooks",
-            "recall init",
+            "`recall init`",
         )),
         (false, false) => out.push(ok("hooks", "not in a git repository")),
     }
@@ -255,7 +266,7 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
         out.push(fail(
             "rejected value",
             format!("{var} is set to a value Recall refused, so it did nothing"),
-            format!("recall status names the file behind {var}"),
+            format!("To see the file behind {var}: `recall status`"),
         ));
     }
 
@@ -295,14 +306,14 @@ fn device_findings(rep: &Report, out: &mut Vec<Finding>) {
         out.push(fail(
             "device key",
             format!("{err}, so this machine sends nothing to the server"),
-            "move it aside and run recall connect to enrol again",
+            "Move it aside, then enrol again: `recall connect`",
         ));
     }
     if rep.device_file_exposed {
         out.push(warn(
             "device key",
             format!("{key_file} is readable by other users"),
-            format!("chmod 600 {key_file}"),
+            format!("`chmod 600 {key_file}`"),
         ));
     }
 
@@ -311,18 +322,19 @@ fn device_findings(rep: &Report, out: &mut Vec<Finding>) {
             (Some(true), true) if rep.authkey_set => out.push(warn(
                 "device",
                 "RECALL_AUTHKEY is set, but this session has not enrolled yet",
-                "recall pull enrols it, and says why when it cannot",
+                "This enrols it, and says why when it cannot: `recall pull`",
             )),
             (Some(true), true) if rep.token_set => out.push(warn(
                 "device",
                 "this session uses the shared RECALL_TOKEN",
-                "on an admin device: recall authkey create --tag cloud --expires 90d, \
-                 then set RECALL_AUTHKEY on the cloud environment and remove RECALL_TOKEN",
+                "On an admin device, make an auth key: \
+                 `recall authkey create --tag cloud --expires 90d` Then set RECALL_AUTHKEY on \
+                 the cloud environment, and remove RECALL_TOKEN.",
             )),
             (Some(true), false) if rep.token_set => out.push(warn(
                 "device",
                 "not enrolled, so this machine still uses the shared RECALL_TOKEN",
-                "recall connect",
+                "`recall connect`",
             )),
             (Some(false), _) => out.push(ok(
                 "device",
@@ -342,7 +354,7 @@ fn device_findings(rep: &Report, out: &mut Vec<Finding>) {
     let reenroll = if rep.remote_session && rep.authkey_set {
         "the next session start enrols again with RECALL_AUTHKEY"
     } else {
-        "recall connect"
+        "`recall connect`"
     };
     match d.confirmed {
         Some(true) => out.push(ok(
@@ -377,7 +389,7 @@ fn device_findings(rep: &Report, out: &mut Vec<Finding>) {
                 "{what}: the server did not confirm it: {}",
                 d.check_error.as_deref().unwrap_or("no answer")
             ),
-            "run recall doctor again; if it persists, recall connect",
+            "Check again: `recall doctor` If it persists: `recall connect`",
         )),
         None => out.push(ok(
             "device",
@@ -396,7 +408,7 @@ fn device_findings(rep: &Report, out: &mut Vec<Finding>) {
                         .as_deref()
                         .unwrap_or("the credentials file")
                 ),
-                "recall connect removes it".to_string(),
+                "This removes it: `recall connect`".to_string(),
             ),
             _ => {
                 let from = rep
@@ -469,7 +481,8 @@ fn version_findings(rep: &Report, out: &mut Vec<Finding>) {
                 "this client is {} and the server needs at least {min}",
                 rep.client_version
             ),
-            "upgrade recall: brew upgrade recall, or npm install -g @pimlabs/recall",
+            "Upgrade recall, with Homebrew: `brew upgrade recall` Or with npm: \
+             `npm install -g @pimlabs/recall`",
         ));
     }
 }
@@ -588,8 +601,8 @@ fn credentials_findings(rep: &Report, out: &mut Vec<Finding>) {
             "token storage",
             detail,
             format!(
-                "run recall connect to save it in ~/.recall/credentials.toml, then \
-                 remove RECALL_TOKEN from {remove_from}"
+                "Save it in ~/.recall/credentials.toml: `recall connect` Then remove \
+                 RECALL_TOKEN from {remove_from}."
             ),
         ));
     }
@@ -633,7 +646,7 @@ fn credentials_findings(rep: &Report, out: &mut Vec<Finding>) {
         out.push(warn(
             "credentials file",
             format!("{err}, so nothing in it is in effect"),
-            "move it aside and run recall connect again",
+            "Move it aside, then connect again: `recall connect`",
         ));
     }
 
@@ -645,7 +658,7 @@ fn credentials_findings(rep: &Report, out: &mut Vec<Finding>) {
         out.push(warn(
             "credentials file",
             format!("{file} is readable by other users"),
-            format!("chmod 600 {file}"),
+            format!("`chmod 600 {file}`"),
         ));
     }
 }
@@ -692,8 +705,8 @@ fn offbox_finding(rep: &Report, out: &mut Vec<Finding>) {
                  only on the server",
                 age.whole_days()
             ),
-            "on the server: check the cron job's mail, then run \
-             RECALL_BACKUP_REMOTE=... ./deploy/backup-offbox.sh by hand",
+            "On the server, check the cron job's mail, then run it by hand: \
+             `RECALL_BACKUP_REMOTE=... ./deploy/backup-offbox.sh`",
         ));
     } else {
         out.push(ok("off-box backup", format!("verified {stamp}")));
@@ -754,8 +767,8 @@ fn audit_finding(rep: &Report, out: &mut Vec<Finding>) {
         out.push(fail(
             CHECK,
             format!("the server did not prove its log extends the checkpoints saved here: {why}"),
-            "recall audit verify; if it persists, recall audit export -o audit.jsonl and \
-             recall audit verify audit.jsonl",
+            "Check again: `recall audit verify` If it persists, export the log and check \
+             the export: `recall audit export -o audit.jsonl` `recall audit verify audit.jsonl`",
         ));
         return;
     }
@@ -767,8 +780,8 @@ fn audit_finding(rep: &Report, out: &mut Vec<Finding>) {
                  go unseen in",
                 audit.dropped
             ),
-            "recall audit verify checks the rest; recall audit reset once you have decided \
-             to trust the log as it is",
+            "Check the rest: `recall audit verify` Once you have decided to trust the log as \
+             it is: `recall audit reset`",
         ));
         return;
     }
@@ -811,8 +824,8 @@ fn audit_finding(rep: &Report, out: &mut Vec<Finding>) {
                 audit.unchecked,
                 audit.unchecked_since.as_deref().unwrap_or_default()
             ),
-            "recall audit verify; a server that never answers the proofs is not proving its \
-             log",
+            "A server that never answers the proofs is not proving its log. Ask it again: \
+             `recall audit verify`",
         ));
         return;
     }
@@ -829,8 +842,8 @@ fn audit_finding(rep: &Report, out: &mut Vec<Finding>) {
                 audit.last_proven_at.as_deref().unwrap_or_default(),
                 audit.saved()
             ),
-            "recall audit verify; a server that never answers the proofs is not proving its \
-             log",
+            "A server that never answers the proofs is not proving its log. Ask it again: \
+             `recall audit verify`",
         ));
         return;
     }
@@ -841,8 +854,8 @@ fn audit_finding(rep: &Report, out: &mut Vec<Finding>) {
                 "the server has left the last {} checks of its log unanswered",
                 audit.unanswered
             ),
-            "recall audit verify; a server that never answers the proofs is not proving its \
-             log",
+            "A server that never answers the proofs is not proving its log. Ask it again: \
+             `recall audit verify`",
         ));
         return;
     }
@@ -855,8 +868,8 @@ fn audit_finding(rep: &Report, out: &mut Vec<Finding>) {
                  checkpoint(s) saved here were not checked",
                 audit.saved()
             ),
-            "recall status says whether this device is still enrolled; recall connect enrols \
-             it again",
+            "To see whether this device is still enrolled: `recall status` To enrol it \
+             again: `recall connect`",
         ));
     } else if let Some(err) = &audit.error {
         out.push(warn(
@@ -865,7 +878,7 @@ fn audit_finding(rep: &Report, out: &mut Vec<Finding>) {
                 "could not check the {} checkpoint(s) saved here: {err}",
                 audit.saved()
             ),
-            "recall audit verify, once the server answers",
+            "Once the server answers: `recall audit verify`",
         ));
     } else if audit.extends == Some(true) {
         out.push(ok(
@@ -883,7 +896,7 @@ fn audit_finding(rep: &Report, out: &mut Vec<Finding>) {
                 "{} checkpoint(s) saved here, and none was checked this time",
                 audit.saved()
             ),
-            "recall audit verify",
+            "`recall audit verify`",
         ));
     }
 }
@@ -927,7 +940,8 @@ fn queue_finding(rep: &Report, out: &mut Vec<Finding>) {
                 if q.queued == 1 { "" } else { "s" },
                 age.whole_minutes()
             ),
-            "on the server: docker logs recall-worker, and check it is running",
+            "On the server, check the merge worker is running, and read its log: \
+             `docker logs recall-worker`",
         )),
         _ => out.push(ok(
             "merge queue",
@@ -1007,7 +1021,7 @@ fn reserved_findings(rep: &Report, out: &mut Vec<Finding>) {
                     "{k}: {files} file(s) synced, but MEMORY.md links none of them, so \
                      Claude Code never reads them"
                 ),
-                "recall pull".to_string(),
+                "This links them in MEMORY.md: `recall pull`".to_string(),
             )),
             Some(k) => out.push(ok(name, format!("{k} ({files} files)"))),
         }
@@ -1437,7 +1451,7 @@ pub(crate) mod tests {
         let found = findings(&rep);
         let f = find(&found, "credentials file").unwrap();
         assert_eq!(f.level, Level::Warn);
-        assert!(f.fix.as_deref().unwrap().starts_with("chmod 600"));
+        assert!(ui::plain(f.fix.as_deref().unwrap()).starts_with("chmod 600"));
     }
 
     /// A leftover shell variable deciding which machine this is, named with
@@ -1668,7 +1682,7 @@ pub(crate) mod tests {
         let f = find(&found, "hooks").unwrap();
 
         assert_eq!(f.level, Level::Fail);
-        assert_eq!(f.fix.as_deref(), Some("recall init"));
+        assert_eq!(ui::plain(f.fix.as_deref().unwrap()), "recall init");
         assert_eq!(verdict(&found), exit::CONFIG);
     }
 

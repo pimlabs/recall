@@ -349,10 +349,13 @@ fn help_template(cmd: &Command) -> StyledStr {
 /// Where to start, under the top-level help.
 fn footer() -> StyledStr {
     let literal = STYLES.get_literal();
+    // Each command on a line of its own, as everywhere else (crate::ui).
     StyledStr::from(format!(
-        "New here? Run '{literal}recall connect https://your-recall-host{literal:#}', \
-         then '{literal}recall doctor{literal:#}'.\n\
-         See '{literal}recall help <command>{literal:#}' for more on a command."
+        "New here? Connect this machine, then check it:\n\
+         \x20 {literal}$ recall connect https://your-recall-host{literal:#}\n\
+         \x20 {literal}$ recall doctor{literal:#}\n\
+         For more on a command:\n\
+         \x20 {literal}$ recall help <command>{literal:#}"
     ))
 }
 

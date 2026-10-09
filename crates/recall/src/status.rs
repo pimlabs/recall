@@ -904,8 +904,8 @@ fn origin(rep: &Report, name: &str) -> String {
 fn connect_hint(rep: &Report, url: &str) -> String {
     match (rep.remote_session, url.is_empty()) {
         (true, _) => "set RECALL_URL and RECALL_AUTHKEY on the cloud environment".to_string(),
-        (false, true) => "recall connect https://your-recall-host".to_string(),
-        (false, false) => format!("recall connect {url}"),
+        (false, true) => "`recall connect https://your-recall-host`".to_string(),
+        (false, false) => format!("`recall connect {url}`"),
     }
 }
 
@@ -1109,7 +1109,10 @@ fn connection_lines(cfg: &ClientConfig, rep: &Report, out: &mut Vec<Line>) {
         let fix = if rep.remote_session {
             "add the server's domain under the cloud environment's Allowed domains".to_string()
         } else {
-            format!("curl -sS {}/health", cfg.url.trim_end_matches('/'))
+            format!(
+                "See what answers there: `curl -sS {}/health`",
+                cfg.url.trim_end_matches('/')
+            )
         };
         out.push(Line::bad(
             C,
@@ -1149,7 +1152,8 @@ fn connection_lines(cfg: &ClientConfig, rep: &Report, out: &mut Vec<Line>) {
                     "{}, and the server needs at least {min}",
                     rep.client_version
                 ),
-                "brew upgrade recall, or npm install -g @pimlabs/recall",
+                "With Homebrew: `brew upgrade recall` Or with npm: \
+                 `npm install -g @pimlabs/recall`",
             ),
             None => Line::good(C, "client", rep.client_version.clone()),
         });
@@ -1162,7 +1166,7 @@ fn connection_lines(cfg: &ClientConfig, rep: &Report, out: &mut Vec<Line>) {
             C,
             "credentials",
             format!("{err}, so nothing in it is in effect"),
-            format!("move {credentials_file} aside and run recall connect again"),
+            format!("Move {credentials_file} aside, then connect again: `recall connect`"),
         ));
     }
     if rep.credentials_exposed {
@@ -1170,7 +1174,7 @@ fn connection_lines(cfg: &ClientConfig, rep: &Report, out: &mut Vec<Line>) {
             C,
             "credentials",
             format!("{credentials_file} is readable by other users"),
-            format!("chmod 600 {credentials_file}"),
+            format!("`chmod 600 {credentials_file}`"),
         ));
     }
     for problem in &rep.config_problems {
@@ -1211,7 +1215,7 @@ fn device_lines(rep: &Report, out: &mut Vec<Line>) {
             C,
             "device",
             format!("{err}, so this machine sends nothing to the server"),
-            format!("move {key_file} aside, then recall connect to enrol again"),
+            format!("Move {key_file} aside, then enrol again: `recall connect`"),
         ));
     }
     if rep.device_file_exposed {
@@ -1219,7 +1223,7 @@ fn device_lines(rep: &Report, out: &mut Vec<Line>) {
             C,
             "device",
             format!("{key_file} is readable by other users"),
-            format!("chmod 600 {key_file}"),
+            format!("`chmod 600 {key_file}`"),
         ));
     }
     let Some(d) = &rep.device else {
@@ -1235,10 +1239,11 @@ fn device_lines(rep: &Report, out: &mut Vec<Line>) {
                 "device",
                 "not enrolled, so this machine uses the shared RECALL_TOKEN",
                 if rep.remote_session {
-                    "on an admin device: recall authkey create --tag cloud --expires 90d, then \
-                     set RECALL_AUTHKEY on the cloud environment and remove RECALL_TOKEN"
+                    "On an admin device, make an auth key: \
+                     `recall authkey create --tag cloud --expires 90d` Then set RECALL_AUTHKEY \
+                     on the cloud environment, and remove RECALL_TOKEN."
                 } else {
-                    "recall connect"
+                    "`recall connect`"
                 },
             ));
         }
@@ -1259,14 +1264,14 @@ fn device_lines(rep: &Report, out: &mut Vec<Line>) {
             if rep.remote_session && rep.authkey_set {
                 "start a new session, which enrols again with RECALL_AUTHKEY"
             } else {
-                "recall connect"
+                "`recall connect`"
             },
         ),
         Some(false) => Line::warn(
             C,
             "device",
             format!("{what}, not confirmed by the server: {why}"),
-            "recall status again; if it persists, recall connect",
+            "Check again: `recall status` If it persists: `recall connect`",
         ),
         Some(true) => Line::good(
             C,
@@ -1280,8 +1285,9 @@ fn device_lines(rep: &Report, out: &mut Vec<Line>) {
 /// Whether conflicting edits are merged, and what is waiting to be.
 fn merge_lines(rep: &Report, out: &mut Vec<Line>) {
     use Group::Connection as C;
-    const WORKER_LOGS: &str = "on the server: docker logs recall-worker, and check it is running";
-    const LOG_IN: &str = "on the server: docker exec -it -u node";
+    const WORKER_LOGS: &str =
+        "On the server, check the merge worker is running, and read its log: \
+         `docker logs recall-worker`";
     out.push(match crate::doctor::worker_quiet(rep) {
         // What the worker last said about its CLI is only as current as
         // the worker: one that stopped asking for work is not ready,
@@ -1306,13 +1312,15 @@ fn merge_lines(rep: &Report, out: &mut Vec<Line>) {
                 C,
                 "merge",
                 "not configured, so conflicting edits use last-write-wins",
-                format!("{LOG_IN} recall-server claude setup-token"),
+                "On the server, log its Claude CLI in: \
+                 `docker exec -it -u node recall-server claude setup-token`",
             ),
             (false, true) => Line::warn(
                 C,
                 "merge",
                 "waiting: the merge worker's claude CLI is not logged in",
-                format!("{LOG_IN} recall-worker claude setup-token"),
+                "On the server, log its Claude CLI in: \
+                 `docker exec -it -u node recall-worker claude setup-token`",
             ),
         },
     });
@@ -1373,7 +1381,8 @@ fn project_lines(rep: &Report, out: &mut Vec<Line>) {
                 "{key}, from this checkout's path: with no git remote, another machine \
                  derives a different one"
             ),
-            "git remote add origin <url>, or declare RECALL_PROJECT_KEY in .claude/settings.json",
+            "Declare RECALL_PROJECT_KEY in .claude/settings.json, or add a remote: \
+             `git remote add origin <url>`",
         ),
         KeySource::LocalPath => Line::quiet(P, "key", format!("{key}, from this directory's path")),
         KeySource::DeclaredButRejected => Line::bad(
@@ -1402,7 +1411,7 @@ fn project_lines(rep: &Report, out: &mut Vec<Line>) {
             P,
             "hooks",
             "not wired, so nothing here syncs",
-            "recall init",
+            "`recall init`",
         ),
         (false, false) => Line::quiet(P, "hooks", "nothing to wire outside a git repository"),
     });
@@ -1620,7 +1629,7 @@ fn audit_line(audit: &AuditReport, server_ok: bool) -> Line {
                 "{} checkpoint(s) dropped unchecked, a gap a rewrite could hide in",
                 audit.dropped
             ),
-            "recall audit verify",
+            "`recall audit verify`",
         );
     }
     if let Some(why) = &audit.unproven {
@@ -1628,7 +1637,7 @@ fn audit_line(audit: &AuditReport, server_ok: bool) -> Line {
             H,
             LABEL,
             format!("not proven: the server answered without a proof: {why}"),
-            "recall audit verify",
+            "`recall audit verify`",
         );
     }
     if audit.extends == Some(true) {
@@ -1656,7 +1665,7 @@ fn audit_line(audit: &AuditReport, server_ok: bool) -> Line {
                 H,
                 LABEL,
                 detail,
-                "recall connect, if the server no longer accepts this device",
+                "If the server no longer accepts this device: `recall connect`",
             ),
             // Nothing saved is nothing left unproven.
             (false, 0) => Line::quiet(H, LABEL, detail),
@@ -1664,7 +1673,7 @@ fn audit_line(audit: &AuditReport, server_ok: bool) -> Line {
                 H,
                 LABEL,
                 detail,
-                "recall audit verify, once the server answers",
+                "Once the server answers: `recall audit verify`",
             ),
         };
     }
@@ -1676,7 +1685,7 @@ fn audit_line(audit: &AuditReport, server_ok: bool) -> Line {
             H,
             LABEL,
             format!("{} checkpoint(s) saved, not checked", audit.saved()),
-            "recall audit verify",
+            "`recall audit verify`",
         );
     }
     Line::quiet(H, LABEL, "nothing saved yet")

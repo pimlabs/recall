@@ -51,12 +51,10 @@ pub fn run(path: Option<&Path>) -> anyhow::Result<i32> {
     // or a cloud session pick sync up without per-machine setup.
     let mut next = Vec::new();
     if wired_now {
-        next.push((
-            format!(
-                "{} add .claude/settings.json && {0} commit -m \"Enable Recall memory sync\"",
-                git_in(&root)
-            ),
-            Some("so fresh clones and cloud sessions sync too".to_string()),
+        next.push(format!(
+            "Commit it, so fresh clones and cloud sessions sync too: `{} add \
+             .claude/settings.json && {0} commit -m \"Enable Recall memory sync\"`",
+            git_in(&root)
         ));
     }
     if let Some((_, connect)) = missing.first() {
@@ -128,28 +126,18 @@ fn project_name(root: &Path) -> String {
 /// warning about them there would send someone editing a shell profile to
 /// fix something that is not broken. A machine with a device key, or a
 /// session with an enrolment key, needs no token either.
-fn missing_configuration(root: &Path) -> Vec<(String, (String, Option<String>))> {
+fn missing_configuration(root: &Path) -> Vec<(String, String)> {
     let cfg = project::resolve_at(root.to_path_buf()).config();
     let has_credential = !cfg.token.is_empty() || cfg.device.is_some() || cfg.authkey.is_some();
     let connect = if project::remote_session() {
-        (
-            "set RECALL_URL and RECALL_AUTHKEY on the cloud environment".to_string(),
-            Some(
-                "recall connect saves nothing in a remote session, which ends with it. See \
-                 docs/reference/token-setup.md"
-                    .to_string(),
-            ),
-        )
+        "Set RECALL_URL and RECALL_AUTHKEY on the cloud environment: recall connect saves \
+         nothing in a remote session, which ends with it. See docs/reference/token-setup.md."
+            .to_string()
     } else {
-        (
-            "recall connect https://your-recall-host".to_string(),
-            Some(
-                "once per machine: it asks for the token and checks it. A claude.ai cloud \
-                 environment sets RECALL_URL and RECALL_AUTHKEY as its own variables instead, \
-                 see docs/reference/token-setup.md"
-                    .to_string(),
-            ),
-        )
+        "Connect this machine, once: it asks for the token and checks it. A claude.ai cloud \
+         environment sets RECALL_URL and RECALL_AUTHKEY as its own variables instead, see \
+         docs/reference/token-setup.md. `recall connect https://your-recall-host`"
+            .to_string()
     };
     let mut missing = Vec::new();
     if cfg.url.is_empty() {

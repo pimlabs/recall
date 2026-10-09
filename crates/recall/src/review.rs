@@ -47,7 +47,7 @@ use recall_hooks::exit;
 use serde::{Deserialize, Serialize};
 
 use crate::project as proj;
-use crate::ui;
+use crate::ui::{self, Line};
 
 mod apply;
 mod claude;
@@ -2689,34 +2689,18 @@ fn warnings(rep: &Report) -> Vec<Warning> {
     out
 }
 
-/// One line of what to do: a sentence, or a command to run exactly as it
-/// is written.
-#[derive(Clone)]
-enum Line {
-    Say(String),
-    Run(String),
-}
-
-/// Prints `lines` starting `indent` columns in. A sentence is folded to
-/// fit; a command gets a line of its own, after `$ ` and in the accent
-/// colour, and is never folded. So which line is a command and which says
-/// what it does is never in doubt, and a command copies whole.
+/// [`ui::print_lines`], with every line made safe for a terminal first:
+/// a claim's id, a file's name and a report's id come from memory or a
+/// server, never from this code.
 fn print_lines(indent: usize, lines: &[Line]) {
-    let pad = " ".repeat(indent);
-    for line in lines {
-        match line {
-            Line::Say(text) => {
-                let width = ui::WIDTH.saturating_sub(indent).max(40);
-                for part in ui::fold(&sanitize_for_terminal(text), width) {
-                    anstream::println!("{pad}{part}");
-                }
-            }
-            Line::Run(command) => anstream::println!(
-                "{pad}  {}",
-                ui::accent(&format!("$ {}", sanitize_for_terminal(command)))
-            ),
-        }
-    }
+    let safe: Vec<Line> = lines
+        .iter()
+        .map(|line| match line {
+            Line::Say(text) => Line::Say(sanitize_for_terminal(text)),
+            Line::Run(command) => Line::Run(sanitize_for_terminal(command)),
+        })
+        .collect();
+    ui::print_lines(indent, &safe);
 }
 
 /// One numbered step of "What to do now": a title, then its lines.
