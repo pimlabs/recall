@@ -155,7 +155,7 @@ pub(super) async fn run(id: &str, yes: bool) -> anyhow::Result<i32> {
     let Some(report) = &saved.report else {
         return Ok(edit::said(
             COMMAND,
-            refused("there is no review yet.", "recall review run makes one."),
+            refused("there is no review yet.", "Make one: `recall review run`"),
         ));
     };
     let Some(claim) = report.claims.iter().find(|c| c.id == id) else {
@@ -163,13 +163,13 @@ pub(super) async fn run(id: &str, yes: bool) -> anyhow::Result<i32> {
             COMMAND,
             refused(
                 format!("the last review has no claim {id}."),
-                "recall review show lists them.",
+                "To see them: `recall review show`",
             ),
         ));
     };
     let no_edit = || {
         let then = if claim.verdict == Some(Verdict::Stale) {
-            "recall review run --claude asks for one."
+            "To ask claude for one: `recall review run --claude`"
         } else {
             ""
         };
@@ -249,7 +249,10 @@ pub(super) async fn run(id: &str, yes: bool) -> anyhow::Result<i32> {
     let heading = format!("{id} stale  {}, {}", claim.file, edit::lines(&claim.lines));
     let code = edit::apply_and_push(COMMAND, id, &heading, &suggested, HINTS, yes).await;
     if code == recall_hooks::exit::OK {
-        println!("recall review run checks it again.");
+        crate::ui::print_lines(
+            0,
+            &crate::ui::lines_of("To check it again: `recall review run`"),
+        );
     }
     Ok(code)
 }

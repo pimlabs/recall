@@ -42,7 +42,7 @@ use recall_hooks::{exit, ClientConfig};
 use recall_wire::audit::merkle::{self, Tree};
 use recall_wire::audit::verify;
 
-use crate::devices::{count, done, next_line, relative, short_hash, title_on_stderr, wrap};
+use crate::devices::{count, done, next_lines, relative, short_hash, title_on_stderr, wrap};
 use crate::edit::printable;
 use crate::project as proj;
 use crate::ui::{self, Tone};
@@ -105,7 +105,7 @@ pub async fn run(cmd: Cmd) -> anyhow::Result<i32> {
             checkpoints,
         } if !checkpoints.is_empty() => refuse(
             "--checkpoint holds an export to a checkpoint, and no export was named.",
-            "recall audit verify FILE --checkpoint SIZE:ROOT",
+            "Name the export: `recall audit verify FILE --checkpoint SIZE:ROOT`",
         ),
         Cmd::Verify { file: None, .. } => check(&cfg).await,
         Cmd::Reset { yes } => reset(&cfg, yes),
@@ -117,7 +117,7 @@ pub async fn run(cmd: Cmd) -> anyhow::Result<i32> {
 fn witness(cfg: &ClientConfig) -> Result<Witness, i32> {
     if cfg.url.is_empty() {
         return Err(refuse(
-            "no server: run recall connect first, or set RECALL_URL.",
+            "no server yet. Set RECALL_URL, or connect this machine first: `recall connect`",
             "",
         ));
     }
@@ -202,7 +202,7 @@ async fn export(cfg: &ClientConfig, output: Option<&Path>) -> i32 {
             Tone::Bad,
             "the leaves the server sent do not hash to its own checkpoint",
         );
-        detail("recall audit verify says the same of the file.");
+        detail("Checked offline, the file says the same.");
         return FAILED;
     }
     let held = match witness.witness_export(&tree, current) {
@@ -246,7 +246,7 @@ async fn export(cfg: &ClientConfig, output: Option<&Path>) -> i32 {
     if let Some(path) = output {
         next_on_stderr(
             &format!("recall audit verify {}", path.display()),
-            "checks it offline",
+            "To check it offline:",
         );
     }
     exit::OK
@@ -273,8 +273,8 @@ impl Fetch {
                         "reading the log's leaves needs an admin device or the server's \
                          RECALL_TOKEN, and {what}."
                     ),
-                    "Run this on an admin device, or with RECALL_TOKEN set. recall audit \
-                     verify, with no file, needs neither.",
+                    "Run this on an admin device, or with RECALL_TOKEN set. Checking against \
+                     the server, with no file, needs neither: `recall audit verify`",
                 );
                 UNUSABLE
             }
@@ -599,7 +599,7 @@ fn verify_file(cfg: &ClientConfig, file: &Path, args: &[String]) -> i32 {
                 count(newer.len(), "checkpoint", "checkpoints"),
                 if newer.len() == 1 { "is" } else { "are" }
             ),
-            Some("recall audit verify (no file) checks them against the server"),
+            Some("To check them against the server: `recall audit verify`"),
         );
     }
     ui::verdict(Tone::Good, "The export checks out.");
@@ -667,9 +667,12 @@ async fn check(cfg: &ClientConfig) -> i32 {
         // the credential, not the server.
         Err(e) if e.refused() => {
             eprintln!("recall audit: the server refused this machine's credential: {e}");
-            eprintln!(
-                "  The device may have been revoked, or not be allowed the audit routes: \
-                 recall status says which, and recall connect enrols it again."
+            ui::eprint_lines(
+                2,
+                &ui::lines_of(
+                    "The device may have been revoked, or not be allowed the audit routes. To \
+                     see which: `recall status` To enrol it again: `recall connect`",
+                ),
             );
             UNUSABLE
         }
@@ -766,7 +769,7 @@ pub(crate) fn report_inconsistency(
 fn after_a_rewrite(kept: Option<&str>) {
     eprintln!();
     detail("If the server was restored from a backup, that is why:");
-    next_on_stderr("recall audit reset", "starts again from the log as it is");
+    next_on_stderr("recall audit reset", "Start again from the log as it is:");
     match kept {
         Some(kept) => detail(&format!(
             "If not, its history was rewritten: keep {kept}, the evidence."
@@ -780,9 +783,9 @@ fn after_a_rewrite(kept: Option<&str>) {
 
 /// The two ways a log that no longer extends a checkpoint came to be.
 pub(crate) const AFTER_A_REWRITE: &str =
-    "If the server was restored from a backup, that is why: recall audit reset, and it starts \
-     again from the log as it is. If not, its history was rewritten: keep the evidence first, \
-     recall audit export -o audit-evidence.jsonl";
+    "If the server was restored from a backup, that is why. Start again from the log as it is: \
+     `recall audit reset` If not, its history was rewritten. Keep the evidence first: \
+     `recall audit export -o audit-evidence.jsonl`";
 
 // ---------------------------------------------------------------------------
 // reset
@@ -850,10 +853,7 @@ fn describe_saved(held: &Saved) -> String {
 /// script says it could not check as asked, whether what is missing is a
 /// server, a home for `audit.json`, a credential or an argument.
 fn refuse(what: &str, then: &str) -> i32 {
-    eprintln!("recall audit: {what}");
-    if !then.is_empty() {
-        eprintln!("  {then}");
-    }
+    ui::refusal("recall audit", what, then);
     UNUSABLE
 }
 
@@ -895,9 +895,12 @@ fn lost_log(saved: usize) -> i32 {
 fn server_error(e: &client::Error) -> i32 {
     eprintln!("recall audit: {}", e.reason());
     if e.device_gone() {
-        eprintln!("  Run recall connect to enrol this machine again.");
+        ui::eprint_lines(
+            2,
+            &next_lines("recall connect", "To enrol this machine again:"),
+        );
     } else if matches!(e, client::Error::Transport(_)) {
-        eprintln!("  Check the server is up: recall doctor");
+        ui::eprint_lines(2, &next_lines("recall doctor", "Check the server is up:"));
     }
     UNUSABLE
 }
@@ -930,9 +933,9 @@ fn detail(text: &str) {
     }
 }
 
-/// The command to run next, and what it does, on stderr.
+/// The command to run next, under what it is for, on stderr.
 fn next_on_stderr(command: &str, what: &str) {
-    anstream::eprintln!("{}", next_line(command, what));
+    ui::eprint_lines(2, &next_lines(command, what));
 }
 
 /// [`ui::verdict`], on stderr: the closing line of an answer that did not

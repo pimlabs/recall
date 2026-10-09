@@ -16,6 +16,14 @@ break will be described here in full rather than smoothed over.
 
 ## Unreleased
 
+- **Every command puts the commands it suggests on lines of their own.**
+  What `recall review` started in 0.4.15 now holds everywhere a person
+  reads: `status`, `doctor`, `init`, `connect`, `disconnect`, `eval`,
+  `devices`, `authkey`, `audit`, `backfill`, every refusal's "what to do
+  next", and the top-level `--help`. A command stands alone after `$ `,
+  under the sentence that says what it is for; the `→` lines that mixed
+  commands into sentences are gone. `recall doctor --json` keeps `fix` as
+  one line of plain text.
 - **The server images have a `latest` tag.** `ghcr.io/pimlabs/recall-server:latest`
   and `recall-worker:latest` follow the newest release, the same image (and
   digest) as its version tag, and never move back to an older one. For

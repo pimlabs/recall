@@ -809,9 +809,15 @@ History
 ```
 
 The marks are `recall doctor`'s: `✓` working, `!` worth a look, `✗` broken, `○`
-off or not applicable here. Anything marked `!` or `✗` has what to run on the
-`→` line under it. Home is shown as `~`, and a long hash is cut short; `recall
-status --json` carries every value whole.
+off or not applicable here. Anything marked `!` or `✗` has what to do under
+it. Home is shown as `~`, and a long hash is cut short; `recall status
+--json` carries every value whole.
+
+**A command is always on a line of its own**, after `$ `, under the sentence
+that says what it is for, in every command's output: `status`, `doctor`,
+`init`, `connect`, `review`, `eval`, `devices`, `authkey`, `audit`,
+`backfill`, and what a refusal says to do next. Nothing else starts with
+`$`, so which line to copy is never in doubt, with colour or without.
 
 It reports them as the *hooks* would see them, not as your shell holds them
 — which is the same thing on most machines and emphatically not the same
@@ -844,17 +850,19 @@ recall doctor  cloud → no server
 
 Connection
   ✗ RECALL_URL    not set anywhere
-                  → cloud environment: the "Add/Edit cloud environment" dialog; laptop:
-                    recall connect <url>
+                  On a cloud environment, set it in the "Add/Edit cloud environment" dialog.
+                  On a laptop:
+                    $ recall connect <url>
   ✗ RECALL_TOKEN  not set anywhere
-                  → cloud environment: the "Add/Edit cloud environment" dialog; laptop:
-                    recall connect <url>
+                  On a cloud environment, set it in the "Add/Edit cloud environment" dialog.
+                  On a laptop:
+                    $ recall connect <url>
 
 This project  acme/app
   ✓ hooks                          wired in .claude/settings.json
   ✗ CLAUDE_CODE_REMOTE_MEMORY_DIR  not set, so auto-memory is off in this remote session
-                                   → set it to /home/user/.claude on the cloud environment
-                                     (not $HOME)
+                                   set it to /home/user/.claude on the cloud environment
+                                   (not $HOME)
   ✓ memory dir                     ~/.claude/projects/-home-user-app/memory (0 files)
 
 Scopes
@@ -901,14 +909,14 @@ Code's auto-memory is off entirely, and only a quiet `○` on a laptop, where
 unset is correct. `CLAUDE_CODE_REMOTE` is what tells the two apart — the same
 signal `.claude/hooks/session-start.sh` keys off.
 
-Every finding that is not `✓` or `○` carries the thing to do about it, on the
-`→` line under it. That is a rule rather than a habit: a test asserts it,
+Every finding that is not `✓` or `○` carries the thing to do about it, under
+it, each command on a line of its own. That is a rule rather than a habit: a test asserts it,
 because a finding a reader cannot act on teaches them to skip the whole
 report. `recall status` keeps the same rule, with the same marks.
 
 `recall doctor --json` emits the findings as an array, each with its `level`,
-`check`, `detail` and `fix` — for a CI step or a shell prompt that should go
-red when memory stops syncing.
+`check`, `detail` and `fix` (the same words, on one line) — for a CI step or a
+shell prompt that should go red when memory stops syncing.
 
 ### Checking whether memory is still true: `recall review`
 
@@ -1188,7 +1196,8 @@ the same two requests `recall eval show` makes, and each finding is shown
 under its file beside the claims whose lines it covers:
 
 ```
-  ◆ eval_7c2kq9 f4 stale (low), on t3 (L12)  → recall eval show eval_7c2kq9
+  ◆ eval_7c2kq9 f4 stale (low), on t3 (L12). To read it:
+    $ recall eval show eval_7c2kq9
 ```
 
 A `stale` finding says a note is old; the review says whether it is also
@@ -1294,9 +1303,10 @@ History
   ✗ audit log   the server's log no longer extends a checkpoint saved here (found 2026-09-24T09:53:53.429Z):
                 the server's proof that its log of 8 leaves extends the 5 saved here does not verify:
                 history before it was rewritten
-                → If the server was restored from a backup, that is why: recall audit reset, and it starts
-                  again from the log as it is. If not, its history was rewritten: keep the evidence first,
-                  recall audit export -o audit-evidence.jsonl
+                If the server was restored from a backup, that is why. Start again from the log as it is:
+                  $ recall audit reset
+                If not, its history was rewritten. Keep the evidence first:
+                  $ recall audit export -o audit-evidence.jsonl
 ```
 
 That finding is written into `audit.json` and stays: every later `recall

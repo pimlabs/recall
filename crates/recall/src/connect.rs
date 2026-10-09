@@ -99,7 +99,8 @@ async fn run(args: Args) -> Step<()> {
         Err(e) => {
             return refuse(
                 &e.to_string(),
-                "Nothing was changed. Fix or move it aside and run recall connect again.",
+                "Nothing was changed. Fix it or move it aside, then connect again: \
+                 `recall connect`",
             )
         }
     };
@@ -126,7 +127,7 @@ async fn run(args: Args) -> Step<()> {
         None => {
             return refuse(
                 "no server named, and none saved yet.",
-                "Name it: recall connect https://your-recall-host",
+                "Name it: `recall connect https://your-recall-host`",
             )
         }
     };
@@ -203,16 +204,16 @@ async fn run(args: Args) -> Step<()> {
 
     let project = proj::git_root().map(|root| project_name(&root));
     let project = project.as_deref().unwrap_or("this project");
-    let _ = cliclack::outro(match wiring {
+    let _ = cliclack::outro(ui::text_of(&match wiring {
         Wiring::NoProject => {
-            format!("Connected as {name}. Run recall init in a project to sync it.")
+            format!("Connected as {name}. To sync a project, in it: `recall init`")
         }
-        Wiring::Declined => format!("Connected as {name}. Run recall init to sync {project}."),
+        Wiring::Declined => format!("Connected as {name}. To sync {project}: `recall init`"),
         Wiring::Already => format!("Connected as {name}, and {project} syncs."),
         Wiring::JustNow => {
             format!("Connected as {name}. {project} syncs from its next Claude Code session.")
         }
-    });
+    }));
     Ok(())
 }
 
@@ -252,7 +253,7 @@ impl Setup<'_> {
                 if !self.interactive {
                     return refuse(
                         "needs a new token, but there is no terminal to ask for one.",
-                        "Run recall connect in a terminal.",
+                        "Run it in a terminal: `recall connect`",
                     );
                 }
                 ask_token(url).await?
@@ -272,7 +273,7 @@ impl Setup<'_> {
         if has_device {
             return refuse(
                 &format!("this machine has a device key for {url}, so no token is saved for it."),
-                "Nothing was saved. Run recall connect again to check the device.",
+                "Nothing was saved. To check the device, connect again: `recall connect`",
             );
         }
         // Read again rather than written back as they were read at the
@@ -378,8 +379,8 @@ impl Setup<'_> {
                 return refuse(
                     &format!("{}.", e.reason()),
                     &format!(
-                        "On an admin device: recall devices revoke {name}. Or enrol under \
-                         another name: recall connect --name {name}-2"
+                        "On an admin device, revoke the old one: `recall devices revoke {name}` \
+                         Or enrol under another name: `recall connect --name {name}-2`"
                     ),
                 )
             }
@@ -406,13 +407,13 @@ impl Setup<'_> {
                     Ok(other) => {
                         return refuse(
                             &format!("approved, but the server then answered {other:?}."),
-                            "Run recall connect again.",
+                            "Connect again: `recall connect`",
                         )
                     }
                     Err(e) => {
                         return refuse(
                             &format!("approved, but asking for the result failed: {}", e.reason()),
-                            "Run recall connect again.",
+                            "Connect again: `recall connect`",
                         )
                     }
                 }
@@ -421,11 +422,11 @@ impl Setup<'_> {
                 let _ = cliclack::note(
                     "Approve it from a machine enrolled as admin, or one holding the server's \
                      RECALL_TOKEN",
-                    format!(
-                        "recall devices approve {}\n\
-                         It shows the fingerprint: check it is the one above.",
+                    ui::text_of(&format!(
+                        "`recall devices approve {}` It shows the fingerprint: check it is the \
+                         one above.",
                         pending.user_code
-                    ),
+                    )),
                 );
                 wait_for_approval(&open, &pending).await?
             }
@@ -457,8 +458,8 @@ impl Setup<'_> {
             // stays on the token, as it would have before devices.
             if !self.interactive && !self.args.yes {
                 say_warning(
-                    "Not enrolled: that needs a confirmation. Run recall connect in a \
-                     terminal, or with --yes, to enrol this machine",
+                    "Not enrolled: that needs a confirmation. To enrol this machine, run this \
+                     in a terminal, or with --yes: `recall connect`",
                 );
                 return Ok(None);
             }
@@ -477,7 +478,7 @@ impl Setup<'_> {
             if !self.interactive {
                 return refuse(
                     "needs a new token, but there is no terminal to ask for one.",
-                    "Run recall connect in a terminal.",
+                    "Run it in a terminal: `recall connect`",
                 );
             }
         }
@@ -523,7 +524,10 @@ impl Setup<'_> {
         if let Err(e) = self.home.save_device(url, entry) {
             return refuse(
                 &format!("approved, but saving the device key failed: {e}"),
-                &format!("On an admin device: recall devices revoke {device}, then run recall connect again."),
+                &format!(
+                    "On an admin device, revoke it: `recall devices revoke {device}` Then \
+                     connect again: `recall connect`"
+                ),
             );
         }
         let (mut creds, mut config) = match load_both(self.home) {
@@ -531,7 +535,7 @@ impl Setup<'_> {
             Err(e) => {
                 return refuse(
                     &format!("the device key is saved, but {e}"),
-                    "Fix or move that file aside and run recall connect again.",
+                    "Fix that file or move it aside, then connect again: `recall connect`",
                 )
             }
         };
@@ -642,15 +646,16 @@ async fn self_approve(url: &str, token: &str, code: &str, fingerprint: &str) -> 
             spinner.error("Approval failed");
             refuse(
                 &format!("could not approve this machine: {}", e.reason()),
-                "Nothing was saved. Revoke the old device first (recall devices revoke <name>), \
-                 or enrol under another name: recall connect --name <another-name>",
+                "Nothing was saved. Revoke the old device first: \
+                 `recall devices revoke <name>` Or enrol under another name: \
+                 `recall connect --name <another-name>`",
             )
         }
         Err(e) => {
             spinner.error("Approval failed");
             refuse(
                 &format!("could not approve this machine: {}", e.reason()),
-                "Nothing was saved. Run recall connect again.",
+                "Nothing was saved. Connect again: `recall connect`",
             )
         }
     }
@@ -682,27 +687,27 @@ async fn wait_for_approval(client: &Client, pending: &EnrollPending) -> Step<Enr
             Ok(Poll::Expired) => {
                 return stop(
                     "the code expired before anyone approved it.",
-                    "Nothing was saved. Run recall connect again for a new code.",
+                    "Nothing was saved. For a new code, connect again: `recall connect`",
                 )
             }
             Ok(Poll::Denied) => return stop("the enrolment was denied.", "Nothing was saved."),
             Ok(Poll::Unknown) => {
                 return stop(
                     "the server no longer knows this enrolment.",
-                    "Nothing was saved. Run recall connect again.",
+                    "Nothing was saved. Connect again: `recall connect`",
                 )
             }
             Err(e) => {
                 return stop(
                     &format!("could not ask whether it was approved: {}", e.reason()),
-                    "Nothing was saved. Run recall connect again.",
+                    "Nothing was saved. Connect again: `recall connect`",
                 )
             }
         }
         if std::time::Instant::now() > deadline {
             return stop(
                 "the code expired before anyone approved it.",
-                "Nothing was saved. Run recall connect again for a new code.",
+                "Nothing was saved. For a new code, connect again: `recall connect`",
             );
         }
     }
@@ -720,7 +725,7 @@ fn check_url(url: &str) -> Step<()> {
     } else {
         refuse(
             &format!("{url:?} is not a server URL."),
-            "Include the scheme: recall connect https://recall.example.com",
+            "Include the scheme: `recall connect https://recall.example.com`",
         )
     }
 }
@@ -945,7 +950,7 @@ fn offer_init(args: &Args, interactive: bool) -> Step<Wiring> {
     if let Err(e) = settings::wire_file(&settings_path) {
         return refuse(
             &format!("could not wire {}: {e}", settings_path.display()),
-            "The connection is saved; fix that and run recall init.",
+            "The connection is saved. Fix that, then: `recall init`",
         );
     }
     // Committing it is not a nicety: it is what makes a fresh clone or a
@@ -953,10 +958,9 @@ fn offer_init(args: &Args, interactive: bool) -> Step<Wiring> {
     let git = crate::init::git_in(&root);
     let _ = cliclack::note(
         "Hooks added. Commit them so other clones sync too:",
-        format!(
-            "{git} add .claude/settings.json\n\
-             {git} commit -m \"Enable Recall memory sync\""
-        ),
+        ui::text_of(&format!(
+            "`{git} add .claude/settings.json` `{git} commit -m \"Enable Recall memory sync\"`"
+        )),
     );
     Ok(Wiring::JustNow)
 }
@@ -977,10 +981,10 @@ async fn offer_backfill(here: &proj::Resolved, args: &Args, interactive: bool) -
                     .interact(),
             )?);
     if !yes {
-        let _ = cliclack::log::remark("Later: recall backfill");
+        let _ = cliclack::log::remark(ui::text_of("Later: `recall backfill`"));
         return Ok(());
     }
-    let later = "The connection is saved; run recall backfill to try again.";
+    let later = "The connection is saved. To try again: `recall backfill`";
     let ctx = match here.hook_context() {
         Ok(ctx) => ctx,
         Err(e) => return refuse(&e.to_string(), later),
@@ -1004,7 +1008,7 @@ async fn offer_backfill(here: &proj::Resolved, args: &Args, interactive: bool) -
     let left = outcome.entries.len() - sent - matches - outcome.count(Disposition::Internal);
     if left > 0 || outcome.stopped.is_some() {
         say_warning(&format!(
-            "{} skipped, run recall backfill to see why",
+            "{} skipped. To see why: `recall backfill`",
             files(left)
         ));
     }
@@ -1184,16 +1188,19 @@ fn spin(message: &str) -> Spinner {
     Spinner(Some(bar))
 }
 
+// Each says `message` with its commands on lines of their own
+// ([`ui::text_of`]), inside cliclack's frame.
+
 fn say_step(message: &str) {
-    let _ = cliclack::log::step(message);
+    let _ = cliclack::log::step(ui::text_of(message));
 }
 
 fn say_success(message: &str) {
-    let _ = cliclack::log::success(message);
+    let _ = cliclack::log::success(ui::text_of(message));
 }
 
 fn say_warning(message: &str) {
-    let _ = cliclack::log::warning(message);
+    let _ = cliclack::log::warning(ui::text_of(message));
 }
 
 /// An answer to a prompt, or the end of the flow when there is none —
@@ -1215,10 +1222,7 @@ fn answer<T>(result: io::Result<T>) -> Step<T> {
 /// styling. A refusal is the output most likely to end up in a log or be
 /// searched for, and it should read the same wherever it lands.
 fn refuse<T>(what: &str, then: &str) -> Step<T> {
-    eprintln!("recall connect: {what}");
-    if !then.is_empty() {
-        eprintln!("  {then}");
-    }
+    ui::refusal("recall connect", what, then);
     Err(Stop(exit::CONFIG))
 }
 
@@ -1268,9 +1272,11 @@ pub fn disconnect(url: Option<&str>) -> anyhow::Result<i32> {
     };
     if target.is_none() && !saved.is_empty() {
         eprintln!("recall disconnect: more than one server is saved; name one:");
-        for u in &saved {
-            eprintln!("  recall disconnect {u}");
-        }
+        let each: Vec<ui::Line> = saved
+            .iter()
+            .map(|u| ui::Line::Run(format!("recall disconnect {u}")))
+            .collect();
+        ui::eprint_lines(0, &each);
         return Ok(exit::CONFIG);
     }
 
@@ -1310,7 +1316,7 @@ pub fn disconnect(url: Option<&str>) -> anyhow::Result<i32> {
                     Tone::Warn,
                     &format!("The server still lists the device {}", device.name),
                     Some(&format!(
-                        "on an admin device: recall devices revoke {}",
+                        "On an admin device: `recall devices revoke {}`",
                         device.name
                     )),
                 );
@@ -1356,7 +1362,7 @@ pub fn disconnect(url: Option<&str>) -> anyhow::Result<i32> {
                 ui::step(
                     Tone::Warn,
                     "The token itself still works on the server",
-                    Some("rotate RECALL_TOKEN there, then recall connect on every machine"),
+                    Some("Rotate RECALL_TOKEN there, then on every machine: `recall connect`"),
                 );
                 removed = true;
             } else if !saved.contains(target) {

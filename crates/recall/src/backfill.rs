@@ -45,9 +45,11 @@ pub async fn run() -> anyhow::Result<i32> {
                 files(outcome.not_reached)
             ))
         );
-        anstream::eprintln!(
-            "  {}",
-            ui::accent("→ recall backfill again: it sends only what the server is still missing")
+        ui::eprint_lines(
+            2,
+            &ui::lines_of(
+                "Run it again; it sends only what the server is still missing: `recall backfill`",
+            ),
         );
         return Ok(exit::SERVER);
     }
@@ -103,28 +105,28 @@ fn print_groups(outcome: &Outcome) {
         Disposition::Deleted,
         Tone::Warn,
         "deleted on the server, on another machine",
-        Some("recall pull catches this machine up"),
+        Some("To catch this machine up: `recall pull`"),
     );
     group(
         &outcome.entries,
         Disposition::Refused,
         Tone::Bad,
         "refused by the server, so skipped",
-        Some("fix what each one says, then recall backfill again"),
+        Some("Fix what each one says, then run it again: `recall backfill`"),
     );
     group(
         &outcome.entries,
         Disposition::Unroutable,
         Tone::Warn,
         "in no scope, so with nowhere to go",
-        Some("do what each one says, then recall backfill again"),
+        Some("Do what each one says, then run it again: `recall backfill`"),
     );
     group(
         &outcome.entries,
         Disposition::Ignored,
         Tone::Bad,
         "on disk but unreadable",
-        Some("fix what each one says, then recall backfill again"),
+        Some("Fix what each one says, then run it again: `recall backfill`"),
     );
     group(
         &outcome.entries,
@@ -162,7 +164,7 @@ fn group(entries: &[Entry], what: Disposition, tone: Tone, why: &str, next: Opti
         anstream::println!("      {}", ui::dim(&line));
     }
     if let Some(next) = next {
-        anstream::println!("    {}", ui::accent(&format!("→ {next}")));
+        ui::print_lines(4, &ui::lines_of(next));
     }
 }
 
