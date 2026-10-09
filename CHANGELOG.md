@@ -20,7 +20,8 @@ break will be described here in full rather than smoothed over.
   and `recall-worker:latest` follow the newest release, the same image (and
   digest) as its version tag, and never move back to an older one. For
   pulling by hand; a deploy still names a version, and the compose files
-  still read `RECALL_VERSION`.
+  still read `RECALL_VERSION`. Actions → Tag latest moves it by hand, for
+  a release built before it existed.
 
 ## 0.4.15 — 2026-10-06
 

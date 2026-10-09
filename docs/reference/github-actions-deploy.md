@@ -306,7 +306,9 @@ re-running the job leaves one that is already there alone.
 ghcr.io/pimlabs/recall-server:latest`): after each release, `tag-latest`
 points it at that version's own image, the same digest, so the same
 attestation covers it. It only moves forward: re-running an older release
-leaves it on the newest. A deploy never uses it and always names the
+leaves it on the newest. **Actions → Tag latest → Run workflow**, with a
+version, does the same by hand, for a release built before it existed or
+to retry; it touches only the registry and builds nothing. A deploy never uses it and always names the
 version it wants, since a tag that moves by itself would be a deploy
 nobody asked for. Each carries
 provenance, from buildx and as a GitHub attestation, which anyone can check:
