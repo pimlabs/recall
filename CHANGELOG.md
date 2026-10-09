@@ -14,7 +14,7 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
-## Unreleased
+## 0.4.16 — 2026-10-10
 
 - **Every command puts the commands it suggests on lines of their own.**
   What `recall review` started in 0.4.15 now holds everywhere a person

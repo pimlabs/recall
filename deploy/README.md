@@ -87,9 +87,11 @@ All three need:
 
   Every release after 0.4.6 also publishes the finished image, for amd64
   and arm64, as `ghcr.io/pimlabs/recall-server:<version>` (and
-  `recall-worker:<version>`), which is what an automatic deploy pulls. The
-  clone is still where the compose files come from; see
-  [Updating](#updating) for pulling instead of building by hand.
+  `recall-worker:<version>`), which is what an automatic deploy pulls.
+  `:latest` follows the newest release, for a quick `docker pull`; a
+  deploy still names its version. The clone is still where the compose
+  files come from; see [Updating](#updating) for pulling instead of
+  building by hand.
 
 - **Linux on amd64 or arm64.** Those are the two server builds a release
   publishes. Anything else can still build from source with
