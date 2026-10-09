@@ -134,9 +134,10 @@ fn missing_configuration(root: &Path) -> Vec<(String, String)> {
          nothing in a remote session, which ends with it. See docs/reference/token-setup.md."
             .to_string()
     } else {
-        "Connect this machine, once: it asks for the token and checks it. A claude.ai cloud \
-         environment sets RECALL_URL and RECALL_AUTHKEY as its own variables instead, see \
-         docs/reference/token-setup.md. `recall connect https://your-recall-host`"
+        "Connect this machine, once: it asks for the token and checks it. \
+         `recall connect https://your-recall-host` A claude.ai cloud environment sets \
+         RECALL_URL and RECALL_AUTHKEY as its own variables instead, see \
+         docs/reference/token-setup.md."
             .to_string()
     };
     let mut missing = Vec::new();
