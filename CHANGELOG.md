@@ -14,6 +14,20 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
+## 0.4.17 — 2026-10-14
+
+- **The server can run under rootless Podman.** `deploy/quadlet/` has
+  systemd (Quadlet) units for `recall-server`, its volume, and a read-only
+  database browser started by hand (Datasette, pinned by digest, in place of
+  sqlite-web), and `deploy/podman-deploy.sh` deploys a release with them.
+  `deploy.yml` takes that path when the repository variable `DEPLOY_RUNTIME`
+  is `podman`; unset, it deploys with compose exactly as before, and nothing
+  changes for a server that runs compose. "Running it under Podman" in
+  `deploy/README.md` covers the first start, the token as a Podman secret,
+  restoring, and moving a compose deployment over. 0.4.17 is the first
+  release that path can deploy, so it is also the oldest a Podman server can
+  roll back to.
+
 ## 0.4.16 — 2026-10-10
 
 - **Every command puts the commands it suggests on lines of their own.**

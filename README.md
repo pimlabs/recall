@@ -38,9 +38,10 @@ Do this first. Every client instruction below asks for a `RECALL_URL` and a
 until it exists.
 
 What it costs, before you start: a host that stays up (a small VPS is the
-usual answer), Docker with Compose v2, a clone of this repository on that
-host — both compose files build from source — and either a domain you control
-or a Cloudflare account, depending on which ingress you pick.
+usual answer), Docker with Compose v2 (or rootless Podman 5 with systemd), a
+clone of this repository on that host — both compose files build from source —
+and either a domain you control or a Cloudflare account, depending on which
+ingress you pick.
 [`deploy/README.md`](deploy/README.md) walks the whole thing, ingress first,
 because that is the choice everything else follows from.
 
@@ -148,7 +149,7 @@ And the tree:
 | Path | What's in it |
 |---|---|
 | `crates/` | The binary. `recall-wire` (frozen contract) · `recall-hooks` (client, including path derivation) · `recall-server` · `recall` (`main`, for both halves — `serve` included). See ARCHITECTURE's code map. |
-| `deploy/` | The image, and a Compose file per ingress — Cloudflare Tunnel or an existing Traefik. Runs on anything with Docker. |
+| `deploy/` | The image, and a Compose file per ingress — Cloudflare Tunnel or an existing Traefik. Runs on anything with Docker. `deploy/quadlet/` runs the same image under rootless Podman. |
 | `scripts/` | `compat-check.sh` (the cutover matrix), `api-doc-check.sh`, `trusted-ip-check.sh`, `install-worker-test.js`, `wrangler-check.py`, `release.sh`, and `probes/`. |
 | `npm/`, `Formula/`, `install.sh`, `install.ps1` | Four of the five install channels. The fifth, `cargo install recall`, needs no file here. |
 | `fixtures/` | A database the retired Node server actually wrote, so the cutover stays testable without it. |
