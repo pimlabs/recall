@@ -74,13 +74,14 @@ repository secret**:
 | `DEPLOY_PORT` | Optional, defaults to `22` |
 | `DEPLOY_PATH` | Optional, defaults to `~/recall` on the VPS |
 
-And two **variables**, not secrets — one names filenames, the other a URL
-that is already public:
+And **variables**, not secrets: one names filenames, one a URL that is
+already public, and one which runtime the server uses:
 
 | Variable | Value |
 |---|---|
 | `DEPLOY_COMPOSE_FILES` | The `-f` flags your server is built from — see below |
 | `DEPLOY_HEALTH_URL` | Your server's `/health` URL, e.g. `https://recall.example.com/health` |
+| `DEPLOY_RUNTIME` | Optional: `podman` for a server that runs under rootless Podman, unset for compose. See [Podman instead of compose](#podman-instead-of-compose) |
 
 `DEPLOY_HEALTH_URL` is independent of everything above: set it even if you
 deploy by hand and never wire up the secrets. It is what makes every deploy
@@ -230,6 +231,31 @@ without them.
 This used to be hardcoded to no `-f` at all, which acts on
 `docker-compose.yml`. On a host running the Traefik stack that quietly built
 and started the *other* ingress alongside the real one.
+
+## Podman instead of compose
+
+A server that runs Recall under rootless Podman, from the Quadlet units in
+`deploy/quadlet/` (see "Running it under Podman" in
+[`deploy/README.md`](../../deploy/README.md#running-it-under-podman)), sets
+the variable `DEPLOY_RUNTIME` to `podman`. `DEPLOY_COMPOSE_FILES` then does
+not apply. The runner verifies the image exactly as under compose, then SSHes
+in as the user that runs the server, checks out the release's tag, and runs
+the tag's own `deploy/podman-deploy.sh` with the digest it verified. That
+script pulls those bytes, installs the units, restarts `recall-server` under
+the user's systemd and waits for `/health`; the deploy fails if it does not
+answer.
+
+Two limits come with it. A release whose tag has no `deploy/podman-deploy.sh`
+cannot be deployed this way, so a rollback goes no further back than the
+first release that has it; the job stops before the checkout moves. And a
+build deploy (0.4.6 and older) never can, since the script only pulls.
+
+The variable is checked rather than defaulted: a value that is neither
+`podman` nor `compose` stops the job. **On a host that moved from compose to
+Podman, delete `DEPLOY_COMPOSE_FILES` too.** Should `DEPLOY_RUNTIME` ever
+be removed by mistake, the compose path then stops at
+[its own check](#deploy_compose_files--a-variable-not-a-secret) instead of
+starting the old stack on the old volume beside the new one.
 
 ## How the health check reaches a port that is not published
 

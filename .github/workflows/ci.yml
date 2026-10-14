@@ -142,13 +142,13 @@ jobs:
 
           # This workflow itself counts for both: a change to either gate
           # below, or to the jobs it feeds, is only proven by running them.
-          if printf '%s\n' "$changed" | grep -Eq '^(crates/|deploy/|Cargo\.(toml|lock)$|scripts/(release-image|image-pullable)\.sh$|\.github/workflows/(ci|build-release)\.yml$)'; then
+          if printf '%s\n' "$changed" | grep -Eq '^(crates/|deploy/|Cargo\.(toml|lock)$|scripts/(release-image|image-pullable|podman-check|verify-release-image)\.sh$|\.github/workflows/(ci|build-release)\.yml$)'; then
             echo "image=true" >> "$GITHUB_OUTPUT"
           else
             echo "image=false" >> "$GITHUB_OUTPUT"
             # One line on purpose: a `\` continuation inside a quoted
             # string keeps the next line's indentation in the annotation.
-            echo "::notice::Nothing under crates/, deploy/, Cargo.toml, Cargo.lock, scripts/release-image.sh, scripts/image-pullable.sh, build-release.yml or this workflow changed, so the server image builds were skipped. They run unconditionally on every push to main."
+            echo "::notice::Nothing under crates/, deploy/, Cargo.toml, Cargo.lock, scripts/release-image.sh, scripts/image-pullable.sh, scripts/podman-check.sh, scripts/verify-release-image.sh, build-release.yml or this workflow changed, so the server image builds and check-podman were skipped. They run unconditionally on every push to main."
           fi
 
           # .github/actions/ too: the windows jobs set up Rust through the
@@ -240,6 +240,8 @@ jobs:
           bash -n scripts/installer-test.sh
           bash -n scripts/release-image.sh
           bash -n scripts/image-pullable.sh
+          bash -n deploy/podman-deploy.sh
+          bash -n scripts/podman-check.sh
           sh -n deploy/fetch-release.sh
 
       # The formula rewrite runs once per release, from CI or from a laptop,
@@ -682,6 +684,35 @@ jobs:
           # impossible without anyone noticing.
           docker run --rm --entrypoint sh recall-server-rel -c 'command -v wget'
 
+  # The Podman deploy, run for real: deploy/podman-deploy.sh and the Quadlet
+  # units in deploy/quadlet/ under rootless Podman and the runner user's own
+  # systemd, on the Podman a Podman deployment runs (ubuntu-26.04 has 5.7).
+  # It deploys the three newest published releases in a row, two of them by
+  # the digest verify-release-image.sh verified, as deploy.yml does, then
+  # runs deploy/README.md's Podman blocks as written: the token, rotating
+  # it, restoring a snapshot, and moving a Compose deployment's volume and
+  # token over from Docker. A unit that publishes beyond loopback, files the
+  # server writes that its user cannot, a restore that keeps the old WAL, a
+  # move that starts on an empty volume: each fails it. See the script.
+  #
+  # Gated on the same diff as `build-image`.
+  check-podman:
+    name: check-podman
+    needs: plan
+    if: needs.plan.outputs.image == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: The Podman deploy and its README procedures work
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/podman-check.sh
+
   # The images build-release.yml publishes, built here the way its `build-image`
   # legs build them: the same script, Dockerfile targets, build arguments
   # and provenance, one leg per architecture on a runner of that
@@ -1026,7 +1057,7 @@ jobs:
   ci-passed:
     name: ci-passed
     if: always()
-    needs: [plan, check-scripts, test-installers, lint, test-linux, build-image, check-publish-image, check-release-image, test-windows, install-windows]
+    needs: [plan, check-scripts, test-installers, lint, test-linux, build-image, check-podman, check-publish-image, check-release-image, test-windows, install-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Every job succeeded or was skipped on purpose

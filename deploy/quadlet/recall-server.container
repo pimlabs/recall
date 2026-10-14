@@ -1,0 +1,53 @@
+# recall-server under rootless Podman, as a Quadlet unit. deploy/podman-deploy.sh
+# installs it into ~/.config/containers/systemd/ and writes
+# recall-server.container.d/50-deploy.conf beside it, with the two lines that
+# differ per deploy: Image= (the version deployed) and the /backups mount
+# (where this checkout's deploy/backups is). This host's own settings, such as
+# RECALL_PUBLIC_URL, go in recall-server.container.d/local.conf, which no
+# deploy writes. See "Running it under Podman" in deploy/README.md.
+
+[Unit]
+Description=Recall sync server
+
+[Container]
+ContainerName=recall-server
+# Container uid 1000 (node, which the entrypoint drops to) is the host user
+# running this unit, so what the server writes to /backups belongs to the
+# owner of deploy/backups, who also runs backup-offbox.sh. keep-id would run
+# the entrypoint as that uid too; it has to start as root to chown /data and
+# /backups and drop to node, so User= says so. Root here is an unprivileged
+# subordinate uid on the host.
+UserNS=keep-id:uid=1000,gid=1000
+User=0:0
+NoNewPrivileges=true
+# Loopback only, and never anything wider: RECALL_TRUSTED_IP_HEADER below is
+# true only while every request arrives through the ingress, which sets it.
+# On a host with other users, also restrict who may connect to this port.
+PublishPort=127.0.0.1:18787:8787
+Volume=recall-data.volume:/data
+Secret=recall-token,type=env,target=RECALL_TOKEN
+Environment=RECALL_PORT=8787
+Environment=RECALL_DB_PATH=/data/recall.db
+Environment=RECALL_BACKUP_DIR=/backups
+Environment=RECALL_BACKUP_INTERVAL_HOURS=24
+Environment=RECALL_BACKUP_KEEP=7
+# The header Traefik sets from the real client address. Rate limiting keys
+# off it and runs before auth; see docker-compose.traefik.yml.
+Environment=RECALL_TRUSTED_IP_HEADER=x-real-ip
+# The deploy pulls the image by digest and tags it as the version that
+# 50-deploy.conf names. A start must run those bytes or fail, never fetch
+# whatever the tag names in the registry by then.
+Pull=never
+HealthCmd=wget -qO- http://127.0.0.1:8787/health
+HealthInterval=30s
+# As the compose files' stop_grace_period: requests in flight finish and the
+# WAL is emptied into recall.db before the container is killed.
+StopTimeout=60
+
+[Service]
+Restart=always
+# Longer than StopTimeout, so systemd never kills the stop itself.
+TimeoutStopSec=90
+
+[Install]
+WantedBy=default.target
