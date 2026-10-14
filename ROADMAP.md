@@ -99,6 +99,13 @@ their own.
       the last sync, found by comparing each file with how that sync left
       it, and `recall sync` does the same by hand. PR #180, shipped in
       0.4.12.
+- [x] **The server runs under rootless Podman too.** Added 2026-10-14 for
+      a host moving its services off Docker to unprivileged users with no
+      daemon. Quadlet units in `deploy/quadlet/`, deployed by
+      `deploy/podman-deploy.sh`, and by `deploy.yml` when `DEPLOY_RUNTIME`
+      is `podman`; the compose path is unchanged. `scripts/podman-check.sh`
+      deploys real releases with it on Podman 5.7 in CI and runs the
+      README's Podman procedures as written. PR #201, shipped in 0.4.17.
 
 ## Phase 5 — One Go binary — done
 
