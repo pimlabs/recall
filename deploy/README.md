@@ -7,7 +7,9 @@ answers, connect your machines with
 
 Docker Compose, on anything that runs Docker. A small always-on VPS is the
 usual answer; a desktop or a laptop works too, with one caveat below. Nothing
-in this directory is specific to a host OS or a Docker distribution.
+in this directory is specific to a host OS or a Docker distribution. A Linux
+host that runs its services under rootless Podman instead has units of its
+own: see [Running it under Podman](#running-it-under-podman).
 
 The choice that actually matters is not the machine but the **ingress**, and
 there are two — see the next section.
@@ -459,6 +461,253 @@ as anyone else it refuses, since files it left behind could stop the
 server opening the database. It is in the audit
 log: a `passkey_reset` leaf, credited to the host, saying how many passkeys
 went and until when the new code works (never the code).
+
+## Running it under Podman
+
+The same image and the same volume, run by rootless Podman from systemd
+units instead of by Docker Compose: for a host that runs each service as an
+unprivileged user of its own, with no Docker daemon. The units are Quadlet
+files in `deploy/quadlet/`, and `deploy/podman-deploy.sh` installs them and
+deploys a release, by hand or from `deploy.yml`. Everything else in this
+README applies, with the commands under [Everyday commands](#everyday-commands).
+
+The ingress is whatever already runs on the host, forwarding to
+`http://127.0.0.1:18787` and setting `X-Real-Ip` from the client's address,
+the way Traefik does in [Which ingress](#which-ingress). A rootless container
+cannot join the ingress's network the way a compose file does, so it has to
+publish a port, and it publishes on loopback only. Loopback is still open to
+every user of the machine, and a connection that does not come through the
+ingress can set `X-Real-Ip` itself. On a host with other users, allow new
+connections to `127.0.0.1:18787` only from the ingress's user and this one
+(nftables matches on `meta skuid`).
+
+### What it needs
+
+- Podman 5.0 or newer, with systemd. `podman-deploy.sh` checks.
+- A user of its own, with subordinate ids in `/etc/subuid` and
+  `/etc/subgid` (`useradd` adds them), and linger, so its services run
+  without a login: `sudo loginctl enable-linger <user>`.
+- A checkout of this repository in that user's home, at a release that has
+  `deploy/podman-deploy.sh`. Older releases cannot be deployed this way.
+- `deploy/backups/` owned by that user. The server writes its snapshots
+  there as that user, and `backup-offbox.sh` runs as that user too.
+- linux/amd64, for the database browser only: Datasette publishes no other
+  platform. The server runs on arm64 as well.
+
+On a host with SELinux enforcing (Fedora, RHEL), the bind mount of
+`deploy/backups` needs a label the container may write, which these units
+do not set; the hosts they are tested on use AppArmor.
+
+### First start
+
+As that user, from the checkout's root. The token first, as a Podman secret
+rather than a line in `.env`. `printf` and not `echo`, since a newline at
+the end would become part of the token:
+
+```sh
+token=$(openssl rand -hex 32) &&
+printf '%s' "$token" | podman secret create recall-token - &&
+echo "RECALL_TOKEN for your clients: $token"
+```
+
+The server reads it as `RECALL_TOKEN`, and `podman inspect` shows the
+secret's name, never its value. Podman keeps it in a file only this user can
+read, as `.env` was.
+
+This host's own settings go in a drop-in that no deploy touches. The admin
+page's address is the usual one (see step 2):
+
+```sh
+mkdir -p ~/.config/containers/systemd/recall-server.container.d
+cat > ~/.config/containers/systemd/recall-server.container.d/local.conf <<'EOF'
+[Container]
+Environment=RECALL_PUBLIC_URL=https://recall.yourdomain.com
+EOF
+```
+
+An `Environment=` line here also overrides one in the unit, such as
+`RECALL_BACKUP_KEEP`. Then deploy a release:
+
+```sh
+deploy/podman-deploy.sh 0.4.17
+```
+
+It checks Podman, linger, the secret and `deploy/backups`, and has Quadlet
+convert the units it is about to install, before it changes anything. Then
+it pulls `ghcr.io/pimlabs/recall-server:<version>` and checks that the image
+says it is that version, installs the units into
+`~/.config/containers/systemd/`, restarts `recall-server` and waits for
+`/health`. The units start it again at boot and whenever it exits.
+Verify from outside as in [step 4](#4-verify-from-outside).
+
+### Deploys from GitHub Actions
+
+Set the repository variable `DEPLOY_RUNTIME` to `podman`, and
+`deploy.yml` runs `podman-deploy.sh` over SSH, with the digest it verified
+rather than the tag; see
+[`github-actions-deploy.md`](../docs/reference/github-actions-deploy.md#podman-instead-of-compose).
+
+### Updating and rolling back
+
+The same command at another release's tag. Rolling back is the same, with
+an older one that has `deploy/podman-deploy.sh`:
+
+```sh
+git fetch --tags origin
+git checkout v0.4.17
+deploy/podman-deploy.sh 0.4.17
+```
+
+Once the new version answers, the script removes older version tags of the
+image, keeping the one before it, so a rollback to it needs no pull.
+
+### Rotating the token
+
+Then update every machine, as
+[`token-setup.md`](../docs/reference/token-setup.md#rotating-the-token)
+says:
+
+```sh
+token=$(openssl rand -hex 32) &&
+printf '%s' "$token" | podman secret create --replace recall-token - &&
+systemctl --user restart recall-server &&
+echo "New RECALL_TOKEN: $token"
+```
+
+### Everyday commands
+
+systemd runs the container now, so it is stopped and started through
+`systemctl --user`, never `podman stop`: systemd starts a container that
+stopped behind its back again. The commands elsewhere in this README
+translate like this:
+
+| | Compose | Podman |
+|---|---|---|
+| Log | `docker logs recall-server` | `journalctl --user -u recall-server` |
+| Stop, start, restart | `docker stop recall-server` | `systemctl --user stop recall-server` |
+| Run a command in it | `docker exec -u node recall-server …` | `podman exec -u node recall-server …` |
+| The volume | `recall_recall-data` | `recall-data` |
+| A container on the volume | `docker run --rm -v recall_recall-data:/data alpine …` | `podman run --rm -v recall-data:/data docker.io/library/alpine:3 …` |
+| Is it healthy | `docker ps` | `systemctl --user status recall-server`, `podman healthcheck run recall-server` |
+
+So `reset-passkeys`, `recall-server admin` and
+[the last resort](#last-resort-by-hand-with-sqlite3) work as written there,
+with these substitutions. Logging the `claude` CLI in, for
+[real merge](#enabling-real-merge-phase-2):
+
+```sh
+podman exec -it -u node recall-server claude setup-token
+```
+
+### Backups and restoring
+
+The server's snapshots land in `deploy/backups/` as [above](#backups),
+owned by the user that runs it, and `backup-offbox.sh` runs as that user.
+To restore one, as there, from the checkout's root:
+
+```sh
+cd deploy
+snap=recall-<timestamp>.db
+[ -f "backups/$snap" ] &&
+podman volume exists recall-data &&
+systemctl --user stop recall-server recall-sqlite-web &&
+podman run --rm -e SNAP="$snap" -v recall-data:/data -v "$(pwd)/backups":/backups:ro docker.io/library/alpine:3 sh -euc '
+  cp "/backups/$SNAP" /data/recall.db.restoring
+  [ "$(head -c 15 /data/recall.db.restoring)" = "SQLite format 3" ]
+  aside=/data/replaced-$(date +%Y%m%d-%H%M%S)
+  mkdir "$aside"
+  for f in recall.db recall.db-wal recall.db-shm recall.db-journal; do
+    if [ -e "/data/$f" ]; then mv "/data/$f" "$aside/"; fi
+  done
+  mv /data/recall.db.restoring /data/recall.db' &&
+systemctl --user start recall-server
+```
+
+Every step means what it does in the Compose block, and the order matters
+for the same reasons. Two differ. The volume is named by
+`recall-data.volume`, not by a project name, so checking that it exists is
+enough to know `podman run` will not create an empty one and restore into
+that. And `systemctl` stops a unit that is not running without complaint,
+so the database browser needs no special case. If the block stops after
+`systemctl --user stop`, nothing was moved: `systemctl --user start
+recall-server`, check `/health`, and fix what the error named.
+`scripts/podman-check.sh` runs this block, as written here, against a real
+server under Podman.
+
+### The database browser
+
+Datasette, read-only, started by hand and stopped after. It has no auth of
+its own, so it is published on loopback only, and nothing starts it but
+this:
+
+```sh
+systemctl --user start recall-sqlite-web
+```
+
+Then from your own machine `ssh -L 8081:127.0.0.1:8081 <user>@<host>`, and
+`http://localhost:8081`. Stop it when you are done with
+`systemctl --user stop recall-sqlite-web`. It reads the database while
+`recall-server` runs, for the reason given in
+[Monitoring](#monitoring--inspecting-the-database).
+
+### Moving a Compose deployment to Podman
+
+A few minutes of downtime. Run it as the user that will run the server,
+while that user can still use Docker, from the checkout's root.
+
+**1. The token**, the one the running server already has, so no machine
+needs a new one:
+
+```sh
+env=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' recall-server) &&
+token=$(printf '%s\n' "$env" | sed -n 's/^RECALL_TOKEN=//p') &&
+[ -n "$token" ] &&
+printf '%s' "$token" | podman secret create recall-token -
+```
+
+**2. This host's settings.** What `.env` gave the compose file besides the
+token, `RECALL_PUBLIC_URL` above all, goes into `local.conf` as in
+[First start](#first-start).
+
+**3. `deploy/backups/`** to the new user, if Docker's server wrote it as
+another uid: `sudo chown -R <user>: deploy/backups`.
+
+**4. The volume.** This stops the Compose server and copies its volume into
+a new Podman volume named `recall-data`:
+
+```sh
+docker inspect -f '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}' recall-server | grep -qx recall_recall-data &&
+! podman volume exists recall-data &&
+docker stop recall-server &&
+move=$(mktemp -d) &&
+docker run --rm -v recall_recall-data:/from:ro -v "$move":/to docker.io/library/alpine:3 tar -C /from -cf /to/recall-data.tar . &&
+podman volume create recall-data &&
+podman volume import recall-data "$move/recall-data.tar" &&
+rm -rf "$move"
+```
+
+The Docker volume is only read, so it stays as it was. A Podman volume of
+that name already there stops the block before anything else, rather than
+copying into it; if an earlier attempt left one behind, remove it with
+`podman volume rm recall-data` and run the block again. The files arrive
+under Podman's ids, and the server's entrypoint gives them to `node` when
+it starts. The `claude` CLI's login moves with them.
+
+**5. The ingress** now forwards to `http://127.0.0.1:18787`, where nothing
+listens until the next step.
+
+**6. Deploy** with `deploy/podman-deploy.sh <version>`, and verify from
+outside as in [step 4](#4-verify-from-outside).
+
+To go back before anything has been written under Podman:
+`systemctl --user stop recall-server`, then `docker start recall-server`
+and the ingress back as it was. Writes made under Podman are not in the
+Docker volume. Once the new server has run a while, remove `RECALL_TOKEN`
+from `deploy/.env`, so the token is kept in one place, and if `deploy.yml`
+deploys this host, set `DEPLOY_RUNTIME` and delete `DEPLOY_COMPOSE_FILES`
+(see [`github-actions-deploy.md`](../docs/reference/github-actions-deploy.md#podman-instead-of-compose)).
+`scripts/podman-check.sh` runs steps 1 and 4 as written here, from a
+Compose-style container to a server under Podman.
 
 ## Switching ingress on a server that is already running
 

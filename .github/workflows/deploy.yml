@@ -26,8 +26,19 @@ name: Deploy a release
 #     their image on the server, and before 0.4.0 that image compiled the
 #     server from source.
 #
-# Needs DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY as repo secrets and
-# DEPLOY_COMPOSE_FILES as a variable; see docs/reference/github-actions-deploy.md.
+# Two ways to run it on the server, chosen by the repository variable
+# DEPLOY_RUNTIME:
+#
+#   - unset (or `compose`): Docker Compose, from the compose files that
+#     DEPLOY_COMPOSE_FILES names, as every deploy did before Podman.
+#   - `podman`: rootless Podman under the SSH user's systemd, by running the
+#     tag's deploy/podman-deploy.sh with the verified digest. A release whose
+#     tag has no such script cannot be deployed this way, and a build deploy
+#     (0.4.6 and older) never can.
+#
+# Needs DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY as repo secrets, and under
+# compose DEPLOY_COMPOSE_FILES as a variable; see
+# docs/reference/github-actions-deploy.md.
 on:
   workflow_call:
     inputs:
@@ -118,13 +129,37 @@ jobs:
             echo "::notice::DEPLOY_HOST is not set, so there is nothing to deploy to. This is not a failure — see docs/reference/github-actions-deploy.md to wire up a server."
           fi
 
+      # Decided from the variable alone, and refused when it says something
+      # else: a typo here must not fall through to compose, which on a host
+      # that moved to Podman would start the old stack on the old volume.
+      - name: Compose or Podman?
+        id: runtime
+        if: steps.secrets.outputs.configured == 'true'
+        env:
+          RUNTIME: ${{ vars.DEPLOY_RUNTIME }}
+          MODE: ${{ steps.how.outputs.mode }}
+        run: |
+          case "$RUNTIME" in
+            ""|compose) runtime=compose ;;
+            podman) runtime=podman ;;
+            *)
+              echo "::error::DEPLOY_RUNTIME is '$RUNTIME'. It is 'podman', or 'compose', or unset for compose. See docs/reference/github-actions-deploy.md."
+              exit 1 ;;
+          esac
+          if [ "$runtime" = podman ] && [ "$MODE" != pull ]; then
+            echo "::error::$VERSION has no published image, and the Podman deploy only pulls. It can be deployed under compose (DEPLOY_RUNTIME unset) only."
+            exit 1
+          fi
+          echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
+          echo "The server runs Recall under $runtime."
+
       # This repository ships two ingresses, so the job cannot know which
       # compose files a given deployment is built from, and guessing is worse
       # than refusing. With no `-f`, compose acts on docker-compose.yml: on a
       # host running the Traefik stack that quietly starts the *other*
       # ingress alongside the real one.
       - name: Is the compose file named?
-        if: steps.secrets.outputs.configured == 'true'
+        if: steps.secrets.outputs.configured == 'true' && steps.runtime.outputs.runtime == 'compose'
         run: |
           if [ -z "${{ vars.DEPLOY_COMPOSE_FILES }}" ]; then
             echo "::error::DEPLOY_HOST is set but DEPLOY_COMPOSE_FILES is not, so this job does not know which ingress your server runs and will not guess. Set it as a repository variable, e.g. '-f docker-compose.traefik.yml -f docker-compose.traefik.local.yml'. See docs/reference/github-actions-deploy.md."
@@ -178,8 +213,8 @@ jobs:
             exit 1
           fi
 
-      - name: Deploy over SSH
-        if: steps.secrets.outputs.configured == 'true'
+      - name: Deploy over SSH, under compose
+        if: steps.secrets.outputs.configured == 'true' && steps.runtime.outputs.runtime == 'compose'
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         with:
           host: ${{ secrets.DEPLOY_HOST }}
@@ -356,6 +391,39 @@ jobs:
           # digest for.
           SERVER_DIGEST: ${{ steps.verify.outputs.server_digest }}
           WORKER_DIGEST: ${{ steps.verify.outputs.worker_digest }}
+
+      # The tag's own deploy/podman-deploy.sh does the work, so a deploy of a
+      # version runs the way that version says, as under compose. Asked of
+      # the tag before the checkout moves: a release older than the script
+      # stops here with the checkout and the server as they were. The
+      # digest is the one the runner verified, never empty: given none, the
+      # script would pull the tag and trust it, which is for a deploy by hand.
+      - name: Deploy over SSH, under Podman
+        if: steps.secrets.outputs.configured == 'true' && steps.runtime.outputs.runtime == 'podman'
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script: |
+            set -e
+            if ! printf '%s' "$SERVER_DIGEST" | grep -Eqx 'sha256:[0-9a-f]{64}'; then
+              echo "This deploy has no verified digest for recall-server (the runner's step 'Is it the image the release built?' says why), so nothing was changed." >&2
+              exit 1
+            fi
+            cd "${DEPLOY_PATH:-$HOME/recall}"
+            git fetch --no-tags origin "refs/tags/v$VERSION:refs/tags/v$VERSION"
+            if ! git cat-file -e "v$VERSION:deploy/podman-deploy.sh" 2>/dev/null; then
+              echo "v$VERSION has no deploy/podman-deploy.sh: it is older than the Podman deploy, so nothing was changed. Deploy a newer release." >&2
+              exit 1
+            fi
+            git checkout --detach "v$VERSION"
+            deploy/podman-deploy.sh "$VERSION" "$SERVER_DIGEST"
+          envs: DEPLOY_PATH,VERSION,SERVER_DIGEST
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          SERVER_DIGEST: ${{ steps.verify.outputs.server_digest }}
 
       # Whichever way the steps above went, say what production is actually
       # running, on the run's summary page, where it is read. A green tick

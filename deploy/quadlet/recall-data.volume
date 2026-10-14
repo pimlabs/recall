@@ -1,0 +1,6 @@
+# The server's database (recall.db, with its WAL) and the `claude` CLI's
+# login under claude-config/: what the compose files call recall-data.
+# Named outright, so every command in deploy/README.md can say recall-data.
+
+[Volume]
+VolumeName=recall-data

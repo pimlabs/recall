@@ -1,0 +1,28 @@
+# Read-only database browser (Datasette) for the owner's own use, started by
+# hand and stopped after:
+#
+#   systemctl --user start recall-sqlite-web
+#   ssh -L 8081:127.0.0.1:8081 <this host>    # then http://localhost:8081
+#   systemctl --user stop recall-sqlite-web
+#
+# It has no auth of its own, so it publishes on loopback only and has no
+# [Install] section: nothing starts it but that command. The name is the one
+# the sqlite-web container had, which deploy/README.md's procedures use.
+#
+# The database is in WAL mode, and a read-only mount cannot create the
+# recall.db-shm a reader needs, so this reads it while recall-server, which
+# keeps that file, is running.
+
+[Unit]
+Description=Recall database browser, read-only
+
+[Container]
+ContainerName=recall-sqlite-web
+# Pinned by digest. Published for linux/amd64 only.
+Image=docker.io/datasetteproject/datasette:0.65.5@sha256:ff4e316f6582c8d296e87bdf7e701a388e64ef73ce850de183afd11fc2aa1324
+Exec=datasette serve /data/recall.db --host 0.0.0.0 --port 8001
+PublishPort=127.0.0.1:8081:8001
+Volume=recall-data.volume:/data:ro
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=all

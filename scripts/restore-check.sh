@@ -121,7 +121,8 @@ blocks = re.findall(r'```sh\n(.*?)```', open(sys.argv[1]).read(), re.S)
 print(sum(len(re.findall(r'docker compose (?:stop|start)', b)) for b in blocks))
 EOF
 }
-RESTORE=$(block 'recall.db.restoring') || exit 1
+# The Compose block; the Podman one is scripts/podman-check.sh's.
+RESTORE=$(block 'docker run --rm -e SNAP') || exit 1
 ROLLBACK=$(block 'journal_mode=DELETE') || exit 1
 INGRESS=$(block 'before-ingress-switch') || exit 1
 LAST_RESORT=$(block 'before-cleanup' '# 3.') || exit 1
