@@ -37,6 +37,7 @@ DIGEST=${2:-}
 # systemctl --user cannot find the user's manager without it.
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 me=$(id -un)
+group=$(id -gn)
 
 # ---------------------------------------------------------------- checks
 
@@ -54,7 +55,12 @@ mkdir -p "$BACKUPS"
 # The advice names the group: uutils chown (Ubuntu 26.04) leaves it as it was
 # for "user:", and a group the user namespace does not map breaks the server.
 [ -w "$BACKUPS" ] \
-  || die "$BACKUPS is not writable by $me. The server writes its snapshots there as $me; give it to $me: sudo chown -R $me:$(id -gn) $BACKUPS"
+  || die "$BACKUPS is not writable by $me. The server writes its snapshots there as $me; give it to $me: sudo chown -R $me:$group $BACKUPS"
+# -w passes when only the group is foreign, yet the entrypoint's chown of
+# /backups then fails: the namespace maps $me and its own group, no other.
+foreign=$(find "$BACKUPS" \( ! -user "$me" -o ! -group "$group" \) -print -quit)
+[ -z "$foreign" ] \
+  || die "$foreign does not belong to $me:$group, and the server cannot start with it: the container's entrypoint cannot chown it. Give it all to $me: sudo chown -R $me:$group $BACKUPS"
 
 # Quadlet itself, run on the units this deploy would install, with this
 # host's own drop-ins beside them, before any of them replaces what runs.
