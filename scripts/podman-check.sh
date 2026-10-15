@@ -227,6 +227,20 @@ grep -q 'cannot convert' <<<"$out" && ok "  and says why" || { bad "  and says w
 chk "  leaving the installed unit as it was" "$(sha256sum < "$UNITS/recall-server.container")" "$(sha256sum < "$ROOT/deploy/quadlet/recall-server.container")"
 chk "  and the server running" "$(systemctl --user is-active recall-server.service)" "active"
 
+section "A file in deploy/backups whose group the user namespace does not map"
+cp -R "$ROOT/deploy" "$W/foreign"
+touch "$W/foreign/backups/recall-foreign.db"
+sudo chgrp root "$W/foreign/backups/recall-foreign.db"
+conf="$UNITS/recall-server.container.d/50-deploy.conf"
+before=$(sha256sum < "$conf")
+started=$(podman inspect --format '{{.State.StartedAt}}' recall-server)
+out=$("$W/foreign/podman-deploy.sh" "$NEW" "$NEW_DIGEST" 2>&1); code=$?
+[ "$code" != 0 ] && ok "the deploy refuses it" || bad "the deploy ran with a file of group root in deploy/backups"
+grep -qF "$W/foreign/backups/recall-foreign.db" <<<"$out" && ok "  and names the file" || { bad "  and names the file"; echo "$out"; }
+grep -qF "sudo chown -R $me:$(id -gn) $W/foreign/backups" <<<"$out" && ok "  and gives the chown that fixes it" || bad "  and gives the chown that fixes it"
+chk "  leaving the installed drop-in as it was" "$(sha256sum < "$conf")" "$before"
+chk "  and the server running, never restarted" "$(podman inspect --format '{{.State.StartedAt}}' recall-server)" "$started"
+
 # ---------------------------------------------------------------- browser
 
 section "The database browser"

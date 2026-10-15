@@ -489,8 +489,10 @@ connections to `127.0.0.1:18787` only from the ingress's user and this one
   without a login: `sudo loginctl enable-linger <user>`.
 - A checkout of this repository in that user's home, at a release that has
   `deploy/podman-deploy.sh`. Older releases cannot be deployed this way.
-- `deploy/backups/` owned by that user. The server writes its snapshots
-  there as that user, and `backup-offbox.sh` runs as that user too.
+- `deploy/backups/` and everything in it owned by that user and its own
+  group. The server writes its snapshots there as that user, and
+  `backup-offbox.sh` runs as that user too. `podman-deploy.sh` refuses any
+  other owner or group, which the container's entrypoint could not chown.
 - linux/amd64, for the database browser only: Datasette publishes no other
   platform. The server runs on arm64 as well.
 
