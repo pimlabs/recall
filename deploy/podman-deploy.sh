@@ -51,8 +51,10 @@ systemctl --user show-environment >/dev/null 2>&1 \
 podman secret exists recall-token \
   || die "there is no Podman secret recall-token, which the server reads its RECALL_TOKEN from. Create it first: see \"Running it under Podman\" in deploy/README.md."
 mkdir -p "$BACKUPS"
+# The advice names the group: uutils chown (Ubuntu 26.04) leaves it as it was
+# for "user:", and a group the user namespace does not map breaks the server.
 [ -w "$BACKUPS" ] \
-  || die "$BACKUPS is not writable by $me. The server writes its snapshots there as $me; give it to $me: sudo chown -R $me: $BACKUPS"
+  || die "$BACKUPS is not writable by $me. The server writes its snapshots there as $me; give it to $me: sudo chown -R $me:$(id -gn) $BACKUPS"
 
 # Quadlet itself, run on the units this deploy would install, with this
 # host's own drop-ins beside them, before any of them replaces what runs.

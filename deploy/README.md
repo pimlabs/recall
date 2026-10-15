@@ -670,7 +670,10 @@ token, `RECALL_PUBLIC_URL` above all, goes into `local.conf` as in
 [First start](#first-start).
 
 **3. `deploy/backups/`** to the new user, if Docker's server wrote it as
-another uid: `sudo chown -R <user>: deploy/backups`.
+another uid: `sudo chown -R "$(id -un):$(id -gn)" deploy/backups`. Name the
+group too: Ubuntu 26.04's uutils `chown` leaves it as it was for `<user>:`,
+unlike GNU, and a group the rootless user namespace does not map leaves the
+server unable to write its snapshots.
 
 **4. The volume.** This stops the Compose server and copies its volume into
 a new Podman volume named `recall-data`:
