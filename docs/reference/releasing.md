@@ -493,7 +493,10 @@ the next build would fail to authenticate.
 
 Every push to `main` reports the build on its commit as the check **Workers
 Builds: recall-install**, so a failed deploy shows up on GitHub without
-opening the dashboard.
+opening the dashboard. A **Retry** from the dashboard's build history does
+not: it adds no check to the commit, so its result is visible only in the
+dashboard. To test a change to the token where GitHub can see it, merge a
+pull request to `main` instead of retrying.
 
 | Path | Answer |
 |---|---|
