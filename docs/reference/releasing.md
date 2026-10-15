@@ -472,6 +472,29 @@ Connecting it is a one-time step: **Workers & Pages → Create → Connect to
 Git**, pick this repository, leave the build command empty (there are no
 dependencies), deploy command `npx wrangler deploy`.
 
+Connecting also creates a user API token, "recall-install build token", and
+**that token is far wider than this Worker needs**: edit on Workers Scripts,
+R2, D1, KV, Queues, Secrets Store and the account's other Workers products,
+plus Workers Routes, Email Routing and SSL on every zone. R2 edit alone is
+enough to lift a bucket's lock rules and then delete what they protected. So
+narrow it right after connecting, under **My Profile → API Tokens →
+recall-install build token → Edit**, to exactly this:
+
+| Scope | Permissions |
+|---|---|
+| account `pimlabs` | Workers Scripts: Edit, Account Settings: Read |
+| zone `pimlabs.id` only | Workers Routes: Edit |
+| user | User Details: Read, Memberships: Read |
+
+Edit it in place. When this was done on 2026-10-15, the Build settings page
+did not list a token created under My Profile, so a replacement could not be
+selected. Never roll it either: Workers Builds keeps the token's value, and
+the next build would fail to authenticate.
+
+Every push to `main` reports the build on its commit as the check **Workers
+Builds: recall-install**, so a failed deploy shows up on GitHub without
+opening the dashboard.
+
 | Path | Answer |
 |---|---|
 | `/install`, `/install.sh` | 200, `text/x-sh`, the contents of `install.sh` on `main` |
