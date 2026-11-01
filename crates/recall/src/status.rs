@@ -234,6 +234,9 @@ pub struct Report {
     pub memory_dir: String,
     /// How many memory files are on disk right now.
     pub memory_files: usize,
+    /// What changed here and the server has not had: the next push, pull
+    /// or `recall sync` sends these.
+    pub unsent: Vec<String>,
     /// Whether `.claude/settings.json` carries Recall's hooks.
     pub hooks_wired: bool,
     /// Whether the working directory is inside a git repository at all.
@@ -508,6 +511,16 @@ async fn collect_asking(
         memory_files: state::list_memory_files(&memory_dir)
             .map(|f| f.len())
             .unwrap_or(0),
+        unsent: recall_hooks::unsent(
+            &memory_dir,
+            &cfg.claude.state_file(&root_str),
+            &scope::scopes(
+                here.project_key(cfg, &remote),
+                cfg.global_key.clone(),
+                cfg.machine_key.clone(),
+            ),
+        )
+        .unwrap_or_default(),
         hooks_wired: std::fs::read(root.join(".claude").join("settings.json"))
             .map(|b| settings::is_wired(&b))
             .unwrap_or(false),

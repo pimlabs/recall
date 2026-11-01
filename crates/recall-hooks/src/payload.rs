@@ -46,11 +46,23 @@ const MAX_PAYLOAD: u64 = 8 << 20;
 /// unrecognised should be quietly ignored rather than turned into noise the
 /// user can't act on. Callers treat an empty `file_path` as "nothing to do".
 pub fn parse_post_tool_use<R: Read>(reader: R) -> PostToolUse {
+    read_post_tool_use(reader).unwrap_or_default()
+}
+
+/// [`parse_post_tool_use`], telling "no hook ran" from "a hook ran and said
+/// nothing of use": [`None`] when stdin held nothing but white space. Claude
+/// Code always sends something, so that is a person, or a script, running
+/// `recall push` by hand. Anything else came from a hook, even what cannot
+/// be read: a real payload past the cap below is cut off, and reads as
+/// garbage.
+pub fn read_post_tool_use<R: Read>(reader: R) -> Option<PostToolUse> {
     let mut buf = Vec::new();
-    if reader.take(MAX_PAYLOAD).read_to_end(&mut buf).is_err() || buf.is_empty() {
-        return PostToolUse::default();
+    if reader.take(MAX_PAYLOAD).read_to_end(&mut buf).is_err()
+        || buf.iter().all(u8::is_ascii_whitespace)
+    {
+        return None;
     }
-    serde_json::from_slice(&buf).unwrap_or_default()
+    Some(serde_json::from_slice(&buf).unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -59,6 +71,30 @@ mod tests {
 
     fn parse(s: &str) -> PostToolUse {
         parse_post_tool_use(s.as_bytes())
+    }
+
+    /// Nothing at all means no hook ran. Anything else came from one, so
+    /// a real payload cut off at the size cap is not mistaken for none.
+    #[test]
+    fn only_an_empty_stdin_is_no_payload() {
+        for empty in ["", " ", "\n", " \n\t"] {
+            assert_eq!(read_post_tool_use(empty.as_bytes()), None, "{empty:?}");
+        }
+        for sent in ["not json", "{}", "[1,2,3]"] {
+            assert_eq!(
+                read_post_tool_use(sent.as_bytes()),
+                Some(PostToolUse::default()),
+                "{sent:?}"
+            );
+        }
+        let too_long = format!(
+            r#"{{"tool_input":{{"file_path":"{}"}}}}"#,
+            "x".repeat(9 << 20)
+        );
+        assert_eq!(
+            read_post_tool_use(too_long.as_bytes()),
+            Some(PostToolUse::default())
+        );
     }
 
     #[test]

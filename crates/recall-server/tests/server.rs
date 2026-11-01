@@ -489,6 +489,55 @@ async fn rate_limit_counts_unauthorized_requests() {
     assert_eq!(retry_after.as_deref(), Some("60"));
 }
 
+/// A check of the audit log asks for one proof per checkpoint saved, which
+/// with a backlog is the whole bucket, for a minute. Sharing it with the
+/// hooks refused every memory edit made in that minute, from a laptop doing
+/// nothing unusual. Mutation: key the limiter on the address alone.
+#[tokio::test]
+async fn audit_requests_leave_the_bucket_pushes_need_alone() {
+    let h = harness(|c| c.rate_limit_max = 3);
+
+    let mut last = StatusCode::OK;
+    for _ in 0..5 {
+        let (status, _, _) = h
+            .get(Some(TEST_TOKEN), recall_wire::audit::CHECKPOINT_PATH)
+            .await;
+        last = status;
+    }
+    assert_eq!(
+        last,
+        StatusCode::TOO_MANY_REQUESTS,
+        "the audit routes are limited, in a bucket of their own"
+    );
+
+    let (status, _, _) = h.get(Some(TEST_TOKEN), "/sync?project_key=acme/app").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/sync while the audit bucket is spent"
+    );
+}
+
+/// One bucket for every audit route, leaves included: `recall audit export`
+/// pages through them, and the proofs and the checkpoint are one check.
+#[tokio::test]
+async fn the_audit_routes_share_one_bucket() {
+    let h = harness(|c| c.rate_limit_max = 3);
+
+    for path in [
+        recall_wire::audit::CHECKPOINT_PATH.to_string(),
+        format!("{}?first=0&second=0", recall_wire::audit::CONSISTENCY_PATH),
+        format!("{}?start=0&end=1", recall_wire::audit::ENTRIES_PATH),
+    ] {
+        let (status, _, _) = h.get(Some(TEST_TOKEN), &path).await;
+        assert_ne!(status, StatusCode::TOO_MANY_REQUESTS, "{path}");
+    }
+    let (status, _, _) = h
+        .get(Some(TEST_TOKEN), recall_wire::audit::CHECKPOINT_PATH)
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
 #[tokio::test]
 async fn admin_page_serves_without_leaking_data() {
     let h = harness(|_| {});

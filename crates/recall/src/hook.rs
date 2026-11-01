@@ -8,7 +8,7 @@
 //! `pull` runs at session start, so an unreachable server is a warning on
 //! stderr and exit 0, never a failure.
 
-use std::io;
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 
 use recall_hooks::{exit, foreign_memory_slug, is_memory_file, payload};
@@ -17,10 +17,27 @@ use crate::project;
 
 /// Handles one `PostToolUse` invocation.
 pub async fn push() -> anyhow::Result<i32> {
-    let hook = payload::parse_post_tool_use(io::stdin().lock());
+    // A terminal has no payload to give, and reading one would wait for ever.
+    let stdin = io::stdin();
+    let hook = match stdin.is_terminal() {
+        true => None,
+        false => payload::read_post_tool_use(stdin.lock()),
+    };
+    let Some(hook) = hook else {
+        // Not a hook, so someone asking to send: exiting 0 in silence reads
+        // as sent. Claude Code always sends a payload, so no session sees
+        // this.
+        eprintln!("recall-push: nothing was sent: there is no hook payload on stdin");
+        eprintln!(
+            "recall-push:   Claude Code runs this after an edit; to send this project's changes, \
+             run recall sync"
+        );
+        return Ok(exit::CONFIG);
+    };
     if hook.tool_input.file_path.is_empty() {
         return Ok(exit::OK);
     }
+    project::enter_session_project();
     let triggered = PathBuf::from(&hook.tool_input.file_path);
 
     // Decide whether this is even our business before asking for
@@ -78,6 +95,17 @@ pub async fn push() -> anyhow::Result<i32> {
         }
         Err(err) => {
             eprintln!("recall-push: {err}");
+            match err.server_error().map(|e| e.may_clear()) {
+                Some(true) => eprintln!(
+                    "recall-push:   it stays unsent here, and the next edit, session start or \
+                     recall sync sends it"
+                ),
+                Some(false) => eprintln!(
+                    "recall-push:   it stays unsent here until what the server refused is \
+                     fixed; recall doctor names it"
+                ),
+                None => {}
+            }
             Ok(exit::SERVER)
         }
     }
@@ -85,6 +113,7 @@ pub async fn push() -> anyhow::Result<i32> {
 
 /// Handles one `SessionStart` invocation.
 pub async fn pull() -> anyhow::Result<i32> {
+    project::enter_session_project();
     // An unconfigured or unreachable server warns on stderr and exits 0,
     // leaving whatever is already on disk alone.
     fetch("recall-pull", exit::OK).await

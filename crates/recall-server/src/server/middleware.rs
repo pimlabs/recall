@@ -13,6 +13,7 @@ use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use recall_wire::audit;
 
 use super::admin;
 use super::auth::{self, Caller};
@@ -182,7 +183,7 @@ pub(super) async fn worker_only(req: Request, next: Next) -> Response {
 pub(super) fn limit(state: &AppState, req: &Request) -> Option<Response> {
     if state
         .limiter
-        .limited(&client_ip(req, &state.cfg.trusted_ip_header))
+        .limited(&limit_key(req, &state.cfg.trusted_ip_header))
     {
         let mut resp = error(
             StatusCode::TOO_MANY_REQUESTS,
@@ -211,6 +212,25 @@ pub(super) fn limit(state: &AppState, req: &Request) -> Option<Response> {
         ));
     }
     None
+}
+
+/// What the limiter counts a request against: its address, and for the
+/// audit routes that address's second bucket.
+///
+/// A check of the log asks for one proof per checkpoint saved, so a machine
+/// that has not run one for a while spends a whole window on it, and for
+/// that minute every hook on the machine was refused. Pushes are what the
+/// server is for and a check can always run again, so neither spends the
+/// other's. The price is a second window's worth of token guesses from one
+/// address, against a token no such number comes near.
+fn limit_key(req: &Request, trusted_header: &str) -> String {
+    let ip = client_ip(req, trusted_header);
+    match req.uri().path() {
+        audit::CHECKPOINT_PATH | audit::CONSISTENCY_PATH | audit::ENTRIES_PATH => {
+            format!("audit {ip}")
+        }
+        _ => ip,
+    }
 }
 
 /// The bearer token first, unchanged: a request carrying the right one is

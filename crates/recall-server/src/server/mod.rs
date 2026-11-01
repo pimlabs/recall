@@ -218,13 +218,15 @@ fn unix_now() -> i64 {
 }
 
 /// How many live nonces one device may have: as many requests as one
-/// address may make while a nonce stays live, which is up to the window
-/// and the few seconds `created` may be ahead of the clock.
+/// address may make while a nonce stays live, in both of its buckets (see
+/// `middleware::limit_key`), which is up to the window and the few seconds
+/// `created` may be ahead of the clock.
 fn nonces_per_device(cfg: &Config) -> usize {
+    const BUCKETS: u128 = 2;
     let live_ms = auth::NONCE_LIFETIME as u128 * 1000;
     let window_ms = cfg.rate_limit_window.as_millis().max(1);
     let windows = live_ms.div_ceil(window_ms);
-    (cfg.rate_limit_max as u128 * windows).min(usize::MAX as u128) as usize
+    (cfg.rate_limit_max as u128 * windows * BUCKETS).min(usize::MAX as u128) as usize
 }
 
 /// The HTTP API, its background jobs, and the state they share.
@@ -892,6 +894,17 @@ mod tests {
     use crate::{Config, Store};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    /// A device keeping to both of an address's buckets, across the two
+    /// windows a nonce can outlive, must not meet its share of nonces: that
+    /// is a 429 of its own, on every route, and it would bring back what
+    /// the second bucket is there to stop.
+    #[test]
+    fn a_devices_share_of_nonces_covers_both_buckets() {
+        let cfg = Config::default();
+        assert_eq!(cfg.rate_limit_max, 60);
+        assert_eq!(super::nonces_per_device(&cfg), 240);
+    }
 
     /// The background sweep checkpoints the WAL, so `recall.db` on its own,
     /// which is all sqlite-web's single-file mount has, catches up within a
