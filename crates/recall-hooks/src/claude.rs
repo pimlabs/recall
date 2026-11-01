@@ -7,7 +7,10 @@
 //! Claude Code changes, there is exactly one place to fix, with its own
 //! tests, instead of the assumption being smeared across the codebase.
 
+use std::fs;
 use std::path::{Path, PathBuf};
+
+use crate::path::lexical_clean;
 
 /// The subset of the environment these paths depend on. Passed in rather
 /// than read from `std::env` inside, so the derivation is testable without
@@ -143,6 +146,50 @@ fn set(value: &Option<String>) -> Option<&str> {
     value.as_deref().filter(|v| !v.is_empty())
 }
 
+/// The directory Claude Code names a project's data after, given a checkout's
+/// git root: that root, unless it is a linked worktree, which shares the
+/// project directory of the repository it belongs to. So a session started in
+/// a worktree reads and writes the main checkout's memory.
+///
+/// Read from the CLI (2.1.309) and compared with the `memory_paths` real
+/// sessions report, for each shape in this module's tests. It is deliberately
+/// not `git rev-parse --git-common-dir`, which disagrees with the CLI about a
+/// worktree moved by hand and about a `.git` file naming a repository that
+/// never made it. The CLI's other checks, on what a path may contain, are not
+/// reproduced: they turn away paths no real repository has.
+pub fn canonical_root(git_root: &Path) -> PathBuf {
+    repository_of_worktree(git_root).unwrap_or_else(|| git_root.to_path_buf())
+}
+
+/// [`canonical_root`] for a linked worktree, [`None`] for anything else.
+fn repository_of_worktree(git_root: &Path) -> Option<PathBuf> {
+    // A directory, as in a main checkout, fails to read here.
+    let gitfile = fs::read_to_string(git_root.join(".git")).ok()?;
+    let private = gitfile.trim().strip_prefix("gitdir:")?.trim();
+    let private = lexical_clean(&git_root.join(private));
+
+    // A submodule has a `.git` file too, and no `commondir` beside it.
+    let common = fs::read_to_string(private.join("commondir")).ok()?;
+    let common = lexical_clean(&private.join(common.trim()));
+    if private.parent()? != common.join("worktrees") {
+        return None;
+    }
+
+    // `mv` leaves this naming where the worktree used to be, and the CLI
+    // then treats it as a project of its own.
+    let back = fs::read_to_string(private.join("gitdir")).ok()?;
+    let back = fs::canonicalize(private.join(back.trim())).ok()?;
+    if back != fs::canonicalize(git_root).ok()?.join(".git") {
+        return None;
+    }
+
+    if common.file_name()? == ".git" {
+        return common.parent().map(Path::to_path_buf);
+    }
+    // A bare repository has no main checkout, so its directory stands in.
+    (!common.join(".git").exists()).then_some(common)
+}
+
 /// Reproduces Claude Code's own project-directory naming, which in the CLI
 /// is the JavaScript expression:
 ///
@@ -177,6 +224,143 @@ pub fn slug(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What `git worktree add` leaves behind: a `.git` file in the worktree,
+    /// and a directory under the repository's naming it back.
+    fn link_worktree(common: &Path, worktree: &Path) {
+        let private = common.join("worktrees").join("w");
+        fs::create_dir_all(&private).unwrap();
+        fs::create_dir_all(worktree).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", private.display()),
+        )
+        .unwrap();
+        fs::write(private.join("commondir"), "../..\n").unwrap();
+        fs::write(
+            private.join("gitdir"),
+            format!("{}\n", worktree.join(".git").display()),
+        )
+        .unwrap();
+    }
+
+    /// A main checkout, and a directory with no git at all, are their own
+    /// project. So is a subdirectory handed in by a caller that has no git
+    /// root to give.
+    #[test]
+    fn a_checkout_that_is_not_a_linked_worktree_is_its_own_project() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(".git")).unwrap();
+        assert_eq!(canonical_root(dir.path()), dir.path());
+
+        let plain = tempfile::tempdir().unwrap();
+        assert_eq!(canonical_root(plain.path()), plain.path());
+    }
+
+    /// The case this exists for, wherever the worktree happens to live.
+    #[test]
+    fn a_linked_worktree_belongs_to_its_main_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        for worktree in [
+            main.join(".claude").join("worktrees").join("x"),
+            dir.path().join("elsewhere"),
+        ] {
+            link_worktree(&main.join(".git"), &worktree);
+            assert_eq!(canonical_root(&worktree), main, "{}", worktree.display());
+        }
+    }
+
+    /// `worktree.useRelativePaths` writes all three files relative to the
+    /// directory each one sits in.
+    #[test]
+    fn a_worktree_with_relative_paths_is_followed_the_same() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        let worktree = main.join("wt");
+        link_worktree(&main.join(".git"), &worktree);
+        fs::write(worktree.join(".git"), "gitdir: ../.git/worktrees/w\n").unwrap();
+        fs::write(main.join(".git/worktrees/w/gitdir"), "../../../wt/.git\n").unwrap();
+
+        assert_eq!(canonical_root(&worktree), main);
+    }
+
+    /// A bare repository has no main checkout to name, so the CLI names its
+    /// directory, `.bare` layout included. With a `.git` of its own inside,
+    /// which no bare repository has, the worktree stands alone.
+    #[test]
+    fn a_worktree_of_a_bare_repository_belongs_to_that_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["app.git", ".bare"] {
+            let bare = dir.path().join(name);
+            let worktree = dir.path().join("wt");
+            link_worktree(&bare, &worktree);
+            assert_eq!(canonical_root(&worktree), bare);
+
+            fs::write(bare.join(".git"), "").unwrap();
+            assert_eq!(canonical_root(&worktree), worktree);
+        }
+    }
+
+    /// A submodule's `.git` file points into the superproject, with no
+    /// `commondir` there, and it stays a project of its own.
+    #[test]
+    fn a_submodule_is_its_own_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("super/.git/modules/lib");
+        let checkout = dir.path().join("super/lib");
+        fs::create_dir_all(&module).unwrap();
+        fs::create_dir_all(&checkout).unwrap();
+        fs::write(
+            checkout.join(".git"),
+            format!("gitdir: {}\n", module.display()),
+        )
+        .unwrap();
+
+        assert_eq!(canonical_root(&checkout), checkout);
+    }
+
+    /// A worktree moved by hand still works in git, and the CLI stops
+    /// treating it as part of the repository, because the way back no longer
+    /// names it. `git rev-parse --git-common-dir` would say otherwise.
+    #[test]
+    fn a_worktree_moved_by_hand_is_its_own_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        let worktree = dir.path().join("wt");
+        link_worktree(&main.join(".git"), &worktree);
+        let moved = dir.path().join("moved");
+        fs::rename(&worktree, &moved).unwrap();
+
+        assert_eq!(canonical_root(&moved), moved);
+    }
+
+    /// A `.git` file that merely claims a repository takes nothing from it:
+    /// the repository's own `worktrees/` has to hold what it points at, or a
+    /// checkout could put its memory under another project's name. git itself
+    /// follows this one.
+    #[test]
+    fn a_gitfile_naming_a_repository_that_never_made_it_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim/.git");
+        let claimed = dir.path().join("forged/fake");
+        let forged = dir.path().join("forged");
+        fs::create_dir_all(&victim).unwrap();
+        fs::create_dir_all(&claimed).unwrap();
+        fs::write(
+            forged.join(".git"),
+            format!("gitdir: {}\n", claimed.display()),
+        )
+        .unwrap();
+        fs::write(claimed.join("commondir"), format!("{}\n", victim.display())).unwrap();
+        fs::write(
+            claimed.join("gitdir"),
+            format!("{}\n", forged.join(".git").display()),
+        )
+        .unwrap();
+
+        assert_eq!(canonical_root(&forged), forged);
+    }
 
     /// Settings and memory are two different roots, and the variable that
     /// separates them is the one a cloud session sets. Getting this wrong

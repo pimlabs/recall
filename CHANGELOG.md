@@ -14,6 +14,25 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
+## Unreleased
+
+- **Memory edited in a session started in a git worktree now syncs.** Claude
+  Code keeps one memory directory per repository, the main checkout's, for
+  every worktree and subdirectory. Recall named it after the worktree instead,
+  so when a session started there, with `claude` in the worktree or with
+  `claude --worktree`, `recall push` took every memory edit for another
+  project's and sent nothing, and `recall pull` filled a directory Claude Code
+  never reads. The desktop app runs its hooks in the main checkout, so its
+  sessions kept syncing, but a command run by hand from a worktree, such as
+  `recall status`, `recall doctor` or `recall sync`, looked in the wrong place
+  there too. Every command now follows Claude Code, and in a worktree of a
+  repository with no remote the project key is the main checkout's rather than
+  one of its own.
+
+  Nothing needs migrating. A `memory` directory or `.recall-state.json` under a
+  worktree's own name is no longer read. Claude Code never read that directory
+  either, so it holds nothing the server lacks, and it can be deleted.
+
 ## 0.4.17 — 2026-10-14
 
 - **The server can run under rootless Podman.** `deploy/quadlet/` has

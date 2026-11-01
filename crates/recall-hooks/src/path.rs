@@ -27,11 +27,10 @@ pub fn is_memory_file(dir: &Path, path: &Path) -> bool {
 /// Exists because those two are not the same kind of "no". A push hook that
 /// skips an unrelated source file should say nothing; one that skips a
 /// memory file because the caller happens to be standing somewhere else
-/// should say so. The difference cost three edits to find: a git worktree
-/// has its own project root, so its slug differs even though `project_key`
-/// — derived from the git remote, which a worktree shares — is identical.
-/// The hook exited 0 without a word, and the next pull restored the server's
-/// older copy over the edit.
+/// should say so. The difference cost three edits to find: the hook exited 0
+/// without a word, and the next pull restored the server's older copy over
+/// the edit. A git worktree is not such a case, since it shares its main
+/// checkout's memory: see [`canonical_root`](crate::claude::canonical_root).
 pub fn foreign_memory_slug(root: &Path, mine: &Path, path: &Path) -> Option<String> {
     if is_under(mine, path) {
         return None;
@@ -86,7 +85,7 @@ pub(crate) fn relative_slash(dir: &Path, path: &Path) -> Option<String> {
 
 /// Resolves `.` and `..` textually, without touching the filesystem —
 /// the equivalent of Go's `filepath.Clean`.
-fn lexical_clean(path: &Path) -> PathBuf {
+pub(crate) fn lexical_clean(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {
@@ -159,20 +158,18 @@ mod tests {
         );
     }
 
-    /// The case that cost three edits: a git worktree has its own project
-    /// root, so its slug differs — while `project_key` stays identical,
-    /// because that comes from the git remote a worktree shares.
+    /// The case that cost three edits: a memory file, but not this project's.
     #[test]
     fn memory_of_another_project_names_the_slug() {
         let root = Path::new("/h/.claude");
-        let mine = Path::new("/h/.claude/projects/-w-app--claude-worktrees-x/memory");
+        let mine = Path::new("/h/.claude/projects/-w-app/memory");
         assert_eq!(
             foreign_memory_slug(
                 root,
                 mine,
-                Path::new("/h/.claude/projects/-w-app/memory/a.md")
+                Path::new("/h/.claude/projects/-w-other/memory/a.md")
             ),
-            Some("-w-app".to_string())
+            Some("-w-other".to_string())
         );
     }
 

@@ -1843,10 +1843,7 @@ fn disconnect_asks_which_when_it_cannot_tell() {
 // ---------------------------------------------------------------------------
 
 /// The failure this was written for, reproduced through the binary: a memory
-/// file belonging to another project under the same Claude root. It happens
-/// in a git worktree, whose project root — and therefore whose memory
-/// directory — differs even though `project_key` does not, because that comes
-/// from the git remote a worktree shares.
+/// file belonging to another project under the same Claude root.
 ///
 /// Three real edits were lost to this. The hook exited 0 without a word, and
 /// the next `recall pull` restored the server's older copy over them.
@@ -1890,6 +1887,247 @@ fn push_stays_silent_about_an_ordinary_file() {
 
     assert_eq!(r.code, 0);
     assert_eq!(r.stderr.trim(), "", "an ordinary edit is not worth a word");
+}
+
+// ---------------------------------------------------------------------------
+// a git worktree: one project, whichever checkout a session started in
+// ---------------------------------------------------------------------------
+
+/// A linked worktree of `repo`, after giving it the commit `git worktree add`
+/// needs. Outside the repository, unlike `claude --worktree`'s, so that
+/// nothing here passes because one path happens to sit under the other.
+fn worktree_of(repo: &Repo) -> Repo {
+    let dir = tempfile::tempdir().unwrap();
+    let path = std::fs::canonicalize(dir.path()).unwrap();
+    let path = strip_verbatim_prefix(path).join("worktree");
+    for args in [
+        vec![
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "first",
+        ],
+        vec![
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            path.to_str().unwrap(),
+        ],
+    ] {
+        assert!(Command::new("git")
+            .args(&args)
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+    }
+    Repo { _dir: dir, path }
+}
+
+/// The memory directory `cwd` resolves to.
+fn memory_dir_from(cwd: &Path, env: &[(&str, &str)]) -> PathBuf {
+    PathBuf::from(status_json(cwd, env)["memory_dir"].as_str().unwrap())
+}
+
+/// Claude Code keeps one memory directory per repository, the main
+/// checkout's, wherever in it a session started: its memory documentation
+/// says so, and the `memory_paths` a real session reports agree. A directory
+/// named after the worktree is one Claude Code never reads or writes.
+#[test]
+fn a_worktree_uses_the_memory_directory_of_its_main_checkout() {
+    let repo = git_repo();
+    let worktree = worktree_of(&repo);
+    let sub = worktree.path().join("deep").join("er");
+    std::fs::create_dir_all(&sub).unwrap();
+    let home = home_elsewhere();
+    let home = home.path().to_string_lossy().to_string();
+    let env = [("HOME", home.as_str())];
+
+    let main = memory_dir_from(repo.path(), &env);
+    assert_eq!(memory_dir_from(worktree.path(), &env), main);
+    assert_eq!(memory_dir_from(&sub, &env), main, "and from inside it");
+}
+
+/// The failure: Claude Code writes to the main checkout's directory, the
+/// hook runs in the worktree, and until this the two disagreed about whose
+/// memory that was, so the edit stayed on this machine.
+#[test]
+fn a_memory_edit_in_a_worktree_reaches_the_server() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let worktree = worktree_of(&repo);
+    let home = home_elsewhere();
+    let home = home.path().to_string_lossy().to_string();
+    let env = [
+        ("HOME", home.as_str()),
+        ("RECALL_URL", server.url.as_str()),
+        ("RECALL_TOKEN", "right"),
+    ];
+
+    let memory = memory_dir_from(repo.path(), &env);
+    std::fs::create_dir_all(&memory).unwrap();
+    let file = memory.join("note.md");
+    std::fs::write(&file, "From a worktree.\n").unwrap();
+    let r = run(&["push"], worktree.path(), &env, Some(&hook_payload(&file)));
+
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(r.stderr.contains("pushed 1"), "stderr: {}", r.stderr);
+    let held = stored(&server, &repo, &env);
+    assert_eq!(held.len(), 1, "held: {held:?}");
+    assert_eq!(held[0].content.as_deref(), Some("From a worktree.\n"));
+}
+
+/// The other direction: a session starting in a worktree reads the main
+/// checkout's directory, so a pull has to fill that one. Written anywhere
+/// else, the session starts without what the server holds.
+#[test]
+fn a_session_starting_in_a_worktree_pulls_into_the_directory_it_reads() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let worktree = worktree_of(&repo);
+    let first = home_elsewhere();
+    let first = first.path().to_string_lossy().to_string();
+    let env = |home| {
+        [
+            ("HOME", home),
+            ("RECALL_URL", server.url.as_str()),
+            ("RECALL_TOKEN", "right"),
+        ]
+    };
+    assert_eq!(
+        push_memory(&repo, &env(&first), "note.md", "Held.\n").code,
+        0
+    );
+
+    let second = home_elsewhere();
+    let second_path = second.path().to_string_lossy().to_string();
+    let r = run(&["pull"], worktree.path(), &env(&second_path), None);
+
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let memory = memory_dir_from(repo.path(), &env(&second_path));
+    assert_eq!(
+        std::fs::read_to_string(memory.join("note.md")).unwrap(),
+        "Held.\n"
+    );
+    let projects: Vec<_> = std::fs::read_dir(second.path().join(".claude").join("projects"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(projects, [memory.parent().unwrap()], "and nothing else");
+}
+
+/// A repository with no remote is keyed by its path. A worktree has to take
+/// the main checkout's, or the one memory directory they share is sent to
+/// two histories, depending on where the session happened to start.
+#[test]
+fn a_worktree_of_a_repository_with_no_remote_keeps_its_project_key() {
+    let repo = git_repo();
+    assert!(Command::new("git")
+        .args(["remote", "remove", "origin"])
+        .current_dir(repo.path())
+        .status()
+        .unwrap()
+        .success());
+    let worktree = worktree_of(&repo);
+    let home = home_elsewhere();
+    let home = home.path().to_string_lossy().to_string();
+    let env = [("HOME", home.as_str())];
+
+    let key = status_json(repo.path(), &env)["project_key"].clone();
+    assert!(key.as_str().unwrap().starts_with("local:"), "key: {key}");
+    assert_eq!(status_json(worktree.path(), &env)["project_key"], key);
+}
+
+/// The memory belongs to the repository; the settings belong to the checkout.
+/// A worktree can be on a branch that wires Recall, or declares a variable,
+/// while the main checkout is not, and `recall init` there has to edit the
+/// file that branch commits. Mutation: move `root` to the main checkout too.
+#[test]
+fn a_worktree_keeps_its_own_settings() {
+    let repo = git_repo();
+    let worktree = worktree_of(&repo);
+    let home = home_elsewhere();
+    let home = home.path().to_string_lossy().to_string();
+    let env = [("HOME", home.as_str())];
+    write_settings(
+        worktree.path(),
+        "settings.json",
+        r#"{"env":{"RECALL_PROJECT_KEY":"acme/from-the-branch"}}"#,
+    );
+
+    let status = status_json(worktree.path(), &env);
+    assert_eq!(status["project_key"], "acme/from-the-branch");
+    assert_eq!(status["project"], worktree.path().to_str().unwrap());
+
+    let r = run(&["init"], worktree.path(), &env, None);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let wired = worktree.path().join(".claude").join("settings.json");
+    assert!(std::fs::read_to_string(wired)
+        .unwrap()
+        .contains("recall push"));
+    assert!(!repo.path().join(".claude").exists());
+}
+
+/// What an older version left under the worktree's own slug is nothing to
+/// reconcile: Claude Code never read that directory, so all it can hold is
+/// what a pull wrote there. It is left alone, unread, and a session in the
+/// worktree works from the main checkout's state.
+#[test]
+fn what_an_older_pull_left_under_a_worktree_slug_is_left_alone() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let worktree = worktree_of(&repo);
+    let elsewhere = home_elsewhere();
+    let elsewhere = elsewhere.path().to_string_lossy().to_string();
+    let home = home_elsewhere();
+    let home = home.path().to_string_lossy().to_string();
+    let env = |home| {
+        [
+            ("HOME", home),
+            ("RECALL_URL", server.url.as_str()),
+            ("RECALL_TOKEN", "right"),
+        ]
+    };
+    assert_eq!(
+        push_memory(&repo, &env(&elsewhere), "note.md", "Held.\n").code,
+        0
+    );
+    let memory = memory_dir_from(repo.path(), &env(&home));
+    let old = Path::new(&home)
+        .join(".claude")
+        .join("projects")
+        .join(recall_hooks::claude::slug(
+            &worktree.path().to_string_lossy(),
+        ));
+    std::fs::create_dir_all(old.join("memory")).unwrap();
+    std::fs::write(old.join("memory").join("stale.md"), "Stale.\n").unwrap();
+    std::fs::write(old.join(".recall-state.json"), "not even json").unwrap();
+
+    let r = run(&["pull"], worktree.path(), &env(&home), None);
+
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(
+        std::fs::read_to_string(old.join(".recall-state.json")).unwrap(),
+        "not even json"
+    );
+    assert!(old.join("memory").join("stale.md").exists());
+    assert!(!old.join("memory").join("note.md").exists());
+    assert!(memory.join("note.md").exists());
+    assert!(
+        memory.parent().unwrap().join(".recall-state.json").exists(),
+        "the state a session here uses is the main checkout's"
+    );
+    assert_eq!(stored(&server, &repo, &env(&home)).len(), 1, "nothing sent");
 }
 
 // ---------------------------------------------------------------------------
