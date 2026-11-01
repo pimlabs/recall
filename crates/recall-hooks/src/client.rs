@@ -82,6 +82,24 @@ impl Error {
         self.device_unknown() || self.device_revoked()
     }
 
+    /// The status the server answered with, when it answered with one.
+    pub(crate) fn status(&self) -> Option<u16> {
+        match self {
+            Error::Status { code, .. } => Some(*code),
+            _ => None,
+        }
+    }
+
+    /// Whether the same request may simply work later: the rate limit, the
+    /// server failing or unreachable. Everything else it answered needs
+    /// something changed first.
+    pub fn may_clear(&self) -> bool {
+        match self.status() {
+            Some(code) => code == 429 || code >= 500,
+            None => matches!(self, Error::Transport(_)),
+        }
+    }
+
     /// Whether the server has no record of the device this client signs
     /// as: an ephemeral one removed after sitting idle, which a cloud
     /// session holding an authkey may replace by enrolling again.
@@ -660,6 +678,27 @@ fn nonce() -> Result<String, Error> {
 mod tests {
     use super::*;
     use crate::testserver::FakeServer;
+
+    /// What the hook tells the session rests on this: the next run sends a
+    /// change refused for one of these, and not for the rest.
+    #[tokio::test]
+    async fn what_may_clear_is_the_limit_and_a_server_that_is_down() {
+        let status = |code| Error::Status {
+            code,
+            body: String::new(),
+        };
+        assert!(status(429).may_clear());
+        assert!(status(500).may_clear());
+        assert!(status(503).may_clear());
+        assert!(!status(400).may_clear());
+        assert!(!status(401).may_clear());
+        assert!(!status(413).may_clear());
+
+        let nobody_there = Client::new("http://127.0.0.1:1", "token").unwrap();
+        let down = nobody_there.pull("acme/app").await.unwrap_err();
+        assert!(matches!(down, Error::Transport(_)), "{down:?}");
+        assert!(down.may_clear());
+    }
 
     /// Every request names the protocol and the build that sent it.
     #[tokio::test]

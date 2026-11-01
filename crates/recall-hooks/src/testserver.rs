@@ -39,6 +39,16 @@ struct Inner {
     /// worth testing — the read succeeds, a write is refused partway — needs
     /// the two halves to be able to disagree.
     fail_pushes_with: Option<(u16, String)>,
+    /// How many pushes the fake's rate limit refuses before answering
+    /// again, as the end of the server's window lifts a real one.
+    pushes_refused: usize,
+    /// Pushes answered before the fake's rate limit refuses every one
+    /// after: [`None`] for no limit.
+    pushes_before_limit: Option<usize>,
+    /// How many pulls are refused before answering again, and with what.
+    pulls_refused: Option<(usize, u16, String)>,
+    /// How many pulls are answered before those refusals start.
+    pulls_before_refusing: usize,
     last_authorization: Option<String>,
     /// The `User-Agent` and protocol header of the last request, so a test
     /// can see what the client says about itself.
@@ -69,6 +79,9 @@ struct Inner {
     /// every one, while others are answered.
     refuse_proofs_from: Option<u64>,
 }
+
+/// What the real server's rate limit answers.
+const RATE_LIMITED: &str = r#"{"error":"rate limit exceeded, try again later"}"#;
 
 pub struct FakeServer {
     pub url: String,
@@ -164,6 +177,39 @@ impl FakeServer {
     /// Make every subsequent `POST /sync` fail, leaving `GET /sync` working.
     pub fn fail_pushes_with(&self, code: u16, body: &str) {
         self.inner.lock().expect("test lock").fail_pushes_with = Some((code, body.to_string()));
+    }
+
+    /// Lifts [`FakeServer::fail_pushes_with`] and every limit on pushes.
+    pub fn stop_failing_pushes(&self) {
+        let mut inner = self.inner.lock().expect("test lock");
+        inner.fail_pushes_with = None;
+        inner.pushes_refused = 0;
+        inner.pushes_before_limit = None;
+    }
+
+    /// Refuses the next `n` pulls with `code`, and answers the ones after.
+    pub fn refuse_next_pulls(&self, n: usize, code: u16, body: &str) {
+        self.refuse_next_pulls_after(0, n, code, body);
+    }
+
+    /// [`FakeServer::refuse_next_pulls`], once `answered` more have been
+    /// answered.
+    pub fn refuse_next_pulls_after(&self, answered: usize, n: usize, code: u16, body: &str) {
+        let mut inner = self.inner.lock().expect("test lock");
+        inner.pulls_before_refusing = answered;
+        inner.pulls_refused = Some((n, code, body.to_string()));
+    }
+
+    /// Refuses the next `n` pushes as its rate limit would, and answers the
+    /// ones after.
+    pub fn refuse_next_pushes(&self, n: usize) {
+        self.inner.lock().expect("test lock").pushes_refused = n;
+    }
+
+    /// Answers `n` more pushes, then refuses each after as its rate limit
+    /// would.
+    pub fn limit_pushes_after(&self, n: usize) {
+        self.inner.lock().expect("test lock").pushes_before_limit = Some(n);
     }
 
     /// The `User-Agent` and `Recall-Protocol` of the last request.
@@ -329,6 +375,16 @@ async fn pull(
     if let Some(failure) = intercept(&state, &headers) {
         return failure;
     }
+    {
+        let mut inner = state.lock().expect("test lock");
+        if inner.pulls_before_refusing > 0 {
+            inner.pulls_before_refusing -= 1;
+        } else if let Some((left, code, body)) = inner.pulls_refused.as_mut().filter(|r| r.0 > 0) {
+            *left -= 1;
+            let code = StatusCode::from_u16(*code).expect("a valid test status");
+            return (code, body.clone()).into_response();
+        }
+    }
     let (files, checkpoint) = {
         let mut inner = state.lock().expect("test lock");
         inner.pulled_keys.push(q.project_key.clone());
@@ -434,7 +490,20 @@ async fn push(
     let refused = {
         let mut inner = state.lock().expect("test lock");
         inner.push_attempts += 1;
-        inner.fail_pushes_with.clone()
+        let limited = match inner.pushes_before_limit.as_mut() {
+            Some(0) => true,
+            Some(left) => {
+                *left -= 1;
+                false
+            }
+            None => false,
+        };
+        let refused_now = inner.pushes_refused > 0;
+        inner.pushes_refused = inner.pushes_refused.saturating_sub(1);
+        match limited || refused_now {
+            true => Some((429, RATE_LIMITED.to_string())),
+            false => inner.fail_pushes_with.clone(),
+        }
     }
     .map(|(code, body)| {
         (

@@ -244,6 +244,17 @@ pub(crate) fn findings(rep: &Report) -> Vec<Finding> {
         "memory dir",
         format!("{} ({} files)", rep.memory_dir, rep.memory_files),
     ));
+    if !rep.unsent.is_empty() {
+        out.push(warn(
+            "unsent",
+            format!(
+                "{} changed here and not on the server: {}",
+                rep.unsent.len(),
+                rep.unsent.join(", ")
+            ),
+            "Send them now: `recall sync`",
+        ));
+    }
 
     offbox_finding(rep, &mut out);
     audit_finding(rep, &mut out);
@@ -1220,6 +1231,7 @@ pub(crate) mod tests {
             project_key_source: KeySource::Remote,
             memory_dir: "/w/memory".into(),
             memory_files: 4,
+            unsent: Vec::new(),
             hooks_wired: true,
             // A wired project on a laptop — the ordinary case, and the one
             // where both of the checks below used to be wrong.
@@ -1653,6 +1665,28 @@ pub(crate) mod tests {
             Level::Ok
         );
         assert_eq!(verdict(&found), exit::OK);
+    }
+
+    /// A change the server does not have is the one thing `recall pull`
+    /// from another folder cannot warn about, so it is said here, by name,
+    /// with what sends it. Mutation: drop the finding.
+    #[test]
+    fn memory_changed_here_and_unsent_is_a_warning_that_names_it() {
+        let mut rep = healthy();
+        rep.unsent = vec!["a.md".into(), "topics/b.md".into()];
+
+        let found = findings(&rep);
+
+        let unsent = find(&found, "unsent").expect("a finding");
+        assert_eq!(unsent.level, Level::Warn);
+        assert!(unsent.detail.contains("topics/b.md"), "{}", unsent.detail);
+        let fix = unsent.fix.as_deref().unwrap_or_default();
+        assert!(fix.contains("recall sync"), "{fix}");
+    }
+
+    #[test]
+    fn nothing_unsent_says_nothing() {
+        assert!(find(&findings(&healthy()), "unsent").is_none());
     }
 
     /// Checking your connection from a home directory is an ordinary thing

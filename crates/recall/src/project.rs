@@ -103,6 +103,21 @@ pub struct Resolved {
     pub env: declared_env::Environment,
 }
 
+/// Moves a hook to the project its session started in, which it may not be
+/// standing in: Claude Code runs hooks where the session's shell is, so one
+/// `cd` away from the project and a memory edit reads as another project's.
+/// `CLAUDE_PROJECT_DIR` stays where the session started, and is set for hooks
+/// alone, so a command typed in that shell is left where it was run.
+///
+/// The move, rather than a root handed along, because `git` is asked for the
+/// root and the remote in the working directory. Failing to move leaves the
+/// hook where it stands, which is what it did before this existed.
+pub fn enter_session_project() {
+    if let Some(dir) = std::env::var_os("CLAUDE_PROJECT_DIR").filter(|d| !d.is_empty()) {
+        let _ = std::env::set_current_dir(dir);
+    }
+}
+
 /// Resolves the current directory's project and environment.
 ///
 /// Never fails: every command here has to be useful on a machine where

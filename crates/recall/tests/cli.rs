@@ -285,16 +285,46 @@ fn push_is_a_silent_no_op_for_a_file_that_is_not_memory() {
 }
 
 /// Hook payloads come from a tool we don't control. Garbage on stdin must
-/// not produce noise in the session.
+/// not produce noise in the session: a real payload past the size cap reads
+/// as garbage too.
 #[test]
 fn push_ignores_a_malformed_hook_payload() {
     let repo = git_repo();
-    for payload in ["", "not json", "{}", r#"{"tool_input":{}}"#, "[1,2,3]"] {
+    for payload in [
+        "not json",
+        "{}",
+        r#"{"tool_input":{}}"#,
+        "[1,2,3]",
+        r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{}}"#,
+    ] {
         let r = run(&["push"], repo.path(), &[], Some(payload));
         assert_eq!(r.code, 0, "payload {payload:?} -> stderr {}", r.stderr);
         assert!(
             r.stderr.is_empty(),
             "payload {payload:?} produced noise: {:?}",
+            r.stderr
+        );
+    }
+}
+
+/// `recall push` run by hand reads a hook's stdin, finds nothing, and used
+/// to exit 0 in silence. A session retrying a refused push in a loop took
+/// that for "push ok on attempt 1", with four files still unsent. Mutation:
+/// treat an empty stdin like a hook that names no file.
+#[test]
+fn push_says_nothing_was_sent_when_there_is_no_payload() {
+    let repo = git_repo();
+    for payload in ["", " \n"] {
+        let r = run(&["push"], repo.path(), &[], Some(payload));
+        assert_ne!(r.code, 0, "payload {payload:?} reads as a success");
+        assert!(
+            r.stderr.contains("nothing was sent"),
+            "payload {payload:?} -> stderr {:?}",
+            r.stderr
+        );
+        assert!(
+            r.stderr.contains("recall sync"),
+            "and it has to say what does send: {:?}",
             r.stderr
         );
     }
@@ -2251,6 +2281,11 @@ fn serve(
         token: token.to_string(),
         db_path: db.path().join("recall.db").to_string_lossy().to_string(),
         merge_enabled: false,
+        // Well past what a test sends, as in the server's own harnesses: a
+        // hook past the limit waits the window out, and hooks at once sweep
+        // each other's files, so the default would hold one test for a
+        // minute, some of the time.
+        rate_limit_max: 10_000,
         ..Default::default()
     };
     let store = std::sync::Arc::new(recall_server::Store::open(&cfg.db_path).expect("store opens"));
@@ -2782,6 +2817,127 @@ fn connect_enrolls_the_first_machine_and_approves_it_with_the_operator_token() {
         saved_device(home.path(), &server.url).unwrap().device_id,
         device.device_id
     );
+}
+
+/// A session's shell can `cd` anywhere, and Claude Code runs hooks where the
+/// shell is. A session that had moved to its scratchpad lost thirteen memory
+/// edits this way, each answered "that file is memory for another project"
+/// and exit 0, though it was this project's. Mutation: resolve the project
+/// from the working directory alone.
+#[test]
+fn a_hook_acts_for_the_project_the_session_started_in() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let home = enrolled(&server, &repo, "jarvis");
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [("RECALL_HOME", home_str.as_str())];
+    let memory_dir = status_json(repo.path(), &env)["memory_dir"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    std::fs::create_dir_all(&memory_dir).unwrap();
+    let file = Path::new(&memory_dir).join("from-elsewhere.md");
+    std::fs::write(&file, "Written while the shell was elsewhere.\n").unwrap();
+
+    let elsewhere = tempfile::tempdir().unwrap();
+    let root = repo.path().to_string_lossy().to_string();
+    let hook_env = [
+        ("RECALL_HOME", home_str.as_str()),
+        ("CLAUDE_PROJECT_DIR", root.as_str()),
+        // `run` sets it to the working directory, which is not the point.
+        ("HOME", root.as_str()),
+    ];
+    let r = run(
+        &["push"],
+        elsewhere.path(),
+        &hook_env,
+        Some(&hook_payload(&file)),
+    );
+
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(r.stderr.contains("pushed 1"), "stderr: {}", r.stderr);
+    let files = stored(&server, &repo, &env);
+    assert!(
+        files.iter().any(|f| f.file_path == "from-elsewhere.md"),
+        "{files:?}"
+    );
+}
+
+/// The session-start hook likewise: a compaction fires it from wherever the
+/// shell has got to, and it must not fill some other directory's memory.
+#[test]
+fn a_pull_hook_acts_for_the_project_the_session_started_in() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let home = enrolled(&server, &repo, "jarvis");
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [("RECALL_HOME", home_str.as_str())];
+    let r = push_memory(&repo, &env, "fact.md", "A fact.\n");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let memory_dir = status_json(repo.path(), &env)["memory_dir"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let local = Path::new(&memory_dir).join("fact.md");
+    std::fs::remove_file(&local).unwrap();
+    // Forgets the delete: this is a machine missing the file, not one
+    // sending a delete of it.
+    let state = Path::new(&memory_dir)
+        .parent()
+        .unwrap()
+        .join(".recall-state.json");
+    std::fs::remove_file(&state).unwrap();
+
+    let elsewhere = tempfile::tempdir().unwrap();
+    let root = repo.path().to_string_lossy().to_string();
+    let hook_env = [
+        ("RECALL_HOME", home_str.as_str()),
+        ("CLAUDE_PROJECT_DIR", root.as_str()),
+        // `run` sets it to the working directory, which is not the point.
+        ("HOME", root.as_str()),
+    ];
+    let r = run(&["pull"], elsewhere.path(), &hook_env, None);
+
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(local.exists(), "stderr: {}", r.stderr);
+}
+
+/// `CLAUDE_PROJECT_DIR` naming somewhere that has since gone is no reason
+/// for a hook to fail: it carries on from where it stands.
+#[test]
+fn a_session_root_that_is_gone_leaves_the_hook_where_it_stands() {
+    let repo = git_repo();
+    let payload = hook_payload(&repo.path().join("src/main.rs"));
+    let r = run(
+        &["push"],
+        repo.path(),
+        &[("CLAUDE_PROJECT_DIR", "/nowhere/at/all")],
+        Some(&payload),
+    );
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stderr.trim(), "");
+}
+
+/// A refusal no retry can clear must not be reported as one the next edit
+/// will. A name the validator rejects stays refused until someone renames
+/// the file. Mutation: print the same line for every refusal.
+///
+/// Unix only, because the file cannot exist on Windows: see the backfill
+/// test of the same name rule.
+#[cfg(unix)]
+#[test]
+fn a_refusal_that_will_not_clear_does_not_promise_the_next_edit_sends_it() {
+    let server = live_server("right");
+    let repo = git_repo();
+    let home = enrolled(&server, &repo, "jarvis");
+    let home_str = home.path().to_string_lossy().to_string();
+    let env = [("RECALL_HOME", home_str.as_str())];
+
+    let r = push_memory(&repo, &env, "\\leading-backslash.md", "A fact.\n");
+
+    assert_eq!(r.code, 2, "stderr: {}", r.stderr);
+    assert!(!r.stderr.contains("next edit"), "stderr: {}", r.stderr);
+    assert!(r.stderr.contains("recall doctor"), "stderr: {}", r.stderr);
 }
 
 /// With a device key, the hooks sign instead of sending a token, and the

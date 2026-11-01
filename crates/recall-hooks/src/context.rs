@@ -78,28 +78,43 @@ impl Context {
         self.scopes.iter().any(|s| s.prefix.is_some())
     }
 
-    /// Rewrites the baseline to match what is on disk right now.
-    ///
-    /// Called at the end of both a push and a pull. A machine that only ever
-    /// pulls still needs an accurate one, or its first local delete would go
-    /// unnoticed.
+    /// Rewrites the baseline to match what is on disk right now, every file
+    /// included: what `recall backfill` leaves, having dealt with each.
     pub(crate) fn refresh_state(&self) -> Result<(), Error> {
-        self.refresh_state_with(&[])
+        self.rewrite_state(&[], true)
     }
 
     /// The same, recording `synced` — `(path, content_sha256)` pairs for
     /// files this run pulled or pushed — as each file's new base.
     ///
+    /// Called at the end of both a push and a pull. A machine that only ever
+    /// pulls still needs an accurate one, or its first local delete would go
+    /// unnoticed.
+    ///
     /// Bases for files that are no longer on disk are dropped, so a file
     /// deleted and later recreated starts without one rather than naming a
     /// version it was never edited from.
+    ///
+    /// A new file this run did not send stays off the list. It is another
+    /// run's, still under way or refused, and a listed file with no base
+    /// reads as unchanged, so listing it here would be the last anyone
+    /// heard of it. A first run has nothing to tell those from and lists
+    /// everything, leaving what was already there to `recall backfill`.
     pub(crate) fn refresh_state_with(&self, synced: &[(String, String)]) -> Result<(), Error> {
+        self.rewrite_state(synced, false)
+    }
+
+    fn rewrite_state(&self, synced: &[(String, String)], list_all: bool) -> Result<(), Error> {
         let files = state::list_memory_files(&self.memory_dir)?;
-        let prev = state::load(&self.state_file)
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+        let prev = state::load(&self.state_file).ok().flatten();
+        let (list_all, prev) = (list_all || prev.is_none(), prev.unwrap_or_default());
+        let known = prev.files;
         let (mut bases, mut disk) = (prev.bases, prev.disk);
+        // Whatever lists everything has dealt with everything, and a file
+        // it held back must not go out at the next sweep regardless.
+        if list_all {
+            disk.retain(|_, fingerprint| fingerprint != state::NEVER_SENT);
+        }
         for (rel, hash) in synced {
             bases.insert(rel.clone(), hash.clone());
             // As it stands now, after the write or the send and after any
@@ -116,7 +131,78 @@ impl Context {
         }
         bases.retain(|rel, _| files.binary_search(rel).is_ok());
         disk.retain(|rel, _| files.binary_search(rel).is_ok());
+        let files: Vec<String> = files
+            .into_iter()
+            .filter(|rel| list_all || known.contains(rel) || bases.contains_key(rel))
+            .collect();
         state::save(&self.state_file, &files, &bases, &disk)?;
+        Ok(())
+    }
+
+    /// What a run stopped partway leaves behind: the new base of each file
+    /// it did send, and each delete it did send off the list, base and all.
+    /// Nothing else moves, so the next run finds whatever this one could
+    /// not send, and a file it did send is not sent from its old base, which
+    /// the server would take for a concurrent edit and merge.
+    ///
+    /// `refused` is the file the run was for, when that is not among `sent`.
+    /// Any run but this one could miss it. With no baseline yet, this writes
+    /// the first, without it: a first run sweeps nothing, and the next run's
+    /// baseline would list it as though it had gone. With a baseline listing
+    /// it and no base, which is how a first run leaves what was already on
+    /// disk, it gets [`state::NEVER_SENT`] for a fingerprint: a listed file
+    /// with no base reads as unchanged, edited or not, and taking it off the
+    /// list instead would lose its delete, should it be removed next.
+    pub(crate) fn keep_what_was_sent(
+        &self,
+        sent: &[(String, String)],
+        deleted: &[String],
+        refused: Option<&str>,
+    ) -> Result<(), Error> {
+        let refused = refused.filter(|rel| !sent.iter().any(|(s, _)| s == rel));
+        let mut baseline = match state::load(&self.state_file)? {
+            Some(mut baseline) => {
+                if let Some(rel) = refused.filter(|rel| {
+                    !baseline.bases.contains_key(*rel) && !baseline.disk.contains_key(*rel)
+                }) {
+                    baseline
+                        .disk
+                        .insert(rel.to_string(), state::NEVER_SENT.to_string());
+                }
+                baseline
+            }
+            None => state::State {
+                files: state::list_memory_files(&self.memory_dir)?
+                    .into_iter()
+                    .filter(|rel| Some(rel.as_str()) != refused)
+                    .collect(),
+                ..Default::default()
+            },
+        };
+        baseline.files.retain(|rel| !deleted.contains(rel));
+        for rel in deleted {
+            baseline.bases.remove(rel);
+            baseline.disk.remove(rel);
+        }
+        for (rel, hash) in sent {
+            baseline.bases.insert(rel.clone(), hash.clone());
+            if let Ok(content) =
+                std::fs::read_to_string(state::join_relative(&self.memory_dir, rel))
+            {
+                baseline
+                    .disk
+                    .insert(rel.clone(), state::fingerprint(rel, &content));
+            }
+            baseline.files.push(rel.clone());
+        }
+        baseline.files.sort();
+        baseline.files.dedup();
+        state::save(
+            &self.state_file,
+            &baseline.files,
+            &baseline.bases,
+            &baseline.disk,
+        )?;
         Ok(())
     }
 }
@@ -177,6 +263,12 @@ impl Error {
             | Error::Pull { source, .. } => Some(source),
             _ => None,
         }
+    }
+
+    /// Whether the server's rate limit is what refused: the one answer that
+    /// means "later", and that a hook waits out.
+    pub(crate) fn rate_limited(&self) -> bool {
+        self.server_error().is_some_and(|e| e.status() == Some(429))
     }
 
     /// Whether the server refused because it no longer accepts the device

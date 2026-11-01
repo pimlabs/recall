@@ -119,7 +119,7 @@ pub use index::machine_is_linked as machine_index_is_linked;
 pub use path::{foreign_memory_slug, is_memory_file};
 pub use promote::{promote, Error as PromoteError, PromoteOutcome, Target as PromoteTarget};
 pub use pull::{pull, PullOutcome};
-pub use push::{push, PushOutcome};
+pub use push::{push, unsent, PushOutcome};
 pub use scope::Scope;
 
 #[cfg(test)]

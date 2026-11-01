@@ -16,6 +16,31 @@ break will be described here in full rather than smoothed over.
 
 ## Unreleased
 
+- **A check of the audit log no longer costs the hooks their pushes.** The
+  server counts `/v1/audit/*` against a second rate-limit bucket per address.
+  A check asks for one proof per checkpoint saved, so a backlog spent the whole
+  minute, and every memory edit made in that minute was refused. A device's
+  share of live nonces doubles to match. This one needs the server upgraded.
+- **A sync the rate limit refuses waits and goes out.** A push, a pull or
+  `recall sync` tries again every 5 seconds for up to 65, reading the memory
+  directory afresh each time, so the session pauses instead of leaving an edit
+  behind or starting without its memory. Past that, or when the server is down,
+  the change stays queued on disk for the next edit, session start or `recall
+  sync`.
+- **A run stopped partway no longer loses track of what it did.** A new file
+  refused on a machine's first sync, or an edit refused on a file listed with no
+  base, used to read as synced and was never sent, by anything. Whatever ends a
+  run now, it keeps the base of each file it did send, which stops the next edit
+  to one being merged with itself.
+- **A hook acts for the project the session started in**, from
+  `CLAUDE_PROJECT_DIR`. Claude Code runs hooks where the session's shell is,
+  so after a `cd` a memory edit was reported as another project's and dropped.
+- **`recall doctor` names memory changed here and not sent**, under `unsent`.
+  `recall status --json` carries the same list.
+- **`recall push` with nothing on stdin says nothing was sent**, and exits 1.
+  It used to exit 0 in silence, which read as sent. `recall sync` is what
+  sends by hand.
+
 - **Memory edited in a session started in a git worktree now syncs.** Claude
   Code keeps one memory directory per repository, the main checkout's, for
   every worktree and subdirectory. Recall named it after the worktree instead,

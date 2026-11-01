@@ -173,10 +173,10 @@ may be only a few seconds ahead: the further ahead a signature may be
 dated, the longer after each start this lasts. A request signed while a
 deploy is under way, or in the first few seconds after, gets that answer,
 and is signed again a few seconds later. One device may have as many
-nonces live at once as the rate limit lets one address send in 65
-seconds, the longest a nonce lives, and never more than 256, a
-sixty-fourth of the 16,384 the server remembers in all, however high
-`RECALL_RATE_LIMIT_MAX` is set. A device over it is refused alone, and
+nonces live at once as the rate limit lets one address send, across both
+of its buckets, in 65 seconds, the longest a nonce lives, and never more
+than 256, a sixty-fourth of the 16,384 the server remembers in all, however
+high `RECALL_RATE_LIMIT_MAX` is set. A device over it is refused alone, and
 every other device carries on.
 
 A `sync` device may use every route but the admin ones and the job routes;
@@ -228,12 +228,21 @@ the auth check — so a flood of invalid tokens is limited too, rather than
 escaping the limiter by never reaching auth. The two enrolment routes, which
 need no credential, are limited the same way and share the same bucket.
 
+An address has a second bucket of the same size, for `GET /v1/audit/checkpoint`,
+`GET /v1/audit/consistency` and `GET /v1/audit/entries`. A check of the audit
+log asks for one proof per checkpoint saved, which with a backlog is a whole
+window, and pushes sharing that window were refused until it ended. It also
+means twice the token guesses from one address, which is why the second bucket
+exists for these three routes and no others.
+
 There is no batch endpoint: a client with many files sends one `POST /sync`
 each, so a run longer than `RECALL_RATE_LIMIT_MAX` files in one window is cut
 short. `Retry-After` carries the whole window in seconds — `60` by default —
 rather than the time remaining in it. `recall backfill` is such a client, and
 stops rather than retrying, so that the push and pull hooks running in the
-same session keep their share of the same bucket.
+same session keep their share of the same bucket. The hooks and `recall sync`
+wait instead, trying again every 5 seconds for up to 65: the window is fixed,
+so a refused request does not move its end.
 
 The client's address is read from exactly one request header, named by
 `RECALL_TRUSTED_IP_HEADER` — `cf-connecting-ip` behind a Cloudflare tunnel,
