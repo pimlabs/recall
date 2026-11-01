@@ -14,6 +14,7 @@ mod global_scope;
 mod machine_scope;
 mod pending;
 mod promote;
+mod refused;
 
 use std::fs;
 use std::path::{Path, PathBuf};

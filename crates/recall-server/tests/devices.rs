@@ -1593,8 +1593,9 @@ async fn the_enrolment_routes_take_small_bodies_only() {
 /// refused on its own, and the others carry on.
 #[tokio::test]
 async fn a_device_that_signs_too_much_is_refused_alone() {
-    // Two a minute per address: a device may have four nonces live, since
-    // the sixty-five seconds one lives span two of the limiter's minutes.
+    // Two a minute per address: a device may have eight nonces live, since
+    // the sixty-five seconds one lives span two of the limiter's minutes,
+    // and an address has two buckets.
     let h = harness(|c| c.rate_limit_max = 2);
     let mut greedy = Machine::new(36);
     stored_device(&h, &mut greedy, "sync");
@@ -1608,7 +1609,7 @@ async fn a_device_that_signs_too_much_is_refused_alone() {
         req
     };
     // Each from its own address, so the rate limiter lets every one by.
-    for i in 0..4 {
+    for i in 0..8 {
         assert_eq!(
             h.send(from(&greedy, &format!("198.51.100.{i}"))).await.0,
             StatusCode::OK

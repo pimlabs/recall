@@ -48,6 +48,12 @@ pub struct State {
     pub disk: BTreeMap<String, String>,
 }
 
+/// A fingerprint no file has, so that a file holding it reads as changed for
+/// as long as it exists: see [`Context::keep_what_was_sent`].
+///
+/// [`Context::keep_what_was_sent`]: crate::Context
+pub(crate) const NEVER_SENT: &str = "never-sent";
+
 impl State {
     /// Whether the file at `rel`, now reading `content`, holds a change
     /// this machine has not sent.
@@ -56,7 +62,9 @@ impl State {
     /// otherwise against its base, which is how a baseline written before
     /// fingerprints existed is still answered. A file known to neither was
     /// never synced from here: unchanged if the baseline already listed it
-    /// (nothing here can say more), new and unsent if it did not.
+    /// (nothing here can say more), new and unsent if it did not, unless it
+    /// is a `MEMORY.md` of nothing but Recall's own links, which every
+    /// machine derives for itself.
     pub(crate) fn changed_since_sync(&self, rel: &str, content: &str) -> bool {
         let sha = recall_wire::content_sha256(content);
         if self.bases.get(rel) == Some(&sha) {
@@ -65,10 +73,13 @@ impl State {
         match self.disk.get(rel) {
             Some(fp) => *fp != fingerprint(rel, content),
             None if self.bases.contains_key(rel) => true,
-            None => self
-                .files
-                .binary_search_by(|f| f.as_str().cmp(rel))
-                .is_err(),
+            None => {
+                self.files
+                    .binary_search_by(|f| f.as_str().cmp(rel))
+                    .is_err()
+                    && !(rel == "MEMORY.md"
+                        && crate::index::without_owned_links(content).trim().is_empty())
+            }
         }
     }
 }

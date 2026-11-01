@@ -664,14 +664,16 @@ moves all pick a winner rather than merging:
 - Editing the file in your editor sends nothing at all: the push hook is
   `PostToolUse`, so it fires when *Claude* writes a memory file, not when you
   do.
-- **Editing memory from inside a git worktree sends nothing either**, and for
-  a less obvious reason. `recall push` resolves the project from the current
-  directory, and a worktree is a different directory, so it has its own
-  memory directory — even though `project_key` is identical, because that
-  comes from the git remote a worktree shares. The file is therefore not this
-  project's memory, the hook stops there, and the next `recall pull` restores
-  the server's older copy over your edit. It now says so on stderr rather
-  than exiting silently; edit memory from the main checkout.
+- **Editing memory from a session started in a git worktree sends nothing
+  either**, and for a less obvious reason. `recall push` resolves the project
+  from the directory the session started in (`CLAUDE_PROJECT_DIR`, so a `cd`
+  in the session's shell changes nothing), and a worktree is a different
+  directory, so it has its own memory directory — even though `project_key`
+  is identical, because that comes from the git remote a worktree shares. The
+  file is therefore not this project's memory, the hook stops there, and the
+  next `recall pull` restores the server's older copy over your edit. It now
+  says so on stderr rather than exiting silently; edit memory from the main
+  checkout.
 
 The one thing that actually merges is the server. Ask Claude to edit the
 file, and the push that follows is merged against the stored version — when
@@ -708,6 +710,25 @@ write one, and says so: the baseline is a claim that this disk and the server
 have been compared, and half a comparison is not that. And with global sync
 on, it refreshes `MEMORY.md`'s links to your `global/` files before sending —
 after asking the server, so a run that cannot reach it changes nothing at all.
+
+### A push the server refused
+
+The server's rate limit is the one refusal a hook and `recall sync` wait out:
+they try again every 5 seconds for up to 65, the window and a little, reading
+the memory directory afresh each time. Claude Code waits for the hook, so a
+session past the limit pauses rather than loses anything, and a session that
+starts past it gets its memory late rather than not at all.
+
+A limit that outlasts the wait fails the hook, as does a server that is down
+or unreachable, and the change stays unsent where it is. The next memory edit,
+session start or `recall sync` sends it. Any other refusal, such as a file past
+the server's 5 MiB limit, stops the same way but will not clear until what it
+refused is changed. Either way `recall doctor` names what is waiting under
+`unsent`. A pull in another folder or on another machine cannot tell it is
+missing, which is the reason to look there.
+
+`recall push` only ever acts on a hook's payload. Run by hand, it says nothing
+was sent and exits 1. `recall sync` is what sends by hand.
 
 ### Memory changed outside Claude's Edit and Write: `recall sync`
 
@@ -1318,7 +1339,9 @@ Until they are checked, the checkpoints wait in `audit.json`, all of them:
 the one saved just before a rewrite is the one that shows it. Once more than
 16 wait, each session's pull says so; run `recall doctor` or `recall audit
 verify`, which prove them in turn and keep each as it is proven, so a check
-the server's rate limit cuts short carries on next time. Each check proves
+the server's rate limit cuts short carries on next time. They count against
+a rate-limit bucket of their own, so a long check leaves the hooks' pushes
+alone. Each check proves
 the newest checkpoint already checked first, and keeps nothing until that
 proof holds: a server showing this machine one history at one check and
 another at the next cannot get checkpoints from both marked checked. The
