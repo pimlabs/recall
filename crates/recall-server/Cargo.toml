@@ -84,9 +84,10 @@ reqwest.workspace = true
 tower = { version = "0.5", features = ["util"] }
 # A software authenticator and WebAuthn client, so the passkey ceremonies
 # are tested end to end against the real verifier without a browser.
-passkey-authenticator = "0.5"
-passkey-client = "0.5"
-passkey-types = "0.5"
+passkey-authenticator = "0.6"
+passkey-client = "0.6"
+passkey-crypto = "0.1"
+passkey-types = "0.6"
 # passkey-authenticator's user-verification trait is an async_trait.
 async-trait = "0.1"
 coset = "0.3"

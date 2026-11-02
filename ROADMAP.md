@@ -106,6 +106,18 @@ their own.
       is `podman`; the compose path is unchanged. `scripts/podman-check.sh`
       deploys real releases with it on Podman 5.7 in CI and runs the
       README's Podman procedures as written. PR #201, shipped in 0.4.17.
+- [x] **A sync the rate limit refuses waits, and what it could not send
+      stays queued.** Added 2026-11-02, after a `recall doctor` checking a
+      backlog of audit checkpoints spent the whole window and four memory
+      edits in that minute were refused. The audit routes got a bucket of
+      their own, a run waits out a refusal, a run stopped partway records
+      what it sent, a hook acts for the project the session started in, and
+      `recall doctor` names what is unsent. PR #210, shipped in 0.4.18.
+- [x] **Memory edited in a session started in a git worktree syncs.** Added
+      2026-11-02. Recall named the memory directory after the worktree,
+      Claude Code after the main checkout, so `claude` in a worktree and
+      `claude --worktree` lost every edit. `claude::canonical_root` follows
+      the CLI. PR #211, shipped in 0.4.18.
 
 ## Phase 5 — One Go binary — done
 
