@@ -16,6 +16,7 @@ use axum::http::{header, Request, StatusCode};
 use axum::Router;
 use passkey_authenticator::{Authenticator, UiHint, UserCheck, UserValidationMethod};
 use passkey_client::{Client, DefaultClientData};
+use passkey_crypto::rust_crypto::RustCryptoBackend;
 use passkey_types::ctap2::{Aaguid, Ctap2Error};
 use passkey_types::webauthn::{CredentialCreationOptions, CredentialRequestOptions};
 use passkey_types::Passkey;
@@ -67,16 +68,23 @@ impl UserValidationMethod for Approves {
 }
 
 /// A phone holding at most one passkey, as a browser would drive it.
-type Phone = Client<Option<Passkey>, Approves, public_suffix::PublicSuffixList, ()>;
+type Phone =
+    Client<Option<Passkey>, Approves, RustCryptoBackend, public_suffix::PublicSuffixList, ()>;
 
 fn phone() -> Phone {
-    Client::new(Authenticator::new(Aaguid::new_empty(), None, Approves))
+    Client::new(Authenticator::new(
+        Aaguid::new_empty(),
+        None,
+        Approves,
+        RustCryptoBackend,
+    ))
 }
 
 /// A hardware key that counts its signatures, where a synced passkey
 /// reports zero every time.
 fn counting_key() -> Phone {
-    let mut authenticator = Authenticator::new(Aaguid::new_empty(), None, Approves);
+    let mut authenticator =
+        Authenticator::new(Aaguid::new_empty(), None, Approves, RustCryptoBackend);
     authenticator.set_make_credentials_with_signature_counter(true);
     Client::new(authenticator)
 }

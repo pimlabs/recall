@@ -14,7 +14,7 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
-## Unreleased
+## 0.4.18 — 2026-11-02
 
 - **A check of the audit log no longer costs the hooks their pushes.** The
   server counts `/v1/audit/*` against a second rate-limit bucket per address.
@@ -40,7 +40,6 @@ break will be described here in full rather than smoothed over.
 - **`recall push` with nothing on stdin says nothing was sent**, and exits 1.
   It used to exit 0 in silence, which read as sent. `recall sync` is what
   sends by hand.
-
 - **Memory edited in a session started in a git worktree now syncs.** Claude
   Code keeps one memory directory per repository, the main checkout's, for
   every worktree and subdirectory. Recall named it after the worktree instead,
@@ -57,6 +56,10 @@ break will be described here in full rather than smoothed over.
   Nothing needs migrating. A `memory` directory or `.recall-state.json` under a
   worktree's own name is no longer read. Claude Code never read that directory
   either, so it holds nothing the server lacks, and it can be deleted.
+- **TLS fixes in the client, the server and the worker.** `rustls` 0.23.46,
+  `rustls-webpki` 0.103.16 and `webpki-roots` 1.0.11, for RUSTSEC-2026-0346 to
+  0349, 0381 and 0382, and `tokio` 1.53.3 for RUSTSEC-2026-0386. Nothing needs
+  changing beyond the upgrade.
 
 ## 0.4.17 — 2026-10-14
 
