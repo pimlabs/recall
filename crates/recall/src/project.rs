@@ -91,8 +91,13 @@ pub fn remote_session() -> bool {
 /// again for its context, and `recall status` read the process environment
 /// while the hooks it was reporting on ran under a different one.
 pub struct Resolved {
-    /// The project root.
+    /// The project root: the checkout, whose settings files apply here.
     pub root: PathBuf,
+    /// What Claude Code names this project's data after, which in a linked
+    /// worktree is the main checkout rather than [`Resolved::root`]. Memory
+    /// and everything kept beside it follow this, and so does a key derived
+    /// from the path: one directory cannot have two histories.
+    canonical_root: PathBuf,
     /// The settings files layered over the shell, as Claude Code layers
     /// them. Kept so `recall status` can say *where* a value came from.
     pub env: declared_env::Environment,
@@ -128,7 +133,12 @@ pub fn resolve() -> Resolved {
 /// just wired.
 pub fn resolve_at(root: PathBuf) -> Resolved {
     let env = declared_env::Environment::discover(&root);
-    Resolved { root, env }
+    let canonical_root = claude::canonical_root(&root);
+    Resolved {
+        root,
+        canonical_root,
+        env,
+    }
 }
 
 impl Resolved {
@@ -140,7 +150,8 @@ impl Resolved {
     /// being set up yet — the exact case Recall exists for — does not report
     /// a missing token on every unrelated file the user touches.
     pub fn memory_dir(&self) -> PathBuf {
-        claude::Env::from_lookup(self.env.lookup()).memory_dir(&self.root.to_string_lossy())
+        claude::Env::from_lookup(self.env.lookup())
+            .memory_dir(&self.canonical_root.to_string_lossy())
     }
 
     /// The root every project's memory lives under, which is the same for
@@ -152,7 +163,8 @@ impl Resolved {
 
     /// `recall review`'s per-machine state file, beside `.recall-state.json`.
     pub fn review_file(&self) -> PathBuf {
-        claude::Env::from_lookup(self.env.lookup()).review_file(&self.root.to_string_lossy())
+        claude::Env::from_lookup(self.env.lookup())
+            .review_file(&self.canonical_root.to_string_lossy())
     }
 
     /// Recall's configuration, resolved through [`Resolved::env`].
@@ -184,7 +196,7 @@ impl Resolved {
         project::key_with_override(
             cfg.project_key.as_deref(),
             remote,
-            &self.root.to_string_lossy(),
+            &self.canonical_root.to_string_lossy(),
         )
     }
 
@@ -204,7 +216,7 @@ impl Resolved {
         let client = cfg.client()?;
         cfg.require()?;
 
-        let root_str = self.root.to_string_lossy().to_string();
+        let root_str = self.canonical_root.to_string_lossy().to_string();
         Ok(Context {
             memory_dir: cfg.claude.memory_dir(&root_str),
             state_file: cfg.claude.state_file(&root_str),
@@ -485,7 +497,11 @@ mod tests {
             let home_dir = recall.display().to_string();
             let shell = move |name: &str| (name == "RECALL_HOME").then(|| home_dir.clone());
             let env = declared_env::Environment::from_files(&[], Box::new(shell));
-            let here = Resolved { root, env };
+            let here = Resolved {
+                canonical_root: root.clone(),
+                root,
+                env,
+            };
             let cfg = ClientConfig {
                 url: "http://127.0.0.1:9".into(),
                 authkey: Some("rk_test".into()),

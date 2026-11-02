@@ -664,16 +664,15 @@ moves all pick a winner rather than merging:
 - Editing the file in your editor sends nothing at all: the push hook is
   `PostToolUse`, so it fires when *Claude* writes a memory file, not when you
   do.
-- **Editing memory from a session started in a git worktree sends nothing
-  either**, and for a less obvious reason. `recall push` resolves the project
-  from the directory the session started in (`CLAUDE_PROJECT_DIR`, so a `cd`
-  in the session's shell changes nothing), and a worktree is a different
-  directory, so it has its own memory directory — even though `project_key`
-  is identical, because that comes from the git remote a worktree shares. The
-  file is therefore not this project's memory, the hook stops there, and the
-  next `recall pull` restores the server's older copy over your edit. It now
-  says so on stderr rather than exiting silently; edit memory from the main
-  checkout.
+- **Editing another project's memory sends nothing either.** The hook sends
+  the memory of the project the session started in (`CLAUDE_PROJECT_DIR`, so a
+  `cd` in the session's shell changes nothing), says so on stderr when the file
+  belongs to a different one, and the next `recall pull` in that project
+  restores the server's older copy over your edit. A git worktree is not a
+  different project: Claude Code keeps one memory directory per repository, the
+  main checkout's, for every worktree and subdirectory, and Recall follows it.
+  A bare repository has no main checkout, so its worktrees share the memory
+  named after the bare directory.
 
 The one thing that actually merges is the server. Ask Claude to edit the
 file, and the push that follows is merged against the stored version — when

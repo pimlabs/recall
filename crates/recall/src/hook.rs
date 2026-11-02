@@ -56,8 +56,9 @@ pub async fn push() -> anyhow::Result<i32> {
                  so nothing was pushed"
             );
             eprintln!(
-                "recall-push:   standing in {}; a git worktree has its own memory directory",
-                here.root.display()
+                "recall-push:   standing in {}, whose memory is {}",
+                here.root.display(),
+                here.memory_dir().display()
             );
         }
         return Ok(exit::OK);
