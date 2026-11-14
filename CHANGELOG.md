@@ -14,7 +14,7 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
-## Unreleased
+## 0.4.19 — 2026-11-14
 
 - **SQLite 3.54.1** (was 3.51.3), built into the client and the server, for
   [RUSTSEC-2026-0459](https://rustsec.org/advisories/RUSTSEC-2026-0459)
