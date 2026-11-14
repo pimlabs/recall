@@ -1,7 +1,7 @@
 name: CI
 
 # Deploying is not in here any more. Since 0.4.0 a server runs releases, not
-# `main`, so the deploy runs after a release is published: see deploy.yml.
+# `main`, so the deploy runs after a release is published: see deploy-release.yml.
 # A push to `main` is checked and nothing else.
 
 on:
@@ -82,7 +82,6 @@ jobs:
   # attestations API, Sigstore), so a pull request that cannot have changed
   # what it checks is not made to depend on them. A push to `main` runs it.
   plan:
-    name: plan
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.diff.outputs.image }}
@@ -126,11 +125,11 @@ jobs:
           echo "$changed"
 
           # Asked of the diff even in a public repository; see above.
-          if printf '%s\n' "$changed" | grep -Eq '^(scripts/(verify-release-image|check-release-environments)\.sh|\.github/workflows/(ci|deploy|build-release|publish)\.yml)$'; then
+          if printf '%s\n' "$changed" | grep -Eq '^(scripts/(verify-release-image|check-release-environments)\.sh|\.github/workflows/(ci|deploy-release|build-release|publish)\.yml)$'; then
             echo "deploy=true" >> "$GITHUB_OUTPUT"
           else
             echo "deploy=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Nothing in scripts/verify-release-image.sh, scripts/check-release-environments.sh, deploy.yml, build-release.yml, publish.yml or this workflow changed, so check-release-image was skipped. It runs unconditionally on every push to main."
+            echo "::notice::Nothing in scripts/verify-release-image.sh, scripts/check-release-environments.sh, deploy-release.yml, build-release.yml, publish.yml or this workflow changed, so check-release-image was skipped. It runs unconditionally on every push to main."
           fi
 
           if [ "${{ github.event.repository.private }}" != "true" ]; then
@@ -169,7 +168,6 @@ jobs:
   # in seconds, in parallel with the Rust jobs and `build-image`, rather than
   # waiting on minutes of Rust and Docker work nobody needed to see first.
   check-scripts:
-    name: check-scripts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -293,7 +291,6 @@ jobs:
   # and what it protects is spread across install.sh, npm/, deploy/,
   # scripts/ and two workflows, a list a path filter would get wrong.
   test-installers:
-    name: test-installers
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -303,7 +300,7 @@ jobs:
           pip install --quiet --disable-pip-version-check PyYAML
           ./scripts/installer-test.sh
 
-  # The Rust checks on Linux, as two jobs that run side by side: `lint`
+  # The Rust checks on Linux, as two jobs that run side by side: `check-lint`
   # reads the code, `test-linux` runs it. They were one job, and at four
   # minutes it was the one the whole run waited for, though its steps
   # needed nothing from one another: clippy and rustdoc share no build with
@@ -311,13 +308,12 @@ jobs:
   # The Docker image has its own job below, since it needs Docker rather
   # than cargo and is gated on the diff.
   #
-  # `lint` is everything that reads the code rather than running it:
+  # `check-lint` is everything that reads the code rather than running it:
   # formatting, clippy, rustdoc and the server's dependency tree.
   # Formatting and rustdoc are the same on every platform, so they run here
   # only; clippy runs on Windows too, in `test-windows`, for the code only
   # Windows compiles.
-  lint:
-    name: lint
+  check-lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -367,15 +363,14 @@ jobs:
   # real socket. It is still the longest Rust job, so it builds once: the
   # test build also compiles the server binary the scripts run.
   test-linux:
-    name: test-linux
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Toolchain (stable) and Swatinem/rust-cache, saved only from main
       # (see .github/actions/rust-setup for why), and cargo-nextest. No
-      # rustfmt or clippy: `lint` runs those. shared-key is set so this
-      # job's cache stays its own: `lint` above has its own, `test-windows`
+      # rustfmt or clippy: `check-lint` runs those. shared-key is set so this
+      # job's cache stays its own: `check-lint` above has its own, `test-windows`
       # below keys by `matrix.os`, and without a key here this job's entries
       # would collide with whatever a same-named job elsewhere set saves.
       - name: Set up Rust (stable), cargo-nextest and the cache
@@ -509,7 +504,6 @@ jobs:
   # workflow and image surface for a build Docker already knows how to do
   # itself, without rust-cache's warmth either way.
   build-image:
-    name: build-image
     needs: plan
     if: needs.plan.outputs.image == 'true'
     runs-on: ubuntu-latest
@@ -691,7 +685,7 @@ jobs:
   # units in deploy/quadlet/ under rootless Podman and the runner user's own
   # systemd, on the Podman a Podman deployment runs (ubuntu-26.04 has 5.7).
   # It deploys the three newest published releases in a row, two of them by
-  # the digest verify-release-image.sh verified, as deploy.yml does, then
+  # the digest verify-release-image.sh verified, as deploy-release.yml does, then
   # runs deploy/README.md's Podman blocks as written: the token, rotating
   # it, restoring a snapshot, and moving a Compose deployment's volume and
   # token over from Docker. A unit that publishes beyond loopback, files the
@@ -700,7 +694,6 @@ jobs:
   #
   # Gated on the same diff as `build-image`.
   check-podman:
-    name: check-podman
     needs: plan
     if: needs.plan.outputs.image == 'true'
     runs-on: ubuntu-26.04
@@ -761,7 +754,7 @@ jobs:
           echo "Newest release: $version ($latest)"
           scripts/release-image.sh build "$version" "$(git rev-parse --short HEAD)" "$ARCH" check
 
-  # What deploy.yml asks before a server pulls anything: does the tag name
+  # What deploy-release.yml asks before a server pulls anything: does the tag name
   # the image the release built? scripts/verify-release-image.sh resolves
   # it to a digest and checks the index's version and the digest's
   # attestation, with `gh attestation verify` and this job's token, which
@@ -773,14 +766,13 @@ jobs:
   # shown able to fail.
   #
   # The newest release is the newest v* tag after 0.4.6 (the last with no
-  # image; deploy.yml's LAST_BUILT_ON_SERVER), by sort -V, whose build
+  # image; deploy-release.yml's LAST_BUILT_ON_SERVER), by sort -V, whose build
   # run's publish-image job has succeeded: a release in progress has its
   # tag before its images, and main must not go red in between. Reading
   # the run is why this job also has `actions: read`. Gated on
   # `plan`'s `deploy` answer, even while the repository is public: see
   # `plan`.
   check-release-image:
-    name: check-release-image
     needs: plan
     if: needs.plan.outputs.deploy == 'true'
     runs-on: ubuntu-latest
@@ -931,7 +923,7 @@ jobs:
           components: ${{ matrix.arch == 'x64' && 'clippy' || '' }}
           cache-key: ${{ matrix.os }}
 
-      # No `cargo fmt`: formatting is the same on every platform, and `lint`
+      # No `cargo fmt`: formatting is the same on every platform, and `check-lint`
       # checks it. Clippy is here for the code only Windows compiles
       # (`cfg(windows)`), and on x64 only: nothing in the workspace depends
       # on the architecture, so arm64 compiles exactly the code x64 has just
@@ -1058,9 +1050,8 @@ jobs:
   # protection rule. `always()` so it reports even when something it waits
   # on failed or was cancelled.
   ci-passed:
-    name: ci-passed
     if: always()
-    needs: [plan, check-scripts, test-installers, lint, test-linux, build-image, check-podman, check-publish-image, check-release-image, test-windows, install-windows]
+    needs: [plan, check-scripts, test-installers, check-lint, test-linux, build-image, check-podman, check-publish-image, check-release-image, test-windows, install-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Every job succeeded or was skipped on purpose

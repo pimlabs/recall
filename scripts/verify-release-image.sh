@@ -20,7 +20,7 @@
 #     was split in two.
 #
 # Prints each verified digest, and under GitHub Actions writes them as the
-# step outputs server_digest and worker_digest. deploy.yml hands those to
+# step outputs server_digest and worker_digest. deploy-release.yml hands those to
 # the server, which pulls them by digest and nothing else.
 #
 # Exits 1 when the server's image fails either check or cannot be read,
@@ -31,7 +31,7 @@
 # Needs docker with buildx, jq, and gh with a token that can read this
 # repository's attestations (GH_TOKEN; `attestations: read` in a workflow).
 #
-# Run by deploy.yml before it deploys, and by ci.yml's check-release-image
+# Run by deploy-release.yml before it deploys, and by ci.yml's check-release-image
 # against the newest published release.
 set -euo pipefail
 

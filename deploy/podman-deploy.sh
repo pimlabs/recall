@@ -2,17 +2,17 @@
 #
 # Deploys a release of recall-server under rootless Podman, from the Quadlet
 # units in deploy/quadlet/, for the user who runs it. Run it from a checkout
-# of the release's tag: .github/workflows/deploy.yml does, over SSH, when
+# of the release's tag: .github/workflows/deploy-release.yml does, over SSH, when
 # DEPLOY_RUNTIME is podman, and by hand it is the same command.
 #
-#   deploy/podman-deploy.sh 0.4.17 sha256:<digest>   # those bytes, as deploy.yml pulls them
+#   deploy/podman-deploy.sh 0.4.17 sha256:<digest>   # those bytes, as deploy-release.yml pulls them
 #   deploy/podman-deploy.sh 0.4.17                   # the tag, trusted
 #
 # Everything it checks, it checks before it changes anything, so a deploy
 # that stops early leaves the running server as it was. Then it pulls the
 # image, installs the units, restarts recall-server, and waits for /health.
 # Once the new version answers, it removes older version tags of the image,
-# keeping the one before it for a rollback, as deploy.yml does under compose.
+# keeping the one before it for a rollback, as deploy-release.yml does under compose.
 #
 # The units come from this checkout, the image from its version, and both
 # are the release's own: deploying 0.4.17 runs the way 0.4.17 says.
@@ -93,7 +93,7 @@ fi
 
 # ---------------------------------------------------------------- image
 
-# By digest, the bytes deploy.yml verified, whatever the tag names by now.
+# By digest, the bytes deploy-release.yml verified, whatever the tag names by now.
 # By hand, the tag, and the image's own label has to agree with it.
 if [ -n "$DIGEST" ]; then
   ref="$REPO@$DIGEST"

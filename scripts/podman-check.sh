@@ -13,7 +13,7 @@
 # and uses Docker for the move from Compose, so it refuses to start where a
 # recall-server unit, a recall-data volume or a recall-token secret already
 # exists. Needs curl, jq, openssl, docker with buildx, and gh with GH_TOKEN:
-# the newer two releases are deployed the way deploy.yml deploys them, by
+# the newer two releases are deployed the way deploy-release.yml deploys them, by
 # the digest scripts/verify-release-image.sh verified, and the oldest the way
 # the README's update by hand does, by its tag.
 #

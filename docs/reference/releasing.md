@@ -95,7 +95,7 @@ Build a release does steps 1 to 3:
    (`tag-latest.yml`, also runnable by hand as Actions → Tag latest), for
    pulling by hand only. Then **deploy** them:
    the deploy verifies each tag's digest against that attestation, and the
-   production server pulls that digest rather than building it (`deploy.yml`; see
+   production server pulls that digest rather than building it (`deploy-release.yml`; see
    [`github-actions-deploy.md`](github-actions-deploy.md)). Neither waits for
    an approval, deliberately: the image holds nothing the Release did not
    already make public, a package version can be deleted, and a deploy is

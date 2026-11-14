@@ -34,7 +34,7 @@ Two workflows are involved:
   green in every job. One job, `ci-passed`, stands for the whole run: it
   is green when every other job succeeded or was deliberately skipped, and
   it is the single check to require if `main` ever gets branch protection.
-- **`.github/workflows/deploy.yml`** puts a release on the server. Build
+- **`.github/workflows/deploy-release.yml`** puts a release on the server. Build
   a release (`build-release.yml`) calls it once the GitHub Release exists, so **every
   release deploys itself**. It can also be run by hand, **Actions → Deploy a release
   → Run workflow** with a version such as `0.4.0`, from anywhere including
@@ -379,7 +379,7 @@ workflows it depends on. The worker's image is checked whether or not the server
 runs it, since the runner cannot see `COMPOSE_PROFILES`; one that cannot be
 read at all only warns, and the server then refuses to deploy a stack that
 runs the worker. The job needs `attestations: read` for this, beside
-`contents: read`, and build-release.yml's `deploy` job grants both.
+`contents: read`, and build-release.yml's `deploy-release` job grants both.
 
 On the server it pulls every image of ours the stack runs (the worker's
 only when `COMPOSE_PROFILES` turns the worker on) **by that digest**,
@@ -406,7 +406,7 @@ a volume. A build deploy (0.4.6 and older) removes nothing.
 
 **A version without an image is built on the server, as before.** 0.4.6 is
 the last release with no published image, and `LAST_BUILT_ON_SERVER` in
-`deploy.yml` says so, in one place. Deploying it or anything older, a
+`deploy-release.yml` says so, in one place. Deploying it or anything older, a
 rollback included, checks out that tag and runs `docker compose up -d
 --build`, exactly as that release was always deployed. Tags never move, so
 the line never does.
@@ -415,7 +415,7 @@ the line never does.
 creates is private, whatever the repository's visibility, and GitHub offers
 no API to change that. So the first release that publishes images stops at
 the end of `publish-image`, with an error naming the package, and before
-`deploy`, so the server is untouched. Then, once per package:
+`deploy-release`, so the server is untouched. Then, once per package:
 
 1. Open `https://github.com/orgs/pimlabs/packages/container/recall-server/settings`.
 2. **Danger Zone → Change visibility → Public**, and confirm with the

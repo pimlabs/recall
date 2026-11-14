@@ -34,7 +34,6 @@ jobs:
   # with npm/package.json ships a package that installs nothing — and it would
   # otherwise be discovered after twenty minutes of runner time.
   check-versions:
-    name: check-versions
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.agree.outputs.version }}
@@ -312,7 +311,6 @@ jobs:
           path: dist/*.tar.gz
 
   publish-github:
-    name: publish-github
     needs: [build-client, build-server]
     runs-on: ubuntu-latest
     # The one job here that writes anything: softprops/action-gh-release
@@ -368,19 +366,18 @@ jobs:
   # None is behind a release-* environment, deliberately. The image holds
   # nothing that is not already public and unapproved in the GitHub Release,
   # a package version can be deleted (npm and crates.io cannot be undone),
-  # and `deploy` below needs it: gating it would make every deploy wait for
+  # and `deploy-release` below needs it: gating it would make every deploy wait for
   # the approval that deploys were deliberately kept out of. GITHUB_TOKEN is
   # the only credential. A package it creates is private whatever this
   # repository's visibility, and GitHub has no API to change that, so
-  # `publish-image` fails, before `deploy`, until the owner has made each
+  # `publish-image` fails, before `deploy-release`, until the owner has made each
   # package public once; see docs/reference/releasing.md.
   #
   # A tag from before images were published (a run dispatched by hand for
   # 0.4.6 or older) has no scripts/release-image.sh, and is deployed by
-  # building on the server (deploy.yml's LAST_BUILT_ON_SERVER), so all three
+  # building on the server (deploy-release.yml's LAST_BUILT_ON_SERVER), so all three
   # pass without doing anything.
   check-image:
-    name: check-image
     needs: [check-versions, publish-github]
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -462,7 +459,6 @@ jobs:
           retention-days: 7
 
   publish-image:
-    name: publish-image
     needs: [check-versions, check-image, build-image]
     # After check-image, whether build-image ran (something to publish) or
     # was skipped (nothing to build); never after either failed.
@@ -528,7 +524,7 @@ jobs:
       # own provenance to each architecture's image too (--provenance
       # mode=max). A tag an earlier run made is attested again, so a run
       # whose attestation failed after its tag was made is finished by
-      # re-running it. deploy.yml verifies it, by digest and with this
+      # re-running it. deploy-release.yml verifies it, by digest and with this
       # workflow as the signer, before a server pulls anything, so an
       # image without one is never deployed.
       - name: Attest the server image
@@ -566,7 +562,7 @@ jobs:
   # `latest` for each image, moved to this version when it is the newest
   # release, never back to an older one: tag-latest.yml, which Actions →
   # Tag latest also runs by hand. For someone pulling by hand; a deploy
-  # names a version. Its own job, which `deploy` does not wait on: a
+  # names a version. Its own job, which `deploy-release` does not wait on: a
   # registry that cannot move `latest` must not hold up the server running
   # the release.
   tag-latest:
@@ -590,10 +586,10 @@ jobs:
   # Its `if` is spelled out because publish-image runs after build-image was
   # skipped, and a job's default `success()` counts that skip against it.
   #
-  # Its permissions are the most deploy.yml can have when called from here:
+  # Its permissions are the most deploy-release.yml can have when called from here:
   # attestations: read, for the deploy to verify the attestation
   # `publish-image` made before the server pulls anything.
-  deploy:
+  deploy-release:
     needs: [check-versions, publish-image]
     if: >-
       !cancelled() && needs.check-versions.result == 'success'
@@ -601,15 +597,14 @@ jobs:
     permissions:
       contents: read
       attestations: read
-    uses: ./.github/workflows/deploy.yml
+    uses: ./.github/workflows/deploy-release.yml
     with:
       version: ${{ needs.check-versions.outputs.version }}
     secrets: inherit
 
   # Where the release goes from here, on the run's summary page: the
   # registries are a separate workflow, run when a person decides.
-  next:
-    name: next
+  show-next-step:
     needs: [check-versions, publish-github]
     runs-on: ubuntu-latest
     steps:

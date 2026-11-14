@@ -1,4 +1,4 @@
-name: Audit
+name: Audit dependencies
 
 # Checks every dependency actually locked in Cargo.lock against the RustSec
 # advisory database. Nothing here builds the workspace or runs its tests —
@@ -23,12 +23,12 @@ on:
     paths:
       - "**/Cargo.toml"
       - "Cargo.lock"
-      - ".github/workflows/audit.yml"
+      - ".github/workflows/audit-dependencies.yml"
   pull_request:
     paths:
       - "**/Cargo.toml"
       - "Cargo.lock"
-      - ".github/workflows/audit.yml"
+      - ".github/workflows/audit-dependencies.yml"
 
 # Only ever reads the checkout and the advisory database it downloads itself.
 permissions:
@@ -36,7 +36,6 @@ permissions:
 
 jobs:
   audit-dependencies:
-    name: audit-dependencies
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

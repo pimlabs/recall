@@ -452,7 +452,7 @@ images, which changes the Dockerfile anyway.
   against `checksums.txt`, instead of compiling. `RECALL_SOURCE=source`
   still compiles from the checkout, for CI and for trying a branch.
 - A server runs releases, not `main`: each release deploys itself
-  (`.github/workflows/deploy.yml`), and any released version can be
+  (`.github/workflows/deploy-release.yml`), and any released version can be
   deployed by hand from the Actions tab, which is also the rollback. A
   push to `main` no longer deploys anything.
 

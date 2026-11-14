@@ -2,7 +2,7 @@ name: Rust setup
 description: >-
   Installs the pinned Rust toolchain (with whatever components the
   caller's checks need), restores/saves Swatinem/rust-cache and, when asked,
-  installs cargo-nextest. Shared by ci.yml's Rust jobs (`lint`, `test-linux`,
+  installs cargo-nextest. Shared by ci.yml's Rust jobs (`check-lint`, `test-linux`,
   `test-windows`, `install-windows`) so these steps are written once instead
   of once per job. The caller checks out the repository itself first: a
   local action cannot be loaded before its own checkout.
@@ -12,7 +12,7 @@ inputs:
     description: >-
       Toolchain components to install, comma-separated (dtolnay/rust-toolchain's
       own `components` input). rustfmt and clippy are the default, which is
-      what `lint` runs; pass '' for a job that needs neither, or just the one
+      what `check-lint` runs; pass '' for a job that needs neither, or just the one
       it runs.
     required: false
     default: rustfmt, clippy

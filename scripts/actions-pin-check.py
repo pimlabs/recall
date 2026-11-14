@@ -63,7 +63,7 @@ def check_the_checker():
         f"actions/checkout@{sha} # v5.1.0",
         f"github/codeql-action/init@{sha} # v3.29.0",
         "./.github/actions/rust-setup",
-        "./.github/workflows/deploy.yml",
+        "./.github/workflows/deploy-release.yml",
     ]
     wrong = [f"accepted {r!r}" for r in must_refuse if problem(r) is None]
     wrong += [f"refused {r!r}" for r in must_accept if problem(r) is not None]
