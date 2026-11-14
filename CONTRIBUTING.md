@@ -229,6 +229,13 @@ together. `dtolnay/rust-toolchain` is the exception Dependabot leaves
 alone: it is pinned to its `stable` branch, which has no releases, and is
 moved by hand.
 
+The Rust toolchain itself is pinned too, so a new stable release cannot
+turn CI red or change what a release is built with. `ARG RUST_VERSION` in
+`deploy/Dockerfile` names it, and every `dtolnay/rust-toolchain` step
+repeats it as `toolchain:`. To move it, change every one in the same pull
+request; `check-scripts` refuses a step that names another version or none
+(`scripts/toolchain-pin-check.py`).
+
 ## Ground rules
 
 See `CLAUDE.md`'s "Ground rules" section — same reason, one source of truth. Touching any of them? Stop and confirm with the user first.

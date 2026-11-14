@@ -32,8 +32,8 @@ updates:
       prefix: deps
     ignore:
       # Pinned to a commit on its `stable` branch, which has no version tags
-      # to move between, and the Rust it installs is whatever is stable on
-      # the day, so the pin does not hold Rust back. Dependabot would propose
-      # the default branch instead, where `toolchain` has no default. Moved
-      # by hand when the action itself needs to change.
+      # to move between. The Rust it installs is each step's `toolchain:`,
+      # pinned on its own (scripts/toolchain-pin-check.py). Dependabot would
+      # propose the default branch instead, where `toolchain` has no
+      # default. Moved by hand when the action itself needs to change.
       - dependency-name: dtolnay/rust-toolchain

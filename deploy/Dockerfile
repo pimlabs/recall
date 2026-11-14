@@ -42,11 +42,16 @@ ARG CLAUDE_CODE_VERSION=2.1.280
 # new one before relying on any flag used below).
 ARG CARGO_CHEF_VERSION=0.1.78
 
+# The Rust every CI job builds with, so a new stable release changes nothing
+# here until the pin moves. scripts/toolchain-pin-check.py holds each
+# workflow's `toolchain:` to this value.
+ARG RUST_VERSION=1.100.0
+
 # ---- chef: rust-alpine plus cargo-chef, the base both `planner` and
 # `source` build from. Its own layers (the apk packages, the cargo install)
 # only change when this Dockerfile does, so they are cache hits on nearly
 # every CI run regardless of what a PR touches.
-FROM rust:1-alpine AS chef
+FROM rust:${RUST_VERSION}-alpine AS chef
 
 # rusqlite's `bundled` feature compiles the SQLite amalgamation from C, so
 # the build stage needs a C toolchain even though nothing here is C. musl
