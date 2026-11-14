@@ -348,7 +348,7 @@ jobs:
   # a tag that moves by itself would be a deploy nobody asked for. `latest`
   # is moved too, afterwards (`tag-latest`), for pulling by hand only.
   # scripts/release-image.sh does every part; ci.yml's
-  # `check-publish-image` runs its build on every pull request.
+  # `check-publish-image` runs its build in every dispatched CI run.
   #
   # Three jobs, Docker's pattern for a build spread across runners:
   #

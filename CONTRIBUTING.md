@@ -21,6 +21,22 @@ cargo build --release -p recall-server   # the server, beside it
 
 The first build is slow — `rusqlite` compiles SQLite from C. After that it's cached.
 
+### Before you push
+
+CI runs only when the owner dispatches it, once per batch of pull requests (`AGENTS.md` has the
+steps), so opening a pull request runs nothing. The cheap checks run on your machine instead, as a
+tracked pre-push hook. Enable it once per clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+`.githooks/pre-push` then runs `cargo fmt --check`, clippy with `-D warnings`, and the script
+checks CI's `check-scripts` runs first (`actions-pin-check`, `toolchain-pin-check`, `docs-check`,
+`compose-check`, `link-check`) before every `git push`. It takes a few seconds once the build is
+cached, and about a minute from an empty `target/`. Run the tests yourself before asking for a batch; `git push --no-verify` skips the
+hook for one push you know is fine.
+
 CI's Linux job runs the same tests with [cargo-nextest](https://nexte.st) (`cargo nextest run --workspace --profile ci`, then `cargo test --doc --workspace` for the doctests nextest does not run), which puts every test in a process of its own and spreads them over every core; the Windows jobs keep `cargo test`, since Windows starts processes too slowly for that to pay. Either way runs every test once; nextest is only faster. Its settings are in `.config/nextest.toml`.
 
 `cargo test -p recall-wire` is the fastest useful check: that crate holds the request/response contract both halves depend on, and its tests pin the wire format byte for byte — field order and the `null`-versus-`""` distinction included — because those were once compatibility guarantees against a second implementation and are now guarantees against the rows already in production.

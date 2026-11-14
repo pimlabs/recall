@@ -55,34 +55,50 @@ jobs:
           echo "tag=v$cargo_v" >> "$GITHUB_OUTPUT"
           echo "Cutting v$cargo_v from $(git rev-parse --short HEAD)"
 
-      # A release of a commit whose CI did not pass is the one thing worth
+      # A release of a tree whose CI did not pass is the one thing worth
       # refusing outright: nothing downstream re-runs the test suite.
-      - name: CI passed on this commit
+      #
+      # CI runs only when dispatched, and a batch is tested on its
+      # integration branch, whose commits are not main's: squash merges
+      # land the same tree under new commits. So the run is found by tree,
+      # not by commit: the newest dispatched CI run whose commit has the
+      # tree main has now. That run must be green, and must not have
+      # skipped an image or Windows job: those skip only in a private
+      # repository, on a batch that did not touch them, and a dispatch of
+      # main runs them all. check-release-image and audit-dependencies may
+      # skip; neither tests the tree being tagged.
+      - name: CI passed on this tree
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          run_id=$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" --event push \
-            --json databaseId --jq '.[0].databaseId')
+          tree=$(git rev-parse "$GITHUB_SHA^{tree}")
+          run_id=
+          while read -r id sha; do
+            if [ "$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$sha" --jq .tree.sha)" = "$tree" ]; then
+              run_id=$id
+              break
+            fi
+          done < <(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=workflow_dispatch&per_page=50" \
+            --jq '.workflow_runs[] | "\(.id) \(.head_sha)"')
           if [ -z "$run_id" ]; then
-            echo "::error::No CI run for $GITHUB_SHA yet. Wait for it, then run this again."
+            echo "::error::No dispatched CI run has tested tree ${tree:0:12}, main's tree at $GITHUB_SHA. Dispatch CI on main (or on the batch that produced it), wait for it, then run this again."
             exit 1
           fi
-          # The whole run, not any one job: ci.yml splits its checks across
-          # several jobs (`check-scripts`, `test-linux`, `build-image`, `test-windows`), and the
-          # Windows jobs test the client the release ships for Windows, so a
-          # red one blocks a release as much as a red Linux one. On a push to
-          # main every job runs; a run is `success` only when each of them
-          # is, and a job skipped by ci.yml's own diff gate does not count
-          # against that.
           read -r status conclusion < <(gh run view "$run_id" --json status,conclusion \
             --jq '"\(.status) \(.conclusion // "none")"')
           if [ "$status" != "completed" ] || [ "$conclusion" != "success" ]; then
             not_green=$(gh run view "$run_id" --json jobs --jq \
               '[.jobs[] | select(.conclusion != "success" and .conclusion != "skipped") | "\(.name): \(if (.conclusion // "") == "" then .status else .conclusion end)"] | join(", ")')
-            echo "::error::CI on $GITHUB_SHA is '$status/$conclusion', not success (${not_green:-no job reported}). Wait for it, or fix it first."
+            echo "::error::CI run $run_id on this tree is '$status/$conclusion', not success (${not_green:-no job reported}). Wait for it, or fix it first."
             exit 1
           fi
-          echo "CI: every job green (run $run_id)"
+          skipped=$(gh run view "$run_id" --json jobs --jq \
+            '[.jobs[] | select(.conclusion == "skipped") | .name | select(startswith("check-release-image") or startswith("audit-dependencies") | not)] | join(", ")')
+          if [ -n "$skipped" ]; then
+            echo "::error::CI run $run_id on this tree skipped $skipped. Dispatch CI on main, which runs every job, then run this again."
+            exit 1
+          fi
+          echo "CI: every job green on this tree (run $run_id)"
 
       # A tag that already exists means this version was released, or
       # started to be. Pointing here, it is an interrupted run and Release is
