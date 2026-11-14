@@ -998,11 +998,11 @@ See `docs/design/handshake.md` for the reasoning.
 - [ ] winget publishing for the Windows client. **Shelved on 2026-09-24:** the
       one-time `winget-pkgs` setup (fork ownership, manual first submission,
       moderation) was too much friction for a single-owner tool. Windows
-      installs with `install.ps1` or npm instead. The `publish-winget` job stays in
-      `publish.yml` and skips while `WINGET_TOKEN` is unset on the `release-winget`
-      environment. The token left over from the attempt made that job fail on
-      0.4.4 and 0.4.6; it was deleted on 2026-09-28, so the next release
-      skips it.
+      installs with `install.ps1` or npm instead. The `publish-winget` job was
+      removed from `publish.yml` on 2026-11-15; `packaging/winget/` stays for a
+      revival. Before that, the token left over from the attempt made the job
+      fail on 0.4.4 and 0.4.6; it was deleted on 2026-09-28, and the job
+      skipped from then on.
 - [x] Optional direct TLS in `recall-server` (certificate files or ACME), for
       a server with no ingress in front of it. PR #105.
 - [x] GitHub Actions names that say what runs: verb-first jobs in the style
