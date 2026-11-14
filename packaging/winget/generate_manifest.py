@@ -3,14 +3,12 @@
 
 Usage: generate_manifest.py <version> <checksums.txt> [<output dir>]
 
-winget-pkgs wants a package's *first* version submitted by hand — the
-`publish-winget` job in .github/workflows/publish.yml (vedantmgoyal9/winget-releaser)
-only updates a package that already exists there, it does not create one.
-This script exists for that one-time submission, and for anyone who wants to
-inspect or hand-edit what a release's manifest will look like without
-re-deriving the shape from scratch. It is not run by CI or by the release
-workflow; komac/wingetcreate write their own manifest during the automated
-update.
+winget is shelved, and no release workflow publishes to it. This script is
+kept for a revival: winget-pkgs wants a package's *first* version submitted
+by hand, and this writes the manifest that submission should match, so
+nobody has to re-derive its shape from scratch. CI checks its output
+against the vendored schemas (test_manifest.py); no release runs it. See
+section 5 of docs/reference/releasing.md.
 
 It writes, under <output dir> (default: packaging/winget/out/<version>),
 the same path winget-pkgs itself uses — manifests/<first letter>/<publisher
