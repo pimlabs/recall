@@ -4,7 +4,7 @@ A minimal, self-hosted sync service for Claude Code's **auto memory** — the no
 
 ## Why
 
-Claude Code's auto memory is explicitly machine-local by design (see Anthropic's own docs — and a related feature request on `anthropics/claude-code` closed as "not planned"). `CLAUDE.md` already syncs fine via git; auto memory doesn't. Existing community tools (`claude-sync`, `claude-brain`, and similar) all assume a fixed set of named "devices" that pair with each other — that model breaks the moment one of your environments is an ephemeral cloud session that's never seen your other machines and won't exist tomorrow.
+Claude Code's auto memory is explicitly machine-local by design (see Anthropic's own docs — and a [related feature request on `anthropics/claude-code`](https://github.com/anthropics/claude-code/issues/39457), closed automatically by a stale bot after a period without activity rather than by a maintainer decision). `CLAUDE.md` already syncs fine via git; auto memory doesn't. Existing community tools (`claude-sync`, `claude-brain`, and similar) all assume a fixed set of named "devices" that pair with each other — that model breaks the moment one of your environments is an ephemeral cloud session that's never seen your other machines and won't exist tomorrow.
 
 Recall exists for that specific gap: **a central service any environment can talk to, with no prior introduction.**
 
