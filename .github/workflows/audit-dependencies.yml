@@ -3,8 +3,18 @@ name: Audit dependencies
 # Checks every dependency actually locked in Cargo.lock against the RustSec
 # advisory database. Nothing here builds the workspace or runs its tests —
 # `cargo audit` reads the lockfile and the advisory database only, so this
-# stays cheap enough to run on a schedule as well as on every change to a
-# manifest.
+# stays cheap enough to run every week.
+#
+# Two ways in. ci.yml calls it in a dispatched run whose diff changes a
+# manifest or the lockfile, so a dependency change is audited before it
+# reaches `main`. The weekly schedule is the one trigger in this repository
+# that starts by itself, kept on purpose: an advisory is published against a
+# lockfile that did not change, and GitHub's Dependabot alerts do not cover
+# RustSec. RUSTSEC-2026-0459 (libsqlite3-sys, 2026-10-30) is in GitHub's
+# database only as GHSA-72w2-rjgg-q729, unreviewed and naming no package,
+# so it raises no alert; RUSTSEC-2026-0285 (rustls, 2026-09-14) became a
+# reviewed advisory on 2026-10-05, nine days after `cargo audit` had made
+# this repository fix it.
 #
 # If this ever reports something, the usual fix is upgrading the affected
 # crate to the patched version the advisory names (`cargo update -p <crate>`),
@@ -18,17 +28,7 @@ on:
     # midnight/on-the-hour cron jobs.
     - cron: "27 4 * * 1"
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - "**/Cargo.toml"
-      - "Cargo.lock"
-      - ".github/workflows/audit-dependencies.yml"
-  pull_request:
-    paths:
-      - "**/Cargo.toml"
-      - "Cargo.lock"
-      - ".github/workflows/audit-dependencies.yml"
+  workflow_call:
 
 # Only ever reads the checkout and the advisory database it downloads itself.
 permissions:

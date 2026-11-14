@@ -10,7 +10,9 @@ GHCR, and the server pulls it rather than assembling it itself; see
 
 Two workflows are involved:
 
-- **`.github/workflows/ci.yml`** runs on every push and PR: `cargo fmt`,
+- **`.github/workflows/ci.yml`** runs only when dispatched, once per batch
+  of pull requests on an integration branch and on `main` before a release
+  (the steps are in `AGENTS.md`): `cargo fmt`,
   `clippy -D warnings`, the test suite, `cargo doc` with `-D warnings`, the
   API-reference checker (`scripts/api-doc-check.sh`, which asserts
   `docs/reference/api.md` against a running server), a syntax check of the
@@ -25,15 +27,16 @@ Two workflows are involved:
 
   The image builds are the expensive part, so they run as jobs of their
   own (`build-image`, `check-publish-image`). While the repository is
-  public they run on every pull request, since GitHub-hosted runners cost
+  public they run in every dispatched run, since GitHub-hosted runners cost
   nothing there. If the repository is ever made private, they start being
-  skipped on a **pull request** whose diff does not touch `crates/`,
+  skipped on a **batch** whose diff from `main` does not touch `crates/`,
   `Cargo.toml`, `Cargo.lock`, `deploy/` or `scripts/release-image.sh` (the
-  Windows jobs likewise), with no edit to the workflow. On a **push to `main`** it always runs, whatever changed,
-  and `start-release.yml` refuses to tag a commit whose CI run is not
-  green in every job. One job, `ci-passed`, stands for the whole run: it
-  is green when every other job succeeded or was deliberately skipped, and
-  it is the single check to require if `main` ever gets branch protection.
+  Windows jobs likewise), with no edit to the workflow
+  (`scripts/ci-plan.sh` reads the diff). A **dispatch of `main`** always
+  runs every job, whatever changed, and `start-release.yml` refuses to tag
+  a tree whose newest dispatched run is not green or skipped one of those
+  jobs. One job, `ci-passed`, stands for the whole run: it is green when
+  every other job succeeded or was deliberately skipped.
 - **`.github/workflows/deploy-release.yml`** puts a release on the server. Build
   a release (`build-release.yml`) calls it once the GitHub Release exists, so **every
   release deploys itself**. It can also be run by hand, **Actions → Deploy a release
@@ -52,9 +55,9 @@ Two workflows are involved:
   for a while (`error: missing server host`) and five PRs were merged over a
   red build before anyone looked.
 
-Runs for a pull request supersede each other: push again and the run for the
-commit you replaced is cancelled. Runs for a push to `main` never are, since
-the release is cut from a commit only once its run finished green.
+Runs on one ref supersede each other: dispatch again on the same branch and
+the earlier run is cancelled. Runs of `main` never are, since the release is
+cut from a tree only once its run finished green.
 
 **Deploys never overlap.** Two deploys once rebuilt the same stack at the same
 time, and the second to reach "Recreate" failed on a container-name conflict.

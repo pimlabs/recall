@@ -51,8 +51,11 @@ Two consequences worth stating, because both have already been got wrong:
 
 ## The short version
 
-Merge a PR that bumps the version in `Cargo.toml` and `npm/package.json`.
-Then either, from anywhere including the GitHub mobile app:
+Merge a PR that bumps the version in `Cargo.toml` and `npm/package.json`,
+through a batch like any other (`AGENTS.md`), so a dispatched CI run has
+tested the tree `main` now has; or dispatch CI on `main` after the merge
+(*Actions → CI → Run workflow*, on `main`), which runs every job. Then
+either, from anywhere including the GitHub mobile app:
 
 > **Actions → Start a release → Run workflow** (on `main`)
 
@@ -64,7 +67,8 @@ git tag -a v0.3.1 -m "recall 0.3.1" && git push origin v0.3.1
 
 Both end in the same place. *Start a release*
 (`.github/workflows/start-release.yml`) reads the version from `main`, refuses
-if any CI job (Linux or Windows) did not pass on that commit or if the tag
+if the newest dispatched CI run of `main`'s tree did not pass in every job
+(Linux or Windows), or skipped an image or Windows job, or if the tag
 already exists somewhere else, creates the tag, and starts *Build a release*
 on it. It dispatches Build a release explicitly because a tag pushed with the
 workflow's own token starts no workflow by itself, and it dispatches it *on
@@ -179,8 +183,10 @@ Done once per repository; nothing here needs repeating per release.
      and that job would publish with no approval at all.
      `scripts/check-release-environments.sh` checks each of these settings,
      for every environment `publish.yml` names: Publish a release runs it
-     before anything publishes, and CI runs it on every push to `main`, so
-     a missing environment or a setting changed later shows up red.
+     before anything publishes, and CI's `check-release-image` runs it on
+     every dispatch of `main` and in a batch that changes the script or the
+     release workflows, so a missing environment or a setting changed later
+     shows up red before the next release needs it.
 2. **npm** — on npmjs.com, `@pimlabs/recall` → *Settings → Trusted
    publishing* → GitHub Actions: organization `pimlabs`, repository `recall`,
    workflow `publish.yml`, environment `release-npm`.
@@ -253,7 +259,7 @@ you tell.
 
 The formula rewrite and the tap push are `scripts/update-formula.py` and
 `scripts/push-tap.sh`, shared by the script and the workflow so the two
-cannot write different formulas. CI checks the rewrite on every PR with
+cannot write different formulas. CI checks the rewrite in every run with
 `scripts/update-formula-check.sh`.
 
 The rest of this page is what each step does and why, for when a step fails
@@ -294,7 +300,7 @@ commit and cannot be changed without another version, and
 that has just been released. A document fixed a day later has already been
 wrong for everyone who installed in that day.
 
-Names are checked on every pull request (`scripts/docs-check.py`: variables,
+Names are checked before every push and in every CI run (`scripts/docs-check.py`: variables,
 the docs index, commands and flags; see `CONTRIBUTING.md`), and CI refuses a
 bump whose `CHANGELOG.md` has no section for the new version, so Start a
 release refuses it too. What no script can check is meaning, so read:
@@ -377,7 +383,7 @@ first, since until 0.4.6 ships latest *is* 0.4.5), `npm/install.js`,
 `scripts/release.sh` and `packaging/winget/generate_manifest.py`.
 
 Those names are a contract, and CI holds everyone to it before a release
-does. The `test-installers` job builds a release on every pull request by
+does. The `test-installers` job builds a release in every CI run by
 running this workflow's own `Package` steps, as written here, for every
 matrix entry, against tiny fake binaries (`scripts/run-package-steps.py`),
 and checks that they wrote exactly the names `package-release.py --name`

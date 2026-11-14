@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# The cheap checks, before every push: CI runs only when dispatched, once
+# per batch, so a branch that fails formatting, clippy or a script check
+# would otherwise reach the batch and turn it red for everyone in it.
+#
+# Enable once per clone:   git config core.hooksPath .githooks
+# Skip once, knowingly:    git push --no-verify
+#
+# The same commands check-lint and check-scripts run in ci.yml, minus what
+# needs a built binary or a network. Tests are not here: the suite takes
+# minutes, and runs in the batch.
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+step() {
+  printf '\n== %s\n' "$1"
+  shift
+  "$@"
+}
+
+step "cargo fmt" cargo fmt --all --check
+step "cargo clippy" cargo clippy --workspace --all-targets --locked --quiet -- -D warnings
+step "actions pinned to a commit" python3 scripts/actions-pin-check.py
+step "toolchain pins" python3 scripts/toolchain-pin-check.py
+step "docs match the code" python3 scripts/docs-check.py
+step "compose files" python3 scripts/compose-check.py
+step "doc links" python3 scripts/link-check.py

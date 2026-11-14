@@ -10,9 +10,10 @@ September 2026 `recall-server`'s own configuration table named
 `RECALL_HOST`, which nothing reads, and `RECALL_BACKUP_INTERVAL_MS`, which
 had become `RECALL_BACKUP_INTERVAL_HOURS`; `docs/README.md` listed three
 designs as "Not built" after two of them had shipped; and six flags of the
-CLI were in no document at all. Each was true once. A check that runs on
-every pull request finds the next one in the pull request that causes it,
-not at release time, when the fix competes with the release.
+CLI were in no document at all. Each was true once. A check that runs
+before every push (.githooks/pre-push) and in every CI run finds the next
+one in the pull request that causes it, not at release time, when the fix
+competes with the release.
 
 What it checks, each in both directions where there are two:
 
