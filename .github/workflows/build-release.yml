@@ -366,11 +366,11 @@ jobs:
   # None is behind a release-* environment, deliberately. The image holds
   # nothing that is not already public and unapproved in the GitHub Release,
   # a package version can be deleted (npm and crates.io cannot be undone),
-  # and `deploy` below needs it: gating it would make every deploy wait for
+  # and `deploy-release` below needs it: gating it would make every deploy wait for
   # the approval that deploys were deliberately kept out of. GITHUB_TOKEN is
   # the only credential. A package it creates is private whatever this
   # repository's visibility, and GitHub has no API to change that, so
-  # `publish-image` fails, before `deploy`, until the owner has made each
+  # `publish-image` fails, before `deploy-release`, until the owner has made each
   # package public once; see docs/reference/releasing.md.
   #
   # A tag from before images were published (a run dispatched by hand for
@@ -562,7 +562,7 @@ jobs:
   # `latest` for each image, moved to this version when it is the newest
   # release, never back to an older one: tag-latest.yml, which Actions →
   # Tag latest also runs by hand. For someone pulling by hand; a deploy
-  # names a version. Its own job, which `deploy` does not wait on: a
+  # names a version. Its own job, which `deploy-release` does not wait on: a
   # registry that cannot move `latest` must not hold up the server running
   # the release.
   tag-latest:
