@@ -6,7 +6,7 @@ name: Build a release
 # deploy of those images to production. About seven minutes, with nobody
 # asked anything.
 #
-# The registries are not here. npm, crates.io, the Homebrew tap and winget
+# The registries are not here. npm, crates.io and the Homebrew tap
 # are published by publish.yml ("Publish a release"), run once a
 # person decides, behind an approval per registry. They used to
 # be jobs of this workflow, waiting for that approval inside its run, and
