@@ -14,6 +14,17 @@ Versions follow [semver](https://semver.org). Below 1.0 the minor number is
 where breaking changes live, and this project has exactly one user, so a
 break will be described here in full rather than smoothed over.
 
+## Unreleased
+
+- **SQLite 3.54.1** (was 3.51.3), built into the client and the server, for
+  [RUSTSEC-2026-0459](https://rustsec.org/advisories/RUSTSEC-2026-0459)
+  (CVE-2026-119375): opening a database beside a `-wal` file whose page size
+  differs from the database's could make ordinary queries return
+  uninitialised memory. The server keeps its database in WAL mode, though
+  Recall never writes such a file itself. `rusqlite` 0.41.1 and
+  `libsqlite3-sys` 0.39.1 (were 0.39.0 and 0.37.0). Nothing needs changing
+  beyond the upgrade, except that building from source now needs Rust 1.89.
+
 ## 0.4.18 — 2026-11-02
 
 - **A check of the audit log no longer costs the hooks their pushes.** The

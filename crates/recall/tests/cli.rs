@@ -25,16 +25,6 @@ fn hook_payload(file: &Path) -> String {
     serde_json::json!({ "tool_input": { "file_path": file } }).to_string()
 }
 
-fn binary() -> PathBuf {
-    // Cargo builds integration-test binaries next to the crate's own.
-    let mut path = std::env::current_exe().expect("test binary path");
-    path.pop();
-    if path.ends_with("deps") {
-        path.pop();
-    }
-    path.join("recall")
-}
-
 struct Run {
     code: i32,
     stdout: String,
@@ -71,7 +61,7 @@ fn run(args: &[&str], cwd: &Path, env: &[(&str, &str)], stdin: Option<&str>) -> 
 /// The binary with a clean environment, as [`run`] runs it, for a test that
 /// has to talk to it while it runs.
 fn command(args: &[&str], cwd: &Path, env: &[(&str, &str)]) -> Command {
-    let mut cmd = Command::new(binary());
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_recall"));
     cmd.args(args)
         .current_dir(cwd)
         .env_clear()
