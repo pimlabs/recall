@@ -163,7 +163,7 @@ jobs:
             echo "::notice::Nothing under crates/, .github/actions/, Cargo.toml, Cargo.lock, install.ps1, npm/install.js, the installer test's scripts, build-release.yml or this workflow changed, so the Windows jobs were skipped. They run unconditionally on every push to main."
           fi
 
-  # Eight checks that are plain scripts against files already in the
+  # Checks that are plain scripts against files already in the
   # checkout: no Rust toolchain, no compile, a few seconds combined. Its own
   # job so a broken script, doc link, formula, manifest or compose leak fails
   # in seconds, in parallel with the Rust jobs and `build-image`, rather than
@@ -221,6 +221,9 @@ jobs:
       # job from bringing a tag back in.
       - name: Every action is pinned to a commit
         run: python3 scripts/actions-pin-check.py
+
+      - name: Every Rust toolchain is the one deploy/Dockerfile pins
+        run: python3 scripts/toolchain-pin-check.py
 
       - name: Shipped shell scripts still parse
         run: |

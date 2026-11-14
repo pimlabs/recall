@@ -1,6 +1,6 @@
 name: Rust setup
 description: >-
-  Installs the pinned stable Rust toolchain (with whatever components the
+  Installs the pinned Rust toolchain (with whatever components the
   caller's checks need), restores/saves Swatinem/rust-cache and, when asked,
   installs cargo-nextest. Shared by ci.yml's Rust jobs (`lint`, `test-linux`,
   `test-windows`, `install-windows`) so these steps are written once instead
@@ -44,6 +44,7 @@ runs:
   steps:
     - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
       with:
+        toolchain: 1.100.0
         components: ${{ inputs.components }}
 
     # A prebuilt cargo-nextest, checked against the SHA-256 that

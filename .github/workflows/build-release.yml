@@ -118,6 +118,7 @@ jobs:
       # push out the entries `main` saves for CI, which are read.
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
         with:
+          toolchain: 1.100.0
           targets: ${{ matrix.target }}
 
       # Every target but one builds on a native runner. rusqlite's `bundled`
@@ -238,6 +239,7 @@ jobs:
       # on a new tag every release, so a cache could only ever miss.
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
         with:
+          toolchain: 1.100.0
           targets: ${{ matrix.target }}
 
       # rusqlite compiles SQLite's C source, so a musl build needs a C
