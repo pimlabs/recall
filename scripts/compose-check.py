@@ -26,7 +26,7 @@ procedures stop, restart and read its logs by that name the same way.
 
 And the image each of those two services runs: the name build-release.yml's
 `publish-image` pushes (scripts/release-image.sh), tagged by RECALL_VERSION,
-which is what deploy.yml pulls, and `:local` without it; with a `build:`
+which is what deploy-release.yml pulls, and `:local` without it; with a `build:`
 beside it, so `docker compose up -d --build` still builds it from the
 checkout for anyone running the files by hand, and for a rollback's older
 tag.
@@ -225,7 +225,7 @@ def server_problems(doc):
         got = services[service].get('image')
         if got != image:
             found.append(f'{service} is image: {image}, the name build-release.yml publishes '
-                         f'and deploy.yml pulls, not {got!r}')
+                         f'and deploy-release.yml pulls, not {got!r}')
         if not services[service].get('build'):
             found.append(f'{service} keeps its build:, so --build still builds it from '
                          'the checkout')

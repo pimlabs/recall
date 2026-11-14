@@ -54,7 +54,6 @@ jobs:
   # out), and Build a release must have made its GitHub Release, since
   # npm's postinstall and the formula download from it.
   check-release:
-    name: check-release
     runs-on: ubuntu-latest
     steps:
       - name: Run on the tag, after its GitHub Release exists
@@ -94,7 +93,6 @@ jobs:
   # a failed job is always safe.
 
   publish-npm:
-    name: publish-npm
     needs: check-release
     runs-on: ubuntu-latest
     environment: release-npm
@@ -132,7 +130,6 @@ jobs:
           npm publish --access public
 
   publish-crates:
-    name: publish-crates
     needs: check-release
     runs-on: ubuntu-latest
     environment: release-crates
@@ -204,7 +201,6 @@ jobs:
           cargo publish --locked "${todo[@]}"
 
   publish-homebrew:
-    name: publish-homebrew
     needs: check-release
     runs-on: ubuntu-latest
     environment: release-homebrew

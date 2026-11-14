@@ -468,7 +468,7 @@ The same image and the same volume, run by rootless Podman from systemd
 units instead of by Docker Compose: for a host that runs each service as an
 unprivileged user of its own, with no Docker daemon. The units are Quadlet
 files in `deploy/quadlet/`, and `deploy/podman-deploy.sh` installs them and
-deploys a release, by hand or from `deploy.yml`. Everything else in this
+deploys a release, by hand or from `deploy-release.yml`. Everything else in this
 README applies, with the commands under [Everyday commands](#everyday-commands).
 
 The ingress is whatever already runs on the host, forwarding to
@@ -545,7 +545,7 @@ Verify from outside as in [step 4](#4-verify-from-outside).
 ### Deploys from GitHub Actions
 
 Set the repository variable `DEPLOY_RUNTIME` to `podman`, and
-`deploy.yml` runs `podman-deploy.sh` over SSH, with the digest it verified
+`deploy-release.yml` runs `podman-deploy.sh` over SSH, with the digest it verified
 rather than the tag; see
 [`github-actions-deploy.md`](../docs/reference/github-actions-deploy.md#podman-instead-of-compose).
 
@@ -708,7 +708,7 @@ To go back before anything has been written under Podman:
 `systemctl --user stop recall-server`, then `docker start recall-server`
 and the ingress back as it was. Writes made under Podman are not in the
 Docker volume. Once the new server has run a while, remove `RECALL_TOKEN`
-from `deploy/.env`, so the token is kept in one place, and if `deploy.yml`
+from `deploy/.env`, so the token is kept in one place, and if `deploy-release.yml`
 deploys this host, set `DEPLOY_RUNTIME` and delete `DEPLOY_COMPOSE_FILES`
 (see [`github-actions-deploy.md`](../docs/reference/github-actions-deploy.md#podman-instead-of-compose)).
 `scripts/podman-check.sh` runs steps 1 and 4 as written here, from a
@@ -897,7 +897,7 @@ rollback leaves `:local` on the last version pulled, so after one, name
 This can run automatically instead: every release deploys itself, and a
 chosen version can be deployed from the Actions tab (phone included). See
 [`docs/reference/github-actions-deploy.md`](../docs/reference/github-actions-deploy.md)
-for wiring `.github/workflows/deploy.yml` to this machine.
+for wiring `.github/workflows/deploy-release.yml` to this machine.
 
 To try an unreleased branch on a server, build it from the checkout:
 `RECALL_SOURCE=source GIT_COMMIT=$(git rev-parse --short HEAD) docker compose

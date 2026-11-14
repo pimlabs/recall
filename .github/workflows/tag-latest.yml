@@ -36,7 +36,6 @@ permissions:
 
 jobs:
   tag-latest:
-    name: tag-latest
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # One at a time across versions: two releases at once must not each
