@@ -522,9 +522,13 @@ installer that nothing documents. CI runs both.
 The API now lives at `recall-server.pimlabs.id`, on a **DNS-only** record.
 That record must stay DNS-only: proxying it would put Cloudflare's edge
 between the client and Traefik, and every client would share one rate-limit
-bucket. The zone's `*.pimlabs.id` wildcard **is** proxied, so deleting the
-specific record would not break the hostname — it would quietly demote it,
-which is worse.
+bucket. Nothing else in the zone answers for that name. The proxied
+`*.pimlabs.id` wildcard was deleted on 2026-11-19, so a name under
+`pimlabs.id` without a record of its own returns NXDOMAIN. Deleting the
+specific record would therefore make the hostname stop resolving: an outage
+that any check of `/health` shows at once, not the quiet demotion to proxied
+that the wildcard used to make possible. `recall.pimlabs.id` keeps a proxied
+record of its own, which the Worker's route needs.
 
 ## 2. Homebrew
 
